@@ -1,23 +1,25 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v9 - Snapshot Version)
+# install_autodownload.sh (v11 - Explicit Cleanup)
 #
 # This script installs or updates the auto-downloader.
-# It is "bulletproof" and:
-# 1. Checks for root, dependencies, AC power, and metered connections.
-# 2. Downloads updates in the background.
-# 3. Notifies you with the *number* of packages and the *new snapshot version*.
-# 4. Reminds you until you install them.
+# It now *explicitly cleans up* all previous versions (v1-v10)
+# before installing the new decoupled v11 architecture.
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-SERVICE_NAME="zypper-autodownload"
+# Config for v11's two-service architecture
+DL_SERVICE_NAME="zypper-autodownload"
+DL_SERVICE_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.service"
+DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
+
+NT_SERVICE_NAME="zypper-notify"
+NT_SERVICE_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.service"
+NT_TIMER_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="/usr/local/bin/notify-updater"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 
 # --- 2. Sanity Checks ---
 echo ">>> Running Sanity Checks..."
@@ -35,18 +37,27 @@ if ! command -v notify-send &> /dev/null; then
 fi
 echo "All checks passed."
 
-# --- 3. Create/Update .service file ---
-if [ -f "$SERVICE_FILE" ]; then
-    echo ">>> Service file found. Overwriting..."
-else
-    echo ">>> Creating systemd service file: ${SERVICE_FILE}"
-fi
-cat << EOF > ${SERVICE_FILE}
+# --- 3. NEW: Clean Up ALL Previous Versions ---
+echo ">>> Stopping and disabling any old (v1-v10) services..."
+# This stops and disables the timer from v1-v9 (the all-in-one)
+systemctl disable --now zypper-autodownload.timer &> /dev/null || true
+# This stops and disables the new timer (in case of re-run)
+systemctl disable --now zypper-notify.timer &> /dev/null || true
+
+# Just in case, stop the services themselves
+systemctl stop zypper-autodownload.service &> /dev/null || true
+systemctl stop zypper-notify.service &> /dev/null || true
+
+# Note: We don't delete the files here, as we will overwrite them.
+#       This step is just to clean up systemd's state.
+echo "Old services disabled."
+
+# --- 4. Create/Update DOWNLOADER Service ---
+echo ">>> Creating downloader service file: ${DL_SERVICE_FILE}"
+cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
-# Do not run on battery
 ConditionACPower=true
-# Do not run on metered connections (e.g., mobile hotspot)
 ConditionNotOnMeteredConnection=true
 Wants=network-online.target
 After=network-online.target nss-lookup.target
@@ -55,21 +66,15 @@ After=network-online.target nss-lookup.target
 Type=oneshot
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
-ExecStartPost=${NOTIFY_SCRIPT_PATH}
 EOF
 
-# --- 4. Create/Update .timer file ---
-if [ -f "$TIMER_FILE" ]; then
-    echo ">>> Timer file found. Overwriting..."
-else
-    echo ">>> Creating systemd timer file: ${TIMER_FILE}"
-fi
-cat << EOF > ${TIMER_FILE}
+# --- 5. Create/Update DOWNLOADER Timer ---
+echo ">>> Creating downloader timer file: ${DL_TIMER_FILE}"
+cat << EOF > ${DL_TIMER_FILE}
 [Unit]
-Description=Run ${SERVICE_NAME} hourly to download updates
+Description=Run ${DL_SERVICE_NAME} hourly to download updates
 
 [Timer]
-# Your custom values:
 OnBootSec=1min
 OnUnitActiveSec=1h
 Persistent=true
@@ -78,25 +83,48 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 5. Create/Update notification script ---
-if [ -f "$NOTIFY_SCRIPT_PATH" ]; then
-    echo ">>> Notification script found. Overwriting..."
-else
-    echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
-fi
+# --- 6. Create/Update NOTIFIER Service ---
+echo ">>> Creating notifier service file: ${NT_SERVICE_FILE}"
+cat << EOF > ${NT_SERVICE_FILE}
+[Unit]
+Description=Notify user of pending Tumbleweed updates
+Wants=network-online.target
+After=network-online.target nss-lookup.target
+
+[Service]
+Type=oneshot
+ExecStart=${NOTIFY_SCRIPT_PATH}
+EOF
+
+# --- 7. Create/Update NOTIFIER Timer ---
+echo ">>> Creating notifier timer file: ${NT_TIMER_FILE}"
+cat << EOF > ${NT_TIMER_FILE}
+[Unit]
+Description=Run ${NT_SERVICE_NAME} hourly to check for updates
+
+[Timer]
+# Runs at a 5-minute offset from the downloader
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# --- 8. Create/Update Notification Script ---
+echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v9 logic - Snapshot Version)
+# notify-updater (v11 logic)
 #
-# This script notifies the user *only* if updates are pending,
-# and includes the package count and new snapshot version.
+# This script is run by its *own timer* (zypper-notify.service).
+# It just checks for pending updates and notifies. It does not download.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
-# This trap ensures that even if this script fails,
-# it will exit with '0' and not cause the main service to fail.
-trap 'exit 0' EXIT
+trap 'exit 0' EXIT # Always exit gracefully
 
 # --- Find the active user ---
 USER_NAME=$(loginctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
@@ -114,13 +142,12 @@ fi
 DBUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
 # --- Check if updates are pending and count them ---
-# We don't need 'zypper refresh' because the main service just did it.
-# Capture output and exit code separately to handle errors.
+# We MUST refresh here, as we can't be sure the downloader ran.
 ZYPPER_OUTPUT=""
-if ! ZYPPER_OUTPUT=$(zypper --non-interactive list-updates --dup 2>&1); then
-    echo "Failed to run 'zypper list-updates' (exit code $?)."
+if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive list-updates --dup 2>&1); then
+    echo "Failed to run zypper (exit code $?)."
     echo "Repos might be locked or network is down. Skipping notification."
-    exit 0 # Exit gracefully, caught by trap
+    exit 0 # Exit gracefully
 fi
 
 # Check if the output contains "Nothing to do."
@@ -131,31 +158,26 @@ if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
 
 else
     # "Nothing to do." was NOT found. Updates are pending.
-    
+
     # --- Count Packages ---
     PACKAGE_COUNT=$(echo "$ZYPPER_OUTPUT" | grep ' | ' | grep -v 'Repository' | grep -v 'S |' | wc -l)
-    
+
     # --- Find Snapshot Version ---
     SNAPSHOT_VERSION=""
-    # Look for the 'tumbleweed-release' package in the output
     if SNAPSHOT_LINE=$(echo "$ZYPPER_OUTPUT" | grep 'tumbleweed-release'); then
-        # The new version is the 7th field in the table row
-        # e.g.: S | ... | tumbleweed-release | package | ... -> 20251110-0 | ...
         SNAPSHOT_VERSION=$(echo "$SNAPSHOT_LINE" | awk '{print $7}')
     fi
 
     # --- Build Notification ---
     TITLE="Updates Ready to Install"
-    
     if [ -n "$SNAPSHOT_VERSION" ]; then
-        # If we found a snapshot, use it in the title
         TITLE="Snapshot ${SNAPSHOT_VERSION} Ready"
     fi
 
     if [ "$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is downloaded. Run 'sudo zypper dup' to install."
+        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
     else
-        MESSAGE="$PACKAGE_COUNT updates are downloaded. Run 'sudo zypper dup' to install."
+        MESSAGE="$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
@@ -169,20 +191,21 @@ fi
 EOF
 
 echo ">>> Making notification script executable..."
-# 6. Make the helper script executable
+# 9. Make the helper script executable
 chmod +x ${NOTIFY_SCRIPT_PATH}
 
 echo ">>> Reloading systemd daemon..."
-# 7. Reload systemd to read the new files
+# 10. Reload systemd to read the new files
 systemctl daemon-reload
 
-echo ">>> (Re)starting the timer..."
-# 8. Enable and start the timer
-systemctl enable --now ${TIMER_FILE}
+echo ">>> Enabling and starting new timers..."
+# 11. Enable and start both timers
+systemctl enable --now ${DL_TIMER_FILE}
+systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The bulletproof auto-downloader and reminder system is installed/updated."
+echo "The decoupled auto-downloader and reminder system is installed/updated."
 echo ""
-echo "To check the timer status, run:"
-echo "systemctl list-timers ${SERVICE_NAME}.timer"
+echo "To check the timers, run:"
+echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
