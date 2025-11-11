@@ -1,12 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v12 - Hybrid Notifier)
+# install_autodownload.sh (v12.1 - Cleaner Upgrade)
 #
 # This script installs or updates the auto-downloader.
-# It introduces a "hybrid" notifier that:
-# - Runs 'zypper refresh' only when on AC power / non-metered.
-# - Runs *without* refresh when on battery to save power.
-# This provides safety *and* persistent reminders.
+# It now features a cleaner, more explicit upgrade step
+# that disables all old services before installing the new v12 logic.
 #
 # MUST be run with sudo or as root.
 
@@ -45,12 +43,17 @@ fi
 echo "All checks passed."
 
 # --- 3. Clean Up ALL Previous Versions ---
-echo ">>> Stopping and disabling any old (v1-v10) services..."
+echo ">>> Cleaning up any old/previous versions..."
+
+# This stops and disables the timer/service from v1-v9 (the all-in-one)
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
-systemctl disable --now zypper-notify.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
+
+# This stops and disables the timers/services from v10/v11 (in case of re-run)
+systemctl disable --now zypper-notify.timer &> /dev/null || true
 systemctl stop zypper-notify.service &> /dev/null || true
-echo "Old services disabled."
+
+echo "Old services disabled. Ready to install."
 
 # --- 4. Create/Update DOWNLOADER Service ---
 echo ">>> Creating downloader service file: ${DL_SERVICE_FILE}"
