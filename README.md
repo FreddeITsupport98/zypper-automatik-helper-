@@ -2,7 +2,7 @@
 
 ![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE-Tumbleweed-73ba25?style=for-the-badge&logo=opensuse)
 
-A smart, "bulletproof" `systemd` service that automates `zypper dup` downloads for openSUSE Tumbleweed and sends rich desktop notifications when updates are ready to install.
+A "bulletproof" `systemd` architecture that automates `zypper dup` downloads, provides persistent, battery-safe notifications, and cleanly upgrades any previous version.
 
 ---
 
@@ -10,246 +10,152 @@ A smart, "bulletproof" `systemd` service that automates `zypper dup` downloads f
 
 On a rolling-release distribution like Tumbleweed, updates are frequent and can be large. This script automates the most time-consuming part: the **download**.
 
-It runs `zypper dup --download-only` in the background on a timer. When you are finally ready to update, the packages are already cached on your machine. This turns a potential 10-minute download and update process into a 1-minute installation.
+It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute installation.
 
 ## ✨ Key Features
 
-* **Fully Automated:** Runs on a `systemd` timer (defaults to hourly) and starts automatically at boot.
-* **Smart Notifications:** Sends a desktop notification **only** if updates are found. It's silent if your system is already up-to-date.
-* **Rich Information:** The notification isn't just "updates ready"—it tells you:
-    * The new **Tumbleweed Snapshot version** (e.g., `20251110-0`).
-    * The **total number of packages** that were downloaded.
-* **Daily Reminder:** If you don't install the updates, it will gently remind you every time it runs and finds pending packages.
-* **"Bulletproof" Safety:**
-    * **AC Power Check:** The service will **not** run if your laptop is on battery power.
-    * **Metered Connection Check:** Will **not** run if you are on a metered network (like a mobile hotspot), saving your data.
-    * **Graceful Errors:** The installer and notification scripts handle errors (like `zypper` locks or no network) without failing the service.
+* **Decoupled Architecture:** Two separate services: a "safe" downloader and a "smart" notifier.
+* **Safe Downloads:** The downloader service will **only** run when you are on **AC Power** and **not** on a **Metered Connection**.
+* **Persistent Reminders:** The notifier service runs every hour and will *always* remind you if updates are pending, even on battery.
+* **"Bulletproof" Safety (v12 Hybrid Logic):** The notifier is smart.
+    * If you're on battery/metered, it **skips `zypper refresh`** (saving power/data) and just checks your local cache for updates.
+    * If you're on AC power, it runs a full `zypper refresh` to get the latest info.
+* **Rich Notifications:** Notifications are silent if you're up-to-date, but show the **Tumbleweed Snapshot version** and **package count** when updates are ready.
+* **Automatic Upgrader:** The installer script is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1-v11).
+* **Dependency Checks:** The installer verifies that `notify-send`, `nmcli`, and `upower` are all present before installing.
 
 ---
 
-## 🛠️ How It Works: The Technical Details
+## 🛠️ How It Works: The v12 Architecture
 
-The installer script creates three files that work together.
+This is a two-service system to provide both safety and persistence.
 
 ### 1. The Installer: `install_autodownload.sh`
 
-* **Idempotent:** The script is safe to re-run. It checks for existing files and overwrites them, making updates easy.
-* **Dependency Check:** It first verifies that `notify-send` (from `libnotify-tools`) is installed before proceeding.
-* **Strict Error Handling:** Uses `set -euo pipefail` to exit immediately if any command fails during installation.
+* **Cleanup:** Explicitly stops and disables all timers/services from *any* previous version to ensure a clean state.
+* **Idempotent:** Safe to re-run. It will simply overwrite the components with the latest version.
+* **Dependency Check:** Verifies that `libnotify-tools`, `NetworkManager`, and `upower` are installed.
+* **Error Handling:** Uses `set -euo pipefail` to stop immediately if anything goes wrong.
 
-### 2. The Service: `/etc/systemd/system/zypper-autodownload.service`
+### 2. The Downloader: `zypper-autodownload`
 
-This is the main "worker" unit. It's a `Type=oneshot` service, meaning it runs its commands and then stops.
+This service's only job is to download packages when it's safe.
 
-```ini
-[Unit]
-Description=Download Tumbleweed updates in background
-# --- Safety Conditions ---
-ConditionACPower=true
-ConditionNotOnMeteredConnection=true
-Wants=network-online.target
-After=network-online.target nss-lookup.target
+* **Service: `/etc/systemd/system/zypper-autodownload.service`**
+    * This `Type=oneshot` service runs `zypper refresh` and `zypper dup --download-only`.
+    * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
+* **Timer: `/etc/systemd/system/zypper-autodownload.timer`**
+    * This timer runs `OnBootSec=1min` and `OnUnitActiveSec=1h`, attempting to trigger the service every hour.
 
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
-ExecStartPost=/usr/local/bin/notify-updater
+### 3. The Notifier: `zypper-notify`
 
-[Unit]
-Description=Run zypper-autodownload hourly to download updates
+This service's job is to check for updates and remind you, no matter what.
 
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1h
-Persistent=true
+* **Service: `/etc/systemd/system/zypper-notify.service`**
+    * A simple `Type=oneshot` service with **no conditions**. Its only job is to run the main script.
+* **Timer: `/etc/systemd/system/zypper-notify.timer`**
+    * This timer runs on a 5-minute offset (e.g., `OnBootSec=5min`) to ensure it runs *after* the downloader has had a chance.
 
-[Install]
-WantedBy=timers.target
+### 4. The "Brains": `/usr/local/bin/notify-updater`
 
-Here is a full, technical README for your GitHub repository.
+This is the "v12 Hybrid" script and the core of the system. It is run by the `zypper-notify.service` every hour.
 
-This is written in Markdown. You can copy and paste this entire block of text directly into your README.md file on GitHub, and it will be formatted perfectly.
-
-Markdown
-
-# Zypper Auto-Downloader for Tumbleweed
-
-![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE-Tumbleweed-73ba25?style=for-the-badge&logo=opensuse)
-
-A smart, "bulletproof" `systemd` service that automates `zypper dup` downloads for openSUSE Tumbleweed and sends rich desktop notifications when updates are ready to install.
+1.  **Finds User:** Uses `loginctl` to find the active graphical user.
+2.  **Checks Safety:** It runs its *own* checks using `upower` (for battery) and `nmcli` (for metered networks).
+3.  **Runs Hybrid Logic:**
+    * **If "Safe" (AC power, not metered):** It runs `zypper refresh` AND `zypper list-updates` to get the freshest data.
+    * **If "Unsafe" (On battery or metered):** It **skips `zypper refresh`** and *only* runs `zypper list-updates` to check the local cache.
+4.  **Parses Output:** If it finds "Nothing to do," it exits silently. Otherwise, it counts the packages, finds the `tumbleweed-release` version, and builds the notification.
+5.  **Sends Notification:** Sends the rich, informative popup to your desktop.
 
 ---
 
-## 🎯 The Goal
+## 📜 Revision History (v1-v12)
 
-On a rolling-release distribution like Tumbleweed, updates are frequent and can be large. This script automates the most time-consuming part: the **download**.
+This script has evolved significantly:
 
-It runs `zypper dup --download-only` in the background on a timer. When you are finally ready to update, the packages are already cached on your machine. This turns a potential 10-minute download and update process into a 1-minute installation.
-
-## ✨ Key Features
-
-* **Fully Automated:** Runs on a `systemd` timer (defaults to hourly) and starts automatically at boot.
-* **Smart Notifications:** Sends a desktop notification **only** if updates are found. It's silent if your system is already up-to-date.
-* **Rich Information:** The notification isn't just "updates ready"—it tells you:
-    * The new **Tumbleweed Snapshot version** (e.g., `20251110-0`).
-    * The **total number of packages** that were downloaded.
-* **Daily Reminder:** If you don't install the updates, it will gently remind you every time it runs and finds pending packages.
-* **"Bulletproof" Safety:**
-    * **AC Power Check:** The service will **not** run if your laptop is on battery power.
-    * **Metered Connection Check:** Will **not** run if you are on a metered network (like a mobile hotspot), saving your data.
-    * **Graceful Errors:** The installer and notification scripts handle errors (like `zypper` locks or no network) without failing the service.
+* **v1-v9:** Started as a single service. We iteratively added features like package counts (v5), idempotency (v6), dependency checks (v7), metered connection checks (v8), and the snapshot version (v9). **These versions are now obsolete.**
+* **v10-v11:** Introduced the **decoupled two-service architecture**, separating the downloader from the notifier. This fixed a flaw where you wouldn't get reminders on battery. The installer was also given a cleanup step (v11).
+* **v12 (Current):** Perfected the design. The notifier now runs a **"hybrid check"**—it still runs on battery (for reminders), but is smart enough to *skip* `zypper refresh` to save power and data.
 
 ---
 
-## 🛠️ How It Works: The Technical Details
+## 🚀 Installation / Upgrading
 
-The installer script creates three files that work together.
+The script is idempotent. You can run this on a fresh install *or* on a PC with an older version.
 
-### 1. The Installer: `install_autodownload.sh`
+1.  Download the latest `install_autodownload.sh` script.
+2.  Make it executable:
+    ```bash
+    chmod +x install_autodownload.sh
+    ```
+3.  Run it with `sudo`:
+    ```bash
+    sudo ./install_autodownload.sh
+    ```
+The script will handle all cleanup, dependency checks, and installation.
 
-* **Idempotent:** The script is safe to re-run. It checks for existing files and overwrites them, making updates easy.
-* **Dependency Check:** It first verifies that `notify-send` (from `libnotify-tools`) is installed before proceeding.
-* **Strict Error Handling:** Uses `set -euo pipefail` to exit immediately if any command fails during installation.
+## 🏃 Usage
 
-### 2. The Service: `/etc/systemd/system/zypper-autodownload.service`
+1.  **Wait.** The services run in the background.
+2.  **Get Notified.** You will get a notification *only* when new updates are pending.
+    > **Snapshot 20251110-0 Ready**
+    > 12 updates are pending. Run 'sudo zypper dup' to install.
+3.  **Update.** When you're ready, open a terminal. The packages will (most likely) be pre-downloaded, making the update incredibly fast.
+    ```bash
+    sudo zypper dup
+    ```
 
-This is the main "worker" unit. It's a `Type=oneshot` service, meaning it runs its commands and then stops.
+### Verifying the Service
 
-```ini
-[Unit]
-Description=Download Tumbleweed updates in background
-# --- Safety Conditions ---
-ConditionACPower=true
-ConditionNotOnMeteredConnection=true
-Wants=network-online.target
-After=network-online.target nss-lookup.target
+```bash
+# Check that both timers are enabled and see when they run next
+systemctl list-timers zypper-autodownload.timer zypper-notify.timer
 
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
-ExecStartPost=/usr/local/bin/notify-updater
-ConditionACPower=true: Ensures it only runs when plugged in.
-
-ConditionNotOnMeteredConnection=true: Prevents data usage on hotspots.
-
-ExecStartPost=: The key to the system. After the download successfully completes, it runs the notify-updater script.
-
-3. The Timer: /etc/systemd/system/zypper-autodownload.timer
-This is the scheduler. It is the only unit you need to enable. It triggers the .service file based on your schedule.
-
-Ini, TOML
-
-[Unit]
-Description=Run zypper-autodownload hourly to download updates
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-OnBootSec=1min: Runs 1 minute after you boot up.
-
-OnUnitActiveSec=1h: Runs every hour (relative to the last run).
-
-Persistent=true: If the computer was off and missed a run, it will run as soon as it boots (after the OnBootSec delay).
-
-4. The Notifier: /usr/local/bin/notify-updater
-This is the "brains" of the operation. It's a bash script that:
-
-Finds the User: Uses loginctl to find the active graphical user (e.g., fb) and their D-Bus address to send a notification.
-
-Checks for Updates: Runs zypper --non-interactive list-updates --dup to get the list of pending packages.
-
-Parses the Output:
-
-It checks for "Nothing to do." If found, the script exits silently.
-
-If updates are pending, it parses the zypper output to find the tumbleweed-release package and extracts the new snapshot version.
-
-It counts the total number of package lines to get a package count.
-
-Sends the Notification: Uses sudo -u $USER_NAME ... notify-send to send the rich notification to your desktop.
-
-🚀 Installation
-You can install this system by running the installer script.
-
-Download the latest installer script (e.g., install_autodownload.sh).
-
-Make it executable:
-
-Bash
-
-chmod +x install_autodownload.sh
-Run it with sudo:
-
-Bash
-
-sudo ./install_autodownload.sh
-The script will check for dependencies, create all three files, reload the systemd daemon, and start the timer.
-
-Usage
-Wait. The service runs in the background. You don't have to do anything.
-
-Get Notified. You will get a notification only when new updates have been downloaded.
-
-
-Getty Images
-> **Snapshot 20251110-0 Ready**
-> 12 updates are downloaded. Run 'sudo zypper dup' to install.
-Update. When you're ready, open a terminal and run your update. It will be incredibly fast because the packages are already cached.
-
-Bash
-
-sudo zypper dup
-Verifying the Service
-Bash
-
-# Check that the timer is enabled and see when it runs next
-systemctl list-timers zypper-autodownload.timer
-
-# Check the status of the last service run
+# Check the status of the last DOWNLOADER run
 systemctl status zypper-autodownload.service
 
-# View the detailed logs from the service (refresh, download, and notification)
-journalctl -u zypper-autodownload.service
+# Check the status of the last NOTIFIER run
+systemctl status zypper-notify.service
+
+# View the detailed logs from the smart notification script
+journalctl -u zypper-notify.service
+
 🔧 Configuration
-Changing the Timer
-If you want to check daily instead of hourly, simply edit the timer file:
+Changing the Timers
+You can edit the timers to change the schedule (e.g., from hourly to daily).
 
 Bash
 
+# Edit the downloader's schedule:
 sudoedit /etc/systemd/system/zypper-autodownload.timer
-Change the [Timer] section to run daily at 3 PM, for example:
 
-Ini, TOML
-
-[Timer]
-# OnBootSec=1min
-# OnUnitActiveSec=1h
-OnCalendar=15:00
-Persistent=true
-After saving, reload systemd and restart the timer:
+# Edit the notifier's schedule:
+sudoedit /etc/systemd/system/zypper-notify.timer
+After saving, reload systemd and restart the timers:
 
 Bash
 
 sudo systemctl daemon-reload
 sudo systemctl restart zypper-autodownload.timer
+sudo systemctl restart zypper-notify.timer
 🗑️ Uninstallation
-To remove the service and all its components:
+To completely remove the v12 system:
 
 Bash
 
-# 1. Stop and disable the timer
+# 1. Stop and disable both timers
 sudo systemctl disable --now zypper-autodownload.timer
+sudo systemctl disable --now zypper-notify.timer
 
-# 2. Remove the files
+# 2. Remove all systemd files
 sudo rm /etc/systemd/system/zypper-autodownload.service
 sudo rm /etc/systemd/system/zypper-autodownload.timer
+sudo rm /etc/systemd/system/zypper-notify.service
+sudo rm /etc/systemd/system/zypper-notify.timer
+
+# 3. Remove the main script
 sudo rm /usr/local/bin/notify-updater
 
-# 3. Reload the systemd daemon
+# 4. Reload the systemd daemon
 sudo systemctl daemon-reload
