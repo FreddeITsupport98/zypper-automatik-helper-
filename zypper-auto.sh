@@ -1,17 +1,19 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v11 - Explicit Cleanup)
+# install_autodownload.sh (v12 - Hybrid Notifier)
 #
 # This script installs or updates the auto-downloader.
-# It now *explicitly cleans up* all previous versions (v1-v10)
-# before installing the new decoupled v11 architecture.
+# It introduces a "hybrid" notifier that:
+# - Runs 'zypper refresh' only when on AC power / non-metered.
+# - Runs *without* refresh when on battery to save power.
+# This provides safety *and* persistent reminders.
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# Config for v11's two-service architecture
+# Config for the two-service architecture
 DL_SERVICE_NAME="zypper-autodownload"
 DL_SERVICE_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.service"
 DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
@@ -29,27 +31,25 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 if ! command -v notify-send &> /dev/null; then
-    echo "Error: 'notify-send' command not found."
-    echo "This is required for notifications."
-    echo "Please install 'libnotify-tools' first, e.g.:"
-    echo "sudo zypper install libnotify-tools"
+    echo "Error: 'notify-send' command not found. Please install 'libnotify-tools'."
+    exit 1
+fi
+if ! command -v nmcli &> /dev/null; then
+    echo "Error: 'nmcli' command not found. Please install 'NetworkManager'."
+    exit 1
+fi
+if ! command -v upower &> /dev/null; then
+    echo "Error: 'upower' command not found. Please install 'upower'."
     exit 1
 fi
 echo "All checks passed."
 
-# --- 3. NEW: Clean Up ALL Previous Versions ---
+# --- 3. Clean Up ALL Previous Versions ---
 echo ">>> Stopping and disabling any old (v1-v10) services..."
-# This stops and disables the timer from v1-v9 (the all-in-one)
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
-# This stops and disables the new timer (in case of re-run)
 systemctl disable --now zypper-notify.timer &> /dev/null || true
-
-# Just in case, stop the services themselves
 systemctl stop zypper-autodownload.service &> /dev/null || true
 systemctl stop zypper-notify.service &> /dev/null || true
-
-# Note: We don't delete the files here, as we will overwrite them.
-#       This step is just to clean up systemd's state.
 echo "Old services disabled."
 
 # --- 4. Create/Update DOWNLOADER Service ---
@@ -112,15 +112,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script ---
+# --- 8. Create/Update Notification Script (v12 Hybrid Logic) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v11 logic)
+# notify-updater (v12 logic - Hybrid Check)
 #
 # This script is run by its *own timer* (zypper-notify.service).
-# It just checks for pending updates and notifies. It does not download.
+# It checks connection state to decide *how* to check for updates.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -141,13 +141,39 @@ fi
 
 DBUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- Check if updates are pending and count them ---
-# We MUST refresh here, as we can't be sure the downloader ran.
+# --- v12: Check connection state ---
+IS_SAFE=true
+
+# Check for AC power (using upower)
+if upower -e | grep -q 'line_power'; then
+    if ! upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'; then
+        IS_SAFE=false
+        echo "Running on battery. Skipping refresh."
+    fi
+fi
+
+# Check for metered connection (using nmcli)
+if [ "$IS_SAFE" = true ]; then
+    if nmcli -t -f GENERAL.METERED c show --active | grep -q 'yes'; then
+        IS_SAFE=false
+        echo "Metered connection detected. Skipping refresh."
+    fi
+fi
+
+# --- v12: Run tiered logic ---
 ZYPPER_OUTPUT=""
-if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive list-updates --dup 2>&1); then
-    echo "Failed to run zypper (exit code $?)."
-    echo "Repos might be locked or network is down. Skipping notification."
-    exit 0 # Exit gracefully
+if [ "$IS_SAFE" = true ]; then
+    echo "Safe to refresh. Running full check..."
+    if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive list-updates --dup 2>&1); then
+        echo "Failed to run 'zypper refresh' (exit code $?). Skipping."
+        exit 0
+    fi
+else
+    echo "Unsafe. Checking local cache only..."
+    if ! ZYPPER_OUTPUT=$(zypper --non-interactive list-updates --dup 2>&1); then
+        echo "Failed to run 'zypper list-updates' (exit code $?). Skipping."
+        exit 0
+    fi
 fi
 
 # Check if the output contains "Nothing to do."
@@ -205,7 +231,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The decoupled auto-downloader and reminder system is installed/updated."
+echo "The v12 hybrid auto-downloader and reminder system is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
