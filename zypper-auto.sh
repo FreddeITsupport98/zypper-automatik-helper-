@@ -1,25 +1,24 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v23.2 - Final Stability Fix)
+# install_autodownload.sh (v24 - Final Button Attempt)
 #
-# This script fixes the final bug from v23.1.
-# 1. Removes 'set -euo pipefail' and 'yes |' from the
-#    logic script, which caused it to exit early.
-# 2. Re-adds 'set -e' for basic error handling.
-# 3. This is the final, stable, working version.
+# This script re-adds the clickable button from v22
+# to the stable v23.2 script. This is the last attempt.
+# If this fails, we must use v23.2 (no button).
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# --- v23: Single Root Service Config ---
+# --- v24: Single Root Service Config ---
 SERVICE_NAME="zypper-smart-updater"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 
-# Our one and only logic script
+# Our two scripts
 LOGIC_SCRIPT_PATH="/usr/local/bin/zypper-smart-updater-script"
+INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v24" # New cache-buster name
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -96,15 +95,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v23.2 logic) ---
+# --- 6. Create the "Brains" Script (v24 logic) ---
 echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
 cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v23.2 logic)
+# zypper-smart-updater-script (v24 logic)
 #
-# This script removes the pipefail and 'yes |' to
-# prevent the script from exiting early.
+# This script re-adds the clickable button.
+# This may fail to pop up on some systems.
 
 # --- Strict Mode & Safety Trap ---
 set -e # Exit on error, but NOT pipefail
@@ -133,10 +132,6 @@ fi
 if [ "\$IS_SAFE" = true ]; then
     echo "Safe to refresh. Running download..."
     zypper --non-interactive --no-gpg-checks refresh
-
-    # --- v23.2 FIX: Run zypper without 'yes |' ---
-    # The --non-interactive flag is sufficient
-    # and this prevents the 'pipefail' bug.
     zypper --non-interactive --no-gpg-checks dup --download-only
 else
     echo "Unsafe. Skipping download step."
@@ -184,35 +179,80 @@ else
     fi
 
     if [ "\$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
+        MESSAGE="1 update is pending. Click 'Install updates' to begin."
     else
-        MESSAGE="\$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
+        MESSAGE="\$PACKAGE_COUNT updates are pending. Click 'Install updates' to begin."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v23: Send a SIMPLE, reliable notification ---
+    # --- v24: Send Actionable Notification (notify-send cache buster) ---
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
         -t 30000 \
+        -A "Install updates=/usr/local/bin/zypper-run-install-v24" \
         "\$TITLE" \
         "\$MESSAGE"
 fi
 EOF
 
-echo ">>> Making script executable..."
-# 7. Make the helper script executable
+# --- 7. Create the Action Script ---
+echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
+cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
+#!/bin/bash
+#
+# This script is launched by the notification system when the
+# "Install updates" button is clicked. It runs AS THE USER.
+
+# Find the user's D-Bus address for graphical applications
+export USER_ID=$(id -u)
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
+
+# The command to run
+RUN_CMD="sudo zypper dup"
+
+# Try to find the best terminal, in order
+if command -v konsole &> /dev/null; then
+    konsole -e "$RUN_CMD"
+elif command -v gnome-terminal &> /dev/null; then
+    gnome-terminal -- $SHELL -c "$RUN_CMD"
+elif command -v xfce4-terminal &> /dev/null; then
+    xfce4-terminal -e "$RUN_CMD"
+elif command -v mate-terminal &> /dev/null; then
+    mate-terminal -e "$RUN_CMD"
+elif command -v xterm &> /dev/null; then
+    xterm -e "$RUN_CMD"
+else
+    # Fallback if no known terminal is found
+    gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "zypper-updater" \
+        0 \
+        "dialog-error" \
+        "Could not find terminal" \
+        "Please run 'sudo zypper dup' manually." \
+        "[]" \
+        "{}" \
+        5000
+fi
+EOF
+
+echo ">>> Making scripts executable..."
+# 8. Make the helper scripts executable
 chmod +x ${LOGIC_SCRIPT_PATH}
+chmod +x ${INSTALL_SCRIPT_PATH}
 
 echo ">>> Reloading systemd daemon..."
-# 8. Reload and enable ROOT services
+# 9. Reload and enable ROOT services
 systemctl daemon-reload
 systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v23.2 (Stable) auto-downloader is installed/updated."
+echo "The v24 (Button Attempt) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
