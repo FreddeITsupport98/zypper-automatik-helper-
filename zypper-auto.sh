@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v14.3 - Button Label Fix)
+# install_autodownload.sh (v14.4 - Final Button Fix)
 #
 # This script installs or updates the auto-downloader.
-# It fixes the notify-send command to show "Install Now"
-# as the button label, instead of the script path.
+# It fixes the button text by simplifying the notify-send
+# action command to be compatible with more systems.
 #
 # MUST be run with sudo or as root.
 
@@ -115,12 +115,12 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v14.3 Button Label Fix) ---
+# --- 8. Create/Update Notification Script (v14.4 Button Fix) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v14.3 logic - Button Label Fix)
+# notify-updater (v14.4 logic - Button Fix)
 #
 # This script fixes the notify-send action string.
 
@@ -213,12 +213,13 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v14.3: Send Actionable Notification (with LABEL) ---
+    # --- v14.4: Send Actionable Notification (Simplified) ---
+    # We use the label "Install updates" as the action ID.
     sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
-        -A "install=Install Now=/usr/local/bin/zypper-run-install" \
+        -A "Install updates=/usr/local/bin/zypper-run-install" \
         "$TITLE" \
         "$MESSAGE"
 fi
@@ -243,7 +244,7 @@ RUN_CMD="sudo zypper dup"
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
     konsole -e "$RUN_CMD"
-elif command -v gnome-terminal &> /dev/null; then
+elif command -v gnome-terminal &> /dev/null;
     gnome-terminal -- $SHELL -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
     xfce4-terminal -e "$RUN_CMD"
@@ -273,7 +274,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v14.3 (Button Label Fix) auto-downloader is installed/updated."
+echo "The v14.4 (Button Fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
