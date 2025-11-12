@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v14.1 - 'logctl' Typo Fix)
+# install_autodownload.sh (v14.2 - Bash Syntax Fix)
 #
 # This script installs or updates the auto-downloader.
-# It fixes a critical typo in the notify-updater script
-# (logctl -> loginctl).
+# It fixes a critical 'if/else' syntax error in the
+# notify-updater script from v14.1.
 #
 # MUST be run with sudo or as root.
 
@@ -115,22 +115,20 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v14.1 Typo Fix) ---
+# --- 8. Create/Update Notification Script (v14.2 Syntax Fix) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v14.1 logic - 'logctl' Typo Fix)
+# notify-updater (v14.2 logic - Bash Syntax Fix)
 #
-# This script uses 'zypper dup --dry-run' to correctly check
-# for pending updates.
+# This script fixes the 'if/else' syntax error from v14.1
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
 trap 'exit 0' EXIT # Always exit gracefully
 
 # --- Find the active user ---
-# THE FIX IS HERE: logctl -> loginctl
 USER_NAME=$(loginctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
 if [ -z "$USER_NAME" ]; then
     echo "Could not find a logged-in user on seat0. Cannot notify."
@@ -164,21 +162,21 @@ if [ "$IS_SAFE" = true ]; then
     fi
 fi
 
-# --- v14: Run tiered logic with 'dup --dry-run' ---
+# --- v14.2: Run tiered logic (with correct 'if/then/else' syntax) ---
 ZYPPER_OUTPUT=""
-if [ "$IS_SAFE" = true ]; {
+if [ "$IS_SAFE" = true ]; then
     echo "Safe to refresh. Running full check..."
     if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive dup --dry-run 2>&1); then
         echo "Failed to run 'zypper refresh' (exit code $?). Skipping."
         exit 0
     fi
-} else {
+else
     echo "Unsafe. Checking local cache only..."
     if ! ZYPPER_OUTPUT=$(zypper --non-interactive dup --dry-run 2>&1); then
         echo "Failed to run 'zypper dup --dry-run' (exit code $?). Skipping."
         exit 0
     fi
-} fi
+fi
 
 # Check if the output contains "Nothing to do."
 if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
@@ -275,7 +273,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v14.1 (typo fix) auto-downloader is installed/updated."
+echo "The v14.2 (syntax fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
