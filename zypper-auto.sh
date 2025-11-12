@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v39.1 - Final Terminal Fix)
+# install_autodownload.sh (v41 - Final Terminal Exit Fix)
 #
 # This script installs the final, most robust architecture.
-# It replaces the hanging '/bin/bash' call with a simple
-# 'read' command to correctly wait for user input before closing.
+# It uses the correct terminal execution method to run 'sudo zypper dup'
+# and ensures the terminal window closes cleanly after the user presses Enter.
 #
 # MUST be run with sudo or as root.
 
@@ -18,7 +18,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
-NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
+NT_SCRIPT_NAME="zypper-notify-updater.py"
 INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
 
 # --- 2. Sanity Checks & User Detection ---
@@ -197,16 +197,15 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v39.1 Python) ---
+# --- 9. Create/Update Notification Script (v41 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v39.1 logic)
+# zypper-notify-updater.py (v41 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification that
-# runs 'sudo zypper dup' in a terminal.
+# to create a robust, clickable notification.
 
 import sys
 import subprocess
@@ -346,7 +345,7 @@ if __name__ == "__main__":
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
-# --- 10. Create the Action Script (v39.1 - Final Terminal Fix) ---
+# --- 10. Create the Action Script (v41 - Final Terminal Fix) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -358,13 +357,13 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- v39.1 FIX: Runs command and launches a final interactive shell ---
-# This avoids the 'stuck' error and the 'read' failure.
-RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nType 'exit' or press Ctrl+D to close this terminal.\n'; /bin/bash"
+# --- v41 FIX: Explicit command chain with exit ---
+# This forces the shell to close cleanly after the user presses Enter.
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nPress Enter to close this terminal.\n'; read; exit"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
-    konsole -e /bin/bash -c "$RUN_CMD"
+    konsole -e "/bin/bash -c \"$RUN_CMD\""
 elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal -- /bin/bash -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
@@ -406,6 +405,7 @@ echo "✅ Success! The (root) downloader is installed."
 echo ""
 echo "--- ⚠️ FINAL STEP REQUIRED ---"
 echo "To finish, you must enable the notifier."
+echo "Please run this command as your user ($SUDO_USER):"
 echo ""
 echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 echo ""
