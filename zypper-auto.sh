@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v37 - pkexec fix)
+# install_autodownload.sh (v38 - pkexec + read fix)
 #
-# This script is identical to v36 but
-# uses pkexec instead of sudo to fix the
-# hanging terminal (password) issue.
+# This script combines the v37 'pkexec' fix with
+# the more reliable v36 'echo/read' prompt.
 #
 # MUST be run with sudo or as root.
 
@@ -72,12 +71,12 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v37) ---
+# --- 2b. Dependency Checks (v38) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
-check_and_install "pkexec" "polkit" "graphical authentication" # <-- FIX ADDED HERE
+check_and_install "pkexec" "polkit" "graphical authentication" # Keep this
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -348,7 +347,7 @@ EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
 # --- 10. Create the Action Script (User Bash Script) ---
-# *** THIS BLOCK IS NOW CORRECTED (v37) ***
+# *** THIS BLOCK IS NOW CORRECTED (v38) ***
 echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -360,9 +359,8 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- v37 FIX: Use 'pkexec' for graphical password prompt ---
-# ---    and 'read -p' for a robust "Press Enter" ---
-RUN_CMD="pkexec /usr/bin/zypper dup; read -p $'\n--- Update finished --- \nPress Enter to close this terminal.' -r"
+# --- v38 FIX: Use 'pkexec' (from v37) + 'echo/read' (from v36) ---
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e \"\n--- Update finished --- \nPress Enter to close this terminal.\"; read -r"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
