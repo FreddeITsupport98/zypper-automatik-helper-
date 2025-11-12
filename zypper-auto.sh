@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v14 - 'dup --dry-run' Fix)
+# install_autodownload.sh (v14.1 - 'logctl' Typo Fix)
 #
 # This script installs or updates the auto-downloader.
-# It fixes a critical bug by replacing the invalid 'list-updates --dup'
-# command with the correct 'zypper dup --dry-run'.
+# It fixes a critical typo in the notify-updater script
+# (logctl -> loginctl).
 #
 # MUST be run with sudo or as root.
 
@@ -115,22 +115,23 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v14 'dry-run' Fix) ---
+# --- 8. Create/Update Notification Script (v14.1 Typo Fix) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v14 logic - 'dup --dry-run' Fix)
+# notify-updater (v14.1 logic - 'logctl' Typo Fix)
 #
 # This script uses 'zypper dup --dry-run' to correctly check
-# for pending updates, fixing the bug from v13.
+# for pending updates.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
 trap 'exit 0' EXIT # Always exit gracefully
 
 # --- Find the active user ---
-USER_NAME=$(logctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
+# THE FIX IS HERE: logctl -> loginctl
+USER_NAME=$(loginctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
 if [ -z "$USER_NAME" ]; then
     echo "Could not find a logged-in user on seat0. Cannot notify."
     exit 0 # Exit gracefully
@@ -247,7 +248,7 @@ if command -v konsole &> /dev/null; then
 elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal -- $SHELL -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMS"
+    xfce4-terminal -e "$RUN_CMD"
 elif command -v mate-terminal &> /dev/null; then
     mate-terminal -e "$RUN_CMD"
 elif command -v xterm &> /dev/null; then
@@ -274,7 +275,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v14 (dry-run fix) auto-downloader is installed/updated."
+echo "The v14.1 (typo fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
