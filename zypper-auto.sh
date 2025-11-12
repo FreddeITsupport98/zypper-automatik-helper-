@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v12.2 - nmcli Fix)
+# install_autodownload.sh (v12.3 - Universal nmcli Fix)
 #
 # This script installs or updates the auto-downloader.
-# Fixes a compatibility issue with different nmcli versions
-# by using 'connection.metered' instead of 'GENERAL.METERED'.
+# It uses a universal `grep` for nmcli to ensure compatibility
+# across different NetworkManager versions.
 #
 # MUST be run with sudo or as root.
 
@@ -112,12 +112,12 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v12.2 nmcli Fix) ---
+# --- 8. Create/Update Notification Script (v12.3 Universal Fix) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v12.2 logic - Hybrid Check + nmcli Fix)
+# notify-updater (v12.3 logic - Hybrid Check + Universal nmcli Fix)
 #
 # This script is run by its *own timer* (zypper-notify.service).
 # It checks connection state to decide *how* to check for updates.
@@ -154,8 +154,9 @@ fi
 
 # Check for metered connection (using nmcli)
 if [ "$IS_SAFE" = true ]; then
-    # THE FIX IS HERE: Using 'connection.metered'
-    if nmcli -g connection.metered c show --active | grep -q 'yes'; then
+    # THE v12.3 FIX: A universal grep that finds the words "metered" and "yes"
+    # on the same line. This is much more compatible.
+    if nmcli c show --active | grep -q "metered.*yes"; then
         IS_SAFE=false
         echo "Metered connection detected. Skipping refresh."
     fi
@@ -216,7 +217,6 @@ else
         "$MESSAGE"
 fi
 EOF
-# ^^^ THIS 'EOF' MUST HAVE NO SPACES BEFORE IT ^^^
 
 echo ">>> Making notification script executable..."
 # 9. Make the helper script executable
@@ -233,7 +233,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v12.2 (nmcli fix) auto-downloader is installed/updated."
+echo "The v12.3 (universal fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
