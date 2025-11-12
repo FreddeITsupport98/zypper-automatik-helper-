@@ -1,11 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v22 - The "v14" Architecture Was Correct)
+# install_autodownload.sh (v22.1 - 30-Second Timeout)
 #
-# This script installs the final, most robust architecture.
-# It returns to the single, root-service model from v14,
-# which we know can show a popup. It uses the "cache-buster"
-# technique (a newly named script) to fix the button text.
+# This script is identical to v22, but adds a 30-second
+# timeout to the notification popup.
 #
 # MUST be run with sudo or as root.
 
@@ -93,18 +91,18 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v22 logic) ---
+# --- 6. Create the "Brains" Script (v22.1 logic) ---
 echo ">>> Creating smart updater script: ${NOTIFY_SCRIPT_PATH}"
 cat << EOF > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v22 logic)
+# zypper-smart-updater-script (v22.1 logic)
 #
 # This single script, run as root, contains all logic:
 # 1. Check safety (AC, metered).
 # 2. Download if safe.
 # 3. Check for pending updates.
-# 4. Notify the user with a clickable button.
+# 4. Notify the user with a 30-second popup.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -195,11 +193,12 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v22: Send Actionable Notification (notify-send cache buster) ---
+    # --- v22.1: Send Actionable Notification with 30-sec timeout ---
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
+        -t 30000 \
         -A "Install updates=/usr/local/bin/zypper-run-install-v22" \
         "\$TITLE" \
         "\$MESSAGE"
@@ -230,7 +229,7 @@ elif command -v xfce4-terminal &> /dev/null; then
     xfce4-terminal -e "$RUN_CMD"
 elif command -v mate-terminal &> /dev/null; then
     mate-terminal -e "$RUN_CMD"
-elif command -v xterm &> /dev/null;
+elif command -v xterm &> /dev/null; then
     xterm -e "$RUN_CMD"
 else
     # Fallback if no known terminal is found
@@ -261,7 +260,7 @@ systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v22 (single-service) auto-downloader is installed/updated."
+echo "The v22.1 (30s timeout) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
