@@ -347,6 +347,7 @@ EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
 # --- 10. Create the Action Script (User Bash Script) ---
+# *** THIS BLOCK IS NOW CORRECTED ***
 echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -367,11 +368,11 @@ if command -v konsole &> /dev/null; then
 elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal -- /bin/bash -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "/bin/bash -c '$RUN_CMD'"
+    xfce4-terminal -e "/bin/bash -c \"$RUN_CMD\""
 elif command -v mate-terminal &> /dev/null; then
-    mate-terminal -e "/bin/bash -c '$RUN_CMD'"
+    mate-terminal -e "/bin/bash -c \"$RUN_CMD\""
 elif command -v xterm &> /dev/null; then
-    xterm -e "/bin/bash -c '$RUN_CMD'"
+    xterm -e "/bin/bash -c \"$RUN_CMD\""
 else
     # Fallback if no known terminal is found
     gdbus call --session \
@@ -405,7 +406,7 @@ echo "✅ Success! The (root) downloader is installed."
 echo ""
 echo "--- ⚠️ FINAL STEP REQUIRED ---"
 echo "To finish, you must enable the notifier."
-echo "Please run this command as your user (fb):"
+echo "Please run this command as your user ($SUDO_USER):"
 echo ""
 echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 echo ""
