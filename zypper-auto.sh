@@ -19,7 +19,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
-INSTALL_SCRIPT_NAME="zypper-run-install-v36" # Name is fine, script content changes
+INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -47,7 +47,7 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
-# --- Helper function to check and install (omitted for brevity) ---
+# --- Helper function to check and install ---
 check_and_install() {
     local cmd=$1
     local package=$2
@@ -72,7 +72,7 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (omitted for brevity) ---
+# --- 2b. Dependency Checks ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
@@ -105,7 +105,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
+# --- 3. Clean Up ALL Previous Versions (System & User) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -128,7 +128,7 @@ rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py"
 rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."*
 echo "Old user services disabled and files removed."
 
-# --- 4. Create/Update DOWNLOADER (omitted for brevity) ---
+# --- 4. Create/Update DOWNLOADER (Root Service) ---
 echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
@@ -144,7 +144,7 @@ ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
 EOF
 
-# --- 5. Create/Update DOWNLOADER (omitted for brevity) ---
+# --- 5. Create/Update DOWNLOADER (Root Timer) ---
 echo ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
@@ -159,14 +159,14 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create User Directories (omitted for brevity) ---
+# --- 6. Create User Directories ---
 echo ">>> Creating user directories (if needed)..."
 mkdir -p "$USER_CONFIG_DIR"
 chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config"
 mkdir -p "$USER_BIN_DIR"
 chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.local"
 
-# --- 7. Create/Update NOTIFIER (omitted for brevity) ---
+# --- 7. Create/Update NOTIFIER (User Service) ---
 echo ">>> Creating (user) notifier service: ${NT_SERVICE_FILE}"
 cat << EOF > ${NT_SERVICE_FILE}
 [Unit]
@@ -181,7 +181,7 @@ ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
-# --- 8. Create/Update NOTIFIER (omitted for brevity) ---
+# --- 8. Create/Update NOTIFIER (User Timer) ---
 echo ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
@@ -197,7 +197,7 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (omitted for brevity) ---
+# --- 9. Create/Update Notification Script (v39.1 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
@@ -212,7 +212,6 @@ import sys
 import subprocess
 import os
 import re
-# ... (imports omitted for brevity)
 try:
     import gi
     gi.require_version("Notify", "0.7")
@@ -222,7 +221,7 @@ except ImportError:
     sys.exit(1)
 
 def is_safe():
-    # ... (is_safe function remains the same) ...
+    """Check for AC power and metered connection."""
     try:
         # Check for AC power
         upower_check = subprocess.run(
@@ -250,7 +249,7 @@ def is_safe():
     return True
 
 def get_updates():
-    # ... (get_updates function remains the same) ...
+    """Run zypper and return the output."""
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
@@ -272,7 +271,7 @@ def get_updates():
         return None
 
 def parse_output(output):
-    # ... (parse_output function remains the same) ...
+    """Parse zypper's output for info."""
     if "Nothing to do." in output:
         return None, None
 
@@ -407,7 +406,6 @@ echo "✅ Success! The (root) downloader is installed."
 echo ""
 echo "--- ⚠️ FINAL STEP REQUIRED ---"
 echo "To finish, you must enable the notifier."
-echo "Please run this command as your user ($SUDO_USER):"
 echo ""
 echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 echo ""
