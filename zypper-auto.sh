@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v26 - The Correct v19.1 Architecture)
+# install_autodownload.sh (v27 - No Button, Final Fix)
 #
-# This script installs the correct 'systemd --user' architecture.
-# Your logs proved this was the only method that successfully
-# sent a 'gdbus' notification with an action button.
+# This script installs the final, most robust architecture.
+# It uses the correct 'systemd --user' model but REMOVES
+# the buggy clickable button, which we've proven
+# fails on this system.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +20,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater"
-INSTALL_SCRIPT_NAME="zypper-run-install"
+INSTALL_SCRIPT_NAME="zypper-run-install" # We will clean this up
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -45,7 +46,7 @@ USER_BIN_DIR="$SUDO_USER_HOME/.local/bin"
 NT_SERVICE_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.service"
 NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
-INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
+INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}" # For cleanup
 
 if ! command -v nmcli &> /dev/null; then
     echo "Error: 'nmcli' command not found. Please install 'NetworkManager'."
@@ -149,16 +150,15 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v19.1/v26) ---
+# --- 9. Create/Update Notification Script (v27 Stable) ---
 echo ">>> Creating (user) notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-notify-updater (v26 / v19.1 logic)
+# zypper-notify-updater (v27 logic - Stable, No Button)
 #
-# This script is run as the USER. It manually
-# exports the DBUS_SESSION_BUS_ADDRESS to ensure
-# it can connect to the graphical session.
+# This script sends a simple, non-actionable notification
+# that is guaranteed to be compatible and to display.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -188,7 +188,7 @@ if [ "$IS_SAFE" = true ]; then
     fi
 fi
 
-# --- v14: Run tiered logic with 'dup --dry-run' ---
+# --- v1Main: Run tiered logic with 'dup --dry-run' ---
 ZYPPER_OUTPUT=""
 if [ "$IS_SAFE" = true ]; then
     echo "Safe to refresh. Running full check..."
@@ -232,13 +232,14 @@ else
     fi
 
     if [ "$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Click 'Install' to begin."
+        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
     else
-        MESSAGE="$PACKAGE_COUNT updates are pending. Click 'Install' to begin."
+        MESSAGE="$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v19.1: Send GDBus notification ---
+    # --- v27: Send Simple, Reliable GDBus notification ---
+    # We have removed the 'actions' array to prevent the bug.
     gdbus call --session \
         --dest org.freedesktop.Notifications \
         --object-path /org/freedesktop/Notifications \
@@ -248,64 +249,20 @@ else
         "system-software-update" \
         "$TITLE" \
         "$MESSAGE" \
-        "['default', 'Install', 'install-action', '${HOME}/.local/bin/zypper-run-install']" \
-        "{'action-icons': <true>}" \
-        5000
+        "[]" \
+        "{}" \
+        30000
 fi
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
-
-# --- 10. Create the Action Script (User Script) ---
-echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
-cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
-#!/bin/bash
-#
-# This script is launched by the notification system when the
-# "Install" button is clicked. It runs AS THE USER.
-
-# --- v19.1: Find the graphical D-Bus session ---
-export USER_ID=$(id -u)
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
-
-# The command to run
-RUN_CMD="sudo zypper dup"
-
-# Try to find the best terminal, in order
-if command -v konsole &> /dev/null; then
-    konsole -e "$RUN_CMD"
-elif command -v gnome-terminal &> /dev/null; then
-    gnome-terminal -- $SHELL -c "$RUN_CMD"
-elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMD"
-elif command -v mate-terminal &> /dev/null; then
-    mate-terminal -e "$RUN_CMD"
-elif command -v xterm &> /dev/null; then
-    xterm -e "$RUN_CMD"
-else
-    # Fallback if no known terminal is found
-    gdbus call --session \
-        --dest org.freedesktop.Notifications \
-        --object-path /org/freedesktop/Notifications \
-        --method org.freedesktop.Notifications.Notify \
-        "zypper-updater" \
-        0 \
-        "dialog-error" \
-        "Could not find terminal" \
-        "Please run 'sudo zypper dup' manually." \
-        "[]" \
-        "{}" \
-        5000
-fi
-EOF
-chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
-
-echo ">>> Making scripts executable..."
-# 11. Make the helper scripts executable
 chmod +x ${NOTIFY_SCRIPT_PATH}
-chmod +x ${INSTALL_SCRIPT_PATH}
+
+# --- 10. Clean up old action script ---
+# This file is no longer needed
+rm -f "$INSTALL_SCRIPT_PATH"
 
 echo ">>> Reloading systemd daemon (for root)..."
-# 12. Reload and enable ROOT services
+# 11. Reload and enable ROOT services
 systemctl daemon-reload
 systemctl enable --now ${DL_TIMER_FILE}
 
