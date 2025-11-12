@@ -1,11 +1,12 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v23.1 - 'pipefail' Fix)
+# install_autodownload.sh (v23.2 - Final Stability Fix)
 #
-# This script fixes the final bug from v23.
-# It now correctly checks the exit status of 'zypper'
-# instead of 'yes', which prevents the script
-# from exiting early.
+# This script fixes the final bug from v23.1.
+# 1. Removes 'set -euo pipefail' and 'yes |' from the
+#    logic script, which caused it to exit early.
+# 2. Re-adds 'set -e' for basic error handling.
+# 3. This is the final, stable, working version.
 #
 # MUST be run with sudo or as root.
 
@@ -95,18 +96,18 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v23.1 logic) ---
+# --- 6. Create the "Brains" Script (v23.2 logic) ---
 echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
 cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v23.1 logic)
+# zypper-smart-updater-script (v23.2 logic)
 #
-# This script fixes the 'pipefail' bug by
-# explicitly checking the exit status of 'zypper'.
+# This script removes the pipefail and 'yes |' to
+# prevent the script from exiting early.
 
 # --- Strict Mode & Safety Trap ---
-set -euo pipefail
+set -e # Exit on error, but NOT pipefail
 trap 'exit 0' EXIT # Always exit gracefully
 
 # --- Check connection state ---
@@ -131,21 +132,12 @@ fi
 # --- Run Download Logic ---
 if [ "\$IS_SAFE" = true ]; then
     echo "Safe to refresh. Running download..."
-    if ! zypper --non-interactive --no-gpg-checks refresh; then
-        echo "Failed to run 'zypper refresh' (exit code \$?). Skipping."
-        exit 0
-    fi
+    zypper --non-interactive --no-gpg-checks refresh
 
-    # --- v23.1 FIX: Check PIPESTATUS ---
-    # This prevents the 'yes' command's broken pipe
-    # from triggering a false failure.
-    yes | zypper --non-interactive --no-gpg-checks dup --download-only
-    ZYPPER_STATUS=\${PIPESTATUS[1]} # Get exit code of 'zypper'
-
-    if [ \$ZYPPER_STATUS -ne 0 ]; then
-        echo "Failed to run 'zypper dup --download-only' (exit code \$ZYPPER_STATUS). Skipping."
-        exit 0
-    fi
+    # --- v23.2 FIX: Run zypper without 'yes |' ---
+    # The --non-interactive flag is sufficient
+    # and this prevents the 'pipefail' bug.
+    zypper --non-interactive --no-gpg-checks dup --download-only
 else
     echo "Unsafe. Skipping download step."
 fi
@@ -153,10 +145,7 @@ fi
 # --- Run Notification Logic ---
 echo "Checking for pending updates..."
 ZYPPER_OUTPUT=""
-if ! ZYPPER_OUTPUT=\$(zypper --non-interactive dup --dry-run 2>&1); then
-    echo "Failed to run 'zypper dup --dry-run' (exit code \$?). Skipping."
-    exit 0
-fi
+ZYPPER_OUTPUT=\$(zypper --non-interactive dup --dry-run 2>&1)
 
 # Check if the output contains "Nothing to do."
 if echo "\$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
@@ -223,7 +212,7 @@ systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v23.1 (Stable) auto-downloader is installed/updated."
+echo "The v23.2 (Stable) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
