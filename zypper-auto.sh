@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v33 - Auto-Dependency Install)
+# install_autodownload.sh (v36 - Clearer Text)
 #
-# This is the correct, final architecture.
-# It uses the 'systemd --user' (Python) model to fix
-# all graphical session bugs.
+# This script is identical to v35 (Python) but
+# changes the notification text to be clearer,
+# as requested.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +19,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
-INSTALL_SCRIPT_NAME="zypper-run-install"
+INSTALL_SCRIPT_NAME="zypper-run-install-v36" # New cache-buster name
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -72,7 +72,7 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v33) ---
+# --- 2b. Dependency Checks (v36) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
@@ -120,8 +120,9 @@ echo "Old system services disabled and files removed."
 echo ">>> Cleaning up all old user-space services..."
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
+rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater"
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" # old python script
+rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py"
 rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."*
 echo "Old user services disabled and files removed."
 
@@ -195,15 +196,16 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v33 Python) ---
+# --- 9. Create/Update Notification Script (v36 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v33 logic)
+# zypper-notify-updater.py (v36 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification.
+# to create a robust, clickable notification that
+# runs 'sudo zypper dup' in a terminal.
 
 import sys
 import subprocess
@@ -283,10 +285,11 @@ def parse_output(output):
     # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
 
+    # --- v36 Change: Updated notification text ---
     if package_count == "1":
-        message = "1 update is pending. Click 'Install' to begin."
+        message = "1 update is pending. Press 'Install' to UPDATE!"
     else:
-        message = f"{package_count} updates are pending. Click 'Install' to begin."
+        message = f"{package_count} updates are pending. Press 'Install' to UPDATE!"
 
     return title, message
 
@@ -317,7 +320,7 @@ def main():
         print("Updates are pending. Sending 'updates ready' reminder.")
 
         # Get the path to the action script
-        action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
+        action_script = os.path.expanduser("~/.local/bin/zypper-run-install-v36")
 
         # Create the notification
         n = Notify.Notification.new(title, message, "system-software-update")
@@ -355,20 +358,20 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# The command to run
-RUN_CMD="sudo zypper dup"
+# --- v35 FIX: Run the command AND wait for user input ---
+RUN_CMD="sudo zypper dup; echo -e \"\n--- Update finished --- \nPress Enter to close this terminal.\"; read"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
-    konsole -e "$RUN_CMD"
+    konsole -e /bin/bash -c "$RUN_CMD"
 elif command -v gnome-terminal &> /dev/null; then
-    gnome-terminal -- $SHELL -c "$RUN_CMD"
+    gnome-terminal -- /bin/bash -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMD"
+    xfce4-terminal -e "/bin/bash -c '$RUN_CMD'"
 elif command -v mate-terminal &> /dev/null; then
-    mate-terminal -e "$RUN_CMD"
+    mate-terminal -e "/bin/bash -c '$RUN_CMD'"
 elif command -v xterm &> /dev/null; then
-    xterm -e "$RUN_CMD"
+    xterm -e "/bin/bash -c '$RUN_CMD'"
 else
     # Fallback if no known terminal is found
     gdbus call --session \
