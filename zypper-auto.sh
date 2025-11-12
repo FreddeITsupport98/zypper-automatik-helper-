@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v14.2 - Bash Syntax Fix)
+# install_autodownload.sh (v14.3 - Button Label Fix)
 #
 # This script installs or updates the auto-downloader.
-# It fixes a critical 'if/else' syntax error in the
-# notify-updater script from v14.1.
+# It fixes the notify-send command to show "Install Now"
+# as the button label, instead of the script path.
 #
 # MUST be run with sudo or as root.
 
@@ -115,14 +115,14 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v14.2 Syntax Fix) ---
+# --- 8. Create/Update Notification Script (v14.3 Button Label Fix) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v14.2 logic - Bash Syntax Fix)
+# notify-updater (v14.3 logic - Button Label Fix)
 #
-# This script fixes the 'if/else' syntax error from v14.1
+# This script fixes the notify-send action string.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -162,7 +162,7 @@ if [ "$IS_SAFE" = true ]; then
     fi
 fi
 
-# --- v14.2: Run tiered logic (with correct 'if/then/else' syntax) ---
+# --- v14: Run tiered logic with 'dup --dry-run' ---
 ZYPPER_OUTPUT=""
 if [ "$IS_SAFE" = true ]; then
     echo "Safe to refresh. Running full check..."
@@ -180,7 +180,7 @@ fi
 
 # Check if the output contains "Nothing to do."
 if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
-    # "Nothing to do." was found. The system is up-to-date.
+    # "Nothing to do." was found. The system is.
     echo "System is up-to-date. No notification needed."
     exit 0
 
@@ -213,12 +213,12 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v13: Send Actionable Notification ---
+    # --- v14.3: Send Actionable Notification (with LABEL) ---
     sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
-        -A "install=/usr/local/bin/zypper-run-install" \
+        -A "install=Install Now=/usr/local/bin/zypper-run-install" \
         "$TITLE" \
         "$MESSAGE"
 fi
@@ -273,7 +273,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v14.2 (syntax fix) auto-downloader is installed/updated."
+echo "The v14.3 (Button Label Fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
