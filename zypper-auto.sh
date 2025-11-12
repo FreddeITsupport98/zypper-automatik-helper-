@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v19.1 - GDBus Path Fix)
+# install_autodownload.sh (v20 - ImportEnvironment Fix)
 #
 # This script installs the final, most robust architecture.
-# It fixes a critical typo in the gdbus object path
-# (/org.freedesktop.Notifications -> /org/freedesktop/Notifications)
+# It adds 'ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY'
+# to the user service, which is the correct systemd way
+# to connect to the graphical session.
 #
 # MUST be run with sudo or as root.
 
@@ -126,6 +127,8 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=${NOTIFY_SCRIPT_PATH}
+# --- v20 FIX: Import the graphical environment ---
+ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
@@ -145,25 +148,20 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v19.1 GDBus Path Fix) ---
+# --- 9. Create/Update Notification Script (v20 logic) ---
 echo ">>> Creating (user) notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-notify-updater (v19.1 logic - GDBus Path Fix)
+# zypper-notify-updater (v20 logic)
 #
-# This script is run as the USER. It now explicitly
-# finds and exports the DBUS_SESSION_BUS_ADDRESS
-# and uses the CORRECT gdbus object path.
+# This script is run as the USER. It no longer needs to
+# export DBUS_SESSION_BUS_ADDRESS because the .service
+# file now imports it.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
 trap 'exit 0' EXIT # Always exit gracefully
-
-# --- v19: Find the graphical D-Bus session ---
-export USER_ID=$(id -u)
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
-echo "Connecting to D-Bus at $DBUS_SESSION_BUS_ADDRESS"
 
 # --- v12: Check connection state (as user) ---
 IS_SAFE=true
@@ -234,7 +232,9 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v19.1: Send GDBus notification (with path fix) ---
+    # --- v20: Send GDBus notification (as user) ---
+    # This should now work because the .service file
+    # imported the D-Bus address.
     gdbus call --session \
         --dest org.freedesktop.Notifications \
         --object-path /org/freedesktop/Notifications \
@@ -259,7 +259,8 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 # This script is launched by the notification system when the
 # "Install" button is clicked. It runs AS THE USER.
 
-# --- v19: Find the graphical D-Bus session ---
+# --- v20: Import D-Bus for fallback error ---
+# This is needed in case the terminal can't be found.
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
@@ -279,7 +280,6 @@ elif command -v xterm &> /dev/null; then
     xterm -e "$RUN_CMD"
 else
     # Fallback if no known terminal is found
-    # --- v19.1: GDBus path fix ---
     gdbus call --session \
         --dest org.freedesktop.Notifications \
         --object-path /org/freedesktop/Notifications \
