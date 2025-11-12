@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v13 - Actionable Notification)
+# install_autodownload.sh (v14 - 'dup --dry-run' Fix)
 #
 # This script installs or updates the auto-downloader.
-# It now adds a clickable "Install Now" button to the notification
-# that opens a terminal and runs 'sudo zypper dup'.
+# It fixes a critical bug by replacing the invalid 'list-updates --dup'
+# command with the correct 'zypper dup --dry-run'.
 #
 # MUST be run with sudo or as root.
 
@@ -115,21 +115,22 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v13 Actionable) ---
+# --- 8. Create/Update Notification Script (v14 'dry-run' Fix) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v13 logic - Actionable)
+# notify-updater (v14 logic - 'dup --dry-run' Fix)
 #
-# This script sends a notification with a clickable "Install Now" button.
+# This script uses 'zypper dup --dry-run' to correctly check
+# for pending updates, fixing the bug from v13.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
 trap 'exit 0' EXIT # Always exit gracefully
 
 # --- Find the active user ---
-USER_NAME=$(loginctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
+USER_NAME=$(logctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
 if [ -z "$USER_NAME" ]; then
     echo "Could not find a logged-in user on seat0. Cannot notify."
     exit 0 # Exit gracefully
@@ -162,21 +163,21 @@ if [ "$IS_SAFE" = true ]; then
     fi
 fi
 
-# --- v12: Run tiered logic ---
+# --- v14: Run tiered logic with 'dup --dry-run' ---
 ZYPPER_OUTPUT=""
-if [ "$IS_SAFE" = true ]; then
+if [ "$IS_SAFE" = true ]; {
     echo "Safe to refresh. Running full check..."
-    if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive list-updates --dup 2>&1); then
+    if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive dup --dry-run 2>&1); then
         echo "Failed to run 'zypper refresh' (exit code $?). Skipping."
         exit 0
     fi
-else
+} else {
     echo "Unsafe. Checking local cache only..."
-    if ! ZYPPER_OUTPUT=$(zypper --non-interactive list-updates --dup 2>&1); then
-        echo "Failed to run 'zypper list-updates' (exit code $?). Skipping."
+    if ! ZYPPER_OUTPUT=$(zypper --non-interactive dup --dry-run 2>&1); then
+        echo "Failed to run 'zypper dup --dry-run' (exit code $?). Skipping."
         exit 0
     fi
-fi
+} fi
 
 # Check if the output contains "Nothing to do."
 if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
@@ -187,13 +188,17 @@ if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
 else
     # "Nothing to do." was NOT found. Updates are pending.
 
-    # --- Count Packages ---
-    PACKAGE_COUNT=$(echo "$ZYPPER_OUTPUT" | grep ' | ' | grep -v 'Repository' | grep -v 'S |' | wc -l)
+    # --- Count Packages (new logic) ---
+    PACKAGE_COUNT="0"
+    if COUNT_LINE=$(echo "$ZYPPER_OUTPUT" | grep 'packages to upgrade'); then
+        PACKAGE_COUNT=$(echo "$COUNT_LINE" | awk '{print $1}')
+    fi
 
-    # --- Find Snapshot Version ---
+    # --- Find Snapshot Version (new logic) ---
     SNAPSHOT_VERSION=""
     if SNAPSHOT_LINE=$(echo "$ZYPPER_OUTPUT" | grep 'tumbleweed-release'); then
-        SNAPSHOT_VERSION=$(echo "$SNAPSHOT_LINE" | awk '{print $7}')
+        # The new version is the 3rd field, e.g., '... -> 20251111-0'
+        SNAPSHOT_VERSION=$(echo "$SNAPSHOT_LINE" | awk '{print $3}')
     fi
 
     # --- Build Notification ---
@@ -210,7 +215,6 @@ else
 
     echo "Updates are pending. Sending 'updates ready' reminder."
     # --- v13: Send Actionable Notification ---
-    # We must run this as the user so the action can find the user's display
     sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
@@ -221,7 +225,7 @@ else
 fi
 EOF
 
-# --- 9. NEW: Create the Action Script ---
+# --- 9. Create the Action Script ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -243,7 +247,7 @@ if command -v konsole &> /dev/null; then
 elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal -- $SHELL -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMD"
+    xfce4-terminal -e "$RUN_CMS"
 elif command -v mate-terminal &> /dev/null; then
     mate-terminal -e "$RUN_CMD"
 elif command -v xterm &> /dev/null; then
@@ -270,7 +274,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v13 (Actionable) auto-downloader is installed/updated."
+echo "The v14 (dry-run fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
