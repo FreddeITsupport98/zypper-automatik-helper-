@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v23 - The Final, Stable Script)
+# install_autodownload.sh (v23.1 - 'pipefail' Fix)
 #
-# This script fixes the two final bugs:
-# 1. Pipes 'yes' to 'zypper' to prevent it from "getting stuck".
-# 2. Removes the broken clickable button and sends a
-#    simple, reliable notification that will always appear.
+# This script fixes the final bug from v23.
+# It now correctly checks the exit status of 'zypper'
+# instead of 'yes', which prevents the script
+# from exiting early.
 #
 # MUST be run with sudo or as root.
 
@@ -95,18 +95,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v23 logic) ---
+# --- 6. Create the "Brains" Script (v23.1 logic) ---
 echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
 cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v23 logic)
+# zypper-smart-updater-script (v23.1 logic)
 #
-# This single script, run as root, contains all logic:
-# 1. Check safety (AC, metered).
-# 2. Download if safe (using 'yes | zypper' to prevent stuck).
-# 3. Check for pending updates.
-# 4. Notify the user with a simple, reliable popup.
+# This script fixes the 'pipefail' bug by
+# explicitly checking the exit status of 'zypper'.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -138,11 +135,15 @@ if [ "\$IS_SAFE" = true ]; then
         echo "Failed to run 'zypper refresh' (exit code \$?). Skipping."
         exit 0
     fi
-    # --- v23 FIX: Pipe 'yes' to 'zypper' ---
-    # This forces it to answer "y" to any questions
-    # and prevents the script from getting stuck.
-    if ! yes | zypper --non-interactive --no-gpg-checks dup --download-only; then
-        echo "Failed to run 'zypper dup --download-only' (exit code \$?). Skipping."
+
+    # --- v23.1 FIX: Check PIPESTATUS ---
+    # This prevents the 'yes' command's broken pipe
+    # from triggering a false failure.
+    yes | zypper --non-interactive --no-gpg-checks dup --download-only
+    ZYPPER_STATUS=\${PIPESTATUS[1]} # Get exit code of 'zypper'
+
+    if [ \$ZYPPER_STATUS -ne 0 ]; then
+        echo "Failed to run 'zypper dup --download-only' (exit code \$ZYPPER_STATUS). Skipping."
         exit 0
     fi
 else
@@ -200,9 +201,7 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v23 FIX: Send a SIMPLE, reliable notification ---
-    # We remove the '-A' (action) button, which caused
-    # the 'pam_kwallet5' and 'no popup' bugs.
+    # --- v23: Send a SIMPLE, reliable notification ---
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
@@ -224,7 +223,7 @@ systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v23 (Stable) auto-downloader is installed/updated."
+echo "The v23.1 (Stable) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
