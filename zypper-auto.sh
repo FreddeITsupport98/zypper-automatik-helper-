@@ -380,7 +380,7 @@ else
         "dialog-error" \
         "Could not find terminal" \
         "Please run 'sudo zypper dup' manually." \
-        "[]"
+        "[]" \
         "{}" \
         5000
 fi
