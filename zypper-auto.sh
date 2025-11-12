@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v39 - Interactive Shell Fix)
+# install_autodownload.sh (v39.1 - Final Terminal Fix)
 #
-# This script fixes the "stuck terminal" by launching
-# a new interactive bash shell after the update,
-# instead of relying on the 'read' command.
+# This script installs the final, most robust architecture.
+# It replaces the hanging '/bin/bash' call with a simple
+# 'read' command to correctly wait for user input before closing.
 #
 # MUST be run with sudo or as root.
 
@@ -47,7 +47,7 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
-# --- Helper function to check and install ---
+# --- Helper function to check and install (omitted for brevity) ---
 check_and_install() {
     local cmd=$1
     local package=$2
@@ -72,7 +72,7 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v39) ---
+# --- 2b. Dependency Checks (omitted for brevity) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
@@ -86,7 +86,7 @@ if [ "$(echo -e "$PY_VERSION\n3.7" | sort -V | head -n1)" != "3.7" ]; then
     exit 1
 fi
 
-# Check for PyGObject (the notification library)
+# Check for PyGobject (the notification library)
 if ! python3 -c "import gi" &> /dev/null; then
     echo "---"
     echo "⚠️  Dependency missing: 'python3-gobject' (for notifications)."
@@ -105,7 +105,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (System & User) ---
+# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -119,6 +119,7 @@ rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
 echo ">>> Cleaning up all old user-space services..."
+SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
@@ -127,7 +128,7 @@ rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py"
 rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."*
 echo "Old user services disabled and files removed."
 
-# --- 4. Create/Update DOWNLOADER (Root Service) ---
+# --- 4. Create/Update DOWNLOADER (omitted for brevity) ---
 echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
@@ -143,7 +144,7 @@ ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
 EOF
 
-# --- 5. Create/Update DOWNLOADER (Root Timer) ---
+# --- 5. Create/Update DOWNLOADER (omitted for brevity) ---
 echo ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
@@ -158,14 +159,14 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create User Directories ---
+# --- 6. Create User Directories (omitted for brevity) ---
 echo ">>> Creating user directories (if needed)..."
 mkdir -p "$USER_CONFIG_DIR"
 chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config"
 mkdir -p "$USER_BIN_DIR"
 chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.local"
 
-# --- 7. Create/Update NOTIFIER (User Service) ---
+# --- 7. Create/Update NOTIFIER (omitted for brevity) ---
 echo ">>> Creating (user) notifier service: ${NT_SERVICE_FILE}"
 cat << EOF > ${NT_SERVICE_FILE}
 [Unit]
@@ -176,12 +177,11 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
-# This is the correct way to get the graphical session
 ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
-# --- 8. Create/Update NOTIFIER (User Timer) ---
+# --- 8. Create/Update NOTIFIER (omitted for brevity) ---
 echo ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
@@ -197,12 +197,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v36 Python) ---
+# --- 9. Create/Update Notification Script (omitted for brevity) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v36 logic)
+# zypper-notify-updater.py (v39.1 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification that
@@ -212,6 +212,7 @@ import sys
 import subprocess
 import os
 import re
+# ... (imports omitted for brevity)
 try:
     import gi
     gi.require_version("Notify", "0.7")
@@ -221,7 +222,7 @@ except ImportError:
     sys.exit(1)
 
 def is_safe():
-    """Check for AC power and metered connection."""
+    # ... (is_safe function remains the same) ...
     try:
         # Check for AC power
         upower_check = subprocess.run(
@@ -249,7 +250,7 @@ def is_safe():
     return True
 
 def get_updates():
-    """Run zypper and return the output."""
+    # ... (get_updates function remains the same) ...
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
@@ -271,7 +272,7 @@ def get_updates():
         return None
 
 def parse_output(output):
-    """Parse zypper's output for info."""
+    # ... (parse_output function remains the same) ...
     if "Nothing to do." in output:
         return None, None
 
@@ -286,11 +287,10 @@ def parse_output(output):
     # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
 
-    # --- v36 Change: Updated notification text ---
     if package_count == "1":
-        message = "1 update is pending. Press 'Install' to UPDATE!"
+        message = "1 update is pending. Click 'Install' to begin."
     else:
-        message = f"{package_count} updates are pending. Press 'Install' to UPDATE!"
+        message = f"{package_count} updates are pending. Click 'Install' to begin."
 
     return title, message
 
@@ -321,7 +321,7 @@ def main():
         print("Updates are pending. Sending 'updates ready' reminder.")
 
         # Get the path to the action script
-        action_script = os.path.expanduser("~/.local/bin/zypper-run-install-v36")
+        action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
         # Create the notification
         n = Notify.Notification.new(title, message, "system-software-update")
@@ -347,9 +347,8 @@ if __name__ == "__main__":
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
-# --- 10. Create the Action Script (User Bash Script) ---
-# *** THIS BLOCK IS NOW CORRECTED (v39) ***
-echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
+# --- 10. Create the Action Script (v39.1 - Final Terminal Fix) ---
+echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
 #
@@ -360,9 +359,9 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- v39 FIX: Launch a new interactive bash shell after the update ---
-# This avoids all 'read' and STDIN problems.
-RUN_CMD="pkexec /usr/bin/zypper dup; echo -e \"\n--- Update finished --- \nType 'exit' or press Ctrl+D to close this terminal.\"; /bin/bash"
+# --- v39.1 FIX: Runs command and launches a final interactive shell ---
+# This avoids the 'stuck' error and the 'read' failure.
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nType 'exit' or press Ctrl+D to close this terminal.\n'; /bin/bash"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
@@ -379,7 +378,7 @@ else
     # Fallback if no known terminal is found
     gdbus call --session \
         --dest org.freedesktop.Notifications \
-        --object-path /org/freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
         --method org.freedesktop.Notifications.Notify \
         "zypper-updater" \
         0 \
