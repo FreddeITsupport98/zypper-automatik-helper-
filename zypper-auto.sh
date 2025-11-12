@@ -121,3 +121,119 @@ cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #
 # This script is run by its *own timer* (zypper-notify.service).
 # It checks connection state to decide *how* to check for updates.
+
+# --- Strict Mode & Safety Trap ---
+set -euo pipefail
+trap 'exit 0' EXIT # Always exit gracefully
+
+# --- Find the active user ---
+USER_NAME=$(loginctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
+if [ -z "$USER_NAME" ]; then
+    echo "Could not find a logged-in user on seat0. Cannot notify."
+    exit 0 # Exit gracefully
+fi
+
+USER_ID=$(id -u "$USER_NAME")
+if [ -z "$USER_ID" ]; then
+    echo "Could not find UID for $USER_NAME. Cannot notify."
+    exit 0 # Exit gracefully
+fi
+
+DBUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
+
+# --- v12: Check connection state ---
+IS_SAFE=true
+
+# Check for AC power (using upower)
+if upower -e | grep -q 'line_power'; then
+    if ! upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'; then
+        IS_SAFE=false
+        echo "Running on battery. Skipping refresh."
+    fi
+fi
+
+# Check for metered connection (using nmcli)
+if [ "$IS_SAFE" = true ]; then
+    # THE FIX IS HERE: Using 'connection.metered'
+    if nmcli -g connection.metered c show --active | grep -q 'yes'; then
+        IS_SAFE=false
+        echo "Metered connection detected. Skipping refresh."
+    fi
+fi
+
+# --- v12: Run tiered logic ---
+ZYPPER_OUTPUT=""
+if [ "$IS_SAFE" = true ]; then
+    echo "Safe to refresh. Running full check..."
+    if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive list-updates --dup 2>&1); then
+        echo "Failed to run 'zypper refresh' (exit code $?). Skipping."
+        exit 0
+    fi
+else
+    echo "Unsafe. Checking local cache only..."
+    if ! ZYPPER_OUTPUT=$(zypper --non-interactive list-updates --dup 2>&1); then
+        echo "Failed to run 'zypper list-updates' (exit code $?). Skipping."
+        exit 0
+    fi
+fi
+
+# Check if the output contains "Nothing to do."
+if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
+    # "Nothing to do." was found. The system is up-to-date.
+    echo "System is up-to-date. No notification needed."
+    exit 0
+
+else
+    # "Nothing to do." was NOT found. Updates are pending.
+
+    # --- Count Packages ---
+    PACKAGE_COUNT=$(echo "$ZYPPER_OUTPUT" | grep ' | ' | grep -v 'Repository' | grep -v 'S |' | wc -l)
+
+    # --- Find Snapshot Version ---
+    SNAPSHOT_VERSION=""
+    if SNAPSHOT_LINE=$(echo "$ZYPPER_OUTPUT" | grep 'tumbleweed-release'); then
+        SNAPSHOT_VERSION=$(echo "$SNAPSHOT_LINE" | awk '{print $7}')
+    fi
+
+    # --- Build Notification ---
+    TITLE="Updates Ready to Install"
+    if [ -n "$SNAPSHOT_VERSION" ]; then
+        TITLE="Snapshot ${SNAPSHOT_VERSION} Ready"
+    fi
+
+    if [ "$PACKAGE_COUNT" -eq 1 ]; then
+        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
+    else
+        MESSAGE="$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
+    fi
+
+    echo "Updates are pending. Sending 'updates ready' reminder."
+    sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
+        /usr/bin/notify-send \
+        -u normal \
+        -i "system-software-update" \
+        "$TITLE" \
+        "$MESSAGE"
+fi
+EOF
+# ^^^ THIS 'EOF' MUST HAVE NO SPACES BEFORE IT ^^^
+
+echo ">>> Making notification script executable..."
+# 9. Make the helper script executable
+chmod +x ${NOTIFY_SCRIPT_PATH}
+
+echo ">>> Reloading systemd daemon..."
+# 10. Reload systemd to read the new files
+systemctl daemon-reload
+
+echo ">>> Enabling and starting new timers..."
+# 11. Enable and start both timers
+systemctl enable --now ${DL_TIMER_FILE}
+systemctl enable --now ${NT_TIMER_FILE}
+
+echo ""
+echo "✅ Success!"
+echo "The v12.2 (nmcli fix) auto-downloader is installed/updated."
+echo ""
+echo "To check the timers, run:"
+echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
