@@ -1,24 +1,24 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v29 - Open Terminal Button)
+# install_autodownload.sh (v30 - Final, Stable, No Button)
 #
-# This script is the final, stable version.
-# The notification button now just opens a terminal,
-# allowing the user to type 'sudo zypper dup' themselves.
+# This is the final, stable version. Your logs have proven
+# that the clickable button (-A) is not compatible with your
+# desktop's session when run from systemd.
+# This script removes the broken button for 100% reliability.
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# --- v29: Single Root Service Config ---
+# --- v30: Single Root Service Config ---
 SERVICE_NAME="zypper-smart-updater"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 
-# Our two scripts
+# Our one and only logic script
 LOGIC_SCRIPT_PATH="/usr/local/bin/zypper-smart-updater-script"
-INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-open-terminal-v29" # New name for new function
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -95,15 +95,16 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v29 logic) ---
+# --- 6. Create the "Brains" Script (v30 logic) ---
 echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
 cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v29 logic)
+# zypper-smart-updater-script (v30 logic)
 #
-# This script sends a notification with a button
-# that just opens a terminal.
+# This script is the stable v23.2. It removes the
+# 'pipefail' setting and the '-A' button to ensure
+# a notification always appears.
 
 # --- Strict Mode & Safety Trap ---
 set -e # Exit on error, but NOT pipefail
@@ -179,77 +180,37 @@ else
     fi
 
     if [ "\$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Click 'Open Terminal' to run 'sudo zypper dup'."
+        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
     else
-        MESSAGE="\$PACKAGE_COUNT updates are pending. Click 'Open Terminal' to run 'sudo zypper dup'."
+        MESSAGE="\$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v29: Send Actionable Notification ---
+    # --- v30: Send a SIMPLE, reliable notification ---
+    # We have removed the '-A' (action) button
+    # which is incompatible with your system.
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
         -t 30000 \
-        -A "Open Terminal=/usr/local/bin/zypper-open-terminal-v29" \
         "\$TITLE" \
         "\$MESSAGE"
 fi
 EOF
 
-# --- 7. Create the Action Script (v29 - Open Terminal) ---
-echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
-cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
-#!/bin/bash
-#
-# This script is launched by the notification system when the
-# "Open Terminal" button is clicked. It runs AS THE USER.
-
-# Find the user's D-Bus address for graphical applications
-export USER_ID=$(id -u)
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
-
-# Try to find the best terminal, in order, and just LAUNCH it.
-if command -v konsole &> /dev/null; then
-    konsole
-elif command -v gnome-terminal &> /dev/null; then
-    gnome-terminal
-elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal
-elif command -v mate-terminal &> /dev/null; then
-    mate-terminal
-elif command -v xterm &> /dev/null; then
-    xterm
-else
-    # Fallback if no known terminal is found
-    gdbus call --session \
-        --dest org.freedesktop.Notifications \
-        --object-path /org/freedesktop/Notifications \
-        --method org.freedesktop.Notifications.Notify \
-        "zypper-updater" \
-        0 \
-        "dialog-error" \
-        "Could not find terminal" \
-        "Please open a terminal and run 'sudo zypper dup'." \
-        "[]" \
-        "{}" \
-        5000
-fi
-EOF
-
-echo ">>> Making scripts executable..."
-# 8. Make the helper scripts executable
+echo ">>> Making script executable..."
+# 7. Make the helper script executable
 chmod +x ${LOGIC_SCRIPT_PATH}
-chmod +x ${INSTALL_SCRIPT_PATH}
 
 echo ">>> Reloading systemd daemon..."
-# 9. Reload and enable ROOT services
+# 8. Reload and enable ROOT services
 systemctl daemon-reload
 systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v29 (Open Terminal) auto-downloader is installed/updated."
+echo "The v30 (Stable, No Button) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
