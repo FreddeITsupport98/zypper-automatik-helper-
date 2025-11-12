@@ -1,25 +1,24 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v28 - The Final Button Fix)
+# install_autodownload.sh (v29 - Open Terminal Button)
 #
-# This script combines the two fixes we found:
-# 1. The stable 'zypper' logic from v23.2 (no pipefail).
-# 2. The fixed button script from v25 (with the 'then').
+# This script is the final, stable version.
+# The notification button now just opens a terminal,
+# allowing the user to type 'sudo zypper dup' themselves.
 #
-# This should be the final, working version.
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# --- v28: Single Root Service Config ---
+# --- v29: Single Root Service Config ---
 SERVICE_NAME="zypper-smart-updater"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 
 # Our two scripts
 LOGIC_SCRIPT_PATH="/usr/local/bin/zypper-smart-updater-script"
-INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v28" # New cache-buster name
+INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-open-terminal-v29" # New name for new function
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -96,15 +95,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v28 logic) ---
+# --- 6. Create the "Brains" Script (v29 logic) ---
 echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
 cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v28 logic)
+# zypper-smart-updater-script (v29 logic)
 #
-# This script combines the stable v23.2 logic with
-# the clickable button.
+# This script sends a notification with a button
+# that just opens a terminal.
 
 # --- Strict Mode & Safety Trap ---
 set -e # Exit on error, but NOT pipefail
@@ -180,50 +179,47 @@ else
     fi
 
     if [ "\$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Click 'Install updates' to begin."
+        MESSAGE="1 update is pending. Click 'Open Terminal' to run 'sudo zypper dup'."
     else
-        MESSAGE="\$PACKAGE_COUNT updates are pending. Click 'Install updates' to begin."
+        MESSAGE="\$PACKAGE_COUNT updates are pending. Click 'Open Terminal' to run 'sudo zypper dup'."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v28: Send Actionable Notification (notify-send cache buster) ---
+    # --- v29: Send Actionable Notification ---
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
         -t 30000 \
-        -A "Install updates=/usr/local/bin/zypper-run-install-v28" \
+        -A "Open Terminal=/usr/local/bin/zypper-open-terminal-v29" \
         "\$TITLE" \
         "\$MESSAGE"
 fi
 EOF
 
-# --- 7. Create the Action Script (v28 - 'then' fix) ---
+# --- 7. Create the Action Script (v29 - Open Terminal) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
 #
 # This script is launched by the notification system when the
-# "Install updates" button is clicked. It runs AS THE USER.
+# "Open Terminal" button is clicked. It runs AS THE USER.
 
 # Find the user's D-Bus address for graphical applications
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# The command to run
-RUN_CMD="sudo zypper dup"
-
-# Try to find the best terminal, in order
+# Try to find the best terminal, in order, and just LAUNCH it.
 if command -v konsole &> /dev/null; then
-    konsole -e "$RUN_CMD"
+    konsole
 elif command -v gnome-terminal &> /dev/null; then
-    gnome-terminal -- $SHELL -c "$RUN_CMD"
+    gnome-terminal
 elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMD"
+    xfce4-terminal
 elif command -v mate-terminal &> /dev/null; then
-    mate-terminal -e "$RUN_CMD"
+    mate-terminal
 elif command -v xterm &> /dev/null; then
-    xterm -e "$RUN_CMD"
+    xterm
 else
     # Fallback if no known terminal is found
     gdbus call --session \
@@ -234,7 +230,7 @@ else
         0 \
         "dialog-error" \
         "Could not find terminal" \
-        "Please run 'sudo zypper dup' manually." \
+        "Please open a terminal and run 'sudo zypper dup'." \
         "[]" \
         "{}" \
         5000
@@ -253,7 +249,7 @@ systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v28 (Final Button) auto-downloader is installed/updated."
+echo "The v29 (Open Terminal) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
