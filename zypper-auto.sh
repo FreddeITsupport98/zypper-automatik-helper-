@@ -1,23 +1,24 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v22.1 - 30-Second Timeout)
+# install_autodownload.sh (v23 - The Final, Stable Script)
 #
-# This script is identical to v22, but adds a 30-second
-# timeout to the notification popup.
+# This script fixes the two final bugs:
+# 1. Pipes 'yes' to 'zypper' to prevent it from "getting stuck".
+# 2. Removes the broken clickable button and sends a
+#    simple, reliable notification that will always appear.
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# --- v22: Single Root Service Config ---
-SERVICE_NAME="zypper-smart-updater" # New name for a clean start
+# --- v23: Single Root Service Config ---
+SERVICE_NAME="zypper-smart-updater"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 
-# Our two scripts
-NOTIFY_SCRIPT_PATH="/usr/local/bin/zypper-smart-updater-script" # Main logic
-INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v22" # Action script
+# Our one and only logic script
+LOGIC_SCRIPT_PATH="/usr/local/bin/zypper-smart-updater-script"
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -51,8 +52,11 @@ systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
 systemctl disable --now zypper-notify.timer &> /dev/null || true
 systemctl stop zypper-notify.service &> /dev/null || true
+systemctl disable --now zypper-smart-updater.timer &> /dev/null || true
+systemctl stop zypper-smart-updater.service &> /dev/null || true
 rm -f /usr/local/bin/zypper-run-install*
 rm -f /usr/local/bin/notify-updater
+rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
 echo ">>> Cleaning up all old user-space services..."
@@ -73,7 +77,7 @@ After=network-online.target nss-lookup.target
 
 [Service]
 Type=oneshot
-ExecStart=${NOTIFY_SCRIPT_PATH}
+ExecStart=${LOGIC_SCRIPT_PATH}
 EOF
 
 # --- 5. Create/Update Timer ---
@@ -91,18 +95,18 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v22.1 logic) ---
-echo ">>> Creating smart updater script: ${NOTIFY_SCRIPT_PATH}"
-cat << EOF > ${NOTIFY_SCRIPT_PATH}
+# --- 6. Create the "Brains" Script (v23 logic) ---
+echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
+cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v22.1 logic)
+# zypper-smart-updater-script (v23 logic)
 #
 # This single script, run as root, contains all logic:
 # 1. Check safety (AC, metered).
-# 2. Download if safe.
+# 2. Download if safe (using 'yes | zypper' to prevent stuck).
 # 3. Check for pending updates.
-# 4. Notify the user with a 30-second popup.
+# 4. Notify the user with a simple, reliable popup.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -134,7 +138,10 @@ if [ "\$IS_SAFE" = true ]; then
         echo "Failed to run 'zypper refresh' (exit code \$?). Skipping."
         exit 0
     fi
-    if ! zypper --non-interactive --no-gpg-checks dup --download-only; then
+    # --- v23 FIX: Pipe 'yes' to 'zypper' ---
+    # This forces it to answer "y" to any questions
+    # and prevents the script from getting stuck.
+    if ! yes | zypper --non-interactive --no-gpg-checks dup --download-only; then
         echo "Failed to run 'zypper dup --download-only' (exit code \$?). Skipping."
         exit 0
     fi
@@ -187,80 +194,37 @@ else
     fi
 
     if [ "\$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Click 'Install updates' to begin."
+        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
     else
-        MESSAGE="\$PACKAGE_COUNT updates are pending. Click 'Install updates' to begin."
+        MESSAGE="\$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v22.1: Send Actionable Notification with 30-sec timeout ---
+    # --- v23 FIX: Send a SIMPLE, reliable notification ---
+    # We remove the '-A' (action) button, which caused
+    # the 'pam_kwallet5' and 'no popup' bugs.
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
         -t 30000 \
-        -A "Install updates=/usr/local/bin/zypper-run-install-v22" \
         "\$TITLE" \
         "\$MESSAGE"
 fi
 EOF
 
-# --- 7. Create the Action Script ---
-echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
-cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
-#!/bin/bash
-#
-# This script is launched by the notification system when the
-# "Install updates" button is clicked. It runs AS THE USER.
-
-# Find the user's D-Bus address for graphical applications
-export USER_ID=$(id -u)
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
-
-# The command to run
-RUN_CMD="sudo zypper dup"
-
-# Try to find the best terminal, in order
-if command -v konsole &> /dev/null; then
-    konsole -e "$RUN_CMD"
-elif command -v gnome-terminal &> /dev/null; then
-    gnome-terminal -- $SHELL -c "$RUN_CMD"
-elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMD"
-elif command -v mate-terminal &> /dev/null; then
-    mate-terminal -e "$RUN_CMD"
-elif command -v xterm &> /dev/null; then
-    xterm -e "$RUN_CMD"
-else
-    # Fallback if no known terminal is found
-    gdbus call --session \
-        --dest org.freedesktop.Notifications \
-        --object-path /org/freedesktop/Notifications \
-        --method org.freedesktop.Notifications.Notify \
-        "zypper-updater" \
-        0 \
-        "dialog-error" \
-        "Could not find terminal" \
-        "Please run 'sudo zypper dup' manually." \
-        "[]" \
-        "{}" \
-        5000
-fi
-EOF
-
-echo ">>> Making scripts executable..."
-# 8. Make the helper scripts executable
-chmod +x ${NOTIFY_SCRIPT_PATH}
-chmod +x ${INSTALL_SCRIPT_PATH}
+echo ">>> Making script executable..."
+# 7. Make the helper script executable
+chmod +x ${LOGIC_SCRIPT_PATH}
 
 echo ">>> Reloading systemd daemon..."
-# 9. Reload and enable ROOT services
+# 8. Reload and enable ROOT services
 systemctl daemon-reload
 systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v22.1 (30s timeout) auto-downloader is installed/updated."
+echo "The v23 (Stable) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
