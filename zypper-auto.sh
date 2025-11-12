@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v38 - pkexec + read fix)
+# install_autodownload.sh (v39 - Interactive Shell Fix)
 #
-# This script combines the v37 'pkexec' fix with
-# the more reliable v36 'echo/read' prompt.
+# This script fixes the "stuck terminal" by launching
+# a new interactive bash shell after the update,
+# instead of relying on the 'read' command.
 #
 # MUST be run with sudo or as root.
 
@@ -71,12 +72,12 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v38) ---
+# --- 2b. Dependency Checks (v39) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
-check_and_install "pkexec" "polkit" "graphical authentication" # Keep this
+check_and_install "pkexec" "polkit" "graphical authentication"
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -347,7 +348,7 @@ EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
 # --- 10. Create the Action Script (User Bash Script) ---
-# *** THIS BLOCK IS NOW CORRECTED (v38) ***
+# *** THIS BLOCK IS NOW CORRECTED (v39) ***
 echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -359,8 +360,9 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- v38 FIX: Use 'pkexec' (from v37) + 'echo/read' (from v36) ---
-RUN_CMD="pkexec /usr/bin/zypper dup; echo -e \"\n--- Update finished --- \nPress Enter to close this terminal.\"; read -r"
+# --- v39 FIX: Launch a new interactive bash shell after the update ---
+# This avoids all 'read' and STDIN problems.
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e \"\n--- Update finished --- \nType 'exit' or press Ctrl+D to close this terminal.\"; /bin/bash"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
@@ -377,7 +379,7 @@ else
     # Fallback if no known terminal is found
     gdbus call --session \
         --dest org.freedesktop.Notifications \
-        --object-path /org/freedesktop/Notifications \
+        --object-path /org/freedesktop.Notifications \
         --method org.freedesktop.Notifications.Notify \
         "zypper-updater" \
         0 \
