@@ -1,11 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v19 - Final D-Bus Fix)
+# install_autodownload.sh (v19.1 - GDBus Path Fix)
 #
 # This script installs the final, most robust architecture.
-# The user-level notifier script is now "smarter" and
-# explicitly finds the graphical D-Bus session, fixing
-# the "no popup" bug.
+# It fixes a critical typo in the gdbus object path
+# (/org.freedesktop.Notifications -> /org/freedesktop/Notifications)
 #
 # MUST be run with sudo or as root.
 
@@ -146,24 +145,22 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v19 D-Bus Fix) ---
+# --- 9. Create/Update Notification Script (v19.1 GDBus Path Fix) ---
 echo ">>> Creating (user) notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-notify-updater (v19 logic - D-Bus Fix)
+# zypper-notify-updater (v19.1 logic - GDBus Path Fix)
 #
 # This script is run as the USER. It now explicitly
 # finds and exports the DBUS_SESSION_BUS_ADDRESS
-# to ensure it can connect to the graphical session.
+# and uses the CORRECT gdbus object path.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
 trap 'exit 0' EXIT # Always exit gracefully
 
 # --- v19: Find the graphical D-Bus session ---
-# This is the magic. We find our own UID and export the
-# path to our graphical session bus.
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 echo "Connecting to D-Bus at $DBUS_SESSION_BUS_ADDRESS"
@@ -237,10 +234,10 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v19: Send GDBus notification (as user, with D-Bus) ---
+    # --- v19.1: Send GDBus notification (with path fix) ---
     gdbus call --session \
         --dest org.freedesktop.Notifications \
-        --object-path /org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
         --method org.freedesktop.Notifications.Notify \
         "zypper-updater" \
         0 \
@@ -263,7 +260,6 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 # "Install" button is clicked. It runs AS THE USER.
 
 # --- v19: Find the graphical D-Bus session ---
-# This is also needed for the fallback error notification.
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
@@ -283,9 +279,10 @@ elif command -v xterm &> /dev/null; then
     xterm -e "$RUN_CMD"
 else
     # Fallback if no known terminal is found
+    # --- v19.1: GDBus path fix ---
     gdbus call --session \
         --dest org.freedesktop.Notifications \
-        --object-path /org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
         --method org.freedesktop.Notifications.Notify \
         "zypper-updater" \
         0 \
