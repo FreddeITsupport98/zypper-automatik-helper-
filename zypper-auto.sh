@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v12.3 - Universal nmcli Fix)
+# install_autodownload.sh (v13 - Actionable Notification)
 #
 # This script installs or updates the auto-downloader.
-# It uses a universal `grep` for nmcli to ensure compatibility
-# across different NetworkManager versions.
+# It now adds a clickable "Install Now" button to the notification
+# that opens a terminal and runs 'sudo zypper dup'.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +19,10 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 NT_SERVICE_NAME="zypper-notify"
 NT_SERVICE_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.service"
 NT_TIMER_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.timer"
+
+# Our two scripts
 NOTIFY_SCRIPT_PATH="/usr/local/bin/notify-updater"
+INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install"
 
 # --- 2. Sanity Checks ---
 echo ">>> Running Sanity Checks..."
@@ -112,15 +115,14 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v12.3 Universal Fix) ---
+# --- 8. Create/Update Notification Script (v13 Actionable) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v12.3 logic - Hybrid Check + Universal nmcli Fix)
+# notify-updater (v13 logic - Actionable)
 #
-# This script is run by its *own timer* (zypper-notify.service).
-# It checks connection state to decide *how* to check for updates.
+# This script sends a notification with a clickable "Install Now" button.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -154,8 +156,6 @@ fi
 
 # Check for metered connection (using nmcli)
 if [ "$IS_SAFE" = true ]; then
-    # THE v12.3 FIX: A universal grep that finds the words "metered" and "yes"
-    # on the same line. This is much more compatible.
     if nmcli c show --active | grep -q "metered.*yes"; then
         IS_SAFE=false
         echo "Metered connection detected. Skipping refresh."
@@ -203,37 +203,74 @@ else
     fi
 
     if [ "$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Run 'sudo zypper dup' to install."
+        MESSAGE="1 update is pending. Click 'Install Now' to begin."
     else
-        MESSAGE="$PACKAGE_COUNT updates are pending. Run 'sudo zypper dup' to install."
+        MESSAGE="$PACKAGE_COUNT updates are pending. Click 'Install Now' to begin."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
+    # --- v13: Send Actionable Notification ---
+    # We must run this as the user so the action can find the user's display
     sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
+        -A "install=/usr/local/bin/zypper-run-install" \
         "$TITLE" \
         "$MESSAGE"
 fi
 EOF
 
-echo ">>> Making notification script executable..."
-# 9. Make the helper script executable
+# --- 9. NEW: Create the Action Script ---
+echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
+cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
+#!/bin/bash
+#
+# This script is launched by the notification system when the
+# "Install Now" button is clicked.
+#
+# It must find a terminal to launch the update command.
+
+# Find the user's D-Bus address for graphical applications
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+
+# The command to run
+RUN_CMD="sudo zypper dup"
+
+# Try to find the best terminal, in order
+if command -v konsole &> /dev/null; then
+    konsole -e "$RUN_CMD"
+elif command -v gnome-terminal &> /dev/null; then
+    gnome-terminal -- $SHELL -c "$RUN_CMD"
+elif command -v xfce4-terminal &> /dev/null; then
+    xfce4-terminal -e "$RUN_CMD"
+elif command -v mate-terminal &> /dev/null; then
+    mate-terminal -e "$RUN_CMD"
+elif command -v xterm &> /dev/null; then
+    xterm -e "$RUN_CMD"
+else
+    # Fallback if no known terminal is found
+    notify-send -u critical "Could not find terminal" "Please run 'sudo zypper dup' manually."
+fi
+EOF
+
+echo ">>> Making scripts executable..."
+# 10. Make the helper scripts executable
 chmod +x ${NOTIFY_SCRIPT_PATH}
+chmod +x ${INSTALL_SCRIPT_PATH}
 
 echo ">>> Reloading systemd daemon..."
-# 10. Reload systemd to read the new files
+# 11. Reload systemd to read the new files
 systemctl daemon-reload
 
 echo ">>> Enabling and starting new timers..."
-# 11. Enable and start both timers
+# 12. Enable and start both timers
 systemctl enable --now ${DL_TIMER_FILE}
 systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v12.3 (universal fix) auto-downloader is installed/updated."
+echo "The v13 (Actionable) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
