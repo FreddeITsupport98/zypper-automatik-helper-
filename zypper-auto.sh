@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v36 - Clearer Text)
+# install_autodownload.sh (v37 - pkexec fix)
 #
-# This script is identical to v35 (Python) but
-# changes the notification text to be clearer,
-# as requested.
+# This script is identical to v36 but
+# uses pkexec instead of sudo to fix the
+# hanging terminal (password) issue.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +19,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
-INSTALL_SCRIPT_NAME="zypper-run-install-v36" # New cache-buster name
+INSTALL_SCRIPT_NAME="zypper-run-install-v36" # Name is fine, script content changes
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -72,11 +72,12 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v36) ---
+# --- 2b. Dependency Checks (v37) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
+check_and_install "pkexec" "polkit" "graphical authentication" # <-- FIX ADDED HERE
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -347,7 +348,7 @@ EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
 # --- 10. Create the Action Script (User Bash Script) ---
-# *** THIS BLOCK IS NOW CORRECTED ***
+# *** THIS BLOCK IS NOW CORRECTED (v37) ***
 echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -359,8 +360,9 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- v35 FIX: Run the command AND wait for user input ---
-RUN_CMD="sudo zypper dup; echo -e \"\n--- Update finished --- \nPress Enter to close this terminal.\"; read"
+# --- v37 FIX: Use 'pkexec' for graphical password prompt ---
+# ---    and 'read -p' for a robust "Press Enter" ---
+RUN_CMD="pkexec /usr/bin/zypper dup; read -p $'\n--- Update finished --- \nPress Enter to close this terminal.' -r"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
