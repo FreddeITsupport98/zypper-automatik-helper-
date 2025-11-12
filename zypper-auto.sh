@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v14.4 - Final Button Fix)
+# install_autodownload.sh (v15 - Notification Cache Buster)
 #
 # This script installs or updates the auto-downloader.
-# It fixes the button text by simplifying the notify-send
-# action command to be compatible with more systems.
+# It fixes a stubborn notification bug by creating a
+# *newly named* action script, forcing buggy daemons
+# to use the new, correct button label.
 #
 # MUST be run with sudo or as root.
 
@@ -20,9 +21,10 @@ NT_SERVICE_NAME="zypper-notify"
 NT_SERVICE_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.service"
 NT_TIMER_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.timer"
 
-# Our two scripts
+# Our two scripts. The installer has a new name.
 NOTIFY_SCRIPT_PATH="/usr/local/bin/notify-updater"
-INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install"
+INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v15"
+OLD_INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install"
 
 # --- 2. Sanity Checks ---
 echo ">>> Running Sanity Checks..."
@@ -53,7 +55,13 @@ systemctl stop zypper-autodownload.service &> /dev/null || true
 systemctl disable --now zypper-notify.timer &> /dev/null || true
 systemctl stop zypper-notify.service &> /dev/null || true
 
-echo "Old services disabled. Ready to install."
+# NEW: Remove the old action script
+if [ -f "$OLD_INSTALL_SCRIPT_PATH" ]; then
+    echo "Removing old (v14) action script..."
+    rm -f "$OLD_INSTALL_SCRIPT_PATH"
+fi
+
+echo "Old services disabled and files removed. Ready to install."
 
 # --- 4. Create/Update DOWNLOADER Service ---
 echo ">>> Creating downloader service file: ${DL_SERVICE_FILE}"
@@ -115,14 +123,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 8. Create/Update Notification Script (v14.4 Button Fix) ---
+# --- 8. Create/Update Notification Script (v15 logic) ---
 echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v14.4 logic - Button Fix)
+# notify-updater (v15 logic - Cache Buster)
 #
-# This script fixes the notify-send action string.
+# This script points to a *newly named* action script
+# to force buggy daemons to use the correct label.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
@@ -207,31 +216,30 @@ else
     fi
 
     if [ "$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Click 'Install Now' to begin."
+        MESSAGE="1 update is pending. Click 'Install updates' to begin."
     else
-        MESSAGE="$PACKAGE_COUNT updates are pending. Click 'Install Now' to begin."
+        MESSAGE="$PACKAGE_COUNT updates are pending. Click 'Install updates' to begin."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v14.4: Send Actionable Notification (Simplified) ---
-    # We use the label "Install updates" as the action ID.
+    # --- v15: Point to the new action script ---
     sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
-        -A "Install updates=/usr/local/bin/zypper-run-install" \
+        -A "Install updates=/usr/local/bin/zypper-run-install-v15" \
         "$TITLE" \
         "$MESSAGE"
 fi
 EOF
 
-# --- 9. Create the Action Script ---
+# --- 9. Create the *NEW* Action Script ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
 #
 # This script is launched by the notification system when the
-# "Install Now" button is clicked.
+# "Install updates" button is clicked.
 #
 # It must find a terminal to launch the update command.
 
@@ -244,7 +252,7 @@ RUN_CMD="sudo zypper dup"
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
     konsole -e "$RUN_CMD"
-elif command -v gnome-terminal &> /dev/null;
+elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal -- $SHELL -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
     xfce4-terminal -e "$RUN_CMD"
@@ -274,7 +282,7 @@ systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v14.4 (Button Fix) auto-downloader is installed/updated."
+echo "The v15 (Cache Buster) auto-downloader is installed/updated."
 echo ""
 echo "To check the timers, run:"
 echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
