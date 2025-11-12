@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v33 - Auto-Dependency Install)
+# install_autodownload.sh (v34 - Python Notifier + Open Terminal)
 #
-# This script installs the 'systemd --user' (Python) architecture.
-# It now checks for dependencies and ASKS for permission
-# to install them if they are missing.
+# This script installs the final, most robust architecture.
+# It uses the 'systemd --user' (Python) model for a
+# reliable button, and the button's action is to
+# safely open a terminal for the user.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +20,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
-INSTALL_SCRIPT_NAME="zypper-run-install"
+INSTALL_SCRIPT_NAME="zypper-open-terminal" # New action
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -72,7 +73,7 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v33) ---
+# --- 2b. Dependency Checks (v34) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
@@ -120,8 +121,9 @@ echo "Old system services disabled and files removed."
 echo ">>> Cleaning up all old user-space services..."
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
+rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater"
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" # old python script
+rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py"
 rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."*
 echo "Old user services disabled and files removed."
 
@@ -195,15 +197,16 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v33 Python) ---
+# --- 9. Create/Update Notification Script (v34 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v33 logic)
+# zypper-notify-updater.py (v34 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification.
+# to create a robust, clickable notification that
+# opens a terminal.
 
 import sys
 import subprocess
@@ -284,15 +287,15 @@ def parse_output(output):
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
 
     if package_count == "1":
-        message = "1 update is pending. Click 'Install' to begin."
+        message = "1 update is pending. Click 'Open Terminal' to run 'sudo zypper dup'."
     else:
-        message = f"{package_count} updates are pending. Click 'Install' to begin."
+        message = f"{package_count} updates are pending. Click 'Open Terminal' to run 'sudo zypper dup'."
 
     return title, message
 
 def on_action(notification, action_id, user_data_script):
     """Callback to run when the button is clicked."""
-    print("Action clicked. Running install script.")
+    print("Action clicked. Opening terminal.")
     try:
         subprocess.Popen([user_data_script])
     except Exception as e:
@@ -317,14 +320,14 @@ def main():
         print("Updates are pending. Sending 'updates ready' reminder.")
 
         # Get the path to the action script
-        action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
+        action_script = os.path.expanduser("~/.local/bin/zypper-open-terminal")
 
         # Create the notification
         n = Notify.Notification.new(title, message, "system-software-update")
         n.set_timeout(30000) # 30 seconds
 
         # Add the button
-        n.add_action("default", "Install", on_action, action_script)
+        n.add_action("default", "Open Terminal", on_action, action_script)
 
         # We need a main loop to keep the script alive for the button
         loop = GLib.MainLoop()
@@ -349,26 +352,23 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
 #
 # This script is launched by the notification system when the
-# "Install" button is clicked. It runs AS THE USER.
+# "Open Terminal" button is clicked. It runs AS THE USER.
 
 # Find the user's D-Bus address for graphical applications
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# The command to run
-RUN_CMD="sudo zypper dup"
-
-# Try to find the best terminal, in order
+# Try to find the best terminal, in order, and just LAUNCH it.
 if command -v konsole &> /dev/null; then
-    konsole -e "$RUN_CMD"
+    konsole
 elif command -v gnome-terminal &> /dev/null; then
-    gnome-terminal -- $SHELL -c "$RUN_CMD"
+    gnome-terminal
 elif command -v xfce4-terminal &> /dev/null; then
-    xfce4-terminal -e "$RUN_CMD"
+    xfce4-terminal
 elif command -v mate-terminal &> /dev/null; then
-    mate-terminal -e "$RUN_CMD"
+    mate-terminal
 elif command -v xterm &> /dev/null; then
-    xterm -e "$RUN_CMD"
+    xterm
 else
     # Fallback if no known terminal is found
     gdbus call --session \
@@ -379,7 +379,7 @@ else
         0 \
         "dialog-error" \
         "Could not find terminal" \
-        "Please run 'sudo zypper dup' manually." \
+        "Please open a terminal and run 'sudo zypper dup'." \
         "[]" \
         "{}" \
         5000
