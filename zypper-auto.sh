@@ -1,42 +1,53 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v15 - Notification Cache Buster)
+# install_autodownload.sh (v19 - Final D-Bus Fix)
 #
-# This script installs or updates the auto-downloader.
-# It fixes a stubborn notification bug by creating a
-# *newly named* action script, forcing buggy daemons
-# to use the new, correct button label.
+# This script installs the final, most robust architecture.
+# The user-level notifier script is now "smarter" and
+# explicitly finds the graphical D-Bus session, fixing
+# the "no popup" bug.
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# Config for the two-service architecture
+# --- Root/System Service Config ---
 DL_SERVICE_NAME="zypper-autodownload"
 DL_SERVICE_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.service"
 DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
-NT_SERVICE_NAME="zypper-notify"
-NT_SERVICE_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.service"
-NT_TIMER_FILE="/etc/systemd/system/${NT_SERVICE_NAME}.timer"
+# --- User Service Config ---
+NT_SERVICE_NAME="zypper-notify-user"
+NT_SCRIPT_NAME="zypper-notify-updater"
+INSTALL_SCRIPT_NAME="zypper-run-install"
 
-# Our two scripts. The installer has a new name.
-NOTIFY_SCRIPT_PATH="/usr/local/bin/notify-updater"
-INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v15"
-OLD_INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install"
-
-# --- 2. Sanity Checks ---
+# --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
 if [ "$EUID" -ne 0 ]; then
   echo "Error: This script must be run with sudo or as root."
   exit 1
 fi
 
-if ! command -v notify-send &> /dev/null; then
-    echo "Error: 'notify-send' command not found. Please install 'libnotify-tools'."
+if [ -z "${SUDO_USER:-}" ]; then
+    echo "Error: Could not detect the user. Please run with 'sudo', not as pure root."
     exit 1
 fi
+
+SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+if [ ! -d "$SUDO_USER_HOME" ]; then
+    echo "Error: Could not find home directory for user $SUDO_USER."
+    exit 1
+fi
+
+# Define user-level paths
+USER_CONFIG_DIR="$SUDO_USER_HOME/.config/systemd/user"
+USER_BIN_DIR="$SUDO_USER_HOME/.local/bin"
+NT_SERVICE_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.service"
+NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
+NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
+INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
+
 if ! command -v nmcli &> /dev/null; then
     echo "Error: 'nmcli' command not found. Please install 'NetworkManager'."
     exit 1
@@ -45,26 +56,30 @@ if ! command -v upower &> /dev/null; then
     echo "Error: 'upower' command not found. Please install 'upower'."
     exit 1
 fi
-echo "All checks passed."
+if ! command -v gdbus &> /dev/null; then
+    echo "Error: 'gdbus' command not found. This is a core part of GLib/GIO."
+    exit 1
+fi
+echo "All checks passed. Will install for user: $SUDO_USER"
 
-# --- 3. Clean Up ALL Previous Versions ---
-echo ">>> Cleaning up any old/previous versions..."
-
+# --- 3. Clean Up ALL Previous Versions (System & User) ---
+echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
 systemctl disable --now zypper-notify.timer &> /dev/null || true
 systemctl stop zypper-notify.service &> /dev/null || true
+rm -f /usr/local/bin/zypper-run-install*
+rm -f /usr/local/bin/notify-updater
+echo "Old system services disabled and files removed."
 
-# NEW: Remove the old action script
-if [ -f "$OLD_INSTALL_SCRIPT_PATH" ]; then
-    echo "Removing old (v14) action script..."
-    rm -f "$OLD_INSTALL_SCRIPT_PATH"
-fi
+echo ">>> Cleaning up old user-space files..."
+sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
+rm -f "$INSTALL_SCRIPT_PATH"
+rm -f "$NOTIFY_SCRIPT_PATH"
+echo "Old user files removed."
 
-echo "Old services disabled and files removed. Ready to install."
-
-# --- 4. Create/Update DOWNLOADER Service ---
-echo ">>> Creating downloader service file: ${DL_SERVICE_FILE}"
+# --- 4. Create/Update DOWNLOADER (Root Service) ---
+echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
@@ -79,8 +94,8 @@ ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
 EOF
 
-# --- 5. Create/Update DOWNLOADER Timer ---
-echo ">>> Creating downloader timer file: ${DL_TIMER_FILE}"
+# --- 5. Create/Update DOWNLOADER (Root Timer) ---
+echo ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
 Description=Run ${DL_SERVICE_NAME} hourly to download updates
@@ -94,8 +109,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create/Update NOTIFIER Service ---
-echo ">>> Creating notifier service file: ${NT_SERVICE_FILE}"
+# --- 6. Create User Directories ---
+echo ">>> Creating user directories (if needed)..."
+mkdir -p "$USER_CONFIG_DIR"
+chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config"
+mkdir -p "$USER_BIN_DIR"
+chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.local"
+
+# --- 7. Create/Update NOTIFIER (User Service) ---
+echo ">>> Creating (user) notifier service: ${NT_SERVICE_FILE}"
 cat << EOF > ${NT_SERVICE_FILE}
 [Unit]
 Description=Notify user of pending Tumbleweed updates
@@ -106,15 +128,15 @@ After=network-online.target nss-lookup.target
 Type=oneshot
 ExecStart=${NOTIFY_SCRIPT_PATH}
 EOF
+chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
-# --- 7. Create/Update NOTIFIER Timer ---
-echo ">>> Creating notifier timer file: ${NT_TIMER_FILE}"
+# --- 8. Create/Update NOTIFIER (User Timer) ---
+echo ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
 Description=Run ${NT_SERVICE_NAME} hourly to check for updates
 
 [Timer]
-# Runs at a 5-minute offset from the downloader
 OnBootSec=5min
 OnUnitActiveSec=1h
 Persistent=true
@@ -122,37 +144,31 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 8. Create/Update Notification Script (v15 logic) ---
-echo ">>> Creating notification helper script: ${NOTIFY_SCRIPT_PATH}"
+# --- 9. Create/Update Notification Script (v19 D-Bus Fix) ---
+echo ">>> Creating (user) notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/bin/bash
 #
-# notify-updater (v15 logic - Cache Buster)
+# zypper-notify-updater (v19 logic - D-Bus Fix)
 #
-# This script points to a *newly named* action script
-# to force buggy daemons to use the correct label.
+# This script is run as the USER. It now explicitly
+# finds and exports the DBUS_SESSION_BUS_ADDRESS
+# to ensure it can connect to the graphical session.
 
 # --- Strict Mode & Safety Trap ---
 set -euo pipefail
 trap 'exit 0' EXIT # Always exit gracefully
 
-# --- Find the active user ---
-USER_NAME=$(loginctl list-sessions --no-legend | grep 'seat0' | awk '{print $3}' | head -n 1)
-if [ -z "$USER_NAME" ]; then
-    echo "Could not find a logged-in user on seat0. Cannot notify."
-    exit 0 # Exit gracefully
-fi
+# --- v19: Find the graphical D-Bus session ---
+# This is the magic. We find our own UID and export the
+# path to our graphical session bus.
+export USER_ID=$(id -u)
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
+echo "Connecting to D-Bus at $DBUS_SESSION_BUS_ADDRESS"
 
-USER_ID=$(id -u "$USER_NAME")
-if [ -z "$USER_ID" ]; then
-    echo "Could not find UID for $USER_NAME. Cannot notify."
-    exit 0 # Exit gracefully
-fi
-
-DBUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
-
-# --- v12: Check connection state ---
+# --- v12: Check connection state (as user) ---
 IS_SAFE=true
 
 # Check for AC power (using upower)
@@ -175,14 +191,14 @@ fi
 ZYPPER_OUTPUT=""
 if [ "$IS_SAFE" = true ]; then
     echo "Safe to refresh. Running full check..."
-    if ! ZYPPER_OUTPUT=$(zypper --non-interactive --no-gpg-checks refresh 2>&1 && zypper --non-interactive dup --dry-run 2>&1); then
-        echo "Failed to run 'zypper refresh' (exit code $?). Skipping."
+    if ! ZYPPER_OUTPUT=$(sudo zypper --non-interactive --no-gpg-checks refresh 2>&1 && sudo zypper --non-interactive dup --dry-run 2>&1); then
+        echo "Failed to run 'sudo zypper' (exit code $?). Skipping."
         exit 0
     fi
 else
     echo "Unsafe. Checking local cache only..."
-    if ! ZYPPER_OUTPUT=$(zypper --non-interactive dup --dry-run 2>&1); then
-        echo "Failed to run 'zypper dup --dry-run' (exit code $?). Skipping."
+    if ! ZYPPER_OUTPUT=$(sudo zypper --non-interactive dup --dry-run 2>&1); then
+        echo "Failed to run 'sudo zypper dup --dry-run' (exit code $?). Skipping."
         exit 0
     fi
 fi
@@ -196,16 +212,15 @@ if echo "$ZYPPER_OUTPUT" | grep -q "Nothing to do."; then
 else
     # "Nothing to do." was NOT found. Updates are pending.
 
-    # --- Count Packages (new logic) ---
+    # --- Count Packages ---
     PACKAGE_COUNT="0"
     if COUNT_LINE=$(echo "$ZYPPER_OUTPUT" | grep 'packages to upgrade'); then
         PACKAGE_COUNT=$(echo "$COUNT_LINE" | awk '{print $1}')
     fi
 
-    # --- Find Snapshot Version (new logic) ---
+    # --- Find Snapshot Version ---
     SNAPSHOT_VERSION=""
     if SNAPSHOT_LINE=$(echo "$ZYPPER_OUTPUT" | grep 'tumbleweed-release'); then
-        # The new version is the 3rd field, e.g., '... -> 20251111-0'
         SNAPSHOT_VERSION=$(echo "$SNAPSHOT_LINE" | awk '{print $3}')
     fi
 
@@ -216,35 +231,41 @@ else
     fi
 
     if [ "$PACKAGE_COUNT" -eq 1 ]; then
-        MESSAGE="1 update is pending. Click 'Install updates' to begin."
+        MESSAGE="1 update is pending. Click 'Install' to begin."
     else
-        MESSAGE="$PACKAGE_COUNT updates are pending. Click 'Install updates' to begin."
+        MESSAGE="$PACKAGE_COUNT updates are pending. Click 'Install' to begin."
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v15: Point to the new action script ---
-    sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
-        /usr/bin/notify-send \
-        -u normal \
-        -i "system-software-update" \
-        -A "Install updates=/usr/local/bin/zypper-run-install-v15" \
+    # --- v19: Send GDBus notification (as user, with D-Bus) ---
+    gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org.freedesktop.Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "zypper-updater" \
+        0 \
+        "system-software-update" \
         "$TITLE" \
-        "$MESSAGE"
+        "$MESSAGE" \
+        "['default', 'Install', 'install-action', '${HOME}/.local/bin/zypper-run-install']" \
+        "{'action-icons': <true>}" \
+        5000
 fi
 EOF
+chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
-# --- 9. Create the *NEW* Action Script ---
-echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
+# --- 10. Create the Action Script (User Script) ---
+echo ">>> Creating (user) action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
 #
 # This script is launched by the notification system when the
-# "Install updates" button is clicked.
-#
-# It must find a terminal to launch the update command.
+# "Install" button is clicked. It runs AS THE USER.
 
-# Find the user's D-Bus address for graphical applications
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+# --- v19: Find the graphical D-Bus session ---
+# This is also needed for the fallback error notification.
+export USER_ID=$(id -u)
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
 # The command to run
 RUN_CMD="sudo zypper dup"
@@ -262,27 +283,38 @@ elif command -v xterm &> /dev/null; then
     xterm -e "$RUN_CMD"
 else
     # Fallback if no known terminal is found
-    notify-send -u critical "Could not find terminal" "Please run 'sudo zypper dup' manually."
+    gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org.freedesktop.Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "zypper-updater" \
+        0 \
+        "dialog-error" \
+        "Could not find terminal" \
+        "Please run 'sudo zypper dup' manually." \
+        "[]" \
+        "{}" \
+        5000
 fi
 EOF
+chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
 
 echo ">>> Making scripts executable..."
-# 10. Make the helper scripts executable
+# 11. Make the helper scripts executable
 chmod +x ${NOTIFY_SCRIPT_PATH}
 chmod +x ${INSTALL_SCRIPT_PATH}
 
-echo ">>> Reloading systemd daemon..."
-# 11. Reload systemd to read the new files
+echo ">>> Reloading systemd daemon (for root)..."
+# 12. Reload and enable ROOT services
 systemctl daemon-reload
-
-echo ">>> Enabling and starting new timers..."
-# 12. Enable and start both timers
 systemctl enable --now ${DL_TIMER_FILE}
-systemctl enable --now ${NT_TIMER_FILE}
 
 echo ""
-echo "✅ Success!"
-echo "The v15 (Cache Buster) auto-downloader is installed/updated."
+echo "✅ Success! The (root) downloader is installed."
 echo ""
-echo "To check the timers, run:"
-echo "systemctl list-timers ${DL_SERVICE_NAME}.timer ${NT_SERVICE_NAME}.timer"
+echo "--- ⚠️ FINAL STEP REQUIRED ---"
+echo "To finish, you must enable the notifier."
+echo "Please run this command as your user (fb):"
+echo ""
+echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
+echo ""
