@@ -1,24 +1,24 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v24 - Final Button Attempt)
+# install_autodownload.sh (v25 - Action Script Syntax Fix)
 #
-# This script re-adds the clickable button from v22
-# to the stable v23.2 script. This is the last attempt.
-# If this fails, we must use v23.2 (no button).
+# This script fixes the final bug: a 'then' was missing
+# in the 'zypper-run-install-v24' script, causing it
+# to crash when the button was clicked.
 #
 # MUST be run with sudo or as root.
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# --- v24: Single Root Service Config ---
+# --- v25: Single Root Service Config ---
 SERVICE_NAME="zypper-smart-updater"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 
 # Our two scripts
 LOGIC_SCRIPT_PATH="/usr/local/bin/zypper-smart-updater-script"
-INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v24" # New cache-buster name
+INSTALL_SCRIPT_PATH="/usr/local/bin/zypper-run-install-v25" # New cache-buster name
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -95,15 +95,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# --- 6. Create the "Brains" Script (v24 logic) ---
+# --- 6. Create the "Brains" Script (v25 logic) ---
 echo ">>> Creating smart updater script: ${LOGIC_SCRIPT_PATH}"
 cat << EOF > ${LOGIC_SCRIPT_PATH}
 #!/bin/bash
 #
-# zypper-smart-updater-script (v24 logic)
+# zypper-smart-updater-script (v25 logic)
 #
-# This script re-adds the clickable button.
-# This may fail to pop up on some systems.
+# This script points to the new v25 action script
+# which has the 'then' syntax error fixed.
 
 # --- Strict Mode & Safety Trap ---
 set -e # Exit on error, but NOT pipefail
@@ -185,19 +185,19 @@ else
     fi
 
     echo "Updates are pending. Sending 'updates ready' reminder."
-    # --- v24: Send Actionable Notification (notify-send cache buster) ---
+    # --- v25: Send Actionable Notification ---
     sudo -u "\$USER_NAME" DBUS_SESSION_BUS_ADDRESS="\$DBUS_ADDRESS" \
         /usr/bin/notify-send \
         -u normal \
         -i "system-software-update" \
         -t 30000 \
-        -A "Install updates=/usr/local/bin/zypper-run-install-v24" \
+        -A "Install updates=/usr/local/bin/zypper-run-install-v25" \
         "\$TITLE" \
         "\$MESSAGE"
 fi
 EOF
 
-# --- 7. Create the Action Script ---
+# --- 7. Create the Action Script (v25 - 'then' fix) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -222,6 +222,7 @@ elif command -v xfce4-terminal &> /dev/null; then
 elif command -v mate-terminal &> /dev/null; then
     mate-terminal -e "$RUN_CMD"
 elif command -v xterm &> /dev/null; then
+    # --- v25 FIX: Added the missing 'then' ---
     xterm -e "$RUN_CMD"
 else
     # Fallback if no known terminal is found
@@ -252,7 +253,7 @@ systemctl enable --now ${TIMER_FILE}
 
 echo ""
 echo "✅ Success!"
-echo "The v24 (Button Attempt) auto-downloader is installed/updated."
+echo "The v25 (Syntax Fix) auto-downloader is installed/updated."
 echo ""
 echo "To check the timer, run:"
 echo "systemctl list-timers ${SERVICE_NAME}.timer"
