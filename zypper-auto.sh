@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v41 - Final Terminal Exit Fix)
+# install_autodownload.sh (v33 - Auto-Dependency Install)
 #
-# This script installs the final, most robust architecture.
-# It uses the correct terminal execution method to run 'sudo zypper dup'
-# and ensures the terminal window closes cleanly after the user presses Enter.
+# This script installs the 'systemd --user' (Python) architecture.
+# It now checks for dependencies and ASKS for permission
+# to install them if they are missing.
 #
 # MUST be run with sudo or as root.
 
@@ -18,8 +18,8 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
-NT_SCRIPT_NAME="zypper-notify-updater.py"
-INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
+NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
+INSTALL_SCRIPT_NAME="zypper-run-install"
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -72,12 +72,11 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks ---
+# --- 2b. Dependency Checks (v33) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
-check_and_install "pkexec" "polkit" "graphical authentication"
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -118,13 +117,12 @@ rm -f /usr/local/bin/notify-updater
 rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
-echo ">>> Cleaning up all old user-space services..."
-SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+echo ">>> Cleaning up old user-space services..."
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater"
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py"
+rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" # old python script
 rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."*
 echo "Old user services disabled and files removed."
 
@@ -177,6 +175,7 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
+# This is the correct way to get the graphical session
 ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
@@ -197,12 +196,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v41 Python) ---
+# --- 9. Create/Update Notification Script (v33 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v41 logic)
+# zypper-notify-updater.py (v33 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -230,7 +229,7 @@ def is_safe():
         if upower_check.returncode != 0:
             print("Running on battery. Skipping refresh.")
             return False
-
+        
         # Check for metered connection
         nmcli_check = subprocess.run(
             "nmcli c show --active | grep -q 'metered.*yes'",
@@ -239,12 +238,12 @@ def is_safe():
         if nmcli_check.returncode == 0:
             print("Metered connection detected. Skipping refresh.")
             return False
-
+            
     except Exception as e:
         print(f"Safety check failed: {e}", file=sys.stderr)
         # Fail safe: assume it's not safe
         return False
-
+    
     return True
 
 def get_updates():
@@ -264,7 +263,7 @@ def get_updates():
             check=True, capture_output=True, text=True
         )
         return result.stdout
-
+        
     except subprocess.CalledProcessError as e:
         print(f"Failed to run zypper: {e.stderr}", file=sys.stderr)
         return None
@@ -284,12 +283,12 @@ def parse_output(output):
 
     # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
-
+    
     if package_count == "1":
         message = "1 update is pending. Click 'Install' to begin."
     else:
         message = f"{package_count} updates are pending. Click 'Install' to begin."
-
+        
     return title, message
 
 def on_action(notification, action_id, user_data_script):
@@ -305,33 +304,33 @@ def on_action(notification, action_id, user_data_script):
 def main():
     try:
         Notify.init("zypper-updater")
-
+        
         output = get_updates()
         if not output:
             print("No output from zypper. Exiting.")
             sys.exit(0)
-
+            
         title, message = parse_output(output)
         if not title:
             print("System is up-to-date. No notification needed.")
             sys.exit(0)
 
         print("Updates are pending. Sending 'updates ready' reminder.")
-
+        
         # Get the path to the action script
         action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
         # Create the notification
         n = Notify.Notification.new(title, message, "system-software-update")
         n.set_timeout(30000) # 30 seconds
-
+        
         # Add the button
         n.add_action("default", "Install", on_action, action_script)
 
         # We need a main loop to keep the script alive for the button
         loop = GLib.MainLoop()
         n.connect("closed", lambda *args: loop.quit())
-
+        
         n.show()
         loop.run() # Wait for the notification to be closed or clicked
 
@@ -345,7 +344,7 @@ if __name__ == "__main__":
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
-# --- 10. Create the Action Script (v41 - Final Terminal Fix) ---
+# --- 10. Create the Action Script (v39.1 - Final Terminal Fix) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -357,13 +356,13 @@ cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 export USER_ID=$(id -u)
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
-# --- v41 FIX: Explicit command chain with exit ---
-# This forces the shell to close cleanly after the user presses Enter.
-RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nPress Enter to close this terminal.\n'; read; exit"
+# --- v39.1 FIX: Runs command and launches a final interactive shell ---
+# This avoids the 'stuck' error and the 'read' failure.
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nType 'exit' or press Ctrl+D to close this terminal.\n'; /bin/bash"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
-    konsole -e "/bin/bash -c \"$RUN_CMD\""
+    konsole -e /bin/bash -c "$RUN_CMD"
 elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal -- /bin/bash -c "$RUN_CMD"
 elif command -v xfce4-terminal &> /dev/null; then
