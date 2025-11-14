@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v34.1 - PolicyKit Fix)
+# install_autodownload.sh (v42 - Enhanced Error Logging)
 #
-# This script installs the final architecture and fixes the policy lock.
-# It replaces 'sudo' with 'pkexec' in the Python script to ensure
-# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
+# This script integrates detailed error logging into the Python script
+# to capture and display the full system policy rejection reason.
 #
 # MUST be run with sudo or as root.
 
@@ -72,12 +71,12 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v34.1) ---
+# --- 2b. Dependency Checks ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
-check_and_install "pkexec" "polkit" "PolicyKit authentication"
+check_and_install "pkexec" "polkit" "graphical authentication"
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -197,12 +196,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v34.1 Python) ---
+# --- 9. Create/Update Notification Script (v42 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v34.1 logic - PKExec Fix)
+# zypper-notify-updater.py (v42 logic - Final Error Handling)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -268,7 +267,9 @@ def get_updates():
         return result.stdout
         
     except subprocess.CalledProcessError as e:
-        print(f"Failed to run zypper: {e.stderr}", file=sys.stderr)
+        # --- v42 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
+        print(f"Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
+        print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
         return None
 
 def parse_output(output):
@@ -281,7 +282,7 @@ def parse_output(output):
     package_count = count_match.group(1) if count_match else "0"
 
     # Find Snapshot
-    snapshot_match = re.search(r"tumbleweed-release.*->\s*([\d-]+)", output)
+    snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb-]+)", output)
     snapshot = snapshot_match.group(1) if snapshot_match else ""
 
     # Build strings
