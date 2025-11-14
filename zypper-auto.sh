@@ -18,7 +18,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
-NT_SCRIPT_NAME="zypper-notify-updater.py" 
+NT_SCRIPT_NAME="zypper-notify-updater.py"
 INSTALL_SCRIPT_NAME="zypper-run-install"
 
 # --- 2. Sanity Checks & User Detection ---
@@ -105,7 +105,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (System & User) ---
+# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -229,7 +229,7 @@ def is_safe():
         if upower_check.returncode != 0:
             print("Running on battery. Skipping refresh.")
             return False
-        
+
         # Check for metered connection
         nmcli_check = subprocess.run(
             "nmcli c show --active | grep -q 'metered.*yes'",
@@ -238,12 +238,12 @@ def is_safe():
         if nmcli_check.returncode == 0:
             print("Metered connection detected. Skipping refresh.")
             return False
-            
+
     except Exception as e:
         print(f"Safety check failed: {e}", file=sys.stderr)
         # Fail safe: assume it's not safe
         return False
-    
+
     return True
 
 def get_updates():
@@ -265,7 +265,7 @@ def get_updates():
             check=True, capture_output=True, text=True
         )
         return result.stdout
-        
+
     except subprocess.CalledProcessError as e:
         print(f"Failed to run zypper: {e.stderr}", file=sys.stderr)
         return None
@@ -285,12 +285,12 @@ def parse_output(output):
 
     # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
-    
+
     if package_count == "1":
         message = "1 update is pending. Click 'Install' to begin."
     else:
         message = f"{package_count} updates are pending. Click 'Install' to begin."
-        
+
     return title, message
 
 def on_action(notification, action_id, user_data_script):
@@ -306,33 +306,33 @@ def on_action(notification, action_id, user_data_script):
 def main():
     try:
         Notify.init("zypper-updater")
-        
+
         output = get_updates()
         if not output:
             print("No output from zypper. Exiting.")
             sys.exit(0)
-            
+
         title, message = parse_output(output)
         if not title:
             print("System is up-to-date. No notification needed.")
             sys.exit(0)
 
         print("Updates are pending. Sending 'updates ready' reminder.")
-        
+
         # Get the path to the action script
         action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
         # Create the notification
         n = Notify.Notification.new(title, message, "system-software-update")
         n.set_timeout(30000) # 30 seconds
-        
+
         # Add the button
         n.add_action("default", "Install", on_action, action_script)
 
         # We need a main loop to keep the script alive for the button
         loop = GLib.MainLoop()
         n.connect("closed", lambda *args: loop.quit())
-        
+
         n.show()
         loop.run() # Wait for the notification to be closed or clicked
 
