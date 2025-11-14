@@ -119,7 +119,6 @@ rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
 echo ">>> Cleaning up all old user-space services..."
-SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
