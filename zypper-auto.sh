@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v33 - Auto-Dependency Install)
+# install_autodownload.sh (v34.1 - PolicyKit Fix)
 #
-# This script installs the 'systemd --user' (Python) architecture.
-# It now checks for dependencies and ASKS for permission
-# to install them if they are missing.
+# This script installs the final architecture and fixes the policy lock.
+# It replaces 'sudo' with 'pkexec' in the Python script to ensure
+# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
 #
 # MUST be run with sudo or as root.
 
@@ -18,10 +18,10 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
-NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
+NT_SCRIPT_NAME="zypper-notify-updater.py" 
 INSTALL_SCRIPT_NAME="zypper-run-install"
 
-# --- 2. Sanity Checks & User Detection ---
+# --- 2. Sanity Checks & User Detection (omitted for brevity) ---
 echo ">>> Running Sanity Checks..."
 if [ "$EUID" -ne 0 ]; then
   echo "Error: This script must be run with sudo or as root."
@@ -47,7 +47,7 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
-# --- Helper function to check and install ---
+# --- Helper function to check and install (omitted for brevity) ---
 check_and_install() {
     local cmd=$1
     local package=$2
@@ -72,11 +72,12 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v33) ---
+# --- 2b. Dependency Checks (v34.1) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
+check_and_install "pkexec" "polkit" "PolicyKit authentication"
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -104,7 +105,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (System & User) ---
+# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -118,6 +119,7 @@ rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
 echo ">>> Cleaning up old user-space services..."
+SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
@@ -196,12 +198,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v33 Python) ---
+# --- 9. Create/Update Notification Script (v34.1 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v33 logic)
+# zypper-notify-updater.py (v34.1 logic - PKExec Fix)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -251,15 +253,17 @@ def get_updates():
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
+            # --- v34.1 FIX: Use pkexec for refresh ---
             subprocess.run(
-                ["sudo", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
+                ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
             )
         else:
             print("Unsafe. Checking local cache only...")
 
+        # --- v34.1 FIX: Use pkexec for dry-run check ---
         result = subprocess.run(
-            ["sudo", "zypper", "--non-interactive", "dup", "--dry-run"],
+            ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
         )
         return result.stdout
@@ -344,7 +348,7 @@ if __name__ == "__main__":
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 
-# --- 10. Create the Action Script (User Bash Script) ---
+# --- 10. Create the Action Script (v39.1 - Final Terminal Fix) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
 #!/bin/bash
@@ -358,7 +362,7 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 
 # --- v39.1 FIX: Runs command and launches a final interactive shell ---
 # This avoids the 'stuck' error and the 'read' failure.
-RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nType 'exit' or press Ctrl+D to close this terminal.\n'; /bin/bash"
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nPress Enter to close this terminal.\n'; read; exit"
 
 # Try to find the best terminal, in order
 if command -v konsole &> /dev/null; then
@@ -404,6 +408,7 @@ echo "✅ Success! The (root) downloader is installed."
 echo ""
 echo "--- ⚠️ FINAL STEP REQUIRED ---"
 echo "To finish, you must enable the notifier."
+echo "Please run this command as your user ($SUDO_USER):"
 echo ""
 echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 echo ""
