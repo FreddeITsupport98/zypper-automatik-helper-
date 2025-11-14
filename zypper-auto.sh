@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v43 - Final PolicyKit Fix)
+# install_autodownload.sh (v44 - Final Minimalist Fix)
 #
-# This script installs the final architecture and fixes the policy lock.
-# It replaces 'sudo' with 'pkexec' in the Python script to ensure
-# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
+# This script reverts to the simple 'sudo' command in the Python script
+# and removes the conflicting 'ImportEnvironment' setting, which was
+# causing the system to reject the service.
 #
 # MUST be run with sudo or as root.
 
@@ -21,7 +21,7 @@ NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py" 
 INSTALL_SCRIPT_NAME="zypper-run-install"
 
-# --- 2. Sanity Checks & User Detection ---
+# --- 2. Sanity Checks & User Detection (omitted for brevity) ---
 echo ">>> Running Sanity Checks..."
 if [ "$EUID" -ne 0 ]; then
   echo "Error: This script must be run with sudo or as root."
@@ -47,7 +47,7 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
-# --- Helper function to check and install ---
+# --- Helper function to check and install (omitted for brevity) ---
 check_and_install() {
     local cmd=$1
     local package=$2
@@ -72,7 +72,7 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks (v43) ---
+# --- 2b. Dependency Checks (v44) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
@@ -177,7 +177,6 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
-ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
@@ -197,15 +196,15 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v43 Python) ---
+# --- 9. Create/Update Notification Script (v44 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v43 logic - PKExec Fix)
+# zypper-notify-updater.py (v44 logic - Revert to SUDO)
 #
-# This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification.
+# This script reverts to the simple 'sudo' call to execute zypper,
+# which is often required when 'pkexec' causes graphical environment errors.
 
 import sys
 import subprocess
@@ -225,7 +224,7 @@ def is_safe():
         # Check for AC power
         upower_check = subprocess.run(
             "upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'",
-            shell=True, check=True
+            shell=True, check=true
         )
         if upower_check.returncode != 0:
             print("Running on battery. Skipping refresh.")
@@ -252,25 +251,24 @@ def get_updates():
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
-            # --- v43 FIX: Use pkexec for refresh ---
+            # --- v44 FIX: Revert to simple SUDO for refresh ---
             subprocess.run(
-                ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
+                ["sudo", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
             )
         else:
             print("Unsafe. Checking local cache only...")
 
-        # --- v43 FIX: Use pkexec for dry-run check ---
+        # --- v44 FIX: Revert to simple SUDO for dry-run check ---
         result = subprocess.run(
-            ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
+            ["sudo", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
         )
         return result.stdout
         
     except subprocess.CalledProcessError as e:
-        # --- v42 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
-        print(f"Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
-        print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
+        # We need to print full stderr to diagnose the policy lock failure
+        print(f"Policy Block Failure: Policy Error: {e.stderr.strip()}", file=sys.stderr)
         return None
 
 def parse_output(output):
