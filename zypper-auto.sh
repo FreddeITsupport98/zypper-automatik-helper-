@@ -201,15 +201,18 @@ echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v44 logic - Revert to SUDO)
+# zypper-notify-updater.py
 #
-# This script reverts to the simple 'sudo' call to execute zypper,
-# which is often required when 'pkexec' causes graphical environment errors.
+# User-side notifier: runs without sudo/pkexec and only reads available updates.
+# The actual installation still happens via the separate action script
+# (which uses pkexec in a terminal).
 
 import sys
 import subprocess
 import os
 import re
+from typing import Optional, Tuple
+
 try:
     import gi
     gi.require_version("Notify", "0.7")
@@ -218,81 +221,108 @@ except ImportError:
     print("Error: PyGObject (gi) not found. Notification failed.", file=sys.stderr)
     sys.exit(1)
 
-def is_safe():
-    """Check for AC power and metered connection."""
+
+def is_safe() -> bool:
+    """Check for AC power and metered connection.
+
+    This only decides whether it's appropriate to *check* for updates.
+    It never runs privileged commands.
+    """
     try:
         # Check for AC power
         upower_check = subprocess.run(
             "upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'",
-            shell=True, check=true
+            shell=True,
+            check=False,
         )
         if upower_check.returncode != 0:
-            print("Running on battery. Skipping refresh.")
+            print("Running on battery. Skipping check.")
             return False
-        
+
         # Check for metered connection
         nmcli_check = subprocess.run(
             "nmcli c show --active | grep -q 'metered.*yes'",
-            shell=True
+            shell=True,
+            check=False,
         )
         if nmcli_check.returncode == 0:
-            print("Metered connection detected. Skipping refresh.")
+            print("Metered connection detected. Skipping check.")
             return False
-            
+
     except Exception as e:
         print(f"Safety check failed: {e}", file=sys.stderr)
         # Fail safe: assume it's not safe
         return False
-    
+
     return True
 
-def get_updates():
-    """Run zypper and return the output."""
-    try:
-        if is_safe():
-            print("Safe to refresh. Running full check...")
-            # --- v44 FIX: Revert to simple SUDO for refresh ---
-            subprocess.run(
-                ["sudo", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
-                check=True, capture_output=True
-            )
-        else:
-            print("Unsafe. Checking local cache only...")
 
-        # --- v44 FIX: Revert to simple SUDO for dry-run check ---
-        result = subprocess.run(
-            ["sudo", "zypper", "--non-interactive", "dup", "--dry-run"],
-            check=True, capture_output=True, text=True
-        )
-        return result.stdout
-        
-    except subprocess.CalledProcessError as e:
-        # We need to print full stderr to diagnose the policy lock failure
-        print(f"Policy Block Failure: Policy Error: {e.stderr.strip()}", file=sys.stderr)
+def get_updates() -> Optional[str]:
+    """Run zypper as the user and return the output.
+
+    We avoid sudo/pkexec here to prevent PolicyKit / TTY issues.
+    The root downloader service keeps the cache/downloads fresh.
+
+    TEST MODE:
+      If the environment variable ZYPPER_NOTIFY_TEST=1 is set, we
+      return a synthetic output with fake updates so you can test
+      that the popup appears even on an up-to-date system.
+    """
+    # ---- TEST MODE: force a fake update situation ----
+    if os.environ.get("ZYPPER_NOTIFY_TEST") == "1":
+        print("[TEST] ZYPPER_NOTIFY_TEST=1: returning synthetic update list.")
+        return """Loading repository data...
+Reading installed packages...
+S | Repository | Name    | Current Version | Available Version | Arch
+--+-----------+---------+-----------------+-------------------+-----
+  | main      | foo     | 1.0             | 1.1               | x86_64
+  | main      | bar     | 2.3             | 2.4               | x86_64
+"""
+
+    if not is_safe():
         return None
 
-def parse_output(output):
+    try:
+        print("Safe to check. Running zypper list-updates (user mode)...")
+        result = subprocess.run(
+            ["zypper", "--non-interactive", "list-updates"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        print(f"zypper list-updates failed: {stderr}", file=sys.stderr)
+        return None
+
+
+def parse_output(output: str) -> Tuple[Optional[str], Optional[str]]:
     """Parse zypper's output for info."""
-    if "Nothing to do." in output:
+    if "No updates found." in output or "No update found." in output:
         return None, None
 
-    # Count Packages
+    # Best-effort count of packages: fall back to "some" if unknown
     count_match = re.search(r"(\d+) packages to upgrade", output)
-    package_count = count_match.group(1) if count_match else "0"
+    if count_match:
+        package_count = count_match.group(1)
+    else:
+        # Rough guess: count non-header lines
+        lines = [l for l in output.splitlines() if l.strip()]
+        # Skip the first few lines (Loading..., Reading..., headers)
+        data_lines = lines[3:]
+        package_count = str(len(data_lines)) if data_lines else "some"
 
-    # Find Snapshot
-    snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb-]+)", output)
-    snapshot = snapshot_match.group(1) if snapshot_match else ""
+    # We likely don't have snapshot info from list-updates, so keep it generic
+    title = "Updates Ready to Install"
 
-    # Build strings
-    title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
-    
     if package_count == "1":
         message = "1 update is pending. Click 'Install' to begin."
     else:
         message = f"{package_count} updates are pending. Click 'Install' to begin."
-        
+
     return title, message
+
 
 def on_action(notification, action_id, user_data_script):
     """Callback to run when the button is clicked."""
@@ -304,43 +334,45 @@ def on_action(notification, action_id, user_data_script):
     notification.close()
     GLib.MainLoop().quit()
 
-def main():
+
+def main() -> None:
     try:
         Notify.init("zypper-updater")
-        
+
         output = get_updates()
         if not output:
-            print("No output from zypper. Exiting.")
+            print("No output from zypper or check skipped. Exiting.")
             sys.exit(0)
-            
+
         title, message = parse_output(output)
         if not title:
             print("System is up-to-date. No notification needed.")
             sys.exit(0)
 
         print("Updates are pending. Sending 'updates ready' reminder.")
-        
+
         # Get the path to the action script
         action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
         # Create the notification
         n = Notify.Notification.new(title, message, "system-software-update")
-        n.set_timeout(30000) # 30 seconds
-        
+        n.set_timeout(30000)  # 30 seconds
+
         # Add the button
         n.add_action("default", "Install", on_action, action_script)
 
         # We need a main loop to keep the script alive for the button
         loop = GLib.MainLoop()
         n.connect("closed", lambda *args: loop.quit())
-        
+
         n.show()
-        loop.run() # Wait for the notification to be closed or clicked
+        loop.run()  # Wait for the notification to be closed or clicked
 
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
     finally:
         Notify.uninit()
+
 
 if __name__ == "__main__":
     main()
