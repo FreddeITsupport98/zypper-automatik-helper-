@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v42 - Enhanced Error Logging)
+# install_autodownload.sh (v43 - Final PolicyKit Fix)
 #
-# This script integrates detailed error logging into the Python script
-# to capture and display the full system policy rejection reason.
+# This script installs the final architecture and fixes the policy lock.
+# It replaces 'sudo' with 'pkexec' in the Python script to ensure
+# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
 #
 # MUST be run with sudo or as root.
 
@@ -71,12 +72,12 @@ check_and_install() {
     fi
 }
 
-# --- 2b. Dependency Checks ---
+# --- 2b. Dependency Checks (v43) ---
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
-check_and_install "pkexec" "polkit" "graphical authentication"
+check_and_install "pkexec" "polkit" "PolicyKit authentication"
 
 # Check Python version (must be 3.7+)
 PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -104,7 +105,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (System & User) ---
+# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -196,12 +197,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v42 Python) ---
+# --- 9. Create/Update Notification Script (v43 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v42 logic - Final Error Handling)
+# zypper-notify-updater.py (v43 logic - PKExec Fix)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -251,7 +252,7 @@ def get_updates():
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
-            # --- v34.1 FIX: Use pkexec for refresh ---
+            # --- v43 FIX: Use pkexec for refresh ---
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
@@ -259,7 +260,7 @@ def get_updates():
         else:
             print("Unsafe. Checking local cache only...")
 
-        # --- v34.1 FIX: Use pkexec for dry-run check ---
+        # --- v43 FIX: Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
