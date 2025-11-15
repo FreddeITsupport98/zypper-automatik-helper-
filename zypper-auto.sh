@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v47 - Final Clean Architecture)
+# install_autodownload.sh (v46.1 - Unconditional & Clean)
 #
-# This script removes all conditional safety checks (upower, nmcli)
-# to simplify the code and ensure the script always attempts to run
-# the full 'zypper refresh'.
+# This script installs the final architecture, removing all unreliable
+# safety checks (upower and nmcli) for maximum stability.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +18,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py"
-INSTALL_SCRIPT_NAME="zypper-run-install"
+INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -47,7 +46,7 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
-# --- Helper function to check and install ---
+# --- Helper function to check and install (omitted for brevity) ---
 check_and_install() {
     local cmd=$1
     local package=$2
@@ -105,7 +104,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
+# --- 3. Clean Up ALL Previous Versions (System & User) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -133,8 +132,7 @@ echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
-ConditionACPower=true
-ConditionNotOnMeteredConnection=true
+# REMOVED: Safety conditions are now obsolete.
 Wants=network-online.target
 After=network-online.target nss-lookup.target
 
@@ -197,14 +195,14 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v45 Python) ---
+# --- 9. Create/Update Notification Script (v46.1 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v45 logic - Final Clean Fix)
+# zypper-notify-updater.py (v46.1 logic - Unconditional)
 #
-# This script is run as the USER. It removes the unreliable upower check.
+# This script is run as the USER. It removes the unreliable safety checks.
 
 import sys
 import subprocess
@@ -219,38 +217,19 @@ except ImportError:
     sys.exit(1)
 
 def is_safe():
-    """Check for metered connection only (assuming AC power on desktop)."""
-
-    is_safe_flag = True
-
-    try:
-        # Check for metered connection (only check remaining)
-        nmcli_check = subprocess.run(
-            "nmcli c show --active | grep -q 'metered.*yes'",
-            shell=True
-        )
-        if nmcli_check.returncode == 0:
-            print("Metered connection detected. Skipping refresh.")
-            return False
-
-    except Exception as e:
-        print(f"Safety check failed: {e}", file=sys.stderr)
-        return False
-
-    return is_safe_flag
+    """Returns True, as checks are handled by systemd/user decision."""
+    # Safety checks are removed to allow for persistent reminders
+    return True
 
 def get_updates():
     """Run zypper and return the output."""
     try:
-        if is_safe():
-            print("Safe to refresh. Running full check...")
-            # --- Use pkexec for refresh ---
-            subprocess.run(
-                ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
-                check=True, capture_output=True
-            )
-        else:
-            print("Unsafe. Checking local cache only...")
+        # We always run the refresh now since safety checks are removed
+        print("Safe to refresh. Running full check...")
+        subprocess.run(
+            ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
+            check=True, capture_output=True
+        )
 
         # --- Use pkexec for dry-run check ---
         result = subprocess.run(
