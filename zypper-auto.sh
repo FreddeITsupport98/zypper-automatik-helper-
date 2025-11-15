@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v43 - Final PolicyKit Fix)
+# install_autodownload.sh (v41.2 - Final Installation Fix)
 #
-# This script installs the final architecture and fixes the policy lock.
-# It replaces 'sudo' with 'pkexec' in the Python script to ensure
-# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
+# This is the final, complete script with the PolicyKit and Terminal Exit fixes.
+# This copy is provided to ensure the EOF markers are not corrupted.
 #
 # MUST be run with sudo or as root.
 
@@ -19,7 +18,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py"
-INSTALL_SCRIPT_NAME="zypper-run-install"
+INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -197,12 +196,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v43 Python) ---
+# --- 9. Create/Update Notification Script (v41 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v43 logic)
+# zypper-notify-updater.py (v41 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -252,7 +251,6 @@ def get_updates():
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
-            # --- v43 FIX: Use pkexec for refresh ---
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
@@ -260,7 +258,6 @@ def get_updates():
         else:
             print("Unsafe. Checking local cache only...")
 
-        # --- v43 FIX: Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
@@ -346,3 +343,68 @@ def main():
 
 if __name__ == "__main__":
     main()
+EOF
+chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
+
+# --- 10. Create the Action Script (v41 - Final Terminal Fix) ---
+echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
+cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
+#!/bin/bash
+#
+# This script is launched by the notification system when the
+# "Install" button is clicked. It runs AS THE USER.
+
+# Find the user's D-Bus address for graphical applications
+export USER_ID=$(id -u)
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
+
+# --- v41 FIX: Explicit command chain with exit ---
+# This forces the shell to close cleanly after the user presses Enter.
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nPress Enter to close this terminal.\n'; read; exit"
+
+# Try to find the best terminal, in order
+if command -v konsole &> /dev/null; then
+    konsole -e "/bin/bash -c \"$RUN_CMD\""
+elif command -v gnome-terminal &> /dev/null; then
+    gnome-terminal -- /bin/bash -c "$RUN_CMD"
+elif command -v xfce4-terminal &> /dev/null; then
+    xfce4-terminal -e "/bin/bash -c \"$RUN_CMD\""
+elif command -v mate-terminal &> /dev/null; then
+    mate-terminal -e "/bin/bash -c \"$RUN_CMD\""
+elif command -v xterm &> /dev/null; then
+    xterm -e "/bin/bash -c \"$RUN_CMD\""
+else
+    # Fallback if no known terminal is found
+    gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "zypper-updater" \
+        0 \
+        "dialog-error" \
+        "Could not find terminal" \
+        "Please run 'sudo zypper dup' manually." \
+        "[]" \
+        "{}" \
+        5000
+fi
+EOF
+chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
+
+echo ">>> Making scripts executable..."
+# 11. Make the helper scripts executable
+chmod +x ${NOTIFY_SCRIPT_PATH}
+chmod +x ${INSTALL_SCRIPT_PATH}
+
+echo ">>> Reloading systemd daemon (for root)..."
+# 12. Reload and enable ROOT services
+systemctl daemon-reload
+systemctl enable --now ${DL_TIMER_FILE}
+
+echo ""
+echo "✅ Success! The (root) downloader is installed."
+echo ""
+echo "--- ⚠️ FINAL STEP REQUIRED ---"
+echo "To finish, you must enable the notifier."
+echo ""
+echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
