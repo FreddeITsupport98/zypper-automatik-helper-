@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v43 - Final PolicyKit Fix)
+# install_autodownload.sh (v47 - Clean Dependencies)
 #
-# This script installs the final architecture and fixes the policy lock.
-# It replaces 'sudo' with 'pkexec' in the Python script to ensure
-# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
+# This script removes all checks for external safety utilities (upower, nmcli)
+# and focuses on the core Python and PolicyKit dependencies.
 #
 # MUST be run with sudo or as root.
 
@@ -74,8 +73,6 @@ check_and_install() {
 
 # --- 2b. Dependency Checks ---
 echo ">>> Checking dependencies..."
-check_and_install "nmcli" "NetworkManager" "checking metered connection"
-check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
 check_and_install "pkexec" "polkit" "graphical authentication"
 
@@ -133,8 +130,7 @@ echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
-ConditionACPower=true
-ConditionNotOnMeteredConnection=true
+# REMOVED: Safety conditions are now obsolete.
 Wants=network-online.target
 After=network-online.target nss-lookup.target
 
@@ -177,7 +173,7 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
-ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
+# REMOVED: ImportEnvironment to fix 'Unknown key' log error.
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
@@ -197,15 +193,14 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v43 Python) ---
+# --- 9. Create/Update Notification Script (v47 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v43 logic)
+# zypper-notify-updater.py (v47 logic - No Safety Checks)
 #
-# This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification.
+# This script is run as the USER. It removes the unreliable safety checks.
 
 import sys
 import subprocess
@@ -219,46 +214,17 @@ except ImportError:
     print("Error: PyGObject (gi) not found. Notification failed.", file=sys.stderr)
     sys.exit(1)
 
-def is_safe():
-    """Check for AC power and metered connection."""
-    try:
-        # Check for AC power
-        upower_check = subprocess.run(
-            "upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'",
-            shell=True, check=True
-        )
-        if upower_check.returncode != 0:
-            print("Running on battery. Skipping refresh.")
-            return False
-
-        # Check for metered connection
-        nmcli_check = subprocess.run(
-            "nmcli c show --active | grep -q 'metered.*yes'",
-            shell=True
-        )
-        if nmcli_check.returncode == 0:
-            print("Metered connection detected. Skipping refresh.")
-            return False
-
-    except Exception as e:
-        print(f"Safety check failed: {e}", file=sys.stderr)
-        # Fail safe: assume it's not safe
-        return False
-
-    return True
-
 def get_updates():
     """Run zypper and return the output."""
     try:
-        if is_safe():
-            print("Safe to refresh. Running full check...")
-            subprocess.run(
-                ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
-                check=True, capture_output=True
-            )
-        else:
-            print("Unsafe. Checking local cache only...")
+        print("Unconditional check. Running full refresh...")
+        # --- Run refresh unconditionally ---
+        subprocess.run(
+            ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
+            check=True, capture_output=True
+        )
 
+        # --- Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
@@ -266,7 +232,7 @@ def get_updates():
         return result.stdout
 
     except subprocess.CalledProcessError as e:
-        # --- v42 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
+        # --- Policy Error Logging ---
         print(f"Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
         print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
         return None
@@ -344,3 +310,69 @@ def main():
 
 if __name__ == "__main__":
     main()
+EOF
+chown "$SUDO_USER:$SUDO_USER" "${NT_SCRIPT_PATH}"
+
+# --- 10. Create the Action Script (v41 - Final Terminal Fix) ---
+echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
+cat << 'EOF' > ${INSTALL_SCRIPT_PATH}
+#!/bin/bash
+#
+# This script is launched by the notification system when the
+# "Install" button is clicked. It runs AS THE USER.
+
+# Find the user's D-Bus address for graphical applications
+export USER_ID=$(id -u)
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
+
+# --- v41 FIX: Explicit command chain with exit ---
+# This forces the shell to close cleanly after the user presses Enter.
+RUN_CMD="pkexec /usr/bin/zypper dup; echo -e '\n--- Update finished --- \nPress Enter to close this terminal.\n'; read; exit"
+
+# Try to find the best terminal, in order
+if command -v konsole &> /dev/null; then
+    konsole -e "/bin/bash -c \"$RUN_CMD\""
+elif command -v gnome-terminal &> /dev/null; then
+    gnome-terminal -- /bin/bash -c "$RUN_CMD"
+elif command -v xfce4-terminal &> /dev/null; then
+    xfce4-terminal -e "/bin/bash -c \"$RUN_CMD\""
+elif command -v mate-terminal &> /dev/null; then
+    mate-terminal -e "/bin/bash -c \"$RUN_CMD\""
+elif command -v xterm &> /dev/null; then
+    xterm -e "/bin/bash -c \"$RUN_CMD\""
+else
+    # Fallback if no known terminal is found
+    gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "zypper-updater" \
+        0 \
+        "dialog-error" \
+        "Could not find terminal" \
+        "Please run 'sudo zypper dup' manually." \
+        "[]" \
+        "{}" \
+        5000
+fi
+EOF
+chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
+
+echo ">>> Making scripts executable..."
+# 11. Make the helper scripts executable
+chmod +x ${NOTIFY_SCRIPT_PATH}
+chmod +x ${INSTALL_SCRIPT_PATH}
+
+echo ">>> Reloading systemd daemon (for root)..."
+# 12. Reload and enable ROOT services
+systemctl daemon-reload
+systemctl enable --now ${DL_TIMER_FILE}
+
+echo ""
+echo "✅ Success! The (root) downloader is installed."
+echo ""
+echo "--- ⚠️ FINAL STEP REQUIRED ---"
+echo "To finish, you must enable the notifier."
+echo ""
+echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
+echo ""
