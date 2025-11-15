@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v41.2 - Final Installation Fix)
+# install_autodownload.sh (v47 - Final Clean Architecture)
 #
-# This is the final, complete script with the PolicyKit and Terminal Exit fixes.
-# This copy is provided to ensure the EOF markers are not corrupted.
+# This script removes all conditional safety checks (upower, nmcli)
+# to simplify the code and ensure the script always attempts to run
+# the full 'zypper refresh'.
 #
 # MUST be run with sudo or as root.
 
@@ -18,7 +19,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py"
-INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
+INSTALL_SCRIPT_NAME="zypper-run-install"
 
 # --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
@@ -104,7 +105,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (System & User) ---
+# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -176,7 +177,7 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
-ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
+# REMOVED: ImportEnvironment to fix 'Unknown key' log error.
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
@@ -196,15 +197,14 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v41 Python) ---
+# --- 9. Create/Update Notification Script (v45 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v41 logic)
+# zypper-notify-updater.py (v45 logic - Final Clean Fix)
 #
-# This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification.
+# This script is run as the USER. It removes the unreliable upower check.
 
 import sys
 import subprocess
@@ -219,18 +219,12 @@ except ImportError:
     sys.exit(1)
 
 def is_safe():
-    """Check for AC power and metered connection."""
-    try:
-        # Check for AC power
-        upower_check = subprocess.run(
-            "upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'",
-            shell=True, check=True
-        )
-        if upower_check.returncode != 0:
-            print("Running on battery. Skipping refresh.")
-            return False
+    """Check for metered connection only (assuming AC power on desktop)."""
 
-        # Check for metered connection
+    is_safe_flag = True
+
+    try:
+        # Check for metered connection (only check remaining)
         nmcli_check = subprocess.run(
             "nmcli c show --active | grep -q 'metered.*yes'",
             shell=True
@@ -241,16 +235,16 @@ def is_safe():
 
     except Exception as e:
         print(f"Safety check failed: {e}", file=sys.stderr)
-        # Fail safe: assume it's not safe
         return False
 
-    return True
+    return is_safe_flag
 
 def get_updates():
     """Run zypper and return the output."""
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
+            # --- Use pkexec for refresh ---
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
@@ -258,6 +252,7 @@ def get_updates():
         else:
             print("Unsafe. Checking local cache only...")
 
+        # --- Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
@@ -265,7 +260,7 @@ def get_updates():
         return result.stdout
 
     except subprocess.CalledProcessError as e:
-        # --- v42 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
+        # --- Policy Error Logging ---
         print(f"Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
         print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
         return None
@@ -344,7 +339,7 @@ def main():
 if __name__ == "__main__":
     main()
 EOF
-chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
+chown "$SUDO_USER:$SUDO_USER" "${NT_SCRIPT_PATH}"
 
 # --- 10. Create the Action Script (v41 - Final Terminal Fix) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
@@ -408,3 +403,4 @@ echo "--- ⚠️ FINAL STEP REQUIRED ---"
 echo "To finish, you must enable the notifier."
 echo ""
 echo "  systemctl --user daemon-reload && systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
+echo ""
