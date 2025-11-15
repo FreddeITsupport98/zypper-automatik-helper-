@@ -177,7 +177,6 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
-ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
@@ -226,14 +225,32 @@ def detect_form_factor():
     """
     try:
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
+        if not devices:
+            return "unknown"
+
+        has_battery = False
+        has_line_power = False
+
         for dev in devices:
             if not dev:
                 continue
-            info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore")
-            if "battery" in info.lower():
-                return "laptop"
-        # No battery device found -> likely a desktop
-        return "desktop"
+            info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore").lower()
+
+            if "line_power" in dev:
+                has_line_power = True
+
+            if "battery" in info:
+                # Heuristic: real laptop batteries usually have power supply yes
+                if "power supply: yes" in info or "power-supply: yes" in info:
+                    has_battery = True
+
+        if has_battery and has_line_power:
+            return "laptop"
+        elif has_battery:
+            # Battery present but no AC adapter device; likely a desktop with UPS/peripheral battery
+            return "desktop"
+        else:
+            return "desktop"
     except Exception as e:
         print(f"Form-factor detection failed: {e}", file=sys.stderr)
         return "unknown"
@@ -445,3 +462,35 @@ def main():
 if __name__ == "__main__":
     main()
 EOF
+
+# --- 10. Create/Update Install Script (user) ---
+echo ">>> Creating (user) install script: ${INSTALL_SCRIPT_PATH}"
+cat << 'EOF' > "${INSTALL_SCRIPT_PATH}"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple helper script to run the full zypper dup in a terminal (if available).
+TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
+
+for term in "${TERMINALS[@]}"; do
+    if command -v "$term" >/dev/null 2>&1; then
+        case "$term" in
+            konsole)
+                exec konsole -e pkexec zypper dup
+                ;;
+            gnome-terminal)
+                exec gnome-terminal -- pkexec zypper dup
+                ;;
+            kitty|alacritty|xterm)
+                exec "$term" -e pkexec zypper dup
+                ;;
+        esac
+    fi
+done
+
+# Fallback: run pkexec directly if no known terminal is found.
+exec pkexec zypper dup
+EOF
+
+chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
+chmod +x "${INSTALL_SCRIPT_PATH}"
