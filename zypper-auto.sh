@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v46 - Unconditional Operation)
+# install_autodownload.sh (v42.1 - Fully Automated Activation)
 #
-# This script removes ALL battery and metered connection safety checks.
-# Both services will run regardless of system power status.
+# This script is the final version. It forces the final systemctl --user
+# commands to run automatically using sudo -u, eliminating the manual step.
 #
 # MUST be run with sudo or as root.
 
@@ -17,10 +17,10 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
-NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
-INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
+NT_SCRIPT_NAME="zypper-notify-updater.py"
+INSTALL_SCRIPT_NAME="zypper-run-install"
 
-# --- 2. Sanity Checks & User Detection (omitted for brevity) ---
+# --- 2. Sanity Checks & User Detection ---
 echo ">>> Running Sanity Checks..."
 if [ "$EUID" -ne 0 ]; then
   echo "Error: This script must be run with sudo or as root."
@@ -104,7 +104,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
+# --- 3. Clean Up ALL Previous Versions (System & User) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -132,7 +132,8 @@ echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
-# --- v46 FIX: Removed safety conditions ---
+ConditionACPower=true
+ConditionNotOnMeteredConnection=true
 Wants=network-online.target
 After=network-online.target nss-lookup.target
 
@@ -195,14 +196,14 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v46 Python) ---
+# --- 9. Create/Update Notification Script (v44.1 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v46 logic - Unconditional)
+# zypper-notify-updater.py (v44.1 logic - Final Clean Fix)
 #
-# This script is run as the USER. It removes the unreliable safety checks.
+# This script is run as the USER. It removes the unreliable upower check.
 
 import sys
 import subprocess
@@ -217,23 +218,40 @@ except ImportError:
     sys.exit(1)
 
 def is_safe():
-    """Returns True because all unreliable checks are removed."""
-    # We rely on systemd for basic network and let the script run.
-    return True
+    """Check for metered connection only (assuming AC power on desktop)."""
+
+    is_safe_flag = True
+
+    try:
+        # Check for metered connection (only check remaining)
+        nmcli_check = subprocess.run(
+            "nmcli c show --active | grep -q 'metered.*yes'",
+            shell=True
+        )
+        if nmcli_check.returncode == 0:
+            print("Metered connection detected. Skipping refresh.")
+            return False
+
+    except Exception as e:
+        print(f"Safety check failed: {e}", file=sys.stderr)
+        return False
+
+    return is_safe_flag
 
 def get_updates():
     """Run zypper and return the output."""
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
-            # --- We trust the connection is available now ---
+            # --- v43 FIX: Use pkexec for refresh ---
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
             )
-        # We don't have an 'else' block because is_safe() is always True.
+        else:
+            print("Unsafe. Checking local cache only...")
 
-        # --- Use pkexec for dry-run check ---
+        # --- v43 FIX: Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
