@@ -219,33 +219,128 @@ except ImportError:
     print("Error: PyGObject (gi) not found. Notification failed.", file=sys.stderr)
     sys.exit(1)
 
-def is_safe():
-    """Check for AC power and metered connection."""
+def detect_form_factor():
+    """Detect whether this machine is a laptop or a desktop using upower.
+
+    Returns "laptop", "desktop", or "unknown".
+    """
     try:
-        # Check for AC power
-        upower_check = subprocess.run(
-            "upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'",
-            shell=True, check=True
-        )
-        if upower_check.returncode != 0:
-            print("Running on battery. Skipping refresh.")
-            return False
-
-        # Check for metered connection
-        nmcli_check = subprocess.run(
-            "nmcli c show --active | grep -q 'metered.*yes'",
-            shell=True
-        )
-        if nmcli_check.returncode == 0:
-            print("Metered connection detected. Skipping refresh.")
-            return False
-
+        devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
+        for dev in devices:
+            if not dev:
+                continue
+            info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore")
+            if "battery" in info.lower():
+                return "laptop"
+        # No battery device found -> likely a desktop
+        return "desktop"
     except Exception as e:
-        print(f"Safety check failed: {e}", file=sys.stderr)
-        # Fail safe: assume it's not safe
+        print(f"Form-factor detection failed: {e}", file=sys.stderr)
+        return "unknown"
+
+
+def on_ac_power(form_factor: str) -> bool:
+    """Check if the system is on AC power.
+
+    On desktops (no battery), we assume AC is effectively always on.
+    """
+    if form_factor == "desktop":
+        return True
+
+    try:
+        devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
+        line_power_devices = [d for d in devices if "line_power" in d]
+
+        if not line_power_devices:
+            # Laptop but no explicit line_power device; be conservative
+            print("No line_power device found; treating as battery (unsafe).", file=sys.stderr)
+            return False
+
+        for dev in line_power_devices:
+            info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore")
+            for line in info.splitlines():
+                line = line.strip().lower()
+                if line.startswith("online:"):
+                    value = line.split(":", 1)[1].strip()
+                    if value in ("yes", "true"):
+                        return True
+                    elif value in ("no", "false"):
+                        return False
+
+        # Could not parse any 'online' line; be conservative for laptops
+        print("Could not parse AC status; treating as battery (unsafe).", file=sys.stderr)
         return False
 
+    except Exception as e:
+        # On a laptop and we truly cannot determine AC: be safe and treat as battery
+        print(f"AC power check failed: {e}", file=sys.stderr)
+        return False
+
+
+def is_metered() -> bool:
+    """Check if any active connection is metered using nmcli.
+
+    Interprets nmcli's 'METERED' column:
+      - yes, guess-yes -> metered
+      - no, guess-no   -> unmetered
+      - unknown        -> treated as unmetered here
+    """
+    try:
+        output = subprocess.check_output(
+            ["nmcli", "-t", "-f", "NAME,TYPE,METERED", "c", "show", "--active"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"nmcli metered check failed: {e}", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print("nmcli not found for metered check; assuming unmetered.", file=sys.stderr)
+        return False
+
+    meter_values = []
+    for line in output.strip().splitlines():
+        if not line:
+            continue
+        parts = line.split(":")
+        if len(parts) < 3:
+            continue
+        metered = parts[2].strip().lower()
+        meter_values.append(metered)
+
+    for m in meter_values:
+        if m in ("yes", "guess-yes"):
+            return True
+
+    # If everything is explicitly unmetered or unknown, treat as unmetered
+    return False
+
+
+def is_safe() -> bool:
+    """Combined safety check.
+
+    - desktops: don't block on AC; only check metered.
+    - laptops: require AC and not metered.
+    """
+    form_factor = detect_form_factor()
+    print(f"Detected form factor: {form_factor}")
+
+    # Metered check (applies to both laptops and desktops)
+    if is_metered():
+        print("Metered connection detected. Skipping refresh.")
+        return False
+
+    # AC check only really matters for laptops
+    if form_factor == "laptop":
+        if not on_ac_power(form_factor):
+            print("Running on battery (or AC unknown). Skipping refresh.")
+            return False
+        else:
+            print("Laptop on AC power.")
+
+    # Desktop or unknown: no AC restriction (already checked metered above)
     return True
+
 
 def get_updates():
     """Run zypper and return the output."""
@@ -254,21 +349,25 @@ def get_updates():
             print("Safe to refresh. Running full check...")
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
-                check=True, capture_output=True
+                check=True,
+                capture_output=True,
             )
         else:
-            print("Unsafe. Checking local cache only...")
+            print("Unsafe based on safety checks. Checking local cache only...")
 
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
-            check=True, capture_output=True, text=True
+            check=True,
+            capture_output=True,
+            text=True,
         )
         return result.stdout
 
     except subprocess.CalledProcessError as e:
         # --- v42 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
-        print(f"Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
-        print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
+        print("Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
+        if e.stderr:
+            print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
         return None
 
 def parse_output(output):
@@ -339,8 +438,10 @@ def main():
 
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
+        # Note: The log you showed previously was missing this error log, which is why we didn't know the cause.
     finally:
         Notify.uninit()
 
 if __name__ == "__main__":
     main()
+EOF
