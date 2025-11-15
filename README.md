@@ -12,22 +12,23 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v41.1 Architecture)
+## ✨ Key Features (v43 Architecture)
 
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
-* **User-Space Notifier:** The notifier now runs as a user service (`~/.config/systemd/user`), ensuring it has proper access to the desktop environment (D-Bus) for reliable, clickable notifications.
-* **Safe Downloads:** The root downloader service will **only** run when you are on **AC Power** and **not** on a **Metered Connection**.
-* **Persistent Reminders:** The user notifier service runs every hour and will *always* remind you if updates are pending, even on battery.
-* **Hybrid Logic:** The notifier script is smart:
-    * If you're on battery/metered, it **skips `zypper refresh`** (saving power/data) and checks the local cache.
-    * If you're on AC power, it runs a full `zypper refresh` to get the latest info before checking.
-* **Clickable Install:** The rich, Python-based desktop notification is **clickable**. Clicking the "Install" button immediately launches a terminal, prompts for your password via `pkexec`, and starts the `zypper dup`.
-* **Automatic Upgrader:** The installer script is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1-v40) to ensure a clean migration.
-* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`) are present and offers to install them if they are missing.
+* **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
+* **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
+* **Smart Safety Logic (User):** The notifier Python script uses `upower` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups, and to avoid false "metered" or "on battery" positives.
+* **Persistent Reminders:** The user notifier service runs every hour and will remind you whenever updates are pending.
+* **Hybrid Refresh Logic:**
+    * If it's unsafe (on battery or metered), it **skips `zypper refresh`** and only checks the existing cache via `zypper dup --dry-run`.
+    * If it's safe, it runs a full `zypper refresh` first, then `zypper dup --dry-run`.
+* **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v42) to ensure a clean migration.
+* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v41.1 Architecture
+## 🛠️ How It Works: The v43 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -35,6 +36,7 @@ This is a two-service system to provide both safety (Downloader) and persistence
 
 * **Cleanup:** Explicitly stops and disables all timers/services from *any* previous version to ensure a clean state.
 * **User Detection:** Reliably determines the `$SUDO_USER`'s home directory to place the user-specific systemd files and scripts (`~/.config/systemd/user`, `~/.local/bin`).
+* **Enables Root Timer:** After writing the units, it runs `systemctl daemon-reload` and `systemctl enable --now zypper-autodownload.timer` automatically.
 
 ### 2. The Downloader (Root Service)
 
@@ -60,11 +62,15 @@ This service's job is to check for updates and remind you, running as your stand
 
 This Python script is the core of the system, run by the `zypper-notify-user.service` every hour.
 
-1.  **Checks Safety:** Uses `upower` and `nmcli` to determine if a refresh is safe (Hybrid Logic).
-2.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and `pkexec zypper dup --dry-run` to check for pending updates.
-3.  **Parses Output:** Counts packages, finds the latest Tumbleweed Snapshot version.
-4.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the Snapshot version and an **"Install"** button.
+1.  **Checks Safety:** Uses `upower` and `nmcli` with extra heuristics to:
+    * distinguish laptops (real internal battery + AC adapter) from desktops/UPS setups,
+    * treat desktops as always on AC for safety decisions,
+    * treat NetworkManager failures as "unmetered" to avoid random false positives.
+2.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates.
+3.  **Parses Output:** Counts packages and finds the latest Tumbleweed snapshot version.
+4.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the snapshot version and an **"Install"** button.
 5.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
+6.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `nmcli` errors) are printed to the journal.
 
 -----
 
@@ -97,6 +103,16 @@ You're done! The root downloader is enabled, and the user notifier is ready.
     > **Snapshot 20251110-0 Ready**
     > 12 updates are pending. Click 'Install' to begin.
 3.  **Install.** Click the **"Install"** button in the notification. This will open a terminal and prompt you for authentication to run `zypper dup`.
+
+### Debugging
+
+If you want more verbose logging from the notifier script (for example, to see detailed `upower`/`nmcli` decisions), enable debug mode:
+
+```bash
+export ZNH_DEBUG=1
+systemctl --user restart zypper-notify-user.service
+journalctl --user -u zypper-notify-user.service -n 50 --no-pager
+```
 
 ### Verifying the Services
 
