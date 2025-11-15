@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v41.1 - Typo and Terminal Exit Fix)
+# install_autodownload.sh (v46 - Unconditional Operation)
 #
-# This script installs the final, most robust architecture.
-# It fixes the critical SUDO_USER_HOME typo and uses the correct
-# terminal execution method to run 'pkexec zypper dup'.
+# This script removes ALL battery and metered connection safety checks.
+# Both services will run regardless of system power status.
 #
 # MUST be run with sudo or as root.
 
@@ -21,7 +20,7 @@ NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py" # It's now a Python script
 INSTALL_SCRIPT_NAME="zypper-run-install" # Action script
 
-# --- 2. Sanity Checks & User Detection ---
+# --- 2. Sanity Checks & User Detection (omitted for brevity) ---
 echo ">>> Running Sanity Checks..."
 if [ "$EUID" -ne 0 ]; then
   echo "Error: This script must be run with sudo or as root."
@@ -47,7 +46,7 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
-# --- Helper function to check and install ---
+# --- Helper function to check and install (omitted for brevity) ---
 check_and_install() {
     local cmd=$1
     local package=$2
@@ -105,7 +104,7 @@ if ! python3 -c "import gi" &> /dev/null; then
 fi
 echo "All dependencies passed."
 
-# --- 3. Clean Up ALL Previous Versions (System & User) ---
+# --- 3. Clean Up ALL Previous Versions (omitted for brevity) ---
 echo ">>> Cleaning up all old system-wide services..."
 systemctl disable --now zypper-autodownload.timer &> /dev/null || true
 systemctl stop zypper-autodownload.service &> /dev/null || true
@@ -119,6 +118,7 @@ rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
 echo ">>> Cleaning up old user-space services..."
+SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
@@ -132,8 +132,7 @@ echo ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
-ConditionACPower=true
-ConditionNotOnMeteredConnection=true
+# --- v46 FIX: Removed safety conditions ---
 Wants=network-online.target
 After=network-online.target nss-lookup.target
 
@@ -176,7 +175,7 @@ After=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
-ImportEnvironment=DBUS_SESSION_BUS_ADDRESS,DISPLAY
+# REMOVED: ImportEnvironment to fix 'Unknown key' log error.
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 
@@ -196,15 +195,14 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v41 Python) ---
+# --- 9. Create/Update Notification Script (v46 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v41 logic)
+# zypper-notify-updater.py (v46 logic - Unconditional)
 #
-# This script is run as the USER. It uses PyGObject (gi)
-# to create a robust, clickable notification.
+# This script is run as the USER. It removes the unreliable safety checks.
 
 import sys
 import subprocess
@@ -219,31 +217,8 @@ except ImportError:
     sys.exit(1)
 
 def is_safe():
-    """Check for AC power and metered connection."""
-    try:
-        # Check for AC power
-        upower_check = subprocess.run(
-            "upower -i $(upower -e | grep 'line_power') | grep -q 'online: *yes'",
-            shell=True, check=True
-        )
-        if upower_check.returncode != 0:
-            print("Running on battery. Skipping refresh.")
-            return False
-
-        # Check for metered connection
-        nmcli_check = subprocess.run(
-            "nmcli c show --active | grep -q 'metered.*yes'",
-            shell=True
-        )
-        if nmcli_check.returncode == 0:
-            print("Metered connection detected. Skipping refresh.")
-            return False
-
-    except Exception as e:
-        print(f"Safety check failed: {e}", file=sys.stderr)
-        # Fail safe: assume it's not safe
-        return False
-
+    """Returns True because all unreliable checks are removed."""
+    # We rely on systemd for basic network and let the script run.
     return True
 
 def get_updates():
@@ -251,13 +226,14 @@ def get_updates():
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
+            # --- We trust the connection is available now ---
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
             )
-        else:
-            print("Unsafe. Checking local cache only...")
+        # We don't have an 'else' block because is_safe() is always True.
 
+        # --- Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
@@ -265,7 +241,7 @@ def get_updates():
         return result.stdout
 
     except subprocess.CalledProcessError as e:
-        # --- v42 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
+        # --- Policy Error Logging ---
         print(f"Policy Block Failure: PolicyKit/PAM refused command.", file=sys.stderr)
         print(f"Policy Error: {e.stderr.strip()}", file=sys.stderr)
         return None
@@ -344,7 +320,7 @@ def main():
 if __name__ == "__main__":
     main()
 EOF
-chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
+chown "$SUDO_USER:$SUDO_USER" "${NT_SCRIPT_PATH}"
 
 # --- 10. Create the Action Script (v41 - Final Terminal Fix) ---
 echo ">>> Creating action script: ${INSTALL_SCRIPT_PATH}"
