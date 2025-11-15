@@ -1,8 +1,10 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v42 - Minutely Schedule Fix)
+# install_autodownload.sh (v41.1 - Typo and Terminal Exit Fix)
 #
-# This script updates the timers to run every minute for testing purposes.
+# This script installs the final, most robust architecture.
+# It fixes the critical SUDO_USER_HOME typo and uses the correct
+# terminal execution method to run 'pkexec zypper dup'.
 #
 # MUST be run with sudo or as root.
 
@@ -117,7 +119,6 @@ rm -f /usr/local/bin/zypper-smart-updater-script
 echo "Old system services disabled and files removed."
 
 echo ">>> Cleaning up old user-space services..."
-SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer &> /dev/null || true
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*"
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*"
@@ -146,11 +147,11 @@ EOF
 echo ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
-Description=Run ${DL_SERVICE_NAME} MINUTELY to download updates
+Description=Run ${DL_SERVICE_NAME} hourly to download updates
 
 [Timer]
-OnBootSec=1m
-OnUnitActiveSec=1m
+OnBootSec=1min
+OnUnitActiveSec=1h
 Persistent=true
 
 [Install]
@@ -160,7 +161,7 @@ EOF
 # --- 6. Create User Directories ---
 echo ">>> Creating user directories (if needed)..."
 mkdir -p "$USER_CONFIG_DIR"
-chown -R "$SUDO_USER:$SUDO_USER" "$SDO_USER_HOME/.config"
+chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config"
 mkdir -p "$USER_BIN_DIR"
 chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.local"
 
@@ -183,11 +184,11 @@ chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 echo ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
-Description=Run ${NT_SERVICE_NAME} MINUTELY to check for updates
+Description=Run ${NT_SERVICE_NAME} hourly to check for updates
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=1m
+OnUnitActiveSec=1h
 Persistent=true
 
 [Install]
@@ -195,12 +196,12 @@ WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
 
-# --- 9. Create/Update Notification Script (v43 Python) ---
+# --- 9. Create/Update Notification Script (v41 Python) ---
 echo ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v43 logic)
+# zypper-notify-updater.py (v41 logic)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -250,7 +251,6 @@ def get_updates():
     try:
         if is_safe():
             print("Safe to refresh. Running full check...")
-            # --- v43 FIX: Use pkexec for refresh ---
             subprocess.run(
                 ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
                 check=True, capture_output=True
@@ -258,7 +258,6 @@ def get_updates():
         else:
             print("Unsafe. Checking local cache only...")
 
-        # --- v43 FIX: Use pkexec for dry-run check ---
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
             check=True, capture_output=True, text=True
