@@ -159,6 +159,10 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+echo ">>> Enabling (root) downloader timer: ${DL_SERVICE_NAME}.timer"
+systemctl daemon-reload
+systemctl enable --now "${DL_SERVICE_NAME}.timer"
+
 # --- 6. Create User Directories ---
 echo ">>> Creating user directories (if needed)..."
 mkdir -p "$USER_CONFIG_DIR"
@@ -210,6 +214,14 @@ import sys
 import subprocess
 import os
 import re
+
+DEBUG = os.getenv("ZNH_DEBUG", "").lower() in ("1", "true", "yes", "debug")
+
+
+def log_debug(msg: str) -> None:
+    if DEBUG:
+        print(f"[DEBUG] {msg}", file=sys.stderr)
+
 try:
     import gi
     gi.require_version("Notify", "0.7")
@@ -309,10 +321,10 @@ def is_metered() -> bool:
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError as e:
-        print(f"nmcli metered check failed: {e}", file=sys.stderr)
+        log_debug(f"nmcli metered check failed: {e}")
         return False
     except FileNotFoundError:
-        print("nmcli not found for metered check; assuming unmetered.", file=sys.stderr)
+        log_debug("nmcli not found for metered check; assuming unmetered.")
         return False
 
     meter_values = []
