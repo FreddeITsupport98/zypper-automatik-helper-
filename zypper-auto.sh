@@ -18,7 +18,7 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
-NT_SCRIPT_NAME="zypper-notify-updater.py" 
+NT_SCRIPT_NAME="zypper-notify-updater.py"
 INSTALL_SCRIPT_NAME="zypper-run-install"
 
 # --- 2. Sanity Checks & User Detection (omitted for brevity) ---
