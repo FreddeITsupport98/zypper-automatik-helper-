@@ -463,7 +463,18 @@ def on_action(notification, action_id, user_data_script):
     """Callback to run when the button is clicked."""
     print("Action clicked. Running install script.")
     try:
-        subprocess.Popen([user_data_script])
+        # Prefer to launch via systemd-run so the process is clearly
+        # associated with the user session and not tied to this script.
+        try:
+            subprocess.Popen([
+                "systemd-run",
+                "--user",
+                "--scope",
+                user_data_script,
+            ])
+        except FileNotFoundError:
+            # Fallback: run the script directly if systemd-run is not available.
+            subprocess.Popen([user_data_script])
     except Exception as e:
         print(f"Failed to launch action script: {e}", file=sys.stderr)
     notification.close()
