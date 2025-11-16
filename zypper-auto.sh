@@ -189,11 +189,11 @@ chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
 echo ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
-Description=Run ${NT_SERVICE_NAME} hourly to check for updates
+Description=Run ${NT_SERVICE_NAME} aggressively to check for updates
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=1h
+OnBootSec=1min
+OnUnitActiveSec=1min
 Persistent=true
 
 [Install]
