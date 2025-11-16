@@ -18,13 +18,13 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
 * **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
 * **Smart Safety Logic (User):** The notifier Python script uses `upower` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups, and to avoid false "metered" or "on battery" positives.
-* **Persistent Reminders:** The user notifier service runs every hour and will remind you whenever updates are pending.
+* **Persistent Reminders:** The user notifier service runs on a configurable schedule (default: *aggressive* every minute) and will remind you whenever updates are pending.
 * **Hybrid Refresh Logic:**
     * If it's unsafe (on battery or metered), it **skips `zypper refresh`** and only checks the existing cache via `zypper dup --dry-run`.
     * If it's safe, it runs a full `zypper refresh` first, then `zypper dup --dry-run`.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
 * **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v42) to ensure a clean migration.
-* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
+* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
@@ -46,7 +46,8 @@ This service's only job is to download packages when it's safe.
     * This service runs `zypper refresh` and `zypper dup --download-only`.
     * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
 * **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
-    * Runs `OnBootSec=1min` and `OnUnitActiveSec=1h`, attempting to trigger the service every hour.
+    * Default: `OnBootSec=1min`, `OnUnitActiveSec=1h` (downloads once per hour when it’s safe).
+    * You can edit this with `sudoedit /etc/systemd/system/zypper-autodownload.timer` and reload via `sudo systemctl daemon-reload && sudo systemctl restart zypper-autodownload.timer`.
 
 ### 3. The Notifier (User Service)
 
@@ -56,11 +57,17 @@ This service's job is to check for updates and remind you, running as your stand
     * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
     * Because it runs in user-space, it has the correct D-Bus environment variables to display notifications reliably.
 * **Timer:** `~/.config/systemd/user/zypper-notify-user.timer`
-    * Runs on a 5-minute offset (e.g., `OnBootSec=5min`) to ensure it runs *after* the downloader has had a chance.
+    * Default (aggressive): `OnBootSec=1min`, `OnUnitActiveSec=1min` (checks for updates roughly once per minute).
+    * You can tone this down (for example, to `OnUnitActiveSec=1h`) using:
+      ```bash
+      systemctl --user edit --full zypper-notify-user.timer
+      systemctl --user daemon-reload
+      systemctl --user restart zypper-notify-user.timer
+      ```
 
 ### 4. The "Brains": `~/.local/bin/zypper-notify-updater.py`
 
-This Python script is the core of the system, run by the `zypper-notify-user.service` every hour.
+This Python script is the core of the system, run by the `zypper-notify-user.service` on the schedule defined by the user timer.
 
 1.  **Checks Safety:** Uses `upower` and `nmcli` with extra heuristics to:
     * distinguish laptops (real internal battery + AC adapter) from desktops/UPS setups,
@@ -69,8 +76,8 @@ This Python script is the core of the system, run by the `zypper-notify-user.ser
 2.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates.
 3.  **Parses Output:** Counts packages and finds the latest Tumbleweed snapshot version.
 4.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the snapshot version and an **"Install"** button.
-5.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
-6.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `nmcli` errors) are printed to the journal.
+5.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
+6.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `upower` / `nmcli` / `inxi` decisions) are printed to the journal.
 
 -----
 
@@ -98,7 +105,7 @@ You're done! The root downloader is enabled, and the user notifier is ready.
 
 ## 🏃 Usage
 
-1.  **Wait.** The services run in the background. The downloader attempts to run hourly when conditions are safe.
+1.  **Wait.** The services run in the background. By default, the downloader runs hourly (configurable) and the notifier checks for updates every minute (also configurable via its systemd timer).
 2.  **Get Notified.** You will get a notification *only* when new updates are pending.
     > **Snapshot 20251110-0 Ready**
     > 12 updates are pending. Click 'Install' to begin.
