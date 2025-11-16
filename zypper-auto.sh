@@ -76,6 +76,7 @@ check_and_install() {
 echo ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
+check_and_install "inxi" "inxi" "hardware and network detection"
 check_and_install "python3" "python3" "running the notifier script"
 check_and_install "pkexec" "polkit" "graphical authentication"
 
@@ -230,42 +231,78 @@ except ImportError:
     print("Error: PyGObject (gi) not found. Notification failed.", file=sys.stderr)
     sys.exit(1)
 
+def has_battery_via_inxi() -> bool:
+    """Use inxi to detect if the system reports a real battery.
+
+    We look for a Battery section in `inxi -Bazy` output.
+    """
+    try:
+        out = subprocess.check_output(
+            ["inxi", "-Bazy"], text=True, stderr=subprocess.DEVNULL
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+    # Very simple heuristic: a Battery: line with an ID- marker
+    for line in out.splitlines():
+        if "Battery:" in line and "ID-" in line:
+            return True
+    return False
+
+
 def detect_form_factor():
-    """Detect whether this machine is a laptop or a desktop using upower.
+    """Detect whether this machine is a laptop or a desktop using upower/inxi.
 
     Returns "laptop", "desktop", or "unknown".
     """
+    # First, try upower-based detection
     try:
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
-        if not devices:
-            return "unknown"
-
-        has_battery = False
-        has_line_power = False
-
-        for dev in devices:
-            if not dev:
-                continue
-            info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore").lower()
-
-            if "line_power" in dev:
-                has_line_power = True
-
-            if "battery" in info:
-                # Heuristic: real laptop batteries usually have power supply yes
-                if "power supply: yes" in info or "power-supply: yes" in info:
-                    has_battery = True
-
-        if has_battery and has_line_power:
-            return "laptop"
-        elif has_battery:
-            # Battery present but no AC adapter device; likely a desktop with UPS/peripheral battery
-            return "desktop"
-        else:
-            return "desktop"
     except Exception as e:
-        print(f"Form-factor detection failed: {e}", file=sys.stderr)
-        return "unknown"
+        log_debug(f"upower -e failed in detect_form_factor: {e}")
+        devices = []
+
+    has_battery = False
+    has_line_power = False
+
+    if devices:
+        try:
+            for dev in devices:
+                if not dev:
+                    continue
+                info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore").lower()
+
+                if "line_power" in dev:
+                    has_line_power = True
+
+                if "battery" in info:
+                    # Heuristic: real laptop batteries usually have power supply yes
+                    if "power supply: yes" in info or "power-supply: yes" in info:
+                        has_battery = True
+        except Exception as e:
+            log_debug(f"upower inspection failed in detect_form_factor: {e}")
+
+    # If upower clearly indicates laptop
+    if has_battery and has_line_power:
+        return "laptop"
+
+    # If upower sees a battery but no line_power, ask inxi to refine
+    if has_battery and not has_line_power:
+        if has_battery_via_inxi():
+            # inxi confirms a battery -> treat as laptop
+            return "laptop"
+        else:
+            # looks more like a desktop with UPS/peripheral battery
+            return "desktop"
+
+    # No battery seen by upower; fall back to inxi
+    if not has_battery:
+        if has_battery_via_inxi():
+            return "laptop"
+        return "desktop"
+
+    # Last resort
+    return "unknown"
 
 
 def on_ac_power(form_factor: str) -> bool:
