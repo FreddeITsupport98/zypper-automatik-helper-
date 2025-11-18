@@ -12,12 +12,12 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v43 Architecture)
+## ✨ Key Features (v45 Architecture)
 
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
 * **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
-* **Smart Safety Logic (User):** The notifier Python script uses `upower` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups, and to avoid false "metered" or "on battery" positives.
+* **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives.
 * **Persistent Reminders:** The user notifier service runs on a configurable schedule (default: *aggressive* every minute) and will remind you whenever updates are pending.
 * **Hybrid Refresh Logic:**
     * If it's unsafe (on battery or metered), it **skips `zypper refresh`** and only checks the existing cache via `zypper dup --dry-run`.
@@ -28,7 +28,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 -----
 
-## 🛠️ How It Works: The v43 Architecture
+## 🛠️ How It Works: The v45 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -69,11 +69,12 @@ This service's job is to check for updates and remind you, running as your stand
 
 This Python script is the core of the system, run by the `zypper-notify-user.service` on the schedule defined by the user timer.
 
-1.  **Checks Safety:** Uses `upower` and `nmcli` with extra heuristics to:
-    * distinguish laptops (real internal battery + AC adapter) from desktops/UPS setups,
+1.  **Checks Safety:** Uses `inxi`, `upower` and `nmcli` with extra heuristics to:
+    * distinguish laptops (real internal battery + AC adapter) from desktops/UPS/embedded setups,
+    * reliably classify any system with a real battery as a laptop, even when `upower` does not expose a `line_power` device,
     * treat desktops as always on AC for safety decisions,
     * treat NetworkManager failures as "unmetered" to avoid random false positives.
-2.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates.
+2.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates. On laptops, "safe" explicitly means **on AC and not on a metered connection**.
 3.  **Parses Output:** Counts packages and finds the latest Tumbleweed snapshot version.
 4.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the snapshot version and an **"Install"** button.
 5.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.

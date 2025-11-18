@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 45 AC BATTERY DETCTION LOGICAL FIX
+#       VERSION 46 AC BATTERY DETCTION LOGICAL FIX
 # This script installs the final architecture and fixes the policy lock.
 # It replaces 'sudo' with 'pkexec' in the Python script to ensure
 # zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
