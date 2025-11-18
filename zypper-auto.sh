@@ -1,7 +1,6 @@
 #!/bin/bash
 #
-# install_autodownload.sh (v43 - Final PolicyKit Fix)
-#
+#       VERSION 45 AC BATTERY DETCTION LOGICAL FIX
 # This script installs the final architecture and fixes the policy lock.
 # It replaces 'sudo' with 'pkexec' in the Python script to ensure
 # zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
@@ -285,6 +284,13 @@ def detect_form_factor():
     Prefer inxi's Machine Type if available; fall back to upower/battery heuristics.
     Returns "laptop", "desktop", or "unknown".
     """
+    # 0. If inxi reports a real battery, treat as laptop immediately.
+    try:
+        if has_battery_via_inxi():
+            return "laptop"
+    except Exception as e:
+        log_debug(f"has_battery_via_inxi failed in detect_form_factor: {e}")
+
     # 1. Prefer inxi's Machine Type (very reliable on most systems)
     try:
         out = subprocess.check_output(
@@ -334,14 +340,12 @@ def detect_form_factor():
     if has_battery and has_line_power:
         return "laptop"
 
-    # If upower sees a battery but no line_power, ask inxi to refine
+    # If upower sees a battery but no line_power, treat as laptop as well.
+    # Some laptops expose only a battery device without a separate line_power
+    # entry; in that case, we must *not* classify as desktop or we will
+    # incorrectly assume always-on AC power.
     if has_battery and not has_line_power:
-        if has_battery_via_inxi():
-            # inxi confirms a battery -> treat as laptop
-            return "laptop"
-        else:
-            # looks more like a desktop with UPS/peripheral battery
-            return "desktop"
+        return "laptop"
 
     # No battery seen by upower; fall back to inxi battery information
     if not has_battery:
@@ -394,39 +398,69 @@ def on_ac_power(form_factor: str) -> bool:
 def is_metered() -> bool:
     """Check if any active connection is metered using nmcli.
 
-    Interprets nmcli's 'METERED' column:
-      - yes, guess-yes -> metered
-      - no, guess-no   -> unmetered
-      - unknown        -> treated as unmetered here
+    Uses GENERAL.METERED per active connection.
+    Treats values like 'yes', 'guess-yes', 'payg' as metered.
     """
     try:
+        # List all connections with ACTIVE flag
         output = subprocess.check_output(
-            ["nmcli", "-t", "-f", "NAME,TYPE,METERED", "c", "show", "--active"],
+            ["nmcli", "-t", "-f", "NAME,UUID,DEVICE,ACTIVE", "connection", "show"],
             text=True,
             stderr=subprocess.DEVNULL,
         )
-    except subprocess.CalledProcessError as e:
-        log_debug(f"nmcli metered check failed: {e}")
-        return False
-    except FileNotFoundError:
-        log_debug("nmcli not found for metered check; assuming unmetered.")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        log_debug(f"nmcli connection list failed for metered check: {e}")
         return False
 
-    meter_values = []
+    active_ids = []
     for line in output.strip().splitlines():
         if not line:
             continue
         parts = line.split(":")
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
-        metered = parts[2].strip().lower()
-        meter_values.append(metered)
+        name, uuid, device, active = parts[:4]
+        if active.strip().lower() == "yes":
+            # Prefer UUID (stable), but fall back to name if missing
+            ident = uuid.strip() or name.strip()
+            if ident:
+                active_ids.append(ident)
 
-    for m in meter_values:
-        if m in ("yes", "guess-yes"):
+    if not active_ids:
+        return False
+
+    for ident in active_ids:
+        m = ""
+        try:
+            m = subprocess.check_output(
+                ["nmcli", "-g", "GENERAL.METERED", "connection", "show", ident],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip().lower()
+        except subprocess.CalledProcessError as e:
+            # Some nmcli versions don't support -g GENERAL.METERED; fall back
+            # to parsing the full "connection show" output.
+            log_debug(f"nmcli GENERAL.METERED failed for {ident}: {e}; trying full show")
+            try:
+                full = subprocess.check_output(
+                    ["nmcli", "connection", "show", ident],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+            except subprocess.CalledProcessError as e2:
+                log_debug(f"nmcli full show failed for {ident}: {e2}")
+                continue
+
+            for line in full.splitlines():
+                line = line.strip()
+                if line.lower().startswith("general.metered:"):
+                    m = line.split(":", 1)[1].strip().lower()
+                    break
+
+        if m in ("yes", "guess-yes", "payg", "guess-payg"):
             return True
 
-    # If everything is explicitly unmetered or unknown, treat as unmetered
+    # All active connections are explicitly unmetered/unknown
     return False
 
 
@@ -453,15 +487,20 @@ def _write_env_state(state: str) -> None:
 
 
 def _notify_env_change(prev_state: str, form_factor: str, on_ac: bool, metered: bool, safe: bool) -> None:
-    """Send a small notification if environment conditions changed since last run.
+    """Track environment changes and notify once per change.
 
-    This is to let the user know why updates may start/stop running
-    (e.g. plugging in AC, switching to metered Wi‑Fi, etc.).
+    - When conditions become *unsafe* (battery or metered), show a
+      "paused" notification explaining why.
+    - When they become *safe* again (AC + unmetered), show a
+      "now safe" notification.
     """
     current_state = f"form_factor={form_factor}, on_ac={on_ac}, metered={metered}, safe={safe}"
 
     if prev_state == current_state:
         return  # no change
+
+    # Always record the new state
+    _write_env_state(current_state)
 
     # Decide a short human‑readable message
     if safe:
@@ -488,8 +527,6 @@ def _notify_env_change(prev_state: str, form_factor: str, on_ac: bool, metered: 
         n.show()
     except Exception as e:
         print(f"Failed to show environment change notification: {e}", file=sys.stderr)
-
-    _write_env_state(current_state)
 
 
 def is_safe() -> bool:
@@ -536,17 +573,28 @@ def is_safe() -> bool:
 
 
 def get_updates():
-    """Run zypper and return the output."""
+    """Run zypper and return the output.
+
+    Returns:
+        - stdout string from "zypper dup --dry-run" when environment is safe
+        - "" (empty string) if environment is not safe and we skip zypper
+        - None if zypper/PolicyKit fails
+    """
     try:
-        if is_safe():
-            print("Safe to refresh. Running full check...")
-            subprocess.run(
-                ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
-                check=True,
-                capture_output=True,
-            )
-        else:
-            print("Unsafe based on safety checks. Checking local cache only...")
+        safe = is_safe()
+
+        if not safe:
+            # Environment not safe (battery or metered). We already showed
+            # an environment change notification, so just skip zypper.
+            print("Environment not safe for background updates; skipping zypper.")
+            return ""
+
+        print("Safe to refresh. Running full check...")
+        subprocess.run(
+            ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
+            check=True,
+            capture_output=True,
+        )
 
         result = subprocess.run(
             ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
@@ -625,8 +673,9 @@ def main():
             n.show()
             return
 
-        if not output.strip():
-            print("No output from zypper. Exiting.")
+        # Empty string means environment was unsafe and zypper was skipped.
+        if not output or not output.strip():
+            print("No zypper run performed (likely due to unsafe conditions). Exiting.")
             return
 
         title, message = parse_output(output)
