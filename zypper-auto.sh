@@ -47,6 +47,35 @@ NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 
+# --- Helper: Self-check syntax for this script and the notifier ---
+run_self_check() {
+    echo ">>> Running self-check (syntax)..."
+
+    # Check bash syntax of this installer
+    if ! bash -n "$0"; then
+        echo "Self-check FAILED: bash syntax error in $0"
+        exit 1
+    fi
+
+    # Check Python notifier syntax if it already exists
+    if [ -f "$NOTIFY_SCRIPT_PATH" ]; then
+        if ! python3 -m py_compile "$NOTIFY_SCRIPT_PATH"; then
+            echo "Self-check FAILED: Python syntax error in $NOTIFY_SCRIPT_PATH"
+            exit 1
+        fi
+    else
+        echo "Note: Python notifier $NOTIFY_SCRIPT_PATH not found yet (first install?)."
+    fi
+
+    echo "Self-check passed."
+}
+
+# Optional mode: only run self-check and exit
+if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
+    run_self_check
+    exit 0
+fi
+
 # --- Helper function to check and install ---
 check_and_install() {
     local cmd=$1
@@ -251,11 +280,30 @@ def has_battery_via_inxi() -> bool:
 
 
 def detect_form_factor():
-    """Detect whether this machine is a laptop or a desktop using upower/inxi.
+    """Detect whether this machine is a laptop or a desktop.
 
+    Prefer inxi's Machine Type if available; fall back to upower/battery heuristics.
     Returns "laptop", "desktop", or "unknown".
     """
-    # First, try upower-based detection
+    # 1. Prefer inxi's Machine Type (very reliable on most systems)
+    try:
+        out = subprocess.check_output(
+            ["inxi", "-Mazy"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        for line in out.splitlines():
+            if "Type:" in line:
+                # Example: "  Type: Laptop System: HP ..."
+                val = line.split("Type:", 1)[1].strip().lower()
+                if val.startswith("laptop") or "notebook" in val:
+                    return "laptop"
+                if val.startswith("desktop") or "tower" in val or "server" in val:
+                    return "desktop"
+    except Exception as e:
+        log_debug(f"inxi -Mazy failed in detect_form_factor: {e}")
+
+    # 2. Fall back to the previous upower + battery-based heuristic
     try:
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
     except Exception as e:
@@ -295,7 +343,7 @@ def detect_form_factor():
             # looks more like a desktop with UPS/peripheral battery
             return "desktop"
 
-    # No battery seen by upower; fall back to inxi
+    # No battery seen by upower; fall back to inxi battery information
     if not has_battery:
         if has_battery_via_inxi():
             return "laptop"
@@ -382,23 +430,102 @@ def is_metered() -> bool:
     return False
 
 
+# --- Environment change tracking ---
+ENV_STATE_DIR = os.path.expanduser("~/.cache/zypper-notify")
+ENV_STATE_FILE = os.path.join(ENV_STATE_DIR, "env_state.txt")
+
+
+def _read_last_env_state() -> str:
+    try:
+        with open(ENV_STATE_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _write_env_state(state: str) -> None:
+    try:
+        os.makedirs(ENV_STATE_DIR, exist_ok=True)
+        with open(ENV_STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(state)
+    except OSError as e:
+        log_debug(f"Failed to write env state: {e}")
+
+
+def _notify_env_change(prev_state: str, form_factor: str, on_ac: bool, metered: bool, safe: bool) -> None:
+    """Send a small notification if environment conditions changed since last run.
+
+    This is to let the user know why updates may start/stop running
+    (e.g. plugging in AC, switching to metered Wi‑Fi, etc.).
+    """
+    current_state = f"form_factor={form_factor}, on_ac={on_ac}, metered={metered}, safe={safe}"
+
+    if prev_state == current_state:
+        return  # no change
+
+    # Decide a short human‑readable message
+    if safe:
+        title = "Update conditions now safe"
+        if metered:
+            # logically shouldn't happen (safe implies not metered), but guard anyway
+            body = "Updates may proceed, but connection is marked metered."
+        elif form_factor == "laptop" and on_ac:
+            body = "Laptop is on AC power and network is unmetered. Updates can be downloaded."
+        else:
+            body = "Conditions are okay to download updates."
+    else:
+        title = "Updates paused due to conditions"
+        if metered:
+            body = "Active connection is metered. Background update downloads are skipped."
+        elif form_factor == "laptop" and not on_ac:
+            body = "Laptop is running on battery. Background update downloads are skipped."
+        else:
+            body = "Current conditions are not safe for background update downloads."
+
+    try:
+        n = Notify.Notification.new(title, body, "dialog-information")
+        n.set_timeout(8000)
+        n.show()
+    except Exception as e:
+        print(f"Failed to show environment change notification: {e}", file=sys.stderr)
+
+    _write_env_state(current_state)
+
+
 def is_safe() -> bool:
     """Combined safety check.
 
     - desktops: don't block on AC; only check metered.
     - laptops: require AC and not metered.
+
+    Returns True if it's safe to run a full refresh, False otherwise.
     """
     form_factor = detect_form_factor()
-    print(f"Detected form factor: {form_factor}")
 
-    # Metered check (applies to both laptops and desktops)
-    if is_metered():
+    # Pre-compute AC and metered status for clearer logging
+    metered = is_metered()
+    if form_factor == "laptop":
+        on_ac = on_ac_power(form_factor)
+    else:
+        on_ac = True  # desktops/unknown are treated as effectively always on AC
+
+    # Decide safety based on current conditions
+    safe = (not metered) and (form_factor != "laptop" or on_ac)
+
+    # Log environment and safety
+    print(f"Environment: form_factor={form_factor}, on_ac={on_ac}, metered={metered}, safe={safe}")
+
+    # Notify user if conditions changed since last run
+    prev_state = _read_last_env_state()
+    _notify_env_change(prev_state, form_factor, on_ac, metered, safe)
+
+    # Apply safety policy
+    if metered:
         print("Metered connection detected. Skipping refresh.")
         return False
 
-    # AC check only really matters for laptops
     if form_factor == "laptop":
-        if not on_ac_power(form_factor):
+        if not on_ac:
             print("Running on battery (or AC unknown). Skipping refresh.")
             return False
         else:
@@ -485,14 +612,35 @@ def main():
         Notify.init("zypper-updater")
 
         output = get_updates()
-        if not output:
+
+        # If get_updates() failed (e.g. PolicyKit error), show a visible error notification
+        if output is None:
+            err_title = "Update check failed"
+            err_message = (
+                "The updater could not run zypper (likely a PolicyKit or authentication issue).\n"
+                "Please run 'zypper dup --dry-run' manually in a terminal to see details."
+            )
+            n = Notify.Notification.new(err_title, err_message, "dialog-error")
+            n.set_timeout(30000)  # 30 seconds
+            n.show()
+            return
+
+        if not output.strip():
             print("No output from zypper. Exiting.")
-            sys.exit(0)
+            return
 
         title, message = parse_output(output)
         if not title:
-            print("System is up-to-date. No notification needed.")
-            sys.exit(0)
+            # No updates available: show an informational popup instead of staying silent
+            print("System is up-to-date. Showing 'no updates found' notification.")
+            n = Notify.Notification.new(
+                "No updates found",
+                "Your system is already up to date.",
+                "dialog-information",
+            )
+            n.set_timeout(10000)  # 10 seconds
+            n.show()
+            return
 
         print("Updates are pending. Sending 'updates ready' reminder.")
 
@@ -522,6 +670,9 @@ def main():
 if __name__ == "__main__":
     main()
 EOF
+
+chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
+chmod +x "${NOTIFY_SCRIPT_PATH}"
 
 # --- 10. Create/Update Install Script (user) ---
 echo ">>> Creating (user) install script: ${INSTALL_SCRIPT_PATH}"
@@ -554,3 +705,21 @@ EOF
 
 chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
 chmod +x "${INSTALL_SCRIPT_PATH}"
+
+# --- 11. Final self-check ---
+echo ">>> Final syntax self-check..."
+run_self_check
+
+# --- 12. Reload user systemd daemon and ensure notifier timer is active ---
+USER_BUS_PATH="unix:path=/run/user/$(id -u "$SUDO_USER")/bus"
+
+echo ">>> Reloading user systemd daemon and (re)starting ${NT_SERVICE_NAME}.timer..."
+if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload; then
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer" || true
+else
+    echo "Warning: Could not talk to user systemd (no session bus?). You may need to run:"
+    echo "  systemctl --user daemon-reload"
+    echo "  systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
+fi
+
+echo ">>> Installation completed successfully."
