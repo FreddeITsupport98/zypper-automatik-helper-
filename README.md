@@ -12,7 +12,7 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v45 Architecture)
+## ✨ Key Features (v46 Architecture)
 
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
@@ -28,7 +28,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 -----
 
-## 🛠️ How It Works: The v45 Architecture
+## 🛠️ How It Works: The v46Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
