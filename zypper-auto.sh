@@ -1007,7 +1007,7 @@ def main():
         # Create the notification
         log_debug(f"Creating notification: {title}")
         n = Notify.Notification.new(title, message, "system-software-update")
-        n.set_timeout(30000) # 30 seconds
+        n.set_timeout(0) # 0 = persistent notification (no timeout)
 
         # Add the button
         n.add_action("default", "Install", on_action, action_script)
