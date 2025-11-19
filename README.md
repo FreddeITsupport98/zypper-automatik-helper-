@@ -28,7 +28,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 -----
 
-## 🛠️ How It Works: The v46Architecture
+## 🛠️ How It Works: The v46 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
