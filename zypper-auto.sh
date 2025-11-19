@@ -1008,17 +1008,24 @@ def main():
         log_debug(f"Creating notification: {title}")
         n = Notify.Notification.new(title, message, "system-software-update")
         n.set_timeout(0) # 0 = persistent notification (no timeout)
+        n.set_urgency(Notify.Urgency.CRITICAL) # Make it more noticeable
 
         # Add the button
         n.add_action("default", "Install", on_action, action_script)
 
-        # We need a main loop to keep the script alive for the button
-        loop = GLib.MainLoop()
-        n.connect("closed", lambda *args: loop.quit())
-
-        log_info("Displaying update notification with Install button")
+        log_info("Displaying persistent update notification with Install button")
         n.show()
-        loop.run() # Wait for the notification to be closed or clicked
+        
+        # Give the notification daemon a moment to process the notification
+        # before we exit, otherwise it might not appear.
+        import time
+        time.sleep(0.5)
+        
+        log_info("Notification shown. Script will exit and timer will re-check in 1 minute.")
+        # Note: We exit immediately after showing the notification.
+        # The notification will persist until clicked/dismissed.
+        # The timer will re-check every minute and show the notification again
+        # if updates are still pending.
 
     except Exception as e:
         log_error(f"An error occurred in main: {e}")
