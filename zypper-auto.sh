@@ -339,11 +339,11 @@ log_info ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 log_debug "Writing timer file: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
-Description=Run ${DL_SERVICE_NAME} hourly to download updates
+Description=Run ${DL_SERVICE_NAME} every minute to download updates
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=1h
+OnUnitActiveSec=1min
 Persistent=true
 
 [Install]
@@ -895,11 +895,20 @@ def get_updates():
         return result.stdout
 
     except subprocess.CalledProcessError as e:
-        # --- v47 ENHANCEMENT: Log full error and STDOUT/STDERR on failure ---
+        # Check if zypper is locked by another process
+        stderr_text = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)
+        
+        if "System management is locked" in stderr_text or "pid" in stderr_text.lower():
+            # Zypper is busy - this is normal, just skip silently
+            log_info("Zypper is currently locked by another process (likely the downloader). Skipping this check.")
+            update_status("SKIPPED: Zypper locked by another process")
+            return ""  # Return empty string to skip notification
+        
+        # Real authentication/policy error - show error notification
         log_error("Policy Block Failure: PolicyKit/PAM refused command")
         update_status("FAILED: PolicyKit/PAM authentication error")
         if e.stderr:
-            log_error(f"Policy Error: {e.stderr.strip()}")
+            log_error(f"Policy Error: {stderr_text.strip()}")
         if e.stdout:
             log_debug(f"Command stdout: {e.stdout}")
         return None
@@ -964,14 +973,15 @@ def main():
 
         output = get_updates()
 
-        # If get_updates() failed (e.g. PolicyKit error), show a visible error notification
+        # If get_updates() failed with a real error (not just zypper lock), show error notification
         if output is None:
             log_error("Update check failed due to PolicyKit/authentication error")
             update_status("FAILED: Update check failed")
             err_title = "Update check failed"
             err_message = (
-                "The updater could not run zypper (likely a PolicyKit or authentication issue).\n"
-                "Please run 'zypper dup --dry-run' manually in a terminal to see details."
+                "The updater could not authenticate with PolicyKit.\n"
+                "This may be a configuration issue.\n\n"
+                "Try running 'pkexec zypper dup --dry-run' manually to test."
             )
             n = Notify.Notification.new(err_title, err_message, "dialog-error")
             n.set_timeout(30000)  # 30 seconds
