@@ -6,36 +6,29 @@ A robust `systemd` architecture that automates `zypper dup` downloads, provides 
 
 -----
 
-## 🐞 Reporting Issues?
-
-**If you need help, please include the relevant logs!** See the [Reporting Issues on GitHub](#reporting-issues-on-github) section for which logs to include.
-
------
-
 ## 🎯 The Goal
 
 On a rolling-release distribution like Tumbleweed, updates are frequent and can be large. This script automates the most time-consuming part: the **download**.
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v47 Architecture)
+## ✨ Key Features (v46 Architecture)
 
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
 * **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
 * **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives.
-* **Comprehensive Logging (NEW in v47):** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Persistent Reminders:** The user notifier service runs on a configurable schedule (default: *aggressive* every minute) and will remind you whenever updates are pending.
 * **Hybrid Refresh Logic:**
     * If it's unsafe (on battery or metered), it **skips `zypper refresh`** and only checks the existing cache via `zypper dup --dry-run`.
     * If it's safe, it runs a full `zypper refresh` first, then `zypper dup --dry-run`.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v46) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v42) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v47 Architecture
+## 🛠️ How It Works: The v46 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -119,18 +112,6 @@ You're done! The root downloader is enabled, and the user notifier is ready.
     > 12 updates are pending. Click 'Install' to begin.
 3.  **Install.** Click the **"Install"** button in the notification. This will open a terminal and prompt you for authentication to run `zypper dup`.
 
-### Quick Status Check
-
-You can check the current status at any time without running commands:
-
-```bash
-# Check installation/system status
-cat /var/log/zypper-auto/last-status.txt
-
-# Check notifier status
-cat ~/.local/share/zypper-notify/last-run-status.txt
-```
-
 ### Debugging
 
 If you want more verbose logging from the notifier script (for example, to see detailed `upower`/`nmcli` decisions), enable debug mode:
@@ -171,154 +152,7 @@ sudo systemctl restart zypper-autodownload.timer
 # For the user notifier (as your regular user):
 systemctl --user daemon-reload
 systemctl --user restart zypper-notify-user.timer
-```
 
------
-
-## 📊 Logging & Monitoring (v47)
-
-Version 47 introduces comprehensive logging to help you understand what's happening without needing to run commands.
-
-### Log Locations
-
-#### System Logs (Root Services)
-**Location:** `/var/log/zypper-auto/`
-
-| File | Purpose | What It Contains |
-|------|---------|------------------|
-| `install-YYYYMMDD-HHMMSS.log` | Installation logs | Complete log of each installation run with timestamps, all commands executed, and their results |
-| `last-status.txt` | Current status | The most recent status message (e.g., "SUCCESS: Installation completed") |
-| `service-logs/downloader.log` | Downloader output | Output from the background download service (`zypper refresh` and `zypper dup --download-only`) |
-| `service-logs/downloader-error.log` | Downloader errors | Error output from the downloader service |
-
-#### User Logs (Notifier Service)
-**Location:** `~/.local/share/zypper-notify/`
-
-| File | Purpose | What It Contains |
-|------|---------|------------------|
-| `notifier-detailed.log` | Complete notifier activity | All notifier operations: environment checks, safety decisions, update checks, errors with full tracebacks |
-| `notifier-detailed.log.old` | Previous log backup | Previous log file (created when main log exceeds 5MB) |
-| `last-run-status.txt` | Last run status | Status of the most recent notifier run (e.g., "Updates available: Snapshot 20251110-0 Ready") |
-| `notifier.log` | Systemd stdout | Standard output captured by systemd |
-| `notifier-error.log` | Systemd stderr | Standard error captured by systemd |
-
-### What Gets Logged
-
-#### Installation Phase
-- ✅ Sanity checks (root privileges, user detection)
-- ✅ Dependency verification and installation
-- ✅ Old service cleanup
-- ✅ Service/timer creation
-- ✅ File permissions and ownership
-- ✅ Syntax validation
-- ✅ Final status summary
-
-#### Runtime (Notifier Service)
-- ✅ **Environment Detection:** Form factor (laptop/desktop), battery status, AC power state
-- ✅ **Safety Checks:** Why updates are allowed or skipped (battery, metered connection, etc.)
-- ✅ **Update Checks:** When zypper runs, what it finds, how many packages
-- ✅ **Notifications:** What notifications are shown to the user
-- ✅ **User Actions:** When the Install button is clicked
-- ✅ **Errors:** Full error messages with Python tracebacks for debugging
-
-### How to Access Logs
-
-#### View Current Status (No Commands Needed)
-```bash
-# System/installation status
-cat /var/log/zypper-auto/last-status.txt
-
-# Notifier status (what's happening with update checks)
-cat ~/.local/share/zypper-notify/last-run-status.txt
-```
-
-#### View Full Installation Log
-```bash
-# View the most recent installation
-ls -lt /var/log/zypper-auto/install-*.log | head -1 | awk '{print $NF}' | xargs cat
-
-# Or specify a date
-cat /var/log/zypper-auto/install-20251119-183000.log
-```
-
-#### View Downloader Service Logs
-```bash
-# See what the background downloader is doing
-sudo cat /var/log/zypper-auto/service-logs/downloader.log
-
-# Check for download errors
-sudo cat /var/log/zypper-auto/service-logs/downloader-error.log
-
-# Or use journalctl for systemd-managed logs
-journalctl -u zypper-autodownload.service
-```
-
-#### View Notifier Logs
-```bash
-# View detailed notifier activity log
-cat ~/.local/share/zypper-notify/notifier-detailed.log
-
-# View just recent entries (last 50 lines)
-tail -50 ~/.local/share/zypper-notify/notifier-detailed.log
-
-# Watch the log in real-time
-tail -f ~/.local/share/zypper-notify/notifier-detailed.log
-
-# View systemd service logs
-journalctl --user -u zypper-notify-user.service
-
-# View just the last run
-journalctl --user -u zypper-notify-user.service -n 50 --no-pager
-```
-
-#### Search Logs for Specific Issues
-```bash
-# Find all errors in notifier log
-grep "\[ERROR\]" ~/.local/share/zypper-notify/notifier-detailed.log
-
-# Check why updates were skipped
-grep "SKIPPED" ~/.local/share/zypper-notify/notifier-detailed.log
-
-# See environment detection history
-grep "Form factor detected" ~/.local/share/zypper-notify/notifier-detailed.log
-
-# Find when updates were available
-grep "packages to upgrade" ~/.local/share/zypper-notify/notifier-detailed.log
-```
-
-### Log Rotation & Cleanup
-
-**Automatic cleanup happens on every installation:**
-- Installation logs: Keep only the **last 10** log files
-- Service logs: Rotate when exceeding **50MB**
-- Notifier logs: Rotate when exceeding **5MB**
-
-No manual maintenance required!
-
-### Understanding Log Entries
-
-Each log entry has a timestamp and severity level:
-
-```
-[2025-11-19 18:30:45] [INFO] Starting update check...
-[2025-11-19 18:30:46] [DEBUG] Checking AC power status (form_factor: laptop)
-[2025-11-19 18:30:46] [INFO] AC power detected: plugged in
-[2025-11-19 18:30:47] [INFO] Environment is safe for updates
-[2025-11-19 18:30:50] [INFO] Found 12 packages to upgrade (snapshot: 20251119)
-[2025-11-19 18:30:51] [ERROR] Failed to show notification: [error details]
-```
-
-**Severity Levels:**
-- `INFO` - Normal operation, status updates
-- `DEBUG` - Detailed information for troubleshooting (only visible with `ZNH_DEBUG=1`)
-- `ERROR` - Something went wrong, includes details
-- `SUCCESS` - Operation completed successfully (installation logs only)
-
------
-
-## 🗑️ Uninstallation
-
-```bash
 # 1. Stop and disable the root timer
 sudo systemctl disable --now zypper-autodownload.timer
 
@@ -335,88 +169,6 @@ rm -f $HOME/.config/systemd/user/zypper-notify-user.timer
 rm -f $HOME/.local/bin/zypper-notify-updater.py
 rm -f $HOME/.local/bin/zypper-run-install
 
-# 4. (Optional) Remove logs
-sudo rm -rf /var/log/zypper-auto
-rm -rf $HOME/.local/share/zypper-notify
-rm -rf $HOME/.cache/zypper-notify
-
-# 5. Reload the systemd daemons
+# 4. Reload the systemd daemons
 sudo systemctl daemon-reload
 systemctl --user daemon-reload
-```
-
------
-
-## 📚 Additional Resources
-
-### Reporting Issues on GitHub
-
-**If you encounter a problem, please include these logs in your GitHub issue:**
-
-#### For Installation Problems:
-```bash
-# 1. Most recent installation log (REQUIRED)
-cat $(ls -t /var/log/zypper-auto/install-*.log | head -1)
-
-# 2. Installation status (REQUIRED)
-cat /var/log/zypper-auto/last-status.txt
-```
-
-#### For Notification/Update Check Problems:
-```bash
-# 1. Detailed notifier log (REQUIRED)
-cat ~/.local/share/zypper-notify/notifier-detailed.log
-
-# 2. Last run status (REQUIRED)
-cat ~/.local/share/zypper-notify/last-run-status.txt
-
-# 3. Systemd service status (HELPFUL)
-systemctl --user status zypper-notify-user.service
-
-# 4. Recent systemd logs (HELPFUL)
-journalctl --user -u zypper-notify-user.service -n 100 --no-pager
-```
-
-#### For Download Problems:
-```bash
-# 1. Downloader logs (REQUIRED)
-sudo cat /var/log/zypper-auto/service-logs/downloader.log
-sudo cat /var/log/zypper-auto/service-logs/downloader-error.log
-
-# 2. Service status (HELPFUL)
-systemctl status zypper-autodownload.service
-```
-
-**Also include:**
-- Your openSUSE Tumbleweed version: `cat /etc/os-release`
-- Python version: `python3 --version`
-- Description of the problem and what you expected to happen
-
-**⚠️ IMPORTANT:** Please **redact any personal information** (usernames, hostnames, network names) before posting logs publicly!
-
-### Troubleshooting Common Issues
-
-**Problem: Updates not being downloaded**
-- Check if the downloader timer is active: `systemctl status zypper-autodownload.timer`
-- Check the downloader log for errors: `sudo cat /var/log/zypper-auto/service-logs/downloader-error.log`
-- Verify conditions are met (AC power, not metered): Check systemd conditions
-
-**Problem: Not receiving notifications**
-- Check notifier timer: `systemctl --user status zypper-notify-user.timer`
-- Check for errors: `cat ~/.local/share/zypper-notify/notifier-detailed.log | grep ERROR`
-- Check last run status: `cat ~/.local/share/zypper-notify/last-run-status.txt`
-- Verify PyGObject is installed: `python3 -c "import gi"`
-
-**Problem: Updates skipped on laptop**
-- Check if on battery: `cat ~/.local/share/zypper-notify/notifier-detailed.log | grep "AC power"`
-- Check for metered connection: `grep "metered" ~/.local/share/zypper-notify/notifier-detailed.log`
-- The system is working as designed - updates only run on AC power and unmetered connections
-
-### Version History
-
-- **v47** (2025-11-19): Added comprehensive logging system with automatic rotation
-- **v46**: AC battery detection logical fix
-- **v45**: Architecture improvements and user-space notifier
-- **v43**: Enhanced Python notification script
-- **v42**: PolicyKit/PAM error logging enhancements
-- Earlier versions: Initial development and refinements
