@@ -1091,34 +1091,50 @@ set -euo pipefail
 # Enhanced install script with post-update service check
 TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
 
-# Function to show post-update info
-show_post_update_info() {
+# Create a wrapper script that will run in the terminal
+RUN_UPDATE() {
+    echo ""
+    echo "=========================================="
+    echo "  Running System Update"
+    echo "=========================================="
+    echo ""
+    
+    # Run the update
+    if pkexec zypper dup; then
+        UPDATE_SUCCESS=true
+    else
+        UPDATE_SUCCESS=false
+    fi
+    
     echo ""
     echo "=========================================="
     echo "  Update Complete - Post-Update Check"
     echo "=========================================="
     echo ""
-    echo "Checking which services need to be restarted..."
-    echo ""
     
-    # Run zypper ps -s to show services that need restart
-    if sudo zypper ps -s 2>/dev/null; then
+    if [ "$UPDATE_SUCCESS" = true ]; then
+        echo "Checking which services need to be restarted..."
         echo ""
-        echo "ℹ️  Why might you need to reboot?"
-        echo ""
-        echo "Some critical system services or libraries were updated."
-        echo "These services are still using old versions in memory:"
-        echo ""
-        echo "  • System services (like systemd, dbus)"
-        echo "  • Desktop environment components"
-        echo "  • Kernel modules or the kernel itself"
-        echo ""
-        echo "Options:"
-        echo "  1. Restart affected services manually (advanced users)"
-        echo "  2. Reboot to ensure all services use updated code (recommended)"
-        echo ""
+        
+        # Run zypper ps -s to show services that need restart
+        if pkexec zypper ps -s 2>/dev/null; then
+            echo ""
+            echo "ℹ️  Services listed above are using old library versions."
+            echo ""
+            echo "What this means:"
+            echo "  • These services/processes are still running old code in memory"
+            echo "  • They should be restarted to use the updated libraries"
+            echo ""
+            echo "Options:"
+            echo "  1. Restart individual services: systemctl restart <service>"
+            echo "  2. Reboot your system (recommended for kernel/system updates)"
+            echo ""
+        else
+            echo "✅ No services require restart. You're all set!"
+            echo ""
+        fi
     else
-        echo "✓ No services require restart. You're all set!"
+        echo "⚠️  Update was cancelled or failed."
         echo ""
     fi
     
@@ -1126,20 +1142,23 @@ show_post_update_info() {
     read -r
 }
 
+# Export the function so it's available in subshells
+export -f RUN_UPDATE
+
 # Run the update in a terminal
 for term in "${TERMINALS[@]}"; do
     if command -v "$term" >/dev/null 2>&1; then
         case "$term" in
             konsole)
-                konsole -e bash -c "pkexec zypper dup && show_post_update_info() { $(declare -f show_post_update_info); }; show_post_update_info"
+                konsole -e bash -c "RUN_UPDATE"
                 exit 0
                 ;;
             gnome-terminal)
-                gnome-terminal -- bash -c "pkexec zypper dup && show_post_update_info() { $(declare -f show_post_update_info); }; show_post_update_info"
+                gnome-terminal -- bash -c "RUN_UPDATE"
                 exit 0
                 ;;
             kitty|alacritty|xterm)
-                "$term" -e bash -c "pkexec zypper dup && show_post_update_info() { $(declare -f show_post_update_info); }; show_post_update_info"
+                "$term" -e bash -c "RUN_UPDATE"
                 exit 0
                 ;;
         esac
@@ -1147,17 +1166,7 @@ for term in "${TERMINALS[@]}"; do
 done
 
 # Fallback: run directly if no terminal found
-pkexec zypper dup
-show_post_update_info() {
-    echo ""
-    echo "=========================================="
-    echo "  Update Complete - Post-Update Check"
-    echo "=========================================="
-    echo ""
-    sudo zypper ps -s 2>/dev/null || echo "✓ No services require restart."
-    echo ""
-}
-show_post_update_info
+RUN_UPDATE
 EOF
 
 chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
