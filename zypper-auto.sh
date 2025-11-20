@@ -329,10 +329,10 @@ After=network-online.target nss-lookup.target
 Type=oneshot
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
-ExecStartPre=/bin/sh -c 'echo "downloading" > ${LOG_DIR}/download-status.txt'
+ExecStartPre=/bin/sh -c 'echo "checking" > ${LOG_DIR}/download-status.txt'
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
-ExecStartPost=/bin/sh -c 'echo "complete" > ${LOG_DIR}/download-status.txt'
+ExecStart=/bin/sh -c 'if /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null | grep -q "packages to upgrade"; then echo "downloading" > ${LOG_DIR}/download-status.txt; /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; else echo "idle" > ${LOG_DIR}/download-status.txt; fi'
+ExecStartPost=/bin/sh -c 'if [ -f ${LOG_DIR}/download-status.txt ] && [ "$(cat ${LOG_DIR}/download-status.txt)" = "downloading" ]; then echo "complete" > ${LOG_DIR}/download-status.txt; fi'
 EOF
 log_success "Downloader service file created"
 
@@ -990,6 +990,12 @@ def main():
                         import time
                         time.sleep(0.5)
                         return  # Exit, will check again next minute
+                    elif status == "checking":
+                        log_info("Checking for updates - skipping notification")
+                        return  # Exit silently, will check again next minute
+                    elif status == "idle":
+                        log_debug("Status is idle (no updates to download)")
+                        # Continue to normal check below
             except Exception as e:
                 log_debug(f"Could not read download status: {e}")
 
@@ -1116,8 +1122,12 @@ RUN_UPDATE() {
         echo "Checking which services need to be restarted..."
         echo ""
         
-        # Run zypper ps -s to show services that need restart
-        if pkexec zypper ps -s 2>/dev/null; then
+        # Run zypper ps -s and capture output
+        ZYPPER_PS_OUTPUT=$(pkexec zypper ps -s 2>/dev/null)
+        echo "$ZYPPER_PS_OUTPUT"
+        
+        # Check if there are any running processes in the output
+        if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
             echo ""
             echo "ℹ️  Services listed above are using old library versions."
             echo ""
