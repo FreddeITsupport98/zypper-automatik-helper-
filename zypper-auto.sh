@@ -329,8 +329,10 @@ After=network-online.target nss-lookup.target
 Type=oneshot
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
+ExecStartPre=/bin/sh -c 'echo "downloading" > ${LOG_DIR}/download-status.txt'
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only
+ExecStartPost=/bin/sh -c 'echo "complete" > ${LOG_DIR}/download-status.txt'
 EOF
 log_success "Downloader service file created"
 
@@ -969,6 +971,27 @@ def main():
     try:
         log_debug("Initializing notification system...")
         Notify.init("zypper-updater")
+        
+        # Check if downloader is actively downloading updates
+        download_status_file = "/var/log/zypper-auto/download-status.txt"
+        if os.path.exists(download_status_file):
+            try:
+                with open(download_status_file, 'r') as f:
+                    status = f.read().strip()
+                    if status == "downloading":
+                        log_info("Download in progress - showing 'downloading' notification")
+                        n = Notify.Notification.new(
+                            "Downloading updates...",
+                            "Background download is in progress. You'll be notified when ready.",
+                            "emblem-downloads"
+                        )
+                        n.set_timeout(5000)  # 5 seconds
+                        n.show()
+                        import time
+                        time.sleep(0.5)
+                        return  # Exit, will check again next minute
+            except Exception as e:
+                log_debug(f"Could not read download status: {e}")
 
         output = get_updates()
 
@@ -1029,17 +1052,14 @@ def main():
         # and the action button callback can be handled.
         log_info("Starting GLib main loop to keep notification alive...")
         loop = GLib.MainLoop()
-        
-        # Set up a timeout to quit after 5 minutes if no interaction
-        # This prevents the script from running forever
-        GLib.timeout_add_seconds(300, lambda: loop.quit())
+        n.connect("closed", lambda *args: loop.quit())
         
         try:
             loop.run()
         except KeyboardInterrupt:
             log_info("Main loop interrupted")
         
-        log_info("Notification dismissed or timeout reached.")
+        log_info("Notification dismissed or action taken.")
 
     except Exception as e:
         log_error(f"An error occurred in main: {e}")
