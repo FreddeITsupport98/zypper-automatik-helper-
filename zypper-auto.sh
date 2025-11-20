@@ -429,7 +429,7 @@ log_debug "Writing Python script to: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v48 with fixed battery detection and persistent notifications)
+# zypper-notify-updater.py (v49 with smart download detection)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
