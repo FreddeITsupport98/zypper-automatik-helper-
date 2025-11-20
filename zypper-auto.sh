@@ -1088,27 +1088,76 @@ cat << 'EOF' > "${INSTALL_SCRIPT_PATH}"
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple helper script to run the full zypper dup in a terminal (if available).
+# Enhanced install script with post-update service check
 TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
 
+# Function to show post-update info
+show_post_update_info() {
+    echo ""
+    echo "=========================================="
+    echo "  Update Complete - Post-Update Check"
+    echo "=========================================="
+    echo ""
+    echo "Checking which services need to be restarted..."
+    echo ""
+    
+    # Run zypper ps -s to show services that need restart
+    if sudo zypper ps -s 2>/dev/null; then
+        echo ""
+        echo "ℹ️  Why might you need to reboot?"
+        echo ""
+        echo "Some critical system services or libraries were updated."
+        echo "These services are still using old versions in memory:"
+        echo ""
+        echo "  • System services (like systemd, dbus)"
+        echo "  • Desktop environment components"
+        echo "  • Kernel modules or the kernel itself"
+        echo ""
+        echo "Options:"
+        echo "  1. Restart affected services manually (advanced users)"
+        echo "  2. Reboot to ensure all services use updated code (recommended)"
+        echo ""
+    else
+        echo "✓ No services require restart. You're all set!"
+        echo ""
+    fi
+    
+    echo "Press Enter to close this window..."
+    read -r
+}
+
+# Run the update in a terminal
 for term in "${TERMINALS[@]}"; do
     if command -v "$term" >/dev/null 2>&1; then
         case "$term" in
             konsole)
-                exec konsole -e pkexec zypper dup
+                konsole -e bash -c "pkexec zypper dup && show_post_update_info() { $(declare -f show_post_update_info); }; show_post_update_info"
+                exit 0
                 ;;
             gnome-terminal)
-                exec gnome-terminal -- pkexec zypper dup
+                gnome-terminal -- bash -c "pkexec zypper dup && show_post_update_info() { $(declare -f show_post_update_info); }; show_post_update_info"
+                exit 0
                 ;;
             kitty|alacritty|xterm)
-                exec "$term" -e pkexec zypper dup
+                "$term" -e bash -c "pkexec zypper dup && show_post_update_info() { $(declare -f show_post_update_info); }; show_post_update_info"
+                exit 0
                 ;;
         esac
     fi
 done
 
-# Fallback: run pkexec directly if no known terminal is found.
-exec pkexec zypper dup
+# Fallback: run directly if no terminal found
+pkexec zypper dup
+show_post_update_info() {
+    echo ""
+    echo "=========================================="
+    echo "  Update Complete - Post-Update Check"
+    echo "=========================================="
+    echo ""
+    sudo zypper ps -s 2>/dev/null || echo "✓ No services require restart."
+    echo ""
+}
+show_post_update_info
 EOF
 
 chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
