@@ -525,11 +525,10 @@ def has_battery_via_inxi() -> bool:
         log_debug(f"inxi battery check failed: {e}")
         return False
 
-    # Very simple heuristic: a Battery: line with an ID- marker
-    for line in out.splitlines():
-        if "Battery:" in line and "ID-" in line:
-            log_debug("Battery detected via inxi")
-            return True
+    # Check if output contains both Battery: and ID- (can be on different lines)
+    if "Battery:" in out and "ID-" in out:
+        log_debug("Battery detected via inxi")
+        return True
     log_debug("No battery detected via inxi")
     return False
 
