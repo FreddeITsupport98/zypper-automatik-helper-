@@ -329,10 +329,10 @@ After=network-online.target nss-lookup.target
 Type=oneshot
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
-ExecStartPre=/bin/sh -c 'echo "checking" > ${LOG_DIR}/download-status.txt'
+ExecStartPre=/bin/sh -c 'echo "refreshing" > ${LOG_DIR}/download-status.txt'
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/bin/sh -c 'if /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null | grep -q "packages to upgrade"; then echo "downloading" > ${LOG_DIR}/download-status.txt; /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; else echo "idle" > ${LOG_DIR}/download-status.txt; fi'
-ExecStartPost=/bin/sh -c 'if [ -f ${LOG_DIR}/download-status.txt ] && [ "$(cat ${LOG_DIR}/download-status.txt)" = "downloading" ]; then echo "complete" > ${LOG_DIR}/download-status.txt; fi'
+ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); echo "downloading:\$PKG_COUNT" > ${LOG_DIR}/download-status.txt; /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
+ExecStartPost=/bin/sh -c 'STATUS=\$(cat ${LOG_DIR}/download-status.txt 2>/dev/null || echo "idle"); if echo "\$STATUS" | grep -q "^downloading:"; then echo "complete" > ${LOG_DIR}/download-status.txt; fi'
 EOF
 log_success "Downloader service file created"
 
@@ -429,7 +429,7 @@ log_debug "Writing Python script to: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v49 with smart download detection)
+# zypper-notify-updater.py (v50 with stage-based download notifications)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.
@@ -978,24 +978,48 @@ def main():
             try:
                 with open(download_status_file, 'r') as f:
                     status = f.read().strip()
-                    if status == "downloading":
-                        log_info("Download in progress - showing 'downloading' notification")
+                    
+                    # Handle stage-based status
+                    if status == "refreshing":
+                        log_info("Stage: Refreshing repositories")
                         n = Notify.Notification.new(
-                            "Downloading updates...",
-                            "Background download is in progress. You'll be notified when ready.",
-                            "emblem-downloads"
+                            "Checking for updates...",
+                            "Refreshing repositories...",
+                            "emblem-synchronizing"
                         )
                         n.set_timeout(5000)  # 5 seconds
                         n.show()
                         import time
                         time.sleep(0.5)
                         return  # Exit, will check again next minute
-                    elif status == "checking":
-                        log_info("Checking for updates - skipping notification")
-                        return  # Exit silently, will check again next minute
+                    
+                    elif status.startswith("downloading:"):
+                        # Extract package count from "downloading:45" format
+                        try:
+                            pkg_count = status.split(":")[1]
+                            log_info(f"Stage: Downloading {pkg_count} packages")
+                            n = Notify.Notification.new(
+                                "Downloading updates...",
+                                f"Downloading {pkg_count} packages in the background.",
+                                "emblem-downloads"
+                            )
+                        except:
+                            log_info("Stage: Downloading packages")
+                            n = Notify.Notification.new(
+                                "Downloading updates...",
+                                "Background download is in progress.",
+                                "emblem-downloads"
+                            )
+                        n.set_timeout(5000)  # 5 seconds
+                        n.show()
+                        import time
+                        time.sleep(0.5)
+                        return  # Exit, will check again next minute
+                    
                     elif status == "idle":
                         log_debug("Status is idle (no updates to download)")
                         # Continue to normal check below
+                        
             except Exception as e:
                 log_debug(f"Could not read download status: {e}")
 
