@@ -18,27 +18,32 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v48 Architecture)
+## ✨ Key Features (v50 Architecture)
 
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
+* **Stage-Based Download Progress (v50):** Real-time notifications showing download stages:
+    * **"Checking for updates..."** - Refreshing repositories
+    * **"Downloading updates... (X packages)"** - Active download with package count
+    * **"Updates Ready to Install"** - Download complete, ready to apply
+* **Smart Download Detection (v49):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications.
 * **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
 * **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives.
 * **Fixed Battery Detection (v48):** Corrected logic that was incorrectly identifying laptops as desktops, now properly detects batteries via `inxi` output.
 * **Persistent Notifications (v48):** Update notifications now persist until user interaction or timeout (5 minutes) by keeping a GLib main loop active.
-* **Environment Change Alerts (v48):** Notifies users when power conditions change (AC plugged/unplugged, metered status).
+* **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Persistent Reminders:** The user notifier service runs on a configurable schedule (default: *aggressive* every minute) and will remind you whenever updates are pending.
 * **Hybrid Refresh Logic:**
     * If it's unsafe (on battery or metered), it **skips `zypper refresh`** and only checks the existing cache via `zypper dup --dry-run`.
     * If it's safe, it runs a full `zypper refresh` first, then `zypper dup --dry-run`.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v47) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v50) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v48 Architecture
+## 🛠️ How It Works: The v50 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -50,13 +55,18 @@ This is a two-service system to provide both safety (Downloader) and persistence
 
 ### 2. The Downloader (Root Service)
 
-This service's only job is to download packages when it's safe.
+This service's only job is to download packages when it's safe, and report progress stages.
 
 * **Service:** `/etc/systemd/system/zypper-autodownload.service`
     * This service runs `zypper refresh` and `zypper dup --download-only`.
+    * It writes stage information to `/var/log/zypper-auto/download-status.txt`:
+        * `refreshing` - Repositories being refreshed
+        * `downloading:X` - Downloading X packages (includes count)
+        * `complete` - Ready for installation
+        * `idle` - No updates available
     * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
 * **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
-    * Default: `OnBootSec=1min`, `OnUnitActiveSec=1h` (downloads once per hour when it’s safe).
+    * Default: `OnBootSec=1min`, `OnUnitActiveSec=1min` (checks for updates every minute when it's safe).
     * You can edit this with `sudoedit /etc/systemd/system/zypper-autodownload.timer` and reload via `sudo systemctl daemon-reload && sudo systemctl restart zypper-autodownload.timer`.
 
 ### 3. The Notifier (User Service)
@@ -79,16 +89,21 @@ This service's job is to check for updates and remind you, running as your stand
 
 This Python script is the core of the system, run by the `zypper-notify-user.service` on the schedule defined by the user timer.
 
-1.  **Checks Safety:** Uses `inxi`, `upower` and `nmcli` with extra heuristics to:
+1.  **Checks Download Stage:** Reads `/var/log/zypper-auto/download-status.txt` to determine if downloads are in progress:
+    * `refreshing` → Shows "Checking for updates..." notification
+    * `downloading:X` → Shows "Downloading X packages..." notification with count
+    * `complete` or `idle` → Proceeds to normal update check
+2.  **Checks Safety:** Uses `inxi`, `upower` and `nmcli` with extra heuristics to:
     * distinguish laptops (real internal battery + AC adapter) from desktops/UPS/embedded setups,
     * reliably classify any system with a real battery as a laptop, even when `upower` does not expose a `line_power` device,
     * treat desktops as always on AC for safety decisions,
     * treat NetworkManager failures as "unmetered" to avoid random false positives.
-2.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates. On laptops, "safe" explicitly means **on AC and not on a metered connection**.
-3.  **Parses Output:** Counts packages and finds the latest Tumbleweed snapshot version.
-4.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the snapshot version and an **"Install"** button.
-5.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
-6.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `upower` / `nmcli` / `inxi` decisions) are printed to the journal.
+3.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates. On laptops, "safe" explicitly means **on AC and not on a metered connection**.
+4.  **Parses Output:** Counts packages and finds the latest Tumbleweed snapshot version.
+5.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the snapshot version and an **"Install"** button.
+6.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
+7.  **Post-Update Check:** After update completes, runs `zypper ps -s` to show which services need restart and provides reboot guidance if needed.
+8.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `upower` / `nmcli` / `inxi` decisions) are printed to the journal.
 
 -----
 
@@ -386,6 +401,8 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v50** (2025-11-20): Added stage-based download notifications with package count display
+- **v49** (2025-11-20): Smart download detection - only notifies when updates are actually being downloaded
 - **v48** (2025-11-20): Fixed battery detection logic (laptops no longer misidentified as desktops) and notification persistence (popups no longer disappear instantly)
 - **v47** (2025-11-19): Added comprehensive logging system with automatic rotation
 - **v46**: AC battery detection logical fix
