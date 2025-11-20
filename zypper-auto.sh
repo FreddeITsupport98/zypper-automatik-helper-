@@ -1026,16 +1026,21 @@ def main():
         log_info("Displaying persistent update notification with Install button")
         n.show()
         
-        # Give the notification daemon a moment to process the notification
-        # before we exit, otherwise it might not appear.
-        import time
-        time.sleep(0.5)
+        # Keep the script running with a GLib main loop so the notification persists
+        # and the action button callback can be handled.
+        log_info("Starting GLib main loop to keep notification alive...")
+        loop = GLib.MainLoop()
         
-        log_info("Notification shown. Script will exit and timer will re-check in 1 minute.")
-        # Note: We exit immediately after showing the notification.
-        # The notification will persist until clicked/dismissed.
-        # The timer will re-check every minute and show the notification again
-        # if updates are still pending.
+        # Set up a timeout to quit after 5 minutes if no interaction
+        # This prevents the script from running forever
+        GLib.timeout_add_seconds(300, lambda: loop.quit())
+        
+        try:
+            loop.run()
+        except KeyboardInterrupt:
+            log_info("Main loop interrupted")
+        
+        log_info("Notification dismissed or timeout reached.")
 
     except Exception as e:
         log_error(f"An error occurred in main: {e}")
