@@ -925,6 +925,11 @@ def parse_output(output):
     # Count Packages
     count_match = re.search(r"(\d+) packages to upgrade", output)
     package_count = count_match.group(1) if count_match else "0"
+    
+    # If no packages found or count is 0, return None
+    if package_count == "0":
+        log_info("No packages to upgrade (count is 0)")
+        return None, None
 
     # Find Snapshot
     snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb-]+)", output)
