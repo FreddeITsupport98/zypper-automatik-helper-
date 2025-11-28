@@ -740,6 +740,7 @@ def is_metered() -> bool:
 # --- Environment change tracking ---
 ENV_STATE_DIR = os.path.expanduser("~/.cache/zypper-notify")
 ENV_STATE_FILE = os.path.join(ENV_STATE_DIR, "env_state.txt")
+LAST_NOTIFICATION_FILE = os.path.join(ENV_STATE_DIR, "last_notification.txt")
 
 
 def _read_last_env_state() -> str:
@@ -757,6 +758,26 @@ def _write_env_state(state: str) -> None:
             f.write(state)
     except OSError as e:
         log_debug(f"Failed to write env state: {e}")
+
+
+def _read_last_notification() -> str:
+    """Read the last notification state (title+message)."""
+    try:
+        with open(LAST_NOTIFICATION_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _write_last_notification(title: str, message: str) -> None:
+    """Write the last notification state."""
+    try:
+        os.makedirs(ENV_STATE_DIR, exist_ok=True)
+        notification_key = f"{title}|{message}"
+        with open(LAST_NOTIFICATION_FILE, "w", encoding="utf-8") as f:
+            f.write(notification_key)
+    except OSError as e:
+        log_debug(f"Failed to write last notification: {e}")
 
 
 def _notify_env_change(prev_state: str, form_factor: str, on_ac: bool, metered: bool, safe: bool) -> None:
@@ -993,6 +1014,8 @@ def main():
                             "emblem-synchronizing"
                         )
                         n.set_timeout(5000)  # 5 seconds
+                        # Set hint to replace previous download status notifications
+                        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
                         n.show()
                         import time
                         time.sleep(0.5)
@@ -1016,6 +1039,8 @@ def main():
                                 "emblem-downloads"
                             )
                         n.set_timeout(5000)  # 5 seconds
+                        # Set hint to replace previous download status notifications
+                        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
                         n.show()
                         import time
                         time.sleep(0.5)
@@ -1068,19 +1093,34 @@ def main():
         log_info("Updates are pending. Sending 'updates ready' reminder.")
         update_status(f"Updates available: {title}")
 
+        # Check if this notification is different from the last one
+        last_notification = _read_last_notification()
+        current_notification = f"{title}|{message}"
+        
+        if last_notification == current_notification:
+            log_info("Notification unchanged, skipping duplicate notification")
+            return
+        
+        log_info(f"Notification changed from [{last_notification}] to [{current_notification}]")
+        _write_last_notification(title, message)
+
         # Get the path to the action script
         action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
-        # Create the notification
+        # Create the notification with a stable ID so it replaces the previous one
         log_debug(f"Creating notification: {title}")
         n = Notify.Notification.new(title, message, "system-software-update")
         n.set_timeout(0) # 0 = persistent notification (no timeout)
         n.set_urgency(Notify.Urgency.CRITICAL) # Make it more noticeable
+        
+        # Set a consistent ID so notifications replace each other
+        n.set_hint("desktop-entry", GLib.Variant("s", "zypper-updater"))
+        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-updates"))
 
         # Add the button
         n.add_action("default", "Install", on_action, action_script)
 
-        log_info("Displaying persistent update notification with Install button")
+        log_info("Displaying persistent update notification with Install button (replaces previous)")
         n.show()
         
         # Keep the script running with a GLib main loop so the notification persists
