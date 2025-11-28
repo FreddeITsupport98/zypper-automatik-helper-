@@ -104,10 +104,15 @@ DL_SERVICE_NAME="zypper-autodownload"
 DL_SERVICE_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.service"
 DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 
+CLEANUP_SERVICE_NAME="zypper-cache-cleanup"
+CLEANUP_SERVICE_FILE="/etc/systemd/system/${CLEANUP_SERVICE_NAME}.service"
+CLEANUP_TIMER_FILE="/etc/systemd/system/${CLEANUP_SERVICE_NAME}.timer"
+
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py"
 INSTALL_SCRIPT_NAME="zypper-run-install"
+VIEW_CHANGES_SCRIPT_NAME="zypper-view-changes"
 
 # --- 2. Sanity Checks & User Detection ---
 update_status "Running sanity checks..."
@@ -145,6 +150,7 @@ NT_SERVICE_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.service"
 NT_TIMER_FILE="$USER_CONFIG_DIR/${NT_SERVICE_NAME}.timer"
 NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
+VIEW_CHANGES_SCRIPT_PATH="$USER_BIN_DIR/${VIEW_CHANGES_SCRIPT_NAME}"
 
 # --- Helper: Self-check syntax for this script and the notifier ---
 run_self_check() {
@@ -327,12 +333,15 @@ After=network-online.target nss-lookup.target
 
 [Service]
 Type=oneshot
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+Nice=19
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
-ExecStartPre=/bin/sh -c 'echo "refreshing" > ${LOG_DIR}/download-status.txt'
+ExecStartPre=/bin/sh -c 'echo "refreshing" > ${LOG_DIR}/download-status.txt; date +%s > ${LOG_DIR}/download-start-time.txt'
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); echo "downloading:\$PKG_COUNT" > ${LOG_DIR}/download-status.txt; /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
-ExecStartPost=/bin/sh -c 'STATUS=\$(cat ${LOG_DIR}/download-status.txt 2>/dev/null || echo "idle"); if echo "\$STATUS" | grep -q "^downloading:"; then echo "complete" > ${LOG_DIR}/download-status.txt; fi'
+ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); DOWNLOAD_SIZE=\$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "\$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown"); echo "downloading:\$PKG_COUNT:\$DOWNLOAD_SIZE" > ${LOG_DIR}/download-status.txt; /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
+ExecStartPost=/bin/sh -c 'STATUS=\$(cat ${LOG_DIR}/download-status.txt 2>/dev/null || echo "idle"); if echo "\$STATUS" | grep -q "^downloading:"; then START_TIME=\$(cat ${LOG_DIR}/download-start-time.txt 2>/dev/null || date +%s); END_TIME=\$(date +%s); DURATION=\$((END_TIME - START_TIME)); echo "complete:\$DURATION" > ${LOG_DIR}/download-status.txt; fi'
 EOF
 log_success "Downloader service file created"
 
@@ -344,8 +353,8 @@ cat << EOF > ${DL_TIMER_FILE}
 Description=Run ${DL_SERVICE_NAME} every minute to download updates
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
+OnBootSec=2min
+OnUnitActiveSec=10min
 Persistent=true
 
 [Install]
@@ -365,6 +374,47 @@ else
     log_error "Failed to enable downloader timer"
     update_status "FAILED: Could not enable downloader timer"
     exit 1
+fi
+
+# --- 6b. Create Cache Cleanup Service ---
+log_info ">>> Creating (root) cache cleanup service: ${CLEANUP_SERVICE_FILE}"
+update_status "Creating cache cleanup service..."
+log_debug "Writing service file: ${CLEANUP_SERVICE_FILE}"
+cat << EOF > ${CLEANUP_SERVICE_FILE}
+[Unit]
+Description=Clean up old zypper cache packages
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/find /var/cache/zypp/packages -type f -name '*.rpm' -mtime +30 -delete
+ExecStart=/usr/bin/find /var/cache/zypp/packages -type d -empty -delete
+StandardOutput=append:${LOG_DIR}/service-logs/cleanup.log
+StandardError=append:${LOG_DIR}/service-logs/cleanup-error.log
+EOF
+log_success "Cache cleanup service file created"
+
+log_info ">>> Creating (root) cache cleanup timer: ${CLEANUP_TIMER_FILE}"
+log_debug "Writing timer file: ${CLEANUP_TIMER_FILE}"
+cat << EOF > ${CLEANUP_TIMER_FILE}
+[Unit]
+Description=Run cache cleanup weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+log_success "Cache cleanup timer file created"
+
+log_info ">>> Enabling (root) cache cleanup timer: ${CLEANUP_SERVICE_NAME}.timer"
+update_status "Enabling cache cleanup timer..."
+systemctl daemon-reload >> "${LOG_FILE}" 2>&1
+if systemctl enable --now "${CLEANUP_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
+    log_success "Cache cleanup timer enabled and started"
+else
+    log_error "Failed to enable cache cleanup timer (non-fatal)"
 fi
 
 # --- 7. Create User Directories ---
@@ -413,7 +463,7 @@ Description=Run ${NT_SERVICE_NAME} aggressively to check for updates
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=1min
+OnUnitActiveSec=3min
 Persistent=true
 
 [Install]
@@ -438,7 +488,8 @@ import sys
 import subprocess
 import os
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DEBUG = os.getenv("ZNH_DEBUG", "").lower() in ("1", "true", "yes", "debug")
@@ -447,10 +498,19 @@ DEBUG = os.getenv("ZNH_DEBUG", "").lower() in ("1", "true", "yes", "debug")
 LOG_DIR = Path.home() / ".local" / "share" / "zypper-notify"
 LOG_FILE = LOG_DIR / "notifier-detailed.log"
 STATUS_FILE = LOG_DIR / "last-run-status.txt"
+HISTORY_FILE = LOG_DIR / "update-history.log"
 MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_HISTORY_SIZE = 1 * 1024 * 1024  # 1MB
 
-# Ensure log directory exists
+# Cache directory
+CACHE_DIR = Path.home() / ".cache" / "zypper-notify"
+CACHE_FILE = CACHE_DIR / "last_check.txt"
+SNOOZE_FILE = CACHE_DIR / "snooze_until.txt"
+CACHE_EXPIRY_MINUTES = 10
+
+# Ensure directories exist
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def rotate_log_if_needed():
     """Rotate log file if it exceeds MAX_LOG_SIZE."""
@@ -496,6 +556,199 @@ def update_status(status: str) -> None:
             f.write(f"[{timestamp}] {status}\n")
     except Exception as e:
         log_error(f"Failed to update status file: {e}")
+
+# --- Caching Functions ---
+def read_cache():
+    """Read cached update check results.
+    Returns: (timestamp, package_count, snapshot) or None if cache invalid/missing.
+    """
+    try:
+        if not CACHE_FILE.exists():
+            return None
+        
+        with open(CACHE_FILE, 'r') as f:
+            line = f.read().strip()
+            parts = line.split('|')
+            if len(parts) != 3:
+                return None
+            
+            timestamp_str, pkg_count, snapshot = parts
+            cache_time = datetime.fromisoformat(timestamp_str)
+            
+            # Check if cache is still valid
+            age_minutes = (datetime.now() - cache_time).total_seconds() / 60
+            if age_minutes > CACHE_EXPIRY_MINUTES:
+                log_debug(f"Cache expired (age: {age_minutes:.1f} minutes)")
+                return None
+            
+            log_debug(f"Cache hit (age: {age_minutes:.1f} minutes)")
+            return cache_time, int(pkg_count), snapshot
+    except Exception as e:
+        log_debug(f"Failed to read cache: {e}")
+        return None
+
+def write_cache(package_count: int, snapshot: str) -> None:
+    """Write update check results to cache."""
+    try:
+        timestamp = datetime.now().isoformat()
+        with open(CACHE_FILE, 'w') as f:
+            f.write(f"{timestamp}|{package_count}|{snapshot}")
+        log_debug(f"Cache written: {package_count} packages, snapshot {snapshot}")
+    except Exception as e:
+        log_debug(f"Failed to write cache: {e}")
+
+# --- Snooze Functions ---
+def check_snoozed() -> bool:
+    """Check if updates are currently snoozed.
+    Returns True if snoozed, False otherwise.
+    """
+    try:
+        if not SNOOZE_FILE.exists():
+            return False
+        
+        with open(SNOOZE_FILE, 'r') as f:
+            snooze_until_str = f.read().strip()
+            snooze_until = datetime.fromisoformat(snooze_until_str)
+            
+            if datetime.now() < snooze_until:
+                remaining = snooze_until - datetime.now()
+                hours = remaining.total_seconds() / 3600
+                log_info(f"Updates snoozed for {hours:.1f} more hours")
+                return True
+            else:
+                # Snooze expired, remove file
+                SNOOZE_FILE.unlink()
+                log_info("Snooze expired, removing snooze file")
+                return False
+    except Exception as e:
+        log_debug(f"Failed to check snooze: {e}")
+        return False
+
+def set_snooze(hours: int) -> None:
+    """Set snooze for specified number of hours."""
+    try:
+        snooze_until = datetime.now() + timedelta(hours=hours)
+        with open(SNOOZE_FILE, 'w') as f:
+            f.write(snooze_until.isoformat())
+        log_info(f"Updates snoozed for {hours} hours until {snooze_until.strftime('%Y-%m-%d %H:%M')}")
+    except Exception as e:
+        log_error(f"Failed to set snooze: {e}")
+
+# --- History Logging ---
+def log_update_history(snapshot: str, package_count: int) -> None:
+    """Log update installation to history file."""
+    try:
+        # Rotate history if needed
+        if HISTORY_FILE.exists() and HISTORY_FILE.stat().st_size > MAX_HISTORY_SIZE:
+            backup = HISTORY_FILE.with_suffix(".log.old")
+            if backup.exists():
+                backup.unlink()
+            HISTORY_FILE.rename(backup)
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(HISTORY_FILE, 'a') as f:
+            f.write(f"[{timestamp}] Installed snapshot {snapshot} with {package_count} packages\n")
+        log_info(f"Update history logged: {snapshot}")
+    except Exception as e:
+        log_error(f"Failed to log update history: {e}")
+
+# --- Safety Checks ---
+def check_disk_space() -> tuple[bool, str]:
+    """Check if there's enough disk space for updates.
+    Returns: (has_space, message)
+    """
+    try:
+        result = subprocess.run(
+            ['df', '-BG', '/'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        lines = result.stdout.strip().split('\n')
+        if len(lines) < 2:
+            return True, "Could not determine disk space"
+        
+        # Parse df output: Filesystem 1G-blocks Used Available Use% Mounted
+        fields = lines[1].split()
+        if len(fields) < 4:
+            return True, "Could not parse disk space"
+        
+        available_str = fields[3].rstrip('G')
+        available_gb = int(available_str)
+        
+        if available_gb < 5:
+            msg = f"Only {available_gb}GB free. 5GB required for updates."
+            log_info(msg)
+            return False, msg
+        
+        log_debug(f"Disk space check passed: {available_gb}GB available")
+        return True, f"{available_gb}GB available"
+    except Exception as e:
+        log_debug(f"Disk space check failed: {e}")
+        return True, "Could not check disk space"
+
+def check_snapshots() -> tuple[bool, str]:
+    """Check if snapper is available and configured.
+    Returns: (has_snapshots, message)
+    """
+    try:
+        result = subprocess.run(
+            ['snapper', 'list'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            snapshot_count = len(result.stdout.strip().split('\n')) - 2  # Subtract header lines
+            log_debug(f"Snapper is working, {snapshot_count} snapshots available")
+            return True, f"{snapshot_count} snapshots available"
+        else:
+            msg = "Snapper not configured or no snapshots"
+            log_info(msg)
+            return False, msg
+    except FileNotFoundError:
+        msg = "Snapper not installed"
+        log_info(msg)
+        return False, msg
+    except Exception as e:
+        log_debug(f"Snapshot check failed: {e}")
+        return False, "Could not check snapshots"
+
+def check_network_quality() -> tuple[bool, str]:
+    """Check network latency to ensure stable connection.
+    Returns: (is_good, message)
+    """
+    try:
+        result = subprocess.run(
+            ['ping', '-c', '3', '-W', '2', '1.1.1.1'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            msg = "Network unreachable"
+            log_info(msg)
+            return False, msg
+        
+        # Parse ping output for average latency
+        # Example: rtt min/avg/max/mdev = 10.1/15.2/20.3/5.1 ms
+        match = re.search(r'rtt min/avg/max/mdev = [\d.]+/([\d.]+)/', result.stdout)
+        if match:
+            avg_latency = float(match.group(1))
+            if avg_latency > 200:
+                msg = f"High latency: {avg_latency:.0f}ms"
+                log_info(msg)
+                return False, msg
+            log_debug(f"Network quality good: {avg_latency:.0f}ms latency")
+            return True, f"{avg_latency:.0f}ms latency"
+        
+        log_debug("Network quality check passed (couldn't parse latency)")
+        return True, "Network OK"
+    except Exception as e:
+        log_debug(f"Network quality check failed: {e}")
+        return True, "Could not check network"
 
 # Rotate log at startup if needed
 rotate_log_if_needed()
@@ -935,22 +1188,60 @@ def get_updates():
             log_debug(f"Command stdout: {e.stdout}")
         return None
 
-def parse_output(output):
-    """Parse zypper's output for info."""
+def extract_package_preview(output: str, max_packages: int = 5) -> list:
+    """Extract a preview of packages being updated.
+    Returns list of package names.
+    """
+    packages = []
+    try:
+        # Look for lines that show package upgrades
+        # Format: package-name | version | arch | repository
+        in_upgrade_section = False
+        for line in output.splitlines():
+            line = line.strip()
+            
+            if "packages to upgrade" in line.lower():
+                in_upgrade_section = True
+                continue
+            
+            if in_upgrade_section and "|" in line:
+                # Parse package line
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 1 and parts[0] and not parts[0].startswith("-"):
+                    pkg_name = parts[0]
+                    # Skip header lines
+                    if pkg_name not in ["Name", "Status", "#"]:
+                        packages.append(pkg_name)
+                        if len(packages) >= max_packages:
+                            break
+            
+            # Stop if we hit another section
+            if in_upgrade_section and line and not line.startswith("|") and "|" not in line:
+                if packages:  # Only break if we found some packages
+                    break
+    except Exception as e:
+        log_debug(f"Failed to extract package preview: {e}")
+    
+    return packages
+
+def parse_output(output, include_preview: bool = True):
+    """Parse zypper's output for info.
+    Returns: (title, message, snapshot, package_count) or (None, None, None, 0)
+    """
     log_debug("Parsing zypper output...")
     
     if "Nothing to do." in output:
         log_info("No updates found in zypper output")
-        return None, None
+        return None, None, None, 0
 
     # Count Packages
     count_match = re.search(r"(\d+) packages to upgrade", output)
-    package_count = count_match.group(1) if count_match else "0"
+    package_count = int(count_match.group(1)) if count_match else 0
     
     # If no packages found or count is 0, return None
-    if package_count == "0":
+    if package_count == 0:
         log_info("No packages to upgrade (count is 0)")
-        return None, None
+        return None, None, None, 0
 
     # Find Snapshot
     snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb-]+)", output)
@@ -961,35 +1252,72 @@ def parse_output(output):
     # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
 
-    if package_count == "1":
-        message = "1 update is pending. Click 'Install' to begin."
+    if package_count == 1:
+        message = "1 update is pending."
     else:
-        message = f"{package_count} updates are pending. Click 'Install' to begin."
+        message = f"{package_count} updates are pending."
+    
+    # Add package preview if requested
+    if include_preview and package_count > 0:
+        preview_packages = extract_package_preview(output, max_packages=3)
+        if preview_packages:
+            preview_str = ", ".join(preview_packages)
+            if len(preview_packages) < package_count:
+                preview_str += f", and {package_count - len(preview_packages)} more"
+            message += f"\n\nIncluding: {preview_str}"
 
-    return title, message
+    return title, message, snapshot, package_count
 
-def on_action(notification, action_id, user_data_script):
-    """Callback to run when the button is clicked."""
-    log_info("User clicked Install button")
-    update_status("User initiated update installation")
-    try:
-        # Prefer to launch via systemd-run so the process is clearly
-        # associated with the user session and not tied to this script.
+def on_action(notification, action_id, user_data):
+    """Callback to run when an action button is clicked."""
+    log_info(f"User clicked action: {action_id}")
+    
+    if action_id == "install":
+        update_status("User initiated update installation")
+        action_script = user_data
         try:
-            log_debug(f"Launching install script via systemd-run: {user_data_script}")
-            subprocess.Popen([
-                "systemd-run",
-                "--user",
-                "--scope",
-                user_data_script,
-            ])
-        except FileNotFoundError:
-            # Fallback: run the script directly if systemd-run is not available.
-            log_debug(f"Launching install script directly: {user_data_script}")
-            subprocess.Popen([user_data_script])
-        log_info("Install script launched successfully")
-    except Exception as e:
-        log_error(f"Failed to launch action script: {e}")
+            # Prefer to launch via systemd-run so the process is clearly
+            # associated with the user session and not tied to this script.
+            try:
+                log_debug(f"Launching install script via systemd-run: {action_script}")
+                subprocess.Popen([
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    action_script,
+                ])
+            except FileNotFoundError:
+                # Fallback: run the script directly if systemd-run is not available.
+                log_debug(f"Launching install script directly: {action_script}")
+                subprocess.Popen([action_script])
+            log_info("Install script launched successfully")
+        except Exception as e:
+            log_error(f"Failed to launch action script: {e}")
+    
+    elif action_id == "snooze-1h":
+        set_snooze(1)
+        update_status("Updates snoozed for 1 hour")
+    
+    elif action_id == "snooze-4h":
+        set_snooze(4)
+        update_status("Updates snoozed for 4 hours")
+    
+    elif action_id == "snooze-1d":
+        set_snooze(24)
+        update_status("Updates snoozed for 1 day")
+    
+    elif action_id == "view-changes":
+        log_info("User clicked View Changes button")
+        update_status("User viewing update details")
+        view_script = os.path.expanduser("~/.local/bin/zypper-view-changes")
+        try:
+            subprocess.Popen([view_script])
+            log_info("View changes script launched")
+        except Exception as e:
+            log_error(f"Failed to launch view changes script: {e}")
+        # Don't close notification or quit loop for view changes
+        return
+    
     notification.close()
     GLib.MainLoop().quit()
 
@@ -1022,13 +1350,22 @@ def main():
                         return  # Exit, will check again next minute
                     
                     elif status.startswith("downloading:"):
-                        # Extract package count from "downloading:45" format
+                        # Extract package count and download size from "downloading:45:123.4 MiB" format
                         try:
-                            pkg_count = status.split(":")[1]
-                            log_info(f"Stage: Downloading {pkg_count} packages")
+                            parts = status.split(":")
+                            pkg_count = parts[1] if len(parts) > 1 else "?"
+                            download_size = parts[2] if len(parts) > 2 else "unknown size"
+                            
+                            log_info(f"Stage: Downloading {pkg_count} packages ({download_size})")
+                            
+                            if download_size and download_size != "unknown":
+                                msg = f"Downloading {pkg_count} packages ({download_size}) in the background."
+                            else:
+                                msg = f"Downloading {pkg_count} packages in the background."
+                            
                             n = Notify.Notification.new(
                                 "Downloading updates...",
-                                f"Downloading {pkg_count} packages in the background.",
+                                msg,
                                 "emblem-downloads"
                             )
                         except:
@@ -1046,6 +1383,34 @@ def main():
                         time.sleep(0.5)
                         return  # Exit, will check again next minute
                     
+                    elif status.startswith("complete:"):
+                        # Extract duration from "complete:123" format (seconds)
+                        try:
+                            duration = int(status.split(":")[1])
+                            minutes = duration // 60
+                            seconds = duration % 60
+                            
+                            if minutes > 0:
+                                time_str = f"{minutes}m {seconds}s"
+                            else:
+                                time_str = f"{seconds}s"
+                            
+                            log_info(f"Download completed in {time_str}")
+                            n = Notify.Notification.new(
+                                "Downloads complete",
+                                f"Updates downloaded in {time_str}. Ready to install.",
+                                "emblem-default"
+                            )
+                            n.set_timeout(10000)  # 10 seconds
+                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
+                            n.show()
+                            import time
+                            time.sleep(0.5)
+                            # Continue to show install notification below
+                        except:
+                            log_debug("Could not parse completion time")
+                            # Continue to show install notification below
+                    
                     elif status == "idle":
                         log_debug("Status is idle (no updates to download)")
                         # Continue to normal check below
@@ -1053,6 +1418,19 @@ def main():
             except Exception as e:
                 log_debug(f"Could not read download status: {e}")
 
+        # Check if updates are snoozed
+        if check_snoozed():
+            log_info("Updates are currently snoozed, skipping notification")
+            return
+        
+        # Run safety checks before proceeding
+        has_space, space_msg = check_disk_space()
+        has_snapshots, snapshot_msg = check_snapshots()
+        net_ok, net_msg = check_network_quality()
+        
+        # Log safety check results
+        log_info(f"Safety checks: disk={space_msg}, snapshots={snapshot_msg}, network={net_msg}")
+        
         output = get_updates()
 
         # If get_updates() failed with a real error (not just zypper lock), show error notification
@@ -1076,7 +1454,7 @@ def main():
             log_info("No zypper run performed (environment not safe). Exiting.")
             return
 
-        title, message = parse_output(output)
+        title, message, snapshot, package_count = parse_output(output)
         if not title:
             # No updates available: show an informational popup instead of staying silent
             log_info("System is up-to-date. Showing 'no updates found' notification.")
@@ -1089,9 +1467,24 @@ def main():
             n.set_timeout(10000)  # 10 seconds
             n.show()
             return
+        
+        # Write cache for future checks
+        write_cache(package_count, snapshot)
 
         log_info("Updates are pending. Sending 'updates ready' reminder.")
         update_status(f"Updates available: {title}")
+        
+        # Add safety warnings to message if needed
+        warnings = []
+        if not has_space:
+            warnings.append(f"⚠️ {space_msg}")
+        if not has_snapshots:
+            warnings.append(f"ℹ️ {snapshot_msg}")
+        if not net_ok:
+            warnings.append(f"⚠️ {net_msg}")
+        
+        if warnings:
+            message += "\n\n" + "\n".join(warnings)
 
         # Check if this notification is different from the last one
         last_notification = _read_last_notification()
@@ -1117,10 +1510,14 @@ def main():
         n.set_hint("desktop-entry", GLib.Variant("s", "zypper-updater"))
         n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-updates"))
 
-        # Add the button
-        n.add_action("default", "Install", on_action, action_script)
+        # Add action buttons
+        n.add_action("install", "Install Now", on_action, action_script)
+        n.add_action("view-changes", "View Changes", on_action, None)
+        n.add_action("snooze-1h", "Snooze 1h", on_action, None)
+        n.add_action("snooze-4h", "Snooze 4h", on_action, None)
+        n.add_action("snooze-1d", "Snooze 1 day", on_action, None)
 
-        log_info("Displaying persistent update notification with Install button (replaces previous)")
+        log_info("Displaying persistent update notification with Install and Snooze buttons (replaces previous)")
         n.show()
         
         # Keep the script running with a GLib main loop so the notification persists
@@ -1251,6 +1648,73 @@ EOF
 chown "$SUDO_USER:$SUDO_USER" "${INSTALL_SCRIPT_PATH}"
 chmod +x "${INSTALL_SCRIPT_PATH}"
 log_success "Install helper script created and made executable"
+
+# --- 11b. Create View Changes Script ---
+log_info ">>> Creating (user) view changes script: ${VIEW_CHANGES_SCRIPT_PATH}"
+update_status "Creating view changes helper script..."
+log_debug "Writing view changes script to: ${VIEW_CHANGES_SCRIPT_PATH}"
+cat << 'EOF' > "${VIEW_CHANGES_SCRIPT_PATH}"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Script to view detailed package changes
+TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
+
+VIEW_CHANGES() {
+    echo ""
+    echo "=========================================="
+    echo "  Package Update Details"
+    echo "=========================================="
+    echo ""
+    echo "Fetching update information..."
+    echo ""
+    
+    # Run zypper with details
+    if pkexec zypper --non-interactive dup --dry-run --details; then
+        echo ""
+        echo "=========================================="
+        echo ""
+        echo "This is a preview of what will be updated."
+        echo "Click 'Install Now' in the notification to proceed."
+        echo ""
+    else
+        echo "⚠️  Could not fetch update details."
+        echo ""
+    fi
+    
+    echo "Press Enter to close this window..."
+    read -r
+}
+
+export -f VIEW_CHANGES
+
+# Run in a terminal
+for term in "${TERMINALS[@]}"; do
+    if command -v "$term" >/dev/null 2>&1; then
+        case "$term" in
+            konsole)
+                konsole --hold -e bash -c "VIEW_CHANGES"
+                exit 0
+                ;;
+            gnome-terminal)
+                gnome-terminal -- bash -c "VIEW_CHANGES"
+                exit 0
+                ;;
+            kitty|alacritty|xterm)
+                "$term" -e bash -c "VIEW_CHANGES"
+                exit 0
+                ;;
+        esac
+    fi
+done
+
+# Fallback
+VIEW_CHANGES
+EOF
+
+chown "$SUDO_USER:$SUDO_USER" "${VIEW_CHANGES_SCRIPT_PATH}"
+chmod +x "${VIEW_CHANGES_SCRIPT_PATH}"
+log_success "View changes helper script created and made executable"
 
 # --- 12. Final self-check ---
 log_info ">>> Final syntax self-check..."
