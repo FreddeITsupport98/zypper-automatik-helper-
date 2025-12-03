@@ -340,8 +340,8 @@ StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
 ExecStartPre=/bin/sh -c 'echo "refreshing" > ${LOG_DIR}/download-status.txt; date +%s > ${LOG_DIR}/download-start-time.txt'
 ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); DOWNLOAD_SIZE=\$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "\$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown"); echo "downloading:\$PKG_COUNT:\$DOWNLOAD_SIZE" > ${LOG_DIR}/download-status.txt; /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only || true; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
-ExecStartPost=/bin/sh -c 'STATUS=\$(cat ${LOG_DIR}/download-status.txt 2>/dev/null || echo "idle"); if echo "\$STATUS" | grep -q "^downloading:"; then START_TIME=\$(cat ${LOG_DIR}/download-start-time.txt 2>/dev/null || date +%s); END_TIME=\$(date +%s); DURATION=\$((END_TIME - START_TIME)); echo "complete:\$DURATION" > ${LOG_DIR}/download-status.txt; fi'
+ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); DOWNLOAD_SIZE=\$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "\$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown"); echo "downloading:\$PKG_COUNT:\$DOWNLOAD_SIZE" > ${LOG_DIR}/download-status.txt; START_TIME=\$(cat ${LOG_DIR}/download-start-time.txt 2>/dev/null || date +%s); /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only || true; END_TIME=\$(date +%s); DURATION=\$((END_TIME - START_TIME)); echo "complete:\$DURATION" > ${LOG_DIR}/download-status.txt; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
+ExecStartPost=/bin/sh -c 'echo "finished" >> ${LOG_DIR}/download-status.txt'
 EOF
 log_success "Downloader service file created"
 
@@ -1311,10 +1311,19 @@ def on_action(notification, action_id, user_data):
         update_status("User viewing update details")
         view_script = os.path.expanduser("~/.local/bin/zypper-view-changes")
         try:
-            subprocess.Popen([view_script])
-            log_info("View changes script launched")
+            # Make sure the script is executable
+            import stat
+            if os.path.exists(view_script):
+                os.chmod(view_script, os.stat(view_script).st_mode | stat.S_IEXEC)
+                log_debug(f"Launching view changes script: {view_script}")
+                subprocess.Popen([view_script], start_new_session=True)
+                log_info("View changes script launched successfully")
+            else:
+                log_error(f"View changes script not found: {view_script}")
         except Exception as e:
             log_error(f"Failed to launch view changes script: {e}")
+            import traceback
+            log_debug(f"Traceback: {traceback.format_exc()}")
         # Don't close notification or quit loop for view changes
         return
     
@@ -1325,6 +1334,11 @@ def main():
     try:
         log_debug("Initializing notification system...")
         Notify.init("zypper-updater")
+        
+        # Check if updates are snoozed FIRST - skip all notifications if snoozed
+        if check_snoozed():
+            log_info("Updates are currently snoozed, skipping all notifications")
+            return
         
         # Check if downloader is actively downloading updates
         download_status_file = "/var/log/zypper-auto/download-status.txt"
@@ -1359,12 +1373,12 @@ def main():
                             log_info(f"Stage: Downloading {pkg_count} packages ({download_size})")
                             
                             if download_size and download_size != "unknown":
-                                msg = f"Downloading {pkg_count} packages ({download_size}) in the background."
+                                msg = f"Downloading {pkg_count} packages ({download_size}) in the background.\n\nYou'll be notified when complete."
                             else:
-                                msg = f"Downloading {pkg_count} packages in the background."
+                                msg = f"Downloading {pkg_count} packages in the background.\n\nYou'll be notified when complete."
                             
                             n = Notify.Notification.new(
-                                "Downloading updates...",
+                                "⬇️ Downloading updates...",
                                 msg,
                                 "emblem-downloads"
                             )
@@ -1397,15 +1411,22 @@ def main():
                             
                             log_info(f"Download completed in {time_str}")
                             n = Notify.Notification.new(
-                                "Downloads complete",
-                                f"Updates downloaded in {time_str}. Ready to install.",
+                                "✅ Downloads Complete!",
+                                f"Updates downloaded successfully in {time_str}.\n\nPackages are ready to install.",
                                 "emblem-default"
                             )
-                            n.set_timeout(10000)  # 10 seconds
-                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
+                            n.set_timeout(15000)  # 15 seconds - show longer
+                            n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
+                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
                             n.show()
                             import time
-                            time.sleep(0.5)
+                            time.sleep(1)  # Wait a bit before continuing
+                            # Clear the complete status so it doesn't show again
+                            try:
+                                with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                    f.write("idle")
+                            except:
+                                pass
                             # Continue to show install notification below
                         except:
                             log_debug("Could not parse completion time")
@@ -1418,11 +1439,6 @@ def main():
             except Exception as e:
                 log_debug(f"Could not read download status: {e}")
 
-        # Check if updates are snoozed
-        if check_snoozed():
-            log_info("Updates are currently snoozed, skipping notification")
-            return
-        
         # Run safety checks before proceeding
         has_space, space_msg = check_disk_space()
         has_snapshots, snapshot_msg = check_snapshots()
@@ -1510,12 +1526,12 @@ def main():
         n.set_hint("desktop-entry", GLib.Variant("s", "zypper-updater"))
         n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-updates"))
 
-        # Add action buttons
+        # Add action buttons with shorter labels
         n.add_action("install", "Install Now", on_action, action_script)
         n.add_action("view-changes", "View Changes", on_action, None)
-        n.add_action("snooze-1h", "Snooze 1h", on_action, None)
-        n.add_action("snooze-4h", "Snooze 4h", on_action, None)
-        n.add_action("snooze-1d", "Snooze 1 day", on_action, None)
+        n.add_action("snooze-1h", "1h", on_action, None)
+        n.add_action("snooze-4h", "4h", on_action, None)
+        n.add_action("snooze-1d", "1d", on_action, None)
 
         log_info("Displaying persistent update notification with Install and Snooze buttons (replaces previous)")
         n.show()
