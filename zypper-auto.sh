@@ -333,15 +333,15 @@ After=network-online.target nss-lookup.target
 
 [Service]
 Type=oneshot
-IOSchedulingClass=idle
-IOSchedulingPriority=7
-Nice=19
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+Nice=-20
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
 ExecStartPre=/bin/sh -c 'echo "refreshing" > ${LOG_DIR}/download-status.txt; date +%s > ${LOG_DIR}/download-start-time.txt'
-ExecStart=/usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); DOWNLOAD_SIZE=\$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "\$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown"); echo "downloading:\$PKG_COUNT:\$DOWNLOAD_SIZE" > ${LOG_DIR}/download-status.txt; START_TIME=\$(cat ${LOG_DIR}/download-start-time.txt 2>/dev/null || date +%s); /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only || true; END_TIME=\$(date +%s); DURATION=\$((END_TIME - START_TIME)); echo "complete:\$DURATION" > ${LOG_DIR}/download-status.txt; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
-ExecStartPost=/bin/sh -c 'echo "finished" >> ${LOG_DIR}/download-status.txt'
+ExecStart=/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh
+ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); DOWNLOAD_SIZE=\$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "\$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown"); echo "downloading:\$PKG_COUNT:\$DOWNLOAD_SIZE:0" > ${LOG_DIR}/download-status.txt; /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; START_TIME=\$(cat ${LOG_DIR}/download-start-time.txt 2>/dev/null || date +%s); END_TIME=\$(date +%s); DURATION=\$((END_TIME - START_TIME)); echo "complete:\$DURATION" > ${LOG_DIR}/download-status.txt; sleep 30; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
+ExecStartPost=/bin/sh -c 'STATUS=\$(cat ${LOG_DIR}/download-status.txt); if [ "\$STATUS" = "complete" ] || echo "\$STATUS" | grep -q "^complete:"; then sleep 5; fi'
 EOF
 log_success "Downloader service file created"
 
@@ -434,6 +434,111 @@ USER_LOG_DIR="$SUDO_USER_HOME/.local/share/zypper-notify"
 log_debug "Creating user log directory: $USER_LOG_DIR"
 mkdir -p "$USER_LOG_DIR"
 chown -R "$SUDO_USER:$SUDO_USER" "$USER_LOG_DIR"
+
+# --- 7b. Create Zypper Wrapper for Manual Updates ---
+log_info ">>> Creating zypper wrapper script for manual updates..."
+update_status "Creating zypper wrapper..."
+ZYPPER_WRAPPER_PATH="$USER_BIN_DIR/zypper-with-ps"
+log_debug "Writing zypper wrapper to: $ZYPPER_WRAPPER_PATH"
+cat << 'EOF' > "$ZYPPER_WRAPPER_PATH"
+#!/usr/bin/env bash
+# Zypper wrapper that automatically runs 'zypper ps -s' after 'zypper dup'
+# This shows which services need restarting after updates
+
+# Check if we're running 'dup' or 'dist-upgrade'
+if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
+    # Run the actual zypper command
+    sudo /usr/bin/zypper "$@"
+    EXIT_CODE=$?
+    
+    # If zypper succeeded, show service restart info
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo ""
+        echo "=========================================="
+        echo "  Post-Update Service Check"
+        echo "=========================================="
+        echo ""
+        echo "Checking which services need to be restarted..."
+        echo ""
+        
+        # Run zypper ps -s to show services using old libraries
+        ZYPPER_PS_OUTPUT=$(sudo /usr/bin/zypper ps -s 2>/dev/null)
+        echo "$ZYPPER_PS_OUTPUT"
+        
+        # Check if there are any running processes
+        if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
+            echo ""
+            echo "ℹ️  Services listed above are using old library versions."
+            echo ""
+            echo "What this means:"
+            echo "  • These services/processes are still running old code in memory"
+            echo "  • They should be restarted to use the updated libraries"
+            echo ""
+            echo "Options:"
+            echo "  1. Restart individual services: systemctl restart <service>"
+            echo "  2. Reboot your system (recommended for kernel/system updates)"
+            echo ""
+        else
+            echo "✅ No services require restart. You're all set!"
+            echo ""
+        fi
+    fi
+    
+    exit $EXIT_CODE
+else
+    # Not a dup command, just run zypper normally
+    sudo /usr/bin/zypper "$@"
+fi
+EOF
+chown "$SUDO_USER:$SUDO_USER" "$ZYPPER_WRAPPER_PATH"
+chmod +x "$ZYPPER_WRAPPER_PATH"
+log_success "Zypper wrapper script created and made executable"
+
+# Add shell alias/function to user's shell config
+log_info ">>> Adding zypper alias to shell configurations..."
+update_status "Configuring shell aliases..."
+
+# Bash configuration
+if [ -f "$SUDO_USER_HOME/.bashrc" ]; then
+    log_debug "Adding zypper alias to .bashrc"
+    # Remove old alias if it exists
+    sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.bashrc"
+    sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.bashrc"
+    # Add new alias
+    echo "" >> "$SUDO_USER_HOME/.bashrc"
+    echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.bashrc"
+    echo "alias zypper='$ZYPPER_WRAPPER_PATH'" >> "$SUDO_USER_HOME/.bashrc"
+    chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.bashrc"
+    log_success "Added zypper alias to .bashrc"
+fi
+
+# Fish configuration
+if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
+    log_debug "Adding zypper alias to fish config"
+    FISH_CONFIG_DIR="$SUDO_USER_HOME/.config/fish/conf.d"
+    mkdir -p "$FISH_CONFIG_DIR"
+    FISH_ALIAS_FILE="$FISH_CONFIG_DIR/zypper-wrapper.fish"
+    echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)" > "$FISH_ALIAS_FILE"
+    echo "alias zypper='$ZYPPER_WRAPPER_PATH'" >> "$FISH_ALIAS_FILE"
+    chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config/fish"
+    log_success "Added zypper alias to fish config"
+fi
+
+# Zsh configuration
+if [ -f "$SUDO_USER_HOME/.zshrc" ]; then
+    log_debug "Adding zypper alias to .zshrc"
+    # Remove old alias if it exists
+    sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.zshrc"
+    sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.zshrc"
+    # Add new alias
+    echo "" >> "$SUDO_USER_HOME/.zshrc"
+    echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.zshrc"
+    echo "alias zypper='$ZYPPER_WRAPPER_PATH'" >> "$SUDO_USER_HOME/.zshrc"
+    chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.zshrc"
+    log_success "Added zypper alias to .zshrc"
+fi
+
+log_success "Shell aliases configured. Restart your shell or run 'source ~/.bashrc' (or equivalent) to activate."
 
 # --- 8. Create/Update NOTIFIER (User Service) ---
 log_info ">>> Creating (user) notifier service: ${NT_SERVICE_FILE}"
@@ -1364,31 +1469,42 @@ def main():
                         return  # Exit, will check again next minute
                     
                     elif status.startswith("downloading:"):
-                        # Extract package count and download size from "downloading:45:123.4 MiB" format
+                        # Extract package count and download size from "downloading:45:123.4 MiB:progress" format
                         try:
                             parts = status.split(":")
                             pkg_count = parts[1] if len(parts) > 1 else "?"
                             download_size = parts[2] if len(parts) > 2 else "unknown size"
+                            progress = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else -1
                             
                             log_info(f"Stage: Downloading {pkg_count} packages ({download_size})")
                             
                             if download_size and download_size != "unknown":
-                                msg = f"Downloading {pkg_count} packages ({download_size}) in the background.\n\nYou'll be notified when complete."
+                                msg = f"Downloading {pkg_count} packages ({download_size})\nRunning at HIGH priority."
                             else:
-                                msg = f"Downloading {pkg_count} packages in the background.\n\nYou'll be notified when complete."
+                                msg = f"Downloading {pkg_count} packages\nRunning at HIGH priority."
                             
                             n = Notify.Notification.new(
-                                "⬇️ Downloading updates...",
+                                "Downloading updates...",
                                 msg,
                                 "emblem-downloads"
                             )
-                        except:
+                            
+                            # Add progress bar hint (0-100, -1 for indeterminate)
+                            if progress >= 0 and progress <= 100:
+                                n.set_hint("value", GLib.Variant("i", progress))
+                            else:
+                                # Indeterminate progress (pulsing animation)
+                                n.set_hint("value", GLib.Variant("i", 50))
+                        except Exception as e:
+                            log_debug(f"Error parsing download status: {e}")
                             log_info("Stage: Downloading packages")
                             n = Notify.Notification.new(
                                 "Downloading updates...",
-                                "Background download is in progress.",
+                                "Background download is in progress at HIGH priority.",
                                 "emblem-downloads"
                             )
+                            n.set_hint("value", GLib.Variant("i", 50))
+                        
                         n.set_timeout(5000)  # 5 seconds
                         # Set hint to replace previous download status notifications
                         n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
@@ -1410,9 +1526,30 @@ def main():
                                 time_str = f"{seconds}s"
                             
                             log_info(f"Download completed in {time_str}")
+                            
+                            # Get changelog preview by running zypper dup --dry-run
+                            changelog_msg = f"Updates downloaded successfully in {time_str}.\n\nPackages are ready to install."
+                            try:
+                                log_debug("Fetching update details for changelog preview...")
+                                result = subprocess.run(
+                                    ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30
+                                )
+                                if result.returncode == 0:
+                                    # Extract package preview
+                                    preview_packages = extract_package_preview(result.stdout, max_packages=5)
+                                    if preview_packages:
+                                        preview_str = ", ".join(preview_packages)
+                                        changelog_msg = f"Updates downloaded successfully in {time_str}.\n\nIncluding: {preview_str}\n\nPackages are ready to install."
+                                        log_info(f"Added changelog preview: {preview_str}")
+                            except Exception as e:
+                                log_debug(f"Could not fetch changelog preview: {e}")
+                            
                             n = Notify.Notification.new(
                                 "✅ Downloads Complete!",
-                                f"Updates downloaded successfully in {time_str}.\n\nPackages are ready to install.",
+                                changelog_msg,
                                 "emblem-default"
                             )
                             n.set_timeout(15000)  # 15 seconds - show longer
