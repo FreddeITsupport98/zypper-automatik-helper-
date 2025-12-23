@@ -18,32 +18,53 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v50 Architecture)
+## ✨ Key Features (v51 Architecture)
 
+* **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
+    * Auto-installed to `/usr/local/bin/zypper-auto-helper`
+    * Shell aliases automatically configured for Bash, Zsh, and Fish
+    * Commands: `--verify`, `--repair`, `--diagnose`, `--check`, `--help`
+* **Advanced Verification & Auto-Repair (v51):** Comprehensive 12-point health check system:
+    * Verifies services, scripts, permissions, processes, and cache
+    * Multi-stage auto-repair with retry logic (up to 3 attempts per issue)
+    * Deep health checks: active + enabled + triggers scheduled
+    * Nuclear options for complete service resets when needed
+    * Accessible via `zypper-auto-helper --verify` after installation
+* **Real-Time Download Progress (v51):** Enhanced progress tracking with visual feedback:
+    * Updates every 5 seconds with current package count and percentage
+    * Intelligent cache detection (doesn't notify if packages already cached)
+    * Progress bar in notifications showing download percentage
+    * High-priority downloads (nice -20, ionice realtime)
+* **Smart Notification Management (v51):** Prevents notification spam:
+    * Synchronous notification IDs prevent duplicate popups
+    * "No updates" notification shown only once until state changes
+    * Download status notifications replace each other smoothly
+* **Manual Update Wrapper (v51):** Automatic post-update checks for manual updates:
+    * Wraps `sudo zypper dup` command automatically
+    * Runs `zypper ps -s` after successful updates
+    * Provides guidance on service restarts and reboots
+    * Works across all shells (Bash, Zsh, Fish)
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
 * **Stage-Based Download Progress (v50):** Real-time notifications showing download stages:
     * **"Checking for updates..."** - Refreshing repositories
-    * **"Downloading updates... (X packages)"** - Active download with package count
-    * **"Updates Ready to Install"** - Download complete, ready to apply
+    * **"Downloading updates... (X of Y packages)"** - Active download with real-time progress
+    * **"✅ Downloads Complete!"** - Download finished with duration and package preview
+    * **"Updates Ready to Install"** - Ready to apply with snapshot info
 * **Smart Download Detection (v49):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications.
 * **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
 * **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives.
 * **Fixed Battery Detection (v48):** Corrected logic that was incorrectly identifying laptops as desktops, now properly detects batteries via `inxi` output.
-* **Persistent Notifications (v48):** Update notifications now persist until user interaction or timeout (5 minutes) by keeping a GLib main loop active.
+* **Persistent Notifications (v48):** Update notifications now persist until user interaction or timeout by keeping a GLib main loop active.
 * **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
-* **Persistent Reminders:** The user notifier service runs on a configurable schedule (default: *aggressive* every minute) and will remind you whenever updates are pending.
-* **Hybrid Refresh Logic:**
-    * If it's unsafe (on battery or metered), it **skips `zypper refresh`** and only checks the existing cache via `zypper dup --dry-run`.
-    * If it's safe, it runs a full `zypper refresh` first, then `zypper dup --dry-run`.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v50) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v51) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v50 Architecture
+## 🛠️ How It Works: The v51 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -116,16 +137,32 @@ The script is idempotent. You can run this on a fresh install *or* on a PC with 
     ```bash
     chmod +x zypper-auto.sh
     ```
-3.  Run it with `sudo`. The script will handle all cleanup, dependency checks, and the installation of the root service.
+3.  Run it with `sudo`. The script will handle everything automatically:
     ```bash
-    sudo ./zypper-auto.sh
-    ```
-4.  **Crucial Final Step:** The installer cannot enable user-level services. You must run this command **as your regular user** (do not use `sudo`) to enable the notifier timer:
-    ```bash
-    systemctl --user daemon-reload && systemctl --user enable --now zypper-notify-user.timer
+    sudo ./zypper-auto.sh install
     ```
 
-You're done! The root downloader is enabled, and the user notifier is ready.
+**That's it!** The installer now:
+- Installs the `zypper-auto-helper` command to `/usr/local/bin`
+- Adds shell aliases to your `.bashrc`, `.zshrc`, or Fish config
+- Enables both root and user services automatically
+- Runs comprehensive verification and auto-repair
+- Reports any issues and fixes them automatically
+
+### Using the Installed Command
+
+After installation (restart your shell or run `source ~/.bashrc`), you can use:
+
+```bash
+zypper-auto-helper --help          # Show help
+zypper-auto-helper --verify        # Run health check and auto-repair
+zypper-auto-helper --repair        # Alias for --verify
+zypper-auto-helper --diagnose      # Alias for --verify
+zypper-auto-helper --check         # Syntax check only
+zypper-auto-helper install         # Reinstall/upgrade
+```
+
+The command automatically includes `sudo` when needed, so you don't need to type it.
 
 -----
 
@@ -139,14 +176,20 @@ You're done! The root downloader is enabled, and the user notifier is ready.
 
 ### Quick Status Check
 
-You can check the current status at any time without running commands:
+You can check the current status at any time:
 
 ```bash
+# Run comprehensive health check and auto-repair (v51)
+zypper-auto-helper --verify
+
 # Check installation/system status
 cat /var/log/zypper-auto/last-status.txt
 
 # Check notifier status
 cat ~/.local/share/zypper-notify/last-run-status.txt
+
+# Check download progress
+cat /var/log/zypper-auto/download-status.txt
 ```
 
 ### Debugging
@@ -401,6 +444,16 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v51** (2025-12-23): **Major Update - Command-Line Interface & Advanced Diagnostics**
+  - ✨ **NEW: `zypper-auto-helper` command** - Installed to `/usr/local/bin` with automatic shell aliases
+  - 🔧 **NEW: Advanced Verification System** - 12-point health check with multi-stage auto-repair
+  - 🚀 **NEW: Real-Time Progress** - Download notifications update every 5 seconds with progress bar
+  - 🎯 **NEW: Smart Cache Detection** - Doesn't notify about downloads if packages already cached
+  - 🔄 **NEW: Manual Update Wrapper** - `sudo zypper dup` automatically runs post-update checks
+  - 🚫 **NEW: Duplicate Prevention** - Synchronous notification IDs prevent popup spam
+  - ⚡ **IMPROVED: High-Priority Downloads** - nice -20 and ionice realtime for faster downloads
+  - 🛠️ **IMPROVED: Installation** - Fully automatic, no manual user service enabling required
+  - 📊 **IMPROVED: Status Tracking** - Better progress reporting with percentage and package count
 - **v50** (2025-11-20): Added stage-based download notifications with package count display
 - **v49** (2025-11-20): Smart download detection - only notifies when updates are actually being downloaded
 - **v48** (2025-11-20): Fixed battery detection logic (laptops no longer misidentified as desktops) and notification persistence (popups no longer disappear instantly)
@@ -418,6 +471,7 @@ systemctl status zypper-autodownload.service
 ```bash
 # 1. Stop and disable the root timer
 sudo systemctl disable --now zypper-autodownload.timer
+sudo systemctl disable --now zypper-cache-cleanup.timer
 
 # 2. Stop and disable the user timer (run as regular user)
 systemctl --user disable --now zypper-notify-user.timer
@@ -425,12 +479,26 @@ systemctl --user disable --now zypper-notify-user.timer
 # 3. Remove all systemd files and scripts
 sudo rm /etc/systemd/system/zypper-autodownload.service
 sudo rm /etc/systemd/system/zypper-autodownload.timer
+sudo rm /etc/systemd/system/zypper-cache-cleanup.service
+sudo rm /etc/systemd/system/zypper-cache-cleanup.timer
+sudo rm /usr/local/bin/zypper-download-with-progress
+sudo rm /usr/local/bin/zypper-auto-helper
 
 # Replace $HOME with your actual home directory (or run as regular user)
 rm -f $HOME/.config/systemd/user/zypper-notify-user.service
 rm -f $HOME/.config/systemd/user/zypper-notify-user.timer
 rm -f $HOME/.local/bin/zypper-notify-updater.py
 rm -f $HOME/.local/bin/zypper-run-install
+rm -f $HOME/.local/bin/zypper-with-ps
+rm -f $HOME/.local/bin/zypper-view-changes
+rm -f $HOME/.config/fish/conf.d/zypper-wrapper.fish
+rm -f $HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish
+
+# Remove shell aliases from config files
+sed -i '/# Zypper wrapper for auto service check/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+sed -i '/alias zypper=/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+sed -i '/# zypper-auto-helper command alias/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+sed -i '/alias zypper-auto-helper=/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
 
 # 4. (Optional) Remove logs
 sudo rm -rf /var/log/zypper-auto
