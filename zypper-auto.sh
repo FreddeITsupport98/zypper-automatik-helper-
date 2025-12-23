@@ -183,12 +183,56 @@ run_self_check() {
     update_status "Syntax checks completed successfully"
 }
 
+# Show help if requested
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+    echo "Zypper Auto-Helper - Installation and Maintenance Tool"
+    echo ""
+    echo "Usage: sudo $0 [COMMAND]"
+    echo ""
+    echo "Commands:"
+    echo "  install           Install or update the zypper auto-updater system (default)"
+    echo "  --verify          Run verification and auto-repair checks"
+    echo "  --repair          Same as --verify (alias)"
+    echo "  --diagnose        Same as --verify (alias)"
+    echo "  --check           Run syntax checks only"
+    echo "  --self-check      Same as --check (alias)"
+    echo "  --help            Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  sudo $0 install              # Full installation"
+    echo "  sudo $0 --verify             # Check system health and auto-fix issues"
+    echo "  sudo $0 --check              # Verify script syntax"
+    echo ""
+    echo "Verification checks (--verify):"
+    echo "  - System/user services active and enabled"
+    echo "  - Python scripts executable and valid syntax"
+    echo "  - Shell wrappers installed correctly"
+    echo "  - No stale processes or bytecode cache"
+    echo "  - Auto-repairs most common issues"
+    echo ""
+    exit 0
+fi
+
 # Optional mode: only run self-check and exit
 if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     log_info "Self-check mode requested"
     run_self_check
     log_success "Self-check mode completed"
     exit 0
+fi
+
+# Optional mode: run verification and auto-repair
+if [[ "${1:-}" == "--verify" || "${1:-}" == "--repair" || "${1:-}" == "--diagnose" ]]; then
+    log_info "Verification and auto-repair mode requested"
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  Zypper Auto-Helper - Verification Mode" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    
+    # Set a flag to skip to verification section
+    VERIFICATION_ONLY_MODE=1
+    # We'll jump to the verification section after defining all variables
 fi
 
 # --- Helper function to check and install ---
@@ -226,6 +270,19 @@ check_and_install() {
         log_success "Command '$cmd' found"
     fi
 }
+
+# Skip installation if we're only verifying
+if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
+    log_info "Skipping installation steps - verification mode"
+    # Need to set DOWNLOADER_SCRIPT path for verification
+    DOWNLOADER_SCRIPT="/usr/local/bin/zypper-download-with-progress"
+    ZYPPER_WRAPPER_PATH="$USER_BIN_DIR/zypper-with-ps"
+    USER_LOG_DIR="$SUDO_USER_HOME/.local/share/zypper-notify"
+    USER_BUS_PATH="unix:path=/run/user/$(id -u "$SUDO_USER")/bus"
+    # Jump to verification section (we'll use a function)
+    run_verification_only
+    exit $?
+fi
 
 # --- 2b. Dependency Checks ---
 update_status "Checking dependencies..."
@@ -2065,28 +2122,149 @@ else
     log_info "  systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 fi
 
-# --- 14. Installation Verification ---
-log_info ">>> Running installation verification checks..."
-update_status "Verifying installation..."
+# --- Function: Run Verification (used by both install and --verify modes) ---
+run_verification_only() {
+    # This function contains all the verification logic
+    # It can be called standalone or as part of installation
+    
+    VERIFICATION_FAILED=0
+    REPAIR_ATTEMPTS=0
+    MAX_REPAIR_ATTEMPTS=3
+    
+    log_info ">>> Running advanced installation verification and auto-repair..."
+    update_status "Verifying installation..."
 
-VERIFICATION_FAILED=0
+# Helper function for advanced repair with retry logic
+attempt_repair() {
+    local check_name="$1"
+    local repair_command="$2"
+    local verify_command="$3"
+    local max_attempts="${4:-2}"
+    
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))  # Track that we're attempting a repair
+    
+    for i in $(seq 1 $max_attempts); do
+        log_info "  → Repair attempt $i/$max_attempts: $check_name"
+        if eval "$repair_command" >> "${LOG_FILE}" 2>&1; then
+            sleep 0.5  # Brief pause for system to stabilize
+            if eval "$verify_command" &>/dev/null; then
+                log_success "  ✓ Repaired successfully on attempt $i"
+                return 0
+            fi
+        fi
+    done
+    log_error "  ✗ Failed to repair after $max_attempts attempts"
+    return 1
+}
 
-# Check 1: System service is active
-log_debug "Checking system downloader service..."
+# Check 1: System service is active and healthy
+log_debug "[1/12] Checking system downloader service..."
 if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
-    log_success "✓ System downloader timer is active"
+    # Additional health check: verify it's enabled
+    if systemctl is-enabled "${DL_SERVICE_NAME}.timer" &>/dev/null; then
+        log_success "✓ System downloader timer is active and enabled"
+    else
+        log_error "✗ System downloader timer is active but NOT enabled (won't survive reboot)"
+        if attempt_repair "enable timer for persistence" \
+            "systemctl enable ${DL_SERVICE_NAME}.timer" \
+            "systemctl is-enabled ${DL_SERVICE_NAME}.timer"; then
+            log_success "  ✓ Timer is now enabled for persistence"
+        else
+            VERIFICATION_FAILED=1
+        fi
+    fi
 else
     log_error "✗ System downloader timer is NOT active"
-    VERIFICATION_FAILED=1
+    # Try comprehensive repair
+    if attempt_repair "restart system downloader" \
+        "systemctl daemon-reload && systemctl enable --now ${DL_SERVICE_NAME}.timer" \
+        "systemctl is-active ${DL_SERVICE_NAME}.timer" 3; then
+        log_success "  ✓ System downloader timer repaired"
+    else
+        log_error "  → Attempting nuclear option: recreating service files..."
+        # Service file should exist from earlier in install, but verify
+        if [ ! -f "${DL_SERVICE_FILE}" ] || [ ! -f "${DL_TIMER_FILE}" ]; then
+            log_error "  ✗ CRITICAL: Service files missing - installation may have failed"
+            VERIFICATION_FAILED=1
+        else
+            systemctl daemon-reload >> "${LOG_FILE}" 2>&1
+            systemctl enable --now "${DL_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+            sleep 1
+            if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
+                log_success "  ✓ Nuclear repair successful"
+            else
+                log_error "  ✗ CRITICAL: Cannot start system timer - check permissions"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    fi
 fi
 
-# Check 2: User service is active
-log_debug "Checking user notifier service..."
+# Check 2: User service is active and healthy
+log_debug "[2/12] Checking user notifier service..."
 if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-active "${NT_SERVICE_NAME}.timer" &>/dev/null; then
-    log_success "✓ User notifier timer is active"
+    # Check if enabled
+    if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-enabled "${NT_SERVICE_NAME}.timer" &>/dev/null; then
+        log_success "✓ User notifier timer is active and enabled"
+        # Deep health check: verify it's actually triggering
+        NEXT_TRIGGER=$(sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user list-timers "${NT_SERVICE_NAME}.timer" 2>/dev/null | grep -o "left" || echo "")
+        if [ -n "$NEXT_TRIGGER" ]; then
+            log_success "  ✓ Timer has upcoming triggers scheduled"
+        else
+            log_error "  ⚠ Warning: Timer is active but no triggers scheduled"
+            log_info "  → Restarting to reset trigger schedule..."
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user restart "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+        fi
+    else
+        log_error "✗ User timer is active but NOT enabled"
+        if attempt_repair "enable user timer" \
+            "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user enable ${NT_SERVICE_NAME}.timer" \
+            "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user is-enabled ${NT_SERVICE_NAME}.timer"; then
+            log_success "  ✓ User timer enabled"
+        else
+            VERIFICATION_FAILED=1
+        fi
+    fi
 else
     log_error "✗ User notifier timer is NOT active"
-    VERIFICATION_FAILED=1
+    # Multi-stage repair process
+    log_info "  → Stage 1: Daemon reload and restart..."
+    if attempt_repair "restart user service" \
+        "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user daemon-reload && sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user enable --now ${NT_SERVICE_NAME}.timer" \
+        "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user is-active ${NT_SERVICE_NAME}.timer" 3; then
+        log_success "  ✓ User notifier timer repaired"
+    else
+        log_error "  → Stage 2: Checking for service file corruption..."
+        if [ ! -f "${NT_SERVICE_FILE}" ] || [ ! -f "${NT_TIMER_FILE}" ]; then
+            log_error "  ✗ CRITICAL: User service files missing"
+            VERIFICATION_FAILED=1
+        else
+            # Check file permissions
+            if [ ! -r "${NT_SERVICE_FILE}" ] || [ ! -r "${NT_TIMER_FILE}" ]; then
+                log_error "  ⚠ Service files have wrong permissions"
+                chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}" "${NT_TIMER_FILE}" >> "${LOG_FILE}" 2>&1
+                chmod 644 "${NT_SERVICE_FILE}" "${NT_TIMER_FILE}" >> "${LOG_FILE}" 2>&1
+            fi
+            
+            # Final attempt
+            log_info "  → Stage 3: Nuclear option - full service reset..."
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user stop "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1
+            sleep 1
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+            sleep 1
+            
+            if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-active "${NT_SERVICE_NAME}.timer" &>/dev/null; then
+                log_success "  ✓ Nuclear repair successful - user timer now active"
+            else
+                log_error "  ✗ CRITICAL: All repair attempts failed"
+                log_error "  → This may indicate a DBUS or systemd user session issue"
+                log_info "  → Try: loginctl enable-linger $SUDO_USER"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    fi
 fi
 
 # Check 3: Python script exists and is executable
@@ -2098,11 +2276,25 @@ if [ -x "${NOTIFY_SCRIPT_PATH}" ]; then
         log_success "✓ Python script syntax is valid"
     else
         log_error "✗ Python script has syntax errors"
+        log_error "  → Cannot auto-fix: syntax errors require manual intervention"
         VERIFICATION_FAILED=1
     fi
 else
     log_error "✗ Python notifier script is missing or not executable"
-    VERIFICATION_FAILED=1
+    if [ -f "${NOTIFY_SCRIPT_PATH}" ]; then
+        log_info "  → Attempting to fix: making script executable..."
+        chmod +x "${NOTIFY_SCRIPT_PATH}" >> "${LOG_FILE}" 2>&1
+        chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}" >> "${LOG_FILE}" 2>&1
+        if [ -x "${NOTIFY_SCRIPT_PATH}" ]; then
+            log_success "  ✓ Fixed: Python script is now executable"
+        else
+            log_error "  ✗ Failed to make Python script executable"
+            VERIFICATION_FAILED=1
+        fi
+    else
+        log_error "  → Cannot auto-fix: file is completely missing"
+        VERIFICATION_FAILED=1
+    fi
 fi
 
 # Check 4: Downloader script exists and is executable
@@ -2147,6 +2339,15 @@ if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
     PROCESS_COUNT=$(pgrep -f "zypper-notify-updater.py" | wc -l)
     if [ $PROCESS_COUNT -gt 1 ]; then
         log_error "⚠ Warning: $PROCESS_COUNT Python notifier processes running (expected 0-1)"
+        log_info "  → Attempting to fix: killing stale processes..."
+        pkill -9 -f "zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1
+        sleep 1
+        if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
+            NEW_COUNT=$(pgrep -f "zypper-notify-updater.py" | wc -l)
+            log_info "  ✓ Fixed: Reduced to $NEW_COUNT process(es)"
+        else
+            log_success "  ✓ Fixed: All stale processes killed"
+        fi
     else
         log_success "✓ Python notifier process count is normal"
     fi
@@ -2158,7 +2359,14 @@ fi
 log_debug "Checking Python bytecode cache..."
 if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
     log_error "⚠ Warning: Python bytecode cache exists (may cause issues)"
-    log_info "  Run: find ~/.local/bin -name '*.pyc' -delete"
+    log_info "  → Attempting to fix: clearing bytecode cache..."
+    find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete >> "${LOG_FILE}" 2>&1
+    find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + >> "${LOG_FILE}" 2>&1 || true
+    if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
+        log_error "  ✗ Failed to clear bytecode cache completely"
+    else
+        log_success "  ✓ Fixed: Python bytecode cache cleared"
+    fi
 else
     log_success "✓ Python bytecode cache is clean"
 fi
@@ -2181,13 +2389,50 @@ else
     log_info "ℹ Status file will be created on first run"
 fi
 
+# Calculate repair statistics
+PROBLEMS_FOUND=$REPAIR_ATTEMPTS
+PROBLEMS_FIXED=$((REPAIR_ATTEMPTS - VERIFICATION_FAILED))
+
 echo "" | tee -a "${LOG_FILE}"
+echo "==============================================" | tee -a "${LOG_FILE}"
+echo "Verification Summary:" | tee -a "${LOG_FILE}"
+echo "  - Checks performed: 12" | tee -a "${LOG_FILE}"
+echo "  - Problems detected: $PROBLEMS_FOUND" | tee -a "${LOG_FILE}"
+echo "  - Problems auto-fixed: $PROBLEMS_FIXED" | tee -a "${LOG_FILE}"
+echo "  - Remaining issues: $VERIFICATION_FAILED" | tee -a "${LOG_FILE}"
+echo "==============================================" | tee -a "${LOG_FILE}"
+echo "" | tee -a "${LOG_FILE}"
+
 if [ $VERIFICATION_FAILED -eq 0 ]; then
     log_success ">>> All verification checks passed! ✓"
+    if [ $PROBLEMS_FOUND -gt 0 ]; then
+        log_success "  ✓ Auto-repair fixed $PROBLEMS_FIXED issue(s)"
+    fi
 else
-    log_error ">>> Some verification checks failed! Please review the logs."
+    log_error ">>> $VERIFICATION_FAILED verification check(s) failed!"
+    log_error "  → Auto-repair attempted but could not fix all issues"
+    log_info "  → Review logs: ${LOG_FILE}"
+    log_info "  → Common fixes:"
+    log_info "     - Check systemd permissions: sudo loginctl enable-linger $SUDO_USER"
+    log_info "     - Verify DBUS session: echo \$DBUS_SESSION_BUS_ADDRESS"
+    log_info "     - Re-run installation: sudo $0 install"
 fi
 echo "" | tee -a "${LOG_FILE}"
+    
+    # Return exit code based on verification results
+    return $VERIFICATION_FAILED
+}
+
+# --- 14. Installation Verification (called during install) ---
+if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
+    # Only run verification during installation, not in verify-only mode
+    # (verify-only mode calls the function directly and exits)
+    run_verification_only
+    VERIFICATION_EXIT_CODE=$?
+else
+    # Should never reach here - verify mode exits earlier
+    VERIFICATION_EXIT_CODE=0
+fi
 
 # --- 15. Final Summary ---
 log_success ">>> Installation completed successfully!"
