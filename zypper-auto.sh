@@ -603,14 +603,43 @@ fi
 
 # Fish configuration
 if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
-    log_debug "Adding zypper alias to fish config"
+    log_debug "Adding zypper wrapper to fish config"
     FISH_CONFIG_DIR="$SUDO_USER_HOME/.config/fish/conf.d"
     mkdir -p "$FISH_CONFIG_DIR"
     FISH_ALIAS_FILE="$FISH_CONFIG_DIR/zypper-wrapper.fish"
-    echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)" > "$FISH_ALIAS_FILE"
-    echo "alias zypper='$ZYPPER_WRAPPER_PATH'" >> "$FISH_ALIAS_FILE"
+    cat > "$FISH_ALIAS_FILE" << 'FISHEOF'
+# Zypper wrapper for auto service check (added by zypper-auto-helper)
+
+# Wrap zypper command
+function zypper --wraps zypper --description "Wrapper for zypper with post-update checks"
+    # Check if we already have sudo in the command (avoid double sudo)
+    set -l has_sudo 0
+    for arg in $argv
+        if test "$arg" = "sudo"
+            set has_sudo 1
+            break
+        end
+    end
+    
+    # Call the wrapper script (which handles sudo internally)
+    ~/.local/bin/zypper-with-ps $argv
+end
+
+# Wrap sudo command when used with zypper
+function sudo --wraps sudo --description "Wrapper for sudo to intercept zypper commands"
+    # Check if first argument is zypper
+    if test (count $argv) -gt 0; and test "$argv[1]" = "zypper"
+        # Remove 'zypper' from argv and call our zypper wrapper
+        set -l zypper_args $argv[2..-1]
+        ~/.local/bin/zypper-with-ps $zypper_args
+    else
+        # Not a zypper command, use real sudo
+        command sudo $argv
+    end
+end
+FISHEOF
     chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config/fish"
-    log_success "Added zypper alias to fish config"
+    log_success "Added zypper wrapper functions to fish config"
 fi
 
 # Zsh configuration
@@ -1704,6 +1733,7 @@ def main():
             )
             n = Notify.Notification.new(err_title, err_message, "dialog-error")
             n.set_timeout(30000)  # 30 seconds
+            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-error"))
             n.show()
             log_info("Error notification displayed")
             return
@@ -1724,6 +1754,7 @@ def main():
                 "dialog-information",
             )
             n.set_timeout(10000)  # 10 seconds
+            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-no-updates"))
             n.show()
             return
         
