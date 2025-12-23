@@ -392,14 +392,21 @@ echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
 kill $TRACKER_PID 2>/dev/null || true
 wait $TRACKER_PID 2>/dev/null || true
 
+# Count packages after download
+AFTER_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
+ACTUAL_DOWNLOADED=$((AFTER_COUNT - BEFORE_COUNT))
+
 # Calculate duration
 START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# Write completion status
-echo "complete:$DURATION" > "$STATUS_FILE"
-sleep 5  # Keep status for 5 seconds
+# Only show completion notification if we actually downloaded something
+if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
+    # Write completion status
+    echo "complete:$DURATION:$ACTUAL_DOWNLOADED" > "$STATUS_FILE"
+    sleep 5  # Keep status for 5 seconds
+fi
 
 # Reset to idle
 echo "idle" > "$STATUS_FILE"
@@ -1598,9 +1605,12 @@ def main():
                         return  # Exit, will check again in 5 seconds
                     
                     elif status.startswith("complete:"):
-                        # Extract duration from "complete:123" format (seconds)
+                        # Extract from "complete:DURATION:ACTUAL_DOWNLOADED" format (seconds)
                         try:
-                            duration = int(status.split(":")[1])
+                            parts = status.split(":")
+                            duration = int(parts[1]) if len(parts) > 1 else 0
+                            actual_downloaded = int(parts[2]) if len(parts) > 2 else 0
+                            
                             minutes = duration // 60
                             seconds = duration % 60
                             
@@ -1609,46 +1619,58 @@ def main():
                             else:
                                 time_str = f"{seconds}s"
                             
-                            log_info(f"Download completed in {time_str}")
-                            
-                            # Get changelog preview by running zypper dup --dry-run
-                            changelog_msg = f"Updates downloaded successfully in {time_str}.\n\nPackages are ready to install."
-                            try:
-                                log_debug("Fetching update details for changelog preview...")
-                                result = subprocess.run(
-                                    ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=30
+                            # Skip notification if nothing was actually downloaded (already cached)
+                            if actual_downloaded == 0:
+                                log_info("All packages were already cached, skipping download complete notification")
+                                # Clear status immediately and continue to show install notification
+                                try:
+                                    with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                        f.write("idle")
+                                except:
+                                    pass
+                                # Don't return - continue to show install notification below
+                            else:
+                                # Packages were actually downloaded, show notification
+                                log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
+                                
+                                # Get changelog preview by running zypper dup --dry-run
+                                changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
+                                try:
+                                    log_debug("Fetching update details for changelog preview...")
+                                    result = subprocess.run(
+                                        ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=30
+                                    )
+                                    if result.returncode == 0:
+                                        # Extract package preview
+                                        preview_packages = extract_package_preview(result.stdout, max_packages=5)
+                                        if preview_packages:
+                                            preview_str = ", ".join(preview_packages)
+                                            changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nIncluding: {preview_str}\n\nReady to install."
+                                            log_info(f"Added changelog preview: {preview_str}")
+                                except Exception as e:
+                                    log_debug(f"Could not fetch changelog preview: {e}")
+                                
+                                n = Notify.Notification.new(
+                                    "✅ Downloads Complete!",
+                                    changelog_msg,
+                                    "emblem-default"
                                 )
-                                if result.returncode == 0:
-                                    # Extract package preview
-                                    preview_packages = extract_package_preview(result.stdout, max_packages=5)
-                                    if preview_packages:
-                                        preview_str = ", ".join(preview_packages)
-                                        changelog_msg = f"Updates downloaded successfully in {time_str}.\n\nIncluding: {preview_str}\n\nPackages are ready to install."
-                                        log_info(f"Added changelog preview: {preview_str}")
-                            except Exception as e:
-                                log_debug(f"Could not fetch changelog preview: {e}")
-                            
-                            n = Notify.Notification.new(
-                                "✅ Downloads Complete!",
-                                changelog_msg,
-                                "emblem-default"
-                            )
-                            n.set_timeout(5000)  # 5 seconds
-                            n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
-                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
-                            n.show()
-                            import time
-                            time.sleep(0.1)  # Wait a bit before continuing
-                            # Clear the complete status so it doesn't show again
-                            try:
-                                with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                    f.write("idle")
-                            except:
-                                pass
-                            # Continue to show install notification below
+                                n.set_timeout(5000)  # 5 seconds
+                                n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
+                                n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
+                                n.show()
+                                import time
+                                time.sleep(0.1)  # Wait a bit before continuing
+                                # Clear the complete status so it doesn't show again
+                                try:
+                                    with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                        f.write("idle")
+                                except:
+                                    pass
+                                # Continue to show install notification below
                         except:
                             log_debug("Could not parse completion time")
                             # Continue to show install notification below
@@ -1757,18 +1779,26 @@ def main():
         log_info("Displaying persistent update notification with Install and Snooze buttons (replaces previous)")
         n.show()
         
-        # Keep the script running with a GLib main loop so the notification persists
-        # and the action button callback can be handled.
-        log_info("Starting GLib main loop to keep notification alive...")
+        # Run main loop for 4 seconds to handle button clicks, then exit
+        # This allows the timer to retrigger every 5 seconds while still handling actions
+        log_info("Running GLib main loop for 4 seconds to handle button clicks...")
         loop = GLib.MainLoop()
         n.connect("closed", lambda *args: loop.quit())
+        
+        # Set a timeout to quit the loop after 4 seconds
+        def quit_loop():
+            if loop.is_running():
+                loop.quit()
+            return False  # Don't repeat
+        
+        GLib.timeout_add(4000, quit_loop)  # 4 seconds
         
         try:
             loop.run()
         except KeyboardInterrupt:
             log_info("Main loop interrupted")
         
-        log_info("Notification dismissed or action taken.")
+        log_info("Main loop finished, service will exit and retrigger in 5 seconds")
 
     except Exception as e:
         log_error(f"An error occurred in main: {e}")
