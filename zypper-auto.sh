@@ -323,6 +323,91 @@ log_debug "Writing service file: ${DL_SERVICE_FILE}"
 mkdir -p "${LOG_DIR}/service-logs"
 chmod 755 "${LOG_DIR}/service-logs"
 
+# First, create the downloader script with progress tracking
+DOWNLOADER_SCRIPT="/usr/local/bin/zypper-download-with-progress"
+log_debug "Creating downloader script with progress tracking: $DOWNLOADER_SCRIPT"
+cat << 'DLSCRIPT' > "$DOWNLOADER_SCRIPT"
+#!/bin/bash
+# Zypper downloader with real-time progress tracking
+set -euo pipefail
+
+LOG_DIR="/var/log/zypper-auto"
+STATUS_FILE="$LOG_DIR/download-status.txt"
+START_TIME_FILE="$LOG_DIR/download-start-time.txt"
+CACHE_DIR="/var/cache/zypp/packages"
+
+# Write status: refreshing
+echo "refreshing" > "$STATUS_FILE"
+date +%s > "$START_TIME_FILE"
+
+# Refresh repos
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>&1
+
+# Get update info
+DRY_OUTPUT=$(mktemp)
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "$DRY_OUTPUT"
+
+if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
+    echo "idle" > "$STATUS_FILE"
+    rm -f "$DRY_OUTPUT"
+    exit 0
+fi
+
+# Extract package count and size
+PKG_COUNT=$(grep -oP "\d+(?= packages to upgrade)" "$DRY_OUTPUT" | head -1)
+DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown")
+rm -f "$DRY_OUTPUT"
+
+# Count packages before download
+BEFORE_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
+
+# Start background progress tracker
+(
+    while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
+        sleep 2  # Update every 2 seconds
+        CURRENT_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
+        DOWNLOADED=$((CURRENT_COUNT - BEFORE_COUNT))
+        if [ $DOWNLOADED -lt 0 ]; then DOWNLOADED=0; fi
+        if [ $DOWNLOADED -gt $PKG_COUNT ]; then DOWNLOADED=$PKG_COUNT; fi
+        
+        # Calculate percentage
+        if [ $PKG_COUNT -gt 0 ]; then
+            PERCENT=$((DOWNLOADED * 100 / PKG_COUNT))
+        else
+            PERCENT=0
+        fi
+        
+        echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:$DOWNLOADED:$PERCENT" > "$STATUS_FILE"
+    done
+) &
+TRACKER_PID=$!
+
+# Write initial downloading status
+echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
+
+# Do the actual download
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only >/dev/null 2>&1
+
+# Kill the progress tracker
+kill $TRACKER_PID 2>/dev/null || true
+wait $TRACKER_PID 2>/dev/null || true
+
+# Calculate duration
+START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# Write completion status
+echo "complete:$DURATION" > "$STATUS_FILE"
+sleep 5  # Keep status for 5 seconds
+
+# Reset to idle
+echo "idle" > "$STATUS_FILE"
+DLSCRIPT
+chmod +x "$DOWNLOADER_SCRIPT"
+log_success "Downloader script created with progress tracking"
+
+# Now create the service file
 cat << EOF > ${DL_SERVICE_FILE}
 [Unit]
 Description=Download Tumbleweed updates in background
@@ -338,10 +423,7 @@ IOSchedulingPriority=0
 Nice=-20
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
-ExecStartPre=/bin/sh -c 'echo "refreshing" > ${LOG_DIR}/download-status.txt; date +%s > ${LOG_DIR}/download-start-time.txt'
-ExecStart=/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh
-ExecStart=/bin/sh -c 'DRY_OUTPUT=\$(mktemp); /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "\$DRY_OUTPUT"; if grep -q "packages to upgrade" "\$DRY_OUTPUT"; then PKG_COUNT=\$(grep -oP "\\d+(?= packages to upgrade)" "\$DRY_OUTPUT" | head -1); DOWNLOAD_SIZE=\$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "\$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown"); echo "downloading:\$PKG_COUNT:\$DOWNLOAD_SIZE:0" > ${LOG_DIR}/download-status.txt; /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only; START_TIME=\$(cat ${LOG_DIR}/download-start-time.txt 2>/dev/null || date +%s); END_TIME=\$(date +%s); DURATION=\$((END_TIME - START_TIME)); echo "complete:\$DURATION" > ${LOG_DIR}/download-status.txt; sleep 30; else echo "idle" > ${LOG_DIR}/download-status.txt; fi; rm -f "\$DRY_OUTPUT"'
-ExecStartPost=/bin/sh -c 'STATUS=\$(cat ${LOG_DIR}/download-status.txt); if [ "\$STATUS" = "complete" ] || echo "\$STATUS" | grep -q "^complete:"; then sleep 5; fi'
+ExecStart=${DOWNLOADER_SCRIPT}
 EOF
 log_success "Downloader service file created"
 
@@ -564,11 +646,11 @@ log_info ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 log_debug "Writing user timer file: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
-Description=Run ${NT_SERVICE_NAME} aggressively to check for updates
+Description=Run ${NT_SERVICE_NAME} frequently to check for updates
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=3min
+OnBootSec=5sec
+OnUnitActiveSec=5sec
 Persistent=true
 
 [Install]
@@ -1465,23 +1547,25 @@ def main():
                         n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
                         n.show()
                         import time
-                        time.sleep(0.5)
-                        return  # Exit, will check again next minute
+                        time.sleep(0.1)
+                        return  # Exit, will check again in 5 seconds
                     
                     elif status.startswith("downloading:"):
-                        # Extract package count and download size from "downloading:45:123.4 MiB:progress" format
+                        # Extract from "downloading:TOTAL:SIZE:DOWNLOADED:PERCENT" format
                         try:
                             parts = status.split(":")
-                            pkg_count = parts[1] if len(parts) > 1 else "?"
+                            pkg_total = parts[1] if len(parts) > 1 else "?"
                             download_size = parts[2] if len(parts) > 2 else "unknown size"
-                            progress = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else -1
+                            pkg_downloaded = parts[3] if len(parts) > 3 else "0"
+                            percent = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
                             
-                            log_info(f"Stage: Downloading {pkg_count} packages ({download_size})")
+                            log_info(f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})")
                             
+                            # Build message with progress
                             if download_size and download_size != "unknown":
-                                msg = f"Downloading {pkg_count} packages ({download_size})\nRunning at HIGH priority."
+                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{download_size} total • Running at HIGH priority"
                             else:
-                                msg = f"Downloading {pkg_count} packages\nRunning at HIGH priority."
+                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\nRunning at HIGH priority"
                             
                             n = Notify.Notification.new(
                                 "Downloading updates...",
@@ -1489,12 +1573,12 @@ def main():
                                 "emblem-downloads"
                             )
                             
-                            # Add progress bar hint (0-100, -1 for indeterminate)
-                            if progress >= 0 and progress <= 100:
-                                n.set_hint("value", GLib.Variant("i", progress))
+                            # Add progress bar hint (0-100)
+                            if percent >= 0 and percent <= 100:
+                                n.set_hint("value", GLib.Variant("i", percent))
                             else:
                                 # Indeterminate progress (pulsing animation)
-                                n.set_hint("value", GLib.Variant("i", 50))
+                                n.set_hint("value", GLib.Variant("i", 0))
                         except Exception as e:
                             log_debug(f"Error parsing download status: {e}")
                             log_info("Stage: Downloading packages")
@@ -1510,8 +1594,8 @@ def main():
                         n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
                         n.show()
                         import time
-                        time.sleep(0.5)
-                        return  # Exit, will check again next minute
+                        time.sleep(0.1)
+                        return  # Exit, will check again in 5 seconds
                     
                     elif status.startswith("complete:"):
                         # Extract duration from "complete:123" format (seconds)
@@ -1552,12 +1636,12 @@ def main():
                                 changelog_msg,
                                 "emblem-default"
                             )
-                            n.set_timeout(15000)  # 15 seconds - show longer
+                            n.set_timeout(5000)  # 5 seconds
                             n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
                             n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
                             n.show()
                             import time
-                            time.sleep(1)  # Wait a bit before continuing
+                            time.sleep(0.1)  # Wait a bit before continuing
                             # Clear the complete status so it doesn't show again
                             try:
                                 with open("/var/log/zypper-auto/download-status.txt", "w") as f:
