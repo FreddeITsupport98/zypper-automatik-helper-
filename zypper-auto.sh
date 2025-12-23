@@ -2014,11 +2014,20 @@ def main():
                             
                             log_info(f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})")
                             
+                            # Build progress bar visual
+                            if percent >= 0 and percent <= 100:
+                                bar_length = 20
+                                filled = int(bar_length * percent / 100)
+                                bar = "█" * filled + "░" * (bar_length - filled)
+                                progress_text = f"[{bar}] {percent}%"
+                            else:
+                                progress_text = "Processing..."
+                            
                             # Build message with progress
                             if download_size and download_size != "unknown":
-                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{download_size} total • Running at HIGH priority"
+                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\n{download_size} total • HIGH priority"
                             else:
-                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\nRunning at HIGH priority"
+                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\nHIGH priority"
                             
                             n = Notify.Notification.new(
                                 "Downloading updates...",
@@ -2026,12 +2035,14 @@ def main():
                                 "emblem-downloads"
                             )
                             
-                            # Add progress bar hint (0-100)
+                            # Add progress bar hint (0-100) for notification daemons that support it
                             if percent >= 0 and percent <= 100:
                                 n.set_hint("value", GLib.Variant("i", percent))
+                                n.set_category("transfer.progress")  # Category hint for progress notifications
                             else:
                                 # Indeterminate progress (pulsing animation)
                                 n.set_hint("value", GLib.Variant("i", 0))
+                                n.set_category("transfer")
                         except Exception as e:
                             log_debug(f"Error parsing download status: {e}")
                             log_info("Stage: Downloading packages")
@@ -2104,7 +2115,7 @@ def main():
                                     changelog_msg,
                                     "emblem-default"
                                 )
-                                n.set_timeout(5000)  # 5 seconds
+                                n.set_timeout(0)  # 0 = persist until user interaction
                                 n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
                                 n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
                                 n.show()
