@@ -306,6 +306,16 @@ SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 log_debug "Disabling user timer..."
 sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
 
+# Force kill any running Python notifier processes
+log_debug "Force-killing any running Python notifier processes..."
+pkill -9 -f "zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1 || true
+sleep 1
+
+# Clear Python bytecode cache
+log_debug "Clearing Python bytecode cache..."
+find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete >> "${LOG_FILE}" 2>&1 || true
+find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + >> "${LOG_FILE}" 2>&1 || true
+
 log_debug "Removing old user binaries and configs..."
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*" >> "${LOG_FILE}" 2>&1
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*" >> "${LOG_FILE}" 2>&1
@@ -1745,9 +1755,22 @@ def main():
 
         title, message, snapshot, package_count = parse_output(output)
         if not title:
-            # No updates available: show an informational popup instead of staying silent
-            log_info("System is up-to-date. Showing 'no updates found' notification.")
+            # No updates available: check if we already showed this
+            log_info("System is up-to-date.")
             update_status("SUCCESS: System up-to-date")
+            
+            # Check if we already showed "no updates" notification
+            last_notification = _read_last_notification()
+            no_updates_key = "No updates found|Your system is already up to date."
+            
+            if last_notification == no_updates_key:
+                log_info("'No updates' notification already shown, skipping duplicate")
+                return
+            
+            # First time or changed - show notification
+            log_info("Showing 'no updates found' notification for the first time")
+            _write_last_notification("No updates found", "Your system is already up to date.")
+            
             n = Notify.Notification.new(
                 "No updates found",
                 "Your system is already up to date.",
@@ -2042,7 +2065,131 @@ else
     log_info "  systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 fi
 
-# --- 14. Final Summary ---
+# --- 14. Installation Verification ---
+log_info ">>> Running installation verification checks..."
+update_status "Verifying installation..."
+
+VERIFICATION_FAILED=0
+
+# Check 1: System service is active
+log_debug "Checking system downloader service..."
+if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
+    log_success "✓ System downloader timer is active"
+else
+    log_error "✗ System downloader timer is NOT active"
+    VERIFICATION_FAILED=1
+fi
+
+# Check 2: User service is active
+log_debug "Checking user notifier service..."
+if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-active "${NT_SERVICE_NAME}.timer" &>/dev/null; then
+    log_success "✓ User notifier timer is active"
+else
+    log_error "✗ User notifier timer is NOT active"
+    VERIFICATION_FAILED=1
+fi
+
+# Check 3: Python script exists and is executable
+log_debug "Checking Python notifier script..."
+if [ -x "${NOTIFY_SCRIPT_PATH}" ]; then
+    log_success "✓ Python notifier script is executable"
+    # Check Python syntax
+    if python3 -m py_compile "${NOTIFY_SCRIPT_PATH}" &>/dev/null; then
+        log_success "✓ Python script syntax is valid"
+    else
+        log_error "✗ Python script has syntax errors"
+        VERIFICATION_FAILED=1
+    fi
+else
+    log_error "✗ Python notifier script is missing or not executable"
+    VERIFICATION_FAILED=1
+fi
+
+# Check 4: Downloader script exists and is executable
+log_debug "Checking downloader script..."
+if [ -x "$DOWNLOADER_SCRIPT" ]; then
+    log_success "✓ Downloader script is executable"
+    # Check bash syntax
+    if bash -n "$DOWNLOADER_SCRIPT" &>/dev/null; then
+        log_success "✓ Downloader script syntax is valid"
+    else
+        log_error "✗ Downloader script has syntax errors"
+        VERIFICATION_FAILED=1
+    fi
+else
+    log_error "✗ Downloader script is missing or not executable"
+    VERIFICATION_FAILED=1
+fi
+
+# Check 5: Shell wrapper exists
+log_debug "Checking zypper wrapper script..."
+if [ -x "$ZYPPER_WRAPPER_PATH" ]; then
+    log_success "✓ Zypper wrapper script is executable"
+else
+    log_error "✗ Zypper wrapper script is missing or not executable"
+    VERIFICATION_FAILED=1
+fi
+
+# Check 6: Fish shell integration (if Fish is installed)
+if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
+    log_debug "Checking Fish shell integration..."
+    if [ -f "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" ]; then
+        log_success "✓ Fish shell wrapper is installed"
+    else
+        log_error "✗ Fish shell wrapper is missing"
+        VERIFICATION_FAILED=1
+    fi
+fi
+
+# Check 7: No old Python processes running
+log_debug "Checking for stale Python processes..."
+if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
+    PROCESS_COUNT=$(pgrep -f "zypper-notify-updater.py" | wc -l)
+    if [ $PROCESS_COUNT -gt 1 ]; then
+        log_error "⚠ Warning: $PROCESS_COUNT Python notifier processes running (expected 0-1)"
+    else
+        log_success "✓ Python notifier process count is normal"
+    fi
+else
+    log_success "✓ No stale Python processes detected"
+fi
+
+# Check 8: Python bytecode cache is clear
+log_debug "Checking Python bytecode cache..."
+if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
+    log_error "⚠ Warning: Python bytecode cache exists (may cause issues)"
+    log_info "  Run: find ~/.local/bin -name '*.pyc' -delete"
+else
+    log_success "✓ Python bytecode cache is clean"
+fi
+
+# Check 9: Log directories exist
+log_debug "Checking log directories..."
+if [ -d "${LOG_DIR}" ] && [ -d "${USER_LOG_DIR}" ]; then
+    log_success "✓ Log directories exist"
+else
+    log_error "✗ Log directories are missing"
+    VERIFICATION_FAILED=1
+fi
+
+# Check 10: Status file exists
+log_debug "Checking status file..."
+if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
+    CURRENT_STATUS=$(cat /var/log/zypper-auto/download-status.txt)
+    log_success "✓ Status file exists (current: $CURRENT_STATUS)"
+else
+    log_info "ℹ Status file will be created on first run"
+fi
+
+echo "" | tee -a "${LOG_FILE}"
+if [ $VERIFICATION_FAILED -eq 0 ]; then
+    log_success ">>> All verification checks passed! ✓"
+else
+    log_error ">>> Some verification checks failed! Please review the logs."
+fi
+echo "" | tee -a "${LOG_FILE}"
+
+# --- 15. Final Summary ---
 log_success ">>> Installation completed successfully!"
 update_status "SUCCESS: Installation completed"
 
