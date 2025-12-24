@@ -2320,67 +2320,67 @@ RUN_UPDATE() {
     echo "  Update Complete - Post-Update Check"
     echo "=========================================="
     echo ""
-    
-    if [ "$UPDATE_SUCCESS" = true ]; then
-        echo ""
-        echo "=========================================="
-        echo "  Flatpak Updates"
-        echo "=========================================="
-        echo ""
 
-        if command -v flatpak >/dev/null 2>&1; then
-            if pkexec flatpak update -y; then
-                echo "✅ Flatpak updates completed."
-            else
-                echo "⚠️  Flatpak update failed (continuing)."
-            fi
+    # Always run Flatpak and Snap updates, even if dup had no updates or failed
+    echo "=========================================="
+    echo "  Flatpak Updates"
+    echo "=========================================="
+    echo ""
+
+    if command -v flatpak >/dev/null 2>&1; then
+        if pkexec flatpak update -y; then
+            echo "✅ Flatpak updates completed."
         else
-            echo "flatpak command not found, skipping Flatpak updates."
-        fi
-
-        echo ""
-        echo "=========================================="
-        echo "  Snap Updates"
-        echo "=========================================="
-        echo ""
-
-        if command -v snap >/dev/null 2>&1; then
-            if pkexec snap refresh; then
-                echo "✅ Snap updates completed."
-            else
-                echo "⚠️  Snap refresh failed (continuing)."
-            fi
-        else
-            echo "snap command not found, skipping Snap updates."
-        fi
-
-        echo ""
-        echo "Checking which services need to be restarted..."
-        echo ""
-        
-        # Run zypper ps -s and capture output
-        ZYPPER_PS_OUTPUT=$(pkexec zypper ps -s 2>/dev/null)
-        echo "$ZYPPER_PS_OUTPUT"
-        
-        # Check if there are any running processes in the output
-        if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
-            echo ""
-            echo "ℹ️  Services listed above are using old library versions."
-            echo ""
-            echo "What this means:"
-            echo "  • These services/processes are still running old code in memory"
-            echo "  • They should be restarted to use the updated libraries"
-            echo ""
-            echo "Options:"
-            echo "  1. Restart individual services: systemctl restart <service>"
-            echo "  2. Reboot your system (recommended for kernel/system updates)"
-            echo ""
-        else
-            echo "✅ No services require restart. You're all set!"
-            echo ""
+            echo "⚠️  Flatpak update failed (continuing)."
         fi
     else
-        echo "⚠️  Update was cancelled or failed."
+        echo "flatpak command not found, skipping Flatpak updates."
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "  Snap Updates"
+    echo "=========================================="
+    echo ""
+
+    if command -v snap >/dev/null 2>&1; then
+        if pkexec snap refresh; then
+            echo "✅ Snap updates completed."
+        else
+            echo "⚠️  Snap refresh failed (continuing)."
+        fi
+    else
+        echo "snap command not found, skipping Snap updates."
+    fi
+
+    echo ""
+    echo "Checking which services need to be restarted..."
+    echo ""
+    
+    # Run zypper ps -s and capture output (even if dup had errors)
+    ZYPPER_PS_OUTPUT=$(pkexec zypper ps -s 2>/dev/null || true)
+    echo "$ZYPPER_PS_OUTPUT"
+    
+    # Check if there are any running processes in the output
+    if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
+        echo ""
+        echo "ℹ️  Services listed above are using old library versions."
+        echo ""
+        echo "What this means:"
+        echo "  • These services/processes are still running old code in memory"
+        echo "  • They should be restarted to use the updated libraries"
+        echo ""
+        echo "Options:"
+        echo "  1. Restart individual services: systemctl restart <service>"
+        echo "  2. Reboot your system (recommended for kernel/system updates)"
+        echo ""
+    else
+        echo "✅ No services require restart. You're all set!"
+        echo ""
+    fi
+
+    if [ "$UPDATE_SUCCESS" = false ]; then
+        echo "⚠️  Zypper dup reported errors (see above), but Flatpak/Snap updates were attempted."
         echo ""
     fi
     
