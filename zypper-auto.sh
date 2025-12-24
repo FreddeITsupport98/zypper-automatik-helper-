@@ -2324,6 +2324,39 @@ RUN_UPDATE() {
     echo ""
     
     if [ "$UPDATE_SUCCESS" = true ]; then
+        echo ""
+        echo "=========================================="
+        echo "  Flatpak Updates"
+        echo "=========================================="
+        echo ""
+
+        if command -v flatpak >/dev/null 2>&1; then
+            if pkexec flatpak update -y; then
+                echo "✅ Flatpak updates completed."
+            else
+                echo "⚠️  Flatpak update failed (continuing)."
+            fi
+        else
+            echo "flatpak command not found, skipping Flatpak updates."
+        fi
+
+        echo ""
+        echo "=========================================="
+        echo "  Snap Updates"
+        echo "=========================================="
+        echo ""
+
+        if command -v snap >/dev/null 2>&1; then
+            if pkexec snap refresh; then
+                echo "✅ Snap updates completed."
+            else
+                echo "⚠️  Snap refresh failed (continuing)."
+            fi
+        else
+            echo "snap command not found, skipping Snap updates."
+        fi
+
+        echo ""
         echo "Checking which services need to be restarted..."
         echo ""
         
