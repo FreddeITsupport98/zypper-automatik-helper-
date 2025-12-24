@@ -2253,10 +2253,11 @@ def main():
         current_notification = f"{title}|{message}"
         
         if last_notification == current_notification:
-            log_info("Notification unchanged, skipping duplicate notification")
-            return
+            log_debug("Notification unchanged, re-showing to keep it visible")
+            # Don't return - we need to keep showing it to keep it persistent
+        else:
+            log_info(f"Notification changed from [{last_notification}] to [{current_notification}]")
         
-        log_info(f"Notification changed from [{last_notification}] to [{current_notification}]")
         _write_last_notification(title, message)
 
         # Get the path to the action script
