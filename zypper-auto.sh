@@ -910,7 +910,40 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
     # Run the actual zypper command
     sudo /usr/bin/zypper "$@"
     EXIT_CODE=$?
-    
+
+    # Always run Flatpak and Snap updates after dup, even if dup had no updates or failed
+    echo ""
+    echo "=========================================="
+    echo "  Flatpak Updates"
+    echo "=========================================="
+    echo ""
+
+    if command -v flatpak >/dev/null 2>&1; then
+        if sudo flatpak update -y; then
+            echo "✅ Flatpak updates completed."
+        else
+            echo "⚠️  Flatpak update failed (continuing)."
+        fi
+    else
+        echo "flatpak command not found, skipping Flatpak updates."
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "  Snap Updates"
+    echo "=========================================="
+    echo ""
+
+    if command -v snap >/dev/null 2>&1; then
+        if sudo snap refresh; then
+            echo "✅ Snap updates completed."
+        else
+            echo "⚠️  Snap refresh failed (continuing)."
+        fi
+    else
+        echo "snap command not found, skipping Snap updates."
+    fi
+
     # Always show service restart info, even if zypper reported errors
     echo ""
     echo "=========================================="
