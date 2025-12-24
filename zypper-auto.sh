@@ -1134,7 +1134,7 @@ Description=Run ${NT_SERVICE_NAME} frequently to check for updates
 
 [Timer]
 OnBootSec=5sec
-OnUnitActiveSec=5sec
+OnUnitInactiveSec=5sec
 Persistent=true
 
 [Install]
