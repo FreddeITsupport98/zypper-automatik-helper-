@@ -911,37 +911,35 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
     sudo /usr/bin/zypper "$@"
     EXIT_CODE=$?
     
-    # If zypper succeeded, show service restart info
-    if [ $EXIT_CODE -eq 0 ]; then
+    # Always show service restart info, even if zypper reported errors
+    echo ""
+    echo "=========================================="
+    echo "  Post-Update Service Check"
+    echo "=========================================="
+    echo ""
+    echo "Checking which services need to be restarted..."
+    echo ""
+    
+    # Run zypper ps -s to show services using old libraries
+    ZYPPER_PS_OUTPUT=$(sudo /usr/bin/zypper ps -s 2>/dev/null || true)
+    echo "$ZYPPER_PS_OUTPUT"
+    
+    # Check if there are any running processes
+    if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
         echo ""
-        echo "=========================================="
-        echo "  Post-Update Service Check"
-        echo "=========================================="
+        echo "ℹ️  Services listed above are using old library versions."
         echo ""
-        echo "Checking which services need to be restarted..."
+        echo "What this means:"
+        echo "  • These services/processes are still running old code in memory"
+        echo "  • They should be restarted to use the updated libraries"
         echo ""
-        
-        # Run zypper ps -s to show services using old libraries
-        ZYPPER_PS_OUTPUT=$(sudo /usr/bin/zypper ps -s 2>/dev/null)
-        echo "$ZYPPER_PS_OUTPUT"
-        
-        # Check if there are any running processes
-        if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
-            echo ""
-            echo "ℹ️  Services listed above are using old library versions."
-            echo ""
-            echo "What this means:"
-            echo "  • These services/processes are still running old code in memory"
-            echo "  • They should be restarted to use the updated libraries"
-            echo ""
-            echo "Options:"
-            echo "  1. Restart individual services: systemctl restart <service>"
-            echo "  2. Reboot your system (recommended for kernel/system updates)"
-            echo ""
-        else
-            echo "✅ No services require restart. You're all set!"
-            echo ""
-        fi
+        echo "Options:"
+        echo "  1. Restart individual services: systemctl restart <service>"
+        echo "  2. Reboot your system (recommended for kernel/system updates)"
+        echo ""
+    else
+        echo "✅ No services require restart. You're all set!"
+        echo ""
     fi
     
     exit $EXIT_CODE
