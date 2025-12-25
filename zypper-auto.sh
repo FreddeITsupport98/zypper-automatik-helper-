@@ -925,7 +925,8 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
             echo "⚠️  Flatpak update failed (continuing)."
         fi
     else
-        echo "flatpak command not found, skipping Flatpak updates."
+        echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
+        echo "   To install: sudo zypper install flatpak"
     fi
 
     echo ""
@@ -941,7 +942,9 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
             echo "⚠️  Snap refresh failed (continuing)."
         fi
     else
-        echo "snap command not found, skipping Snap updates."
+        echo "⚠️  Snapd is not installed - skipping Snap updates."
+        echo "   To install: sudo zypper install snapd"
+        echo "   Then enable: sudo systemctl enable --now snapd"
     fi
 
     # Always show service restart info, even if zypper reported errors
@@ -2280,29 +2283,21 @@ def main():
         n.add_action("snooze-4h", "4h", on_action, None)
         n.add_action("snooze-1d", "1d", on_action, None)
 
-        log_info("Displaying persistent update notification with Install and Snooze buttons (replaces previous)")
+        log_info("Displaying persistent update notification with Install and Snooze buttons")
         n.show()
         
-        # Run main loop for 4 seconds to handle button clicks, then exit
-        # This allows the timer to retrigger every 5 seconds while still handling actions
-        log_info("Running GLib main loop for 4 seconds to handle button clicks...")
+        # Run main loop indefinitely - only exit when user interacts with notification
+        # This keeps the notification visible until user takes action
+        log_info("Running GLib main loop indefinitely - waiting for user action...")
         loop = GLib.MainLoop()
         n.connect("closed", lambda *args: loop.quit())
-        
-        # Set a timeout to quit the loop after 4 seconds
-        def quit_loop():
-            if loop.is_running():
-                loop.quit()
-            return False  # Don't repeat
-        
-        GLib.timeout_add(4000, quit_loop)  # 4 seconds
         
         try:
             loop.run()
         except KeyboardInterrupt:
             log_info("Main loop interrupted")
         
-        log_info("Main loop finished, service will exit and retrigger in 5 seconds")
+        log_info("Main loop finished - user interacted with notification or it was dismissed")
 
     except Exception as e:
         log_error(f"An error occurred in main: {e}")
@@ -2368,7 +2363,8 @@ RUN_UPDATE() {
             echo "⚠️  Flatpak update failed (continuing)."
         fi
     else
-        echo "flatpak command not found, skipping Flatpak updates."
+        echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
+        echo "   To install: sudo zypper install flatpak"
     fi
 
     echo ""
@@ -2384,7 +2380,9 @@ RUN_UPDATE() {
             echo "⚠️  Snap refresh failed (continuing)."
         fi
     else
-        echo "snap command not found, skipping Snap updates."
+        echo "⚠️  Snapd is not installed - skipping Snap updates."
+        echo "   To install: sudo zypper install snapd"
+        echo "   Then enable: sudo systemctl enable --now snapd"
     fi
 
     echo ""
@@ -2459,61 +2457,63 @@ update_status "Creating view changes helper script..."
 log_debug "Writing view changes script to: ${VIEW_CHANGES_SCRIPT_PATH}"
 cat << 'EOF' > "${VIEW_CHANGES_SCRIPT_PATH}"
 #!/usr/bin/env bash
-set -euo pipefail
 
 # Script to view detailed package changes
-TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
+# Create a temporary script file for the terminal to execute
+TMP_SCRIPT=$(mktemp /tmp/zypper-view-changes.XXXXXX.sh)
 
-VIEW_CHANGES() {
+cat > "$TMP_SCRIPT" << 'INNEREOF'
+#!/usr/bin/env bash
+echo ""
+echo "=========================================="
+echo "  Package Update Details"
+echo "=========================================="
+echo ""
+echo "Fetching update information..."
+echo ""
+
+# Run zypper with details
+if pkexec zypper --non-interactive dup --dry-run --details; then
     echo ""
     echo "=========================================="
-    echo "  Package Update Details"
-    echo "=========================================="
     echo ""
-    echo "Fetching update information..."
+    echo "This is a preview of what will be updated."
+    echo "Click 'Install Now' in the notification to proceed."
     echo ""
-    
-    # Run zypper with details
-    if pkexec zypper --non-interactive dup --dry-run --details; then
-        echo ""
-        echo "=========================================="
-        echo ""
-        echo "This is a preview of what will be updated."
-        echo "Click 'Install Now' in the notification to proceed."
-        echo ""
-    else
-        echo "⚠️  Could not fetch update details."
-        echo ""
-    fi
-    
-    echo "Press Enter to close this window..."
-    read -r
-}
+else
+    echo "⚠️  Could not fetch update details."
+    echo ""
+fi
 
-export -f VIEW_CHANGES
+echo "Press Enter to close this window..."
+read -r
 
-# Run in a terminal
-for term in "${TERMINALS[@]}"; do
-    if command -v "$term" >/dev/null 2>&1; then
-        case "$term" in
-            konsole)
-                konsole --hold -e bash -c "VIEW_CHANGES"
-                exit 0
-                ;;
-            gnome-terminal)
-                gnome-terminal -- bash -c "VIEW_CHANGES"
-                exit 0
-                ;;
-            kitty|alacritty|xterm)
-                "$term" -e bash -c "VIEW_CHANGES"
-                exit 0
-                ;;
-        esac
-    fi
-done
+# Clean up temporary script
+rm -f "$0"
+INNEREOF
 
-# Fallback
-VIEW_CHANGES
+chmod +x "$TMP_SCRIPT"
+
+# Try terminals in order
+if command -v konsole >/dev/null 2>&1; then
+    konsole -e "$TMP_SCRIPT" &
+    disown
+elif command -v gnome-terminal >/dev/null 2>&1; then
+    gnome-terminal -- "$TMP_SCRIPT" &
+    disown
+elif command -v kitty >/dev/null 2>&1; then
+    kitty -e "$TMP_SCRIPT" &
+    disown
+elif command -v alacritty >/dev/null 2>&1; then
+    alacritty -e "$TMP_SCRIPT" &
+    disown
+elif command -v xterm >/dev/null 2>&1; then
+    xterm -e "$TMP_SCRIPT" &
+    disown
+else
+    # No terminal found, run directly
+    "$TMP_SCRIPT"
+fi
 EOF
 
 chown "$SUDO_USER:$SUDO_USER" "${VIEW_CHANGES_SCRIPT_PATH}"
@@ -2582,6 +2582,69 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
 else
     # Should never reach here - verify mode exits earlier
     VERIFICATION_EXIT_CODE=0
+fi
+
+# --- 14b. Check for Optional Packages ---
+log_info ">>> Checking for optional package managers..."
+MISSING_PACKAGES=()
+
+if ! command -v flatpak >/dev/null 2>&1; then
+    log_info "Flatpak is not installed (optional)"
+    MISSING_PACKAGES+=("flatpak")
+fi
+
+if ! command -v snap >/dev/null 2>&1; then
+    log_info "Snapd is not installed (optional)"
+    MISSING_PACKAGES+=("snapd")
+fi
+
+# Notify user about missing packages if any
+if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+    log_info "Optional package managers missing: ${MISSING_PACKAGES[*]}"
+    
+    # Create notification for user
+    MISSING_MSG="The following optional package managers are not installed:\n\n"
+    for pkg in "${MISSING_PACKAGES[@]}"; do
+        if [ "$pkg" = "flatpak" ]; then
+            MISSING_MSG+="• Flatpak - for Flatpak app updates\n  Install: sudo zypper install flatpak\n\n"
+        elif [ "$pkg" = "snapd" ]; then
+            MISSING_MSG+="• Snapd - for Snap package updates\n  Install: sudo zypper install snapd\n  Enable: sudo systemctl enable --now snapd\n\n"
+        fi
+    done
+    MISSING_MSG+="These are optional. System updates will work without them."
+    
+    # Send desktop notification to user
+    if command -v notify-send >/dev/null 2>&1; then
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" notify-send \
+            -u normal \
+            -t 15000 \
+            -i "dialog-information" \
+            "Zypper Auto-Helper: Optional Packages" \
+            "${MISSING_MSG}" 2>/dev/null || true
+    fi
+    
+    echo "" | tee -a "${LOG_FILE}"
+    echo "============================" | tee -a "${LOG_FILE}"
+    echo "⚠️  Optional Packages Missing" | tee -a "${LOG_FILE}"
+    echo "============================" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    for pkg in "${MISSING_PACKAGES[@]}"; do
+        if [ "$pkg" = "flatpak" ]; then
+            echo "Flatpak:" | tee -a "${LOG_FILE}"
+            echo "  Purpose: Update Flatpak applications" | tee -a "${LOG_FILE}"
+            echo "  Install: sudo zypper install flatpak" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+        elif [ "$pkg" = "snapd" ]; then
+            echo "Snapd:" | tee -a "${LOG_FILE}"
+            echo "  Purpose: Update Snap packages" | tee -a "${LOG_FILE}"
+            echo "  Install: sudo zypper install snapd" | tee -a "${LOG_FILE}"
+            echo "  Enable:  sudo systemctl enable --now snapd" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+        fi
+    done
+    echo "Note: These are optional. System updates will work without them." | tee -a "${LOG_FILE}"
+    echo "============================" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
 fi
 
 # --- 15. Final Summary ---
