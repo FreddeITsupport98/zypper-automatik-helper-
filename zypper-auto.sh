@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 48 FIXED BATTERY DETECTION AND NOTIFICATION PERSISTENCE
+#       VERSION 53 - Snooze controls, safety preflight, and CLI helper
 # This script installs the final architecture and fixes the policy lock.
 # It replaces 'sudo' with 'pkexec' in the Python script to ensure
 # zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
@@ -1153,7 +1153,7 @@ log_debug "Writing Python script to: ${NOTIFY_SCRIPT_PATH}"
 cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
 #!/usr/bin/env python3
 #
-# zypper-notify-updater.py (v50 with stage-based download notifications)
+# zypper-notify-updater.py (v53 with snooze controls and safety preflight)
 #
 # This script is run as the USER. It uses PyGObject (gi)
 # to create a robust, clickable notification.

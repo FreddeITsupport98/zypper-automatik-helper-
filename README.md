@@ -18,7 +18,7 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v51 Architecture)
+## ✨ Key Features (v53 Architecture)
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
@@ -56,15 +56,18 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives.
 * **Fixed Battery Detection (v48):** Corrected logic that was incorrectly identifying laptops as desktops, now properly detects batteries via `inxi` output.
 * **Persistent Notifications (v48):** Update notifications now persist until user interaction or timeout by keeping a GLib main loop active.
+* **Environment Change Awareness (v53):** Tracks when your machine switches between AC/battery or metered/unmetered connections and shows "updates paused" / "conditions now safe" notifications accordingly.
+* **Snooze & Quiet Hours (v53):** Lets you snooze update reminders for 1h, 4h, or 1 day via notification buttons, with state stored under `~/.cache/zypper-notify`.
+* **Safety Preflight Checks (v53):** Before showing "Install" it checks root filesystem free space, Btrfs snapshots (snapper), and basic network health and adds warnings to the notification if something looks risky.
 * **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v51) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v53) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v51 Architecture
+## 🛠️ How It Works: The v53 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -179,7 +182,7 @@ The command automatically includes `sudo` when needed, so you don't need to type
 You can check the current status at any time:
 
 ```bash
-# Run comprehensive health check and auto-repair (v51)
+# Run comprehensive health check and auto-repair
 zypper-auto-helper --verify
 
 # Check installation/system status
@@ -444,6 +447,12 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v53** (2025-12-25): **Snooze Controls & Environment-Aware Safety Preflight**
+  - ✨ **NEW: Snooze buttons (1h / 4h / 1d)** in the notification with persistent state under `~/.cache/zypper-notify`, so you can temporarily pause reminders.
+  - 🔔 **NEW: Environment change notifications** when AC/battery or metered status changes, explaining why downloads are paused or allowed.
+  - 🛡️ **NEW: Safety preflight checks** for disk space, Btrfs snapshots (snapper), and basic network quality, with warnings appended to the update notification instead of failing silently.
+  - 👀 **NEW: "View Changes" helper** launched from the notification to show `zypper dup --dry-run --details` in a terminal.
+  - ℹ️ **NEW: Optional Flatpak/Snap detection** after install with a desktop notification describing how to enable them for app updates.
 - **v51** (2025-12-23): **Major Update - Command-Line Interface & Advanced Diagnostics**
   - ✨ **NEW: `zypper-auto-helper` command** - Installed to `/usr/local/bin` with automatic shell aliases
   - 🔧 **NEW: Advanced Verification System** - 12-point health check with multi-stage auto-repair
