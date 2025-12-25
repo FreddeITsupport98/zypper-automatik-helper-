@@ -39,6 +39,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Synchronous notification IDs prevent duplicate popups
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
+* **Robust Zypper Error Handling (v54):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications.
 * **Manual Update Wrapper (v51):** Automatic post-update checks for manual updates:
     * Wraps `sudo zypper dup` command automatically
     * Runs `zypper ps -s` after successful updates
@@ -128,6 +129,7 @@ This Python script is the core of the system, run by the `zypper-notify-user.ser
 6.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
 7.  **Post-Update Check:** After update completes, runs `zypper ps -s` to show which services need restart and provides reboot guidance if needed.
 8.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `upower` / `nmcli` / `inxi` decisions) are printed to the journal.
+9.  **Manual-Intervention Helper (v54):** If `pkexec zypper dup --dry-run` fails due to a solver/interaction problem (such as a vendor conflict), the notifier shows a dedicated "Updates require manual decision" notification that includes the first `Problem:` line and an **"Open Helper"** button which launches `~/.local/bin/zypper-run-install` so you can resolve it in a terminal.
 
 -----
 
@@ -447,6 +449,11 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v54** (2025-12-25): **Robust Conflict Handling & Helper Integration**
+  - 🧠 **NEW: Smarter zypper error handling** that distinguishes PolicyKit/authentication failures, zypper locks, and normal solver/interaction errors.
+  - 🧩 **NEW: "Updates require manual decision" notification** when `zypper dup --dry-run` needs interactive choices (e.g. vendor conflicts), including the first `Problem:` line from zypper output.
+  - 🖱️ **NEW: "Open Helper" action button** on manual-intervention notifications that launches `zypper-run-install` in a terminal so you can resolve issues immediately.
+  - 🔁 **FIXED: Stale downloader status handling** – old `refreshing` / `downloading:` states in `/var/log/zypper-auto/download-status.txt` are ignored after 5 minutes so the notifier always runs a fresh check.
 - **v53** (2025-12-25): **Snooze Controls & Environment-Aware Safety Preflight**
   - ✨ **NEW: Snooze buttons (1h / 4h / 1d)** in the notification with persistent state under `~/.cache/zypper-notify`, so you can temporarily pause reminders.
   - 🔔 **NEW: Environment change notifications** when AC/battery or metered status changes, explaining why downloads are paused or allowed.

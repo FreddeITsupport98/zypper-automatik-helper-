@@ -1844,22 +1844,89 @@ def get_updates():
         return result.stdout
 
     except subprocess.CalledProcessError as e:
-        # Check if zypper is locked by another process
-        stderr_text = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)
-        
+        """Handle zypper failures more intelligently.
+
+        - Distinguish between a normal zypper lock, PolicyKit errors,
+          and solver/interaction errors (e.g. vendor conflicts).
+        """
+        # Normalise stderr/stdout to strings
+        stderr_text = ""
+        stdout_text = ""
+        if e.stderr:
+            stderr_text = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)
+        if e.stdout:
+            stdout_text = e.stdout.decode() if isinstance(e.stdout, bytes) else str(e.stdout)
+
+        # 1) Zypper is locked by another process – this is expected sometimes.
         if "System management is locked" in stderr_text or "pid" in stderr_text.lower():
-            # Zypper is busy - this is normal, just skip silently
             log_info("Zypper is currently locked by another process (likely the downloader). Skipping this check.")
             update_status("SKIPPED: Zypper locked by another process")
             return ""  # Return empty string to skip notification
-        
-        # Real authentication/policy error - show error notification
-        log_error("Policy Block Failure: PolicyKit/PAM refused command")
-        update_status("FAILED: PolicyKit/PAM authentication error")
-        if e.stderr:
-            log_error(f"Policy Error: {stderr_text.strip()}")
-        if e.stdout:
-            log_debug(f"Command stdout: {e.stdout}")
+
+        # 2) Check for PolicyKit / authentication style errors.
+        lower_stderr = stderr_text.lower()
+        polkit_markers = (
+            "polkit",
+            "authentication is required",
+            "authentication failed",
+            "not authorized",
+            "not authorised",
+        )
+        if any(marker in lower_stderr for marker in polkit_markers):
+            log_error("Policy Block Failure: PolicyKit/PAM refused command")
+            update_status("FAILED: PolicyKit/PAM authentication error")
+            if stderr_text:
+                log_error(f"Policy Error: {stderr_text.strip()}")
+            if stdout_text:
+                log_debug(f"Command stdout: {stdout_text}")
+            return None
+
+        # 3) Otherwise, treat as a normal zypper/solver error that needs manual action.
+        log_error("Zypper dry-run failed: manual intervention required")
+        if stderr_text:
+            log_debug(f"Zypper stderr: {stderr_text.strip()}")
+
+        # Try to extract the first 'Problem:' line to show a useful hint.
+        problem_line = ""
+        for line in stdout_text.splitlines():
+            if line.strip().startswith("Problem:"):
+                problem_line = line.strip()
+                break
+
+        if problem_line:
+            summary = problem_line
+        else:
+            summary = "Zypper dup --dry-run failed. See logs for detailed information."
+
+        update_status("FAILED: Zypper dry-run requires manual decision")
+        err_title = "Updates require manual decision"
+        err_message = (
+            summary
+            + "\n\n"
+            + "Open a terminal and run:\n"
+            + "  sudo zypper dup\n"
+            + "to resolve this interactively. After that, the notifier will resume normally."
+        )
+
+        n = Notify.Notification.new(err_title, err_message, "dialog-warning")
+        n.set_timeout(30000)  # 30 seconds
+        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-error"))
+
+        # Add an action button to launch the interactive helper in a terminal
+        action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
+        n.add_action("install", "Open Helper", on_action, action_script)
+
+        log_info("Manual-intervention notification displayed (with Open Helper action)")
+
+        # Run a short GLib main loop so the user can click the action
+        loop = GLib.MainLoop()
+        n.connect("closed", lambda *args: loop.quit())
+        n.show()
+        try:
+            loop.run()
+        except KeyboardInterrupt:
+            log_info("Manual-intervention main loop interrupted")
+
         return None
 
 def extract_package_preview(output: str, max_packages: int = 5) -> list:
@@ -2027,158 +2094,169 @@ def main():
         download_status_file = "/var/log/zypper-auto/download-status.txt"
         if os.path.exists(download_status_file):
             try:
+                # Treat very old statuses as stale so we don't get stuck forever
+                try:
+                    mtime = os.path.getmtime(download_status_file)
+                    age_seconds = time.time() - mtime
+                except Exception as e:
+                    log_debug(f"Could not stat download status file: {e}")
+                    age_seconds = 0
+
                 with open(download_status_file, 'r') as f:
                     status = f.read().strip()
-                    
-                    # Handle stage-based status
-                    if status == "refreshing":
-                        log_info("Stage: Refreshing repositories")
-                        n = Notify.Notification.new(
-                            "Checking for updates...",
-                            "Refreshing repositories...",
-                            "emblem-synchronizing"
-                        )
-                        n.set_timeout(5000)  # 5 seconds
-                        # Set hint to replace previous download status notifications
-                        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
-                        n.show()
-                        import time
-                        time.sleep(0.1)
-                        return  # Exit, will check again in 5 seconds
-                    
-                    elif status.startswith("downloading:"):
-                        # Extract from "downloading:TOTAL:SIZE:DOWNLOADED:PERCENT" format
-                        try:
-                            parts = status.split(":")
-                            pkg_total = parts[1] if len(parts) > 1 else "?"
-                            download_size = parts[2] if len(parts) > 2 else "unknown size"
-                            pkg_downloaded = parts[3] if len(parts) > 3 else "0"
-                            percent = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-                            
-                            log_info(f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})")
-                            
-                            # Build progress bar visual
-                            if percent >= 0 and percent <= 100:
-                                bar_length = 20
-                                filled = int(bar_length * percent / 100)
-                                bar = "█" * filled + "░" * (bar_length - filled)
-                                progress_text = f"[{bar}] {percent}%"
-                            else:
-                                progress_text = "Processing..."
-                            
-                            # Build message with progress
-                            if download_size and download_size != "unknown":
-                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\n{download_size} total • HIGH priority"
-                            else:
-                                msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\nHIGH priority"
-                            
+
+                # If status looks like an in‑progress state but is stale, ignore it
+                if status in ("refreshing",) or status.startswith("downloading:"):
+                    if age_seconds > 300:  # older than 5 minutes
+                        log_info(f"Stale download status '{status}' (age {age_seconds:.0f}s) - ignoring and continuing to full check")
+                    else:
+                        # Handle stage-based status for fresh operations
+                        if status == "refreshing":
+                            log_info("Stage: Refreshing repositories")
                             n = Notify.Notification.new(
-                                "Downloading updates...",
-                                msg,
-                                "emblem-downloads"
+                                "Checking for updates...",
+                                "Refreshing repositories...",
+                                "emblem-synchronizing"
                             )
-                            
-                            # Add progress bar hint (0-100) for notification daemons that support it
-                            if percent >= 0 and percent <= 100:
-                                n.set_hint("value", GLib.Variant("i", percent))
-                                n.set_category("transfer.progress")  # Category hint for progress notifications
-                            else:
-                                # Indeterminate progress (pulsing animation)
-                                n.set_hint("value", GLib.Variant("i", 0))
-                                n.set_category("transfer")
-                        except Exception as e:
-                            log_debug(f"Error parsing download status: {e}")
-                            log_info("Stage: Downloading packages")
-                            n = Notify.Notification.new(
-                                "Downloading updates...",
-                                "Background download is in progress at HIGH priority.",
-                                "emblem-downloads"
-                            )
-                            n.set_hint("value", GLib.Variant("i", 50))
-                        
-                        n.set_timeout(5000)  # 5 seconds
-                        # Set hint to replace previous download status notifications
-                        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
-                        n.show()
-                        import time
-                        time.sleep(0.1)
-                        return  # Exit, will check again in 5 seconds
-                    
-                    elif status.startswith("complete:"):
-                        # Extract from "complete:DURATION:ACTUAL_DOWNLOADED" format (seconds)
-                        try:
-                            parts = status.split(":")
-                            duration = int(parts[1]) if len(parts) > 1 else 0
-                            actual_downloaded = int(parts[2]) if len(parts) > 2 else 0
-                            
-                            minutes = duration // 60
-                            seconds = duration % 60
-                            
-                            if minutes > 0:
-                                time_str = f"{minutes}m {seconds}s"
-                            else:
-                                time_str = f"{seconds}s"
-                            
-                            # Skip notification if nothing was actually downloaded (already cached)
-                            if actual_downloaded == 0:
-                                log_info("All packages were already cached, skipping download complete notification")
-                                # Clear status immediately and continue to show install notification
-                                try:
-                                    with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                        f.write("idle")
-                                except:
-                                    pass
-                                # Don't return - continue to show install notification below
-                            else:
-                                # Packages were actually downloaded, show notification
-                                log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
-                                
-                                # Get changelog preview by running zypper dup --dry-run
-                                changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
-                                try:
-                                    log_debug("Fetching update details for changelog preview...")
-                                    result = subprocess.run(
-                                        ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=30
-                                    )
-                                    if result.returncode == 0:
-                                        # Extract package preview
-                                        preview_packages = extract_package_preview(result.stdout, max_packages=5)
-                                        if preview_packages:
-                                            preview_str = ", ".join(preview_packages)
-                                            changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nIncluding: {preview_str}\n\nReady to install."
-                                            log_info(f"Added changelog preview: {preview_str}")
-                                except Exception as e:
-                                    log_debug(f"Could not fetch changelog preview: {e}")
-                                
+                            n.set_timeout(5000)  # 5 seconds
+                            # Set hint to replace previous download status notifications
+                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
+                            n.show()
+                            time.sleep(0.1)
+                            return  # Exit, will check again in 5 seconds
+
+                        elif status.startswith("downloading:"):
+                            # Extract from "downloading:TOTAL:SIZE:DOWNLOADED:PERCENT" format
+                            try:
+                                parts = status.split(":")
+                                pkg_total = parts[1] if len(parts) > 1 else "?"
+                                download_size = parts[2] if len(parts) > 2 else "unknown size"
+                                pkg_downloaded = parts[3] if len(parts) > 3 else "0"
+                                percent = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+                                log_info(f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})")
+
+                                # Build progress bar visual
+                                if 0 <= percent <= 100:
+                                    bar_length = 20
+                                    filled = int(bar_length * percent / 100)
+                                    bar = "█" * filled + "░" * (bar_length - filled)
+                                    progress_text = f"[{bar}] {percent}%"
+                                else:
+                                    progress_text = "Processing..."
+
+                                # Build message with progress
+                                if download_size and download_size != "unknown":
+                                    msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\n{download_size} total • HIGH priority"
+                                else:
+                                    msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\nHIGH priority"
+
                                 n = Notify.Notification.new(
-                                    "✅ Downloads Complete!",
-                                    changelog_msg,
-                                    "emblem-default"
+                                    "Downloading updates...",
+                                    msg,
+                                    "emblem-downloads"
                                 )
-                                n.set_timeout(0)  # 0 = persist until user interaction
-                                n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
-                                n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
-                                n.show()
-                                import time
-                                time.sleep(0.1)  # Wait a bit before continuing
-                                # Clear the complete status so it doesn't show again
-                                try:
-                                    with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                        f.write("idle")
-                                except:
-                                    pass
-                                # Continue to show install notification below
-                        except:
-                            log_debug("Could not parse completion time")
-                            # Continue to show install notification below
-                    
-                    elif status == "idle":
-                        log_debug("Status is idle (no updates to download)")
-                        # Continue to normal check below
+
+                                # Add progress bar hint (0-100) for notification daemons that support it
+                                if 0 <= percent <= 100:
+                                    n.set_hint("value", GLib.Variant("i", percent))
+                                    n.set_category("transfer.progress")  # Category hint for progress notifications
+                                else:
+                                    # Indeterminate progress (pulsing animation)
+                                    n.set_hint("value", GLib.Variant("i", 0))
+                                    n.set_category("transfer")
+                            except Exception as e:
+                                log_debug(f"Error parsing download status: {e}")
+                                log_info("Stage: Downloading packages")
+                                n = Notify.Notification.new(
+                                    "Downloading updates...",
+                                    "Background download is in progress at HIGH priority.",
+                                    "emblem-downloads"
+                                )
+                                n.set_hint("value", GLib.Variant("i", 50))
+
+                            n.set_timeout(5000)  # 5 seconds
+                            # Set hint to replace previous download status notifications
+                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
+                            n.show()
+                            time.sleep(0.1)
+                            return  # Exit, will check again in 5 seconds
+
+                # Fresh 'complete:' or 'idle' status fall through to the normal logic below
+                if status.startswith("complete:"):
+                    # Extract from "complete:DURATION:ACTUAL_DOWNLOADED" format (seconds)
+                    try:
+                        parts = status.split(":")
+                        duration = int(parts[1]) if len(parts) > 1 else 0
+                        actual_downloaded = int(parts[2]) if len(parts) > 2 else 0
                         
+                        minutes = duration // 60
+                        seconds = duration % 60
+                        
+                        if minutes > 0:
+                            time_str = f"{minutes}m {seconds}s"
+                        else:
+                            time_str = f"{seconds}s"
+                        
+                        # Skip notification if nothing was actually downloaded (already cached)
+                        if actual_downloaded == 0:
+                            log_info("All packages were already cached, skipping download complete notification")
+                            # Clear status immediately and continue to show install notification
+                            try:
+                                with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                    f.write("idle")
+                            except:
+                                pass
+                            # Don't return - continue to show install notification below
+                        else:
+                            # Packages were actually downloaded, show notification
+                            log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
+                            
+                            # Get changelog preview by running zypper dup --dry-run
+                            changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
+                            try:
+                                log_debug("Fetching update details for changelog preview...")
+                                result = subprocess.run(
+                                    ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30
+                                )
+                                if result.returncode == 0:
+                                    # Extract package preview
+                                    preview_packages = extract_package_preview(result.stdout, max_packages=5)
+                                    if preview_packages:
+                                        preview_str = ", ".join(preview_packages)
+                                        changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nIncluding: {preview_str}\n\nReady to install."
+                                        log_info(f"Added changelog preview: {preview_str}")
+                            except Exception as e:
+                                log_debug(f"Could not fetch changelog preview: {e}")
+                            
+                            n = Notify.Notification.new(
+                                "✅ Downloads Complete!",
+                                changelog_msg,
+                                "emblem-default"
+                            )
+                            n.set_timeout(0)  # 0 = persist until user interaction
+                            n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
+                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
+                            n.show()
+                            time.sleep(0.1)  # Wait a bit before continuing
+                            # Clear the complete status so it doesn't show again
+                            try:
+                                with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                    f.write("idle")
+                            except:
+                                pass
+                            # Continue to show install notification below
+                    except:
+                        log_debug("Could not parse completion time")
+                        # Continue to show install notification below
+                
+                elif status == "idle":
+                    log_debug("Status is idle (no updates to download)")
+                    # Continue to normal check below
+                    
             except Exception as e:
                 log_debug(f"Could not read download status: {e}")
 
