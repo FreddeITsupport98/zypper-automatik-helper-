@@ -1989,8 +1989,17 @@ def on_action(notification, action_id, user_data):
             import stat
             if os.path.exists(view_script):
                 os.chmod(view_script, os.stat(view_script).st_mode | stat.S_IEXEC)
-                log_debug(f"Launching view changes script: {view_script}")
-                subprocess.Popen([view_script], start_new_session=True)
+                log_debug(f"Launching view changes script via systemd-run: {view_script}")
+                try:
+                    subprocess.Popen([
+                        "systemd-run",
+                        "--user",
+                        "--scope",
+                        view_script,
+                    ])
+                except FileNotFoundError:
+                    log_debug("systemd-run not found, launching directly")
+                    subprocess.Popen([view_script], start_new_session=True)
                 log_info("View changes script launched successfully")
             else:
                 log_error(f"View changes script not found: {view_script}")
@@ -2459,8 +2468,33 @@ cat << 'EOF' > "${VIEW_CHANGES_SCRIPT_PATH}"
 #!/usr/bin/env bash
 
 # Script to view detailed package changes
+# Logging for debugging
+LOG_FILE="$HOME/.local/share/zypper-notify/view-changes.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] View changes script started" >> "$LOG_FILE"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] DISPLAY=$DISPLAY" >> "$LOG_FILE"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] USER=$USER" >> "$LOG_FILE"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] PWD=$PWD" >> "$LOG_FILE"
+
+# Ensure a usable GUI environment when launched from systemd --user
+# Prefer existing vars; only set safe defaults if missing
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] XDG_RUNTIME_DIR was empty, set to $XDG_RUNTIME_DIR" >> "$LOG_FILE"
+fi
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] DBUS_SESSION_BUS_ADDRESS was empty, set to $DBUS_SESSION_BUS_ADDRESS" >> "$LOG_FILE"
+fi
+# On Wayland, WAYLAND_DISPLAY is usually set by the session. If both DISPLAY and WAYLAND_DISPLAY
+# are empty, fall back to DISPLAY=:0 which works for X11
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    export DISPLAY=:0
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Neither DISPLAY nor WAYLAND_DISPLAY set; defaulted DISPLAY to :0" >> "$LOG_FILE"
+fi
+
 # Create a temporary script file for the terminal to execute
 TMP_SCRIPT=$(mktemp /tmp/zypper-view-changes.XXXXXX.sh)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Created temp script: $TMP_SCRIPT" >> "$LOG_FILE"
 
 cat > "$TMP_SCRIPT" << 'INNEREOF'
 #!/usr/bin/env bash
@@ -2494,25 +2528,38 @@ INNEREOF
 
 chmod +x "$TMP_SCRIPT"
 
-# Try terminals in order
+# Try terminals in order  
 if command -v konsole >/dev/null 2>&1; then
-    konsole -e "$TMP_SCRIPT" &
-    disown
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching konsole..." >> "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Command: konsole --noclose -e bash $TMP_SCRIPT" >> "$LOG_FILE"
+    nohup konsole --noclose -e bash "$TMP_SCRIPT" >> "$LOG_FILE" 2>&1 &
+    KONSOLE_PID=$!
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Konsole PID: $KONSOLE_PID" >> "$LOG_FILE"
+    sleep 0.5
+    if ps -p $KONSOLE_PID > /dev/null 2>&1; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Konsole is running" >> "$LOG_FILE"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Konsole exited immediately!" >> "$LOG_FILE"
+    fi
 elif command -v gnome-terminal >/dev/null 2>&1; then
-    gnome-terminal -- "$TMP_SCRIPT" &
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching gnome-terminal..." >> "$LOG_FILE"
+    gnome-terminal -- "$TMP_SCRIPT" >> "$LOG_FILE" 2>&1 &
     disown
 elif command -v kitty >/dev/null 2>&1; then
-    kitty -e "$TMP_SCRIPT" &
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching kitty..." >> "$LOG_FILE"
+    kitty -e "$TMP_SCRIPT" >> "$LOG_FILE" 2>&1 &
     disown
 elif command -v alacritty >/dev/null 2>&1; then
-    alacritty -e "$TMP_SCRIPT" &
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching alacritty..." >> "$LOG_FILE"
+    alacritty -e "$TMP_SCRIPT" >> "$LOG_FILE" 2>&1 &
     disown
 elif command -v xterm >/dev/null 2>&1; then
-    xterm -e "$TMP_SCRIPT" &
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching xterm..." >> "$LOG_FILE"
+    xterm -e "$TMP_SCRIPT" >> "$LOG_FILE" 2>&1 &
     disown
 else
-    # No terminal found, run directly
-    "$TMP_SCRIPT"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] No terminal found, running directly" >> "$LOG_FILE"
+    "$TMP_SCRIPT" >> "$LOG_FILE" 2>&1
 fi
 EOF
 
