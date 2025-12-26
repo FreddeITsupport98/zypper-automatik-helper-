@@ -1136,8 +1136,11 @@ cat << EOF > ${NT_TIMER_FILE}
 Description=Run ${NT_SERVICE_NAME} frequently to check for updates
 
 [Timer]
-OnBootSec=5sec
-OnUnitInactiveSec=5sec
+# Run 5 seconds after the timer is started, and then every 5 seconds
+# thereafter. Using OnActiveSec avoids the "active (elapsed), no NEXT" bug
+# that can happen with OnBootSec/OnUnitInactiveSec on some systemd versions
+# when the user manager starts long after boot.
+OnActiveSec=5sec
 Persistent=true
 
 [Install]
@@ -2687,12 +2690,19 @@ if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --us
     log_debug "Enabling user timer: ${NT_SERVICE_NAME}.timer"
     if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
         log_success "User notifier timer enabled and started"
+        # Some systemd versions can leave the timer in an 'elapsed' state
+        # with no NEXT trigger after unit changes. Force a restart so it
+        # gets a fresh schedule and actually fires again for this user.
+        log_debug "Restarting user timer to ensure it is scheduled"
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user restart "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
     else
         log_error "Failed to enable user timer (non-fatal)"
+        log_info "You may need to run manually as the target user:"
+        log_info "  systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
     fi
 else
     log_error "Warning: Could not talk to user systemd (no session bus?)"
-    log_info "You may need to run manually:"
+    log_info "You may need to run manually as the target user:"
     log_info "  systemctl --user daemon-reload"
     log_info "  systemctl --user enable --now ${NT_SERVICE_NAME}.timer"
 fi
