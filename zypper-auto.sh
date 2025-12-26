@@ -1365,33 +1365,98 @@ def check_disk_space() -> tuple[bool, str]:
         return True, "Could not check disk space"
 
 def check_snapshots() -> tuple[bool, str]:
-    """Check if snapper is available and configured.
+    """Check if snapper is installed and whether configs/snapshots exist.
+
     Returns: (has_snapshots, message)
+    - has_snapshots=True  => at least one snapshot exists
+    - has_snapshots=False => snapper not installed, not configured, or zero snapshots
     """
+    # First, see if snapper is installed and if there is a root config
     try:
-        result = subprocess.run(
-            ['snapper', 'list'],
+        cfg_result = subprocess.run(
+            ['snapper', 'list-configs'],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
-        
-        if result.returncode == 0 and result.stdout.strip():
-            snapshot_count = len(result.stdout.strip().split('\n')) - 2  # Subtract header lines
-            log_debug(f"Snapper is working, {snapshot_count} snapshots available")
-            return True, f"{snapshot_count} snapshots available"
-        else:
-            msg = "Snapper not configured or no snapshots"
-            log_info(msg)
-            return False, msg
     except FileNotFoundError:
         msg = "Snapper not installed"
         log_info(msg)
         return False, msg
     except Exception as e:
-        log_debug(f"Snapshot check failed: {e}")
+        log_debug(f"Snapshot config check failed: {e}")
         return False, "Could not check snapshots"
 
+    has_config = False
+    root_config = False
+    if cfg_result.returncode == 0 and cfg_result.stdout.strip():
+        for line in cfg_result.stdout.strip().split('\n'):
+            line = line.strip()
+            if not line or line.startswith('Config'):
+                continue
+            parts = [p.strip() for p in line.split('|')]
+            if len(parts) < 2:
+                continue
+            name = parts[1]
+            if not name:
+                continue
+            has_config = True
+            if name == 'root':
+                root_config = True
+
+    # Now check the actual snapshots
+    try:
+        result = subprocess.run(
+            ['snapper', 'list'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as e:
+        log_debug(f"Snapshot list check failed: {e}")
+        if root_config or has_config:
+            msg = "Snapper configured (root) but snapshot list not available"
+            log_info(msg)
+            return False, msg
+        return False, "Could not check snapshots"
+
+    if result.returncode == 0:
+        lines = [ln for ln in result.stdout.split('\n') if ln.strip()]
+
+        # If snapper prints "No permissions.", that usually means there *are*
+        # snapshots but they are only visible to root (common on Tumbleweed
+        # when called as an unprivileged user). Treat this as "configured",
+        # but explain that permissions hide the details.
+        if any("No permissions" in ln for ln in lines):
+            if root_config or has_config:
+                msg = "Snapper configured (root) but snapshots require root permissions to view"
+            else:
+                msg = "Snapper present but snapshots require root permissions to view"
+            log_info(msg)
+            return False, msg
+
+        # snapper list normally has 2 header lines; anything beyond that is a snapshot
+        if len(lines) > 2:
+            snapshot_count = len(lines) - 2
+            log_debug(f"Snapper is working, {snapshot_count} snapshots available")
+            return True, f"{snapshot_count} snapshots available"
+        if root_config or has_config:
+            msg = "Snapper configured (root) but no snapshots yet"
+            log_info(msg)
+            return False, msg
+        msg = "Snapper not configured or no snapshots"
+        log_info(msg)
+        return False, msg
+
+    # Non-zero return code from snapper list
+    if root_config or has_config:
+        msg = "Snapper configured (root) but snapshot list failed"
+        log_info(msg)
+        return False, msg
+
+    msg = "Snapper not configured or no snapshots"
+    log_info(msg)
+    return False, msg
 def check_network_quality() -> tuple[bool, str]:
     """Check network latency to ensure stable connection.
     Returns: (is_good, message)
