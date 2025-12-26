@@ -1136,11 +1136,10 @@ cat << EOF > ${NT_TIMER_FILE}
 Description=Run ${NT_SERVICE_NAME} frequently to check for updates
 
 [Timer]
-# Run 5 seconds after the timer is started, and then every 5 seconds
-# thereafter. Using OnActiveSec avoids the "active (elapsed), no NEXT" bug
-# that can happen with OnBootSec/OnUnitInactiveSec on some systemd versions
-# when the user manager starts long after boot.
-OnActiveSec=5sec
+# First run a few seconds after the user manager starts,
+# then re-run a fixed time after the service finishes.
+OnBootSec=5sec
+OnUnitInactiveSec=5min
 Persistent=true
 
 [Install]
