@@ -2929,6 +2929,7 @@ import os
 import subprocess
 import sys
 import traceback
+import shutil
 
 try:
     import gi
@@ -2949,6 +2950,9 @@ if "DBUS_SESSION_BUS_ADDRESS" not in os.environ or not os.environ["DBUS_SESSION_
 if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
     # Fallback for X11-only sessions
     os.environ["DISPLAY"] = ":0"
+if not os.environ.get("PATH"):
+    # Minimal sane PATH so we can discover common terminals
+    os.environ["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 
 
 def _open_terminal_with_soar_install() -> None:
@@ -2959,16 +2963,24 @@ def _open_terminal_with_soar_install() -> None:
     terminals = ["konsole", "gnome-terminal", "kitty", "alacritty", "xterm"]
 
     for term in terminals:
-        if subprocess.call(["which", term], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
-            if term == "konsole":
-                subprocess.Popen([term, "-e", "bash", "-lc", cmd])
-            elif term == "gnome-terminal":
-                subprocess.Popen([term, "--", "bash", "-lc", cmd])
-            else:
-                subprocess.Popen([term, "-e", "bash", "-lc", cmd])
-            return
+        # Use shutil.which instead of external 'which' so we don't depend on
+        # that binary existing in a restricted PATH.
+        if shutil.which(term) is not None:
+            try:
+                if term == "konsole":
+                    subprocess.Popen([term, "-e", "bash", "-lc", cmd])
+                elif term == "gnome-terminal":
+                    subprocess.Popen([term, "--", "bash", "-lc", cmd])
+                else:
+                    subprocess.Popen([term, "-e", "bash", "-lc", cmd])
+                return
+            except Exception:
+                # If launching this terminal fails for any reason, try the next one.
+                continue
 
-    # Fallback: run in a plain shell if no terminal was detected
+    # Fallback: run in a plain shell if no terminal was detected or all
+    # launches failed. This at least ensures the installer runs, even if it
+    # isn't in a separate GUI terminal.
     subprocess.Popen(["bash", "-lc", cmd])
 
 
