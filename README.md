@@ -18,7 +18,7 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v53 Architecture)
+## ✨ Key Features (v55 Architecture)
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
@@ -40,6 +40,10 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
 * **Robust Zypper Error Handling (v54):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications.
+* **Soar / Flatpak / Snap Integration (v55):** Every `zypper dup` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), and an optional `soar sync` step, so app runtimes and Soar-managed apps stay in sync after system updates.
+* **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
+* **Improved Snapper Detection (v55):** Recognises Tumbleweed's default root snapper configuration and handles `snapper list` permission errors ("No permissions.") as "snapper configured" instead of "not configured".
+* **More Robust Notifier Timer (v55):** Uses `OnActiveSec` and an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
 * **Manual Update Wrapper (v51):** Automatic post-update checks for manual updates:
     * Wraps `sudo zypper dup` command automatically
     * Runs `zypper ps -s` after successful updates
@@ -63,12 +67,12 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v53) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v55) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v53 Architecture
+## 🛠️ How It Works: The v55 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -102,8 +106,8 @@ This service's job is to check for updates and remind you, running as your stand
     * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
     * Because it runs in user-space, it has the correct D-Bus environment variables to display notifications reliably.
 * **Timer:** `~/.config/systemd/user/zypper-notify-user.timer`
-    * Default (aggressive): `OnBootSec=1min`, `OnUnitActiveSec=1min` (checks for updates roughly once per minute).
-    * You can tone this down (for example, to `OnUnitActiveSec=1h`) using:
+    * Default (aggressive): runs a few seconds after being activated and then every few seconds (`OnActiveSec`), so checks for updates frequently while your user session is running.
+    * You can tone this down (for example, to run only every 10 minutes or 1 hour) using:
       ```bash
       systemctl --user edit --full zypper-notify-user.timer
       systemctl --user daemon-reload
@@ -449,6 +453,12 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v55** (2025-12-27): **Soar Integration, Smarter Detection & Timer Fixes**
+  - 🔗 **NEW: Soar integration** – every `zypper dup` triggered via the helper or the shell wrapper now runs Flatpak updates, Snap refresh, and an optional `soar sync` step so app runtimes and Soar-managed apps stay in sync with system updates.
+  - 🧩 **NEW: Optional Soar guidance & install helper** – if Soar is not installed for the user, the installer logs and (optionally) notifies with the exact install command (`curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh`), suggests `soar sync`, and shows a rich desktop notification with an **"Install Soar"** button that opens a terminal and runs the installer for you.
+  - 🧭 **NEW: Smarter optional-tool detection** – Flatpak, Snap, and Soar are now detected using the user's PATH and common per-user locations (like `~/.local/bin` and `~/pkgforge`) to avoid false "missing" warnings; if Soar is already present, the install helper notification is suppressed.
+  - 📸 **IMPROVED: Snapper detection** – `snapper list-configs` is inspected so the default `root` config on Tumbleweed is recognised, and `snapper list` permission errors ("No permissions.") are treated as "snapper configured (root) but snapshots require root permissions to view" rather than "not configured".
+  - ⏱️ **IMPROVED: Notifier timer behaviour** – the user timer now uses `OnActiveSec` plus an automatic restart after install so it no longer gets stuck in an `active (elapsed)` state with no future trigger.
 - **v54** (2025-12-25): **Robust Conflict Handling & Helper Integration**
   - 🧠 **NEW: Smarter zypper error handling** that distinguishes PolicyKit/authentication failures, zypper locks, and normal solver/interaction errors.
   - 🧩 **NEW: "Updates require manual decision" notification** when `zypper dup --dry-run` needs interactive choices (e.g. vendor conflicts), including the first `Problem:` line from zypper output.

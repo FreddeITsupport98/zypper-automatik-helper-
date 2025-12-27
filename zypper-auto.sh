@@ -936,7 +936,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
     echo ""
 
     if command -v snap >/dev/null 2>&1; then
-        if sudo snap refresh; then
+        if pkexec snap refresh; then
             echo "✅ Snap updates completed."
         else
             echo "⚠️  Snap refresh failed (continuing)."
@@ -945,6 +945,24 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
         echo "⚠️  Snapd is not installed - skipping Snap updates."
         echo "   To install: sudo zypper install snapd"
         echo "   Then enable: sudo systemctl enable --now snapd"
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "  Soar Sync (optional)"
+    echo "=========================================="
+    echo ""
+
+    if command -v soar >/dev/null 2>&1; then
+        if soar sync; then
+            echo "✅ Soar sync completed."
+        else
+            echo "⚠️  Soar sync failed (continuing)."
+        fi
+    else
+        echo "ℹ️  Soar is not installed - skipping Soar sync."
+        echo "    To install: curl -fsSL \"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\" | sh"
+        echo "    Then run: soar sync"
     fi
 
     # Always show service restart info, even if zypper reported errors
@@ -2712,7 +2730,103 @@ chown "$SUDO_USER:$SUDO_USER" "${VIEW_CHANGES_SCRIPT_PATH}"
 chmod +x "${VIEW_CHANGES_SCRIPT_PATH}"
 log_success "View changes helper script created and made executable"
 
-# --- 11c. Install script itself as a command ---
+# --- 11c. Create Soar Install Helper (user) ---
+SOAR_INSTALL_HELPER_PATH="$USER_BIN_DIR/zypper-soar-install-helper"
+log_info ">>> Creating (user) Soar install helper: ${SOAR_INSTALL_HELPER_PATH}"
+update_status "Creating Soar install helper script..."
+log_debug "Writing Soar helper script to: ${SOAR_INSTALL_HELPER_PATH}"
+cat << 'EOF' > "${SOAR_INSTALL_HELPER_PATH}"
+#!/usr/bin/env python3
+"""
+Small helper that shows a notification with an "Install Soar" button.
+When clicked, it opens a terminal and runs the official Soar install
+command:
+
+  curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh
+"""
+
+import os
+import subprocess
+import sys
+import traceback
+
+try:
+    import gi
+    gi.require_version("Notify", "0.7")
+    from gi.repository import Notify, GLib
+except Exception:
+    # If PyGObject is not available for some reason, just exit quietly.
+    sys.exit(0)
+
+
+def _open_terminal_with_soar_install() -> None:
+    cmd = (
+        "curl -fsSL \"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\" | sh; "
+        "echo; echo 'Press Enter to close this window...'; read -r"
+    )
+    terminals = ["konsole", "gnome-terminal", "kitty", "alacritty", "xterm"]
+
+    for term in terminals:
+        if subprocess.call(["which", term], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            if term == "konsole":
+                subprocess.Popen([term, "-e", "bash", "-lc", cmd])
+            elif term == "gnome-terminal":
+                subprocess.Popen([term, "--", "bash", "-lc", cmd])
+            else:
+                subprocess.Popen([term, "-e", "bash", "-lc", cmd])
+            return
+
+    # Fallback: run in a plain shell if no terminal was detected
+    subprocess.Popen(["bash", "-lc", cmd])
+
+
+def _on_action(notification, action_id, user_data):
+    if action_id == "install":
+        _open_terminal_with_soar_install()
+    notification.close()
+    GLib.MainLoop().quit()
+
+
+def main() -> None:
+    try:
+        Notify.init("zypper-auto-helper")
+        body = (
+            "Soar (optional CLI helper) is not installed.\n\n"
+            "Click 'Install Soar' to open a terminal and run the official "
+            "install script, or dismiss this notification to skip."
+        )
+        n = Notify.Notification.new(
+            "Zypper Auto-Helper: Install Soar",
+            body,
+            "dialog-information",
+        )
+        n.set_timeout(0)  # persistent until action or close
+        n.add_action("install", "Install Soar", _on_action, None)
+
+        loop = GLib.MainLoop()
+        n.connect("closed", lambda *args: loop.quit())
+        n.show()
+        try:
+            loop.run()
+        finally:
+            Notify.uninit()
+    except Exception:
+        traceback.print_exc()
+        try:
+            Notify.uninit()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()
+EOF
+
+chown "$SUDO_USER:$SUDO_USER" "${SOAR_INSTALL_HELPER_PATH}"
+chmod +x "${SOAR_INSTALL_HELPER_PATH}"
+log_success "Soar install helper script created and made executable"
+
+# --- 11d. Install script itself as a command ---
 log_info ">>> Installing zypper-auto-helper command..."
 update_status "Installing command-line interface..."
 
@@ -2797,6 +2911,28 @@ if ! command -v snap >/dev/null 2>&1; then
     MISSING_PACKAGES+=("snapd")
 fi
 
+# Optional: Soar CLI helper (used to sync metadata after updates)
+# Soar is typically installed per-user (for example under ~/.local/bin or
+# ~/pkgforge). Detect it using the user's PATH and common install dirs so
+# we don't warn when it is already present.
+SOAR_PRESENT=0
+
+# 1) Check via the user's PATH
+if sudo -u "$SUDO_USER" command -v soar >/dev/null 2>&1; then
+    SOAR_PRESENT=1
+# 2) Check common per-user install locations
+elif [ -x "$SUDO_USER_HOME/.local/bin/soar" ]; then
+    SOAR_PRESENT=1
+elif [ -d "$SUDO_USER_HOME/pkgforge" ] && \
+     find "$SUDO_USER_HOME/pkgforge" -maxdepth 1 -type f -name 'soar*' -perm -u+x 2>/dev/null | grep -q .; then
+    SOAR_PRESENT=1
+fi
+
+if [ "$SOAR_PRESENT" -eq 0 ]; then
+    log_info "Soar CLI is not installed for user $SUDO_USER (optional)"
+    MISSING_PACKAGES+=("soar")
+fi
+
 # Notify user about missing packages if any
 if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
     log_info "Optional package managers missing: ${MISSING_PACKAGES[*]}"
@@ -2821,6 +2957,17 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
             "Zypper Auto-Helper: Optional Packages" \
             "${MISSING_MSG}" 2>/dev/null || true
     fi
+
+    # If Soar is missing and the helper exists, also show a richer
+    # notification with an "Install Soar" button that opens a terminal
+    # running the official install script.
+    if printf '%s
+' "${MISSING_PACKAGES[@]}" | grep -qx 'soar'; then
+        if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            "$USER_BIN_DIR/zypper-soar-install-helper" >/dev/null 2>&1 & then
+            log_debug "Launched Soar install helper notification for user $SUDO_USER"
+        fi
+    fi
     
     echo "" | tee -a "${LOG_FILE}"
     echo "============================" | tee -a "${LOG_FILE}"
@@ -2838,6 +2985,12 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
             echo "  Purpose: Update Snap packages" | tee -a "${LOG_FILE}"
             echo "  Install: sudo zypper install snapd" | tee -a "${LOG_FILE}"
             echo "  Enable:  sudo systemctl enable --now snapd" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+        elif [ "$pkg" = "soar" ]; then
+            echo "Soar:" | tee -a "${LOG_FILE}"
+            echo "  Purpose: Optional CLI helper for keeping metadata in sync after updates" | tee -a "${LOG_FILE}"
+            echo "  Install: curl -fsSL \"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\" | sh" | tee -a "${LOG_FILE}"
+            echo "  Usage after install: soar sync" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
         fi
     done
