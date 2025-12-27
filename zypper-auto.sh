@@ -2649,8 +2649,34 @@ RUN_UPDATE() {
             echo "⚠️  Soar sync failed (continuing)."
         fi
     else
-        echo "ℹ️  Soar is not installed - skipping Soar update/sync."
-        echo "    Install from: https://github.com/pkgforge/soar/releases"
+        echo "ℹ️  Soar is not installed."
+        if command -v curl >/dev/null 2>&1; then
+            echo "    Soar can be installed from the official GitHub installer."
+            read -rp "    Do you want to install Soar (stable) from GitHub now? [y/N]: " SOAR_INSTALL_REPLY
+            if [[ "$SOAR_INSTALL_REPLY" =~ ^[Yy]$ ]]; then
+                echo "Installing Soar from GitHub..."
+                if curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh; then
+                    echo "✅ Soar installed successfully."
+                    # Optionally run initial sync if the binary is now available
+                    if command -v soar >/dev/null 2>&1; then
+                        if soar sync; then
+                            echo "✅ Soar sync completed."
+                        else
+                            echo "⚠️  Soar sync failed after install (continuing)."
+                        fi
+                    fi
+                else
+                    echo "⚠️  Failed to install Soar from GitHub. You can install it manually from:"
+                    echo "    https://github.com/pkgforge/soar/releases"
+                fi
+            else
+                echo "Skipping Soar installation. You can install it later from:"
+                echo "    https://github.com/pkgforge/soar/releases"
+            fi
+        else
+            echo "⚠️  curl is not installed; cannot automatically install Soar."
+            echo "    Please install curl or install Soar manually from: https://github.com/pkgforge/soar/releases"
+        fi
     fi
 
     echo ""
