@@ -484,6 +484,55 @@ echo "" | tee -a "${LOG_FILE}"
     return $VERIFICATION_FAILED
 }
 
+# --- Helper: Soar-only installation mode (CLI) ---
+run_soar_install_only() {
+    log_info ">>> Soar installation helper mode..."
+    update_status "Running Soar installation helper..."
+
+    SOAR_PRESENT=0
+
+    # Detect Soar for the target user in common locations
+    if sudo -u "$SUDO_USER" command -v soar >/dev/null 2>&1; then
+        SOAR_PRESENT=1
+    elif [ -x "$SUDO_USER_HOME/.local/bin/soar" ]; then
+        SOAR_PRESENT=1
+    elif [ -d "$SUDO_USER_HOME/pkgforge" ] && \
+         find "$SUDO_USER_HOME/pkgforge" -maxdepth 1 -type f -name 'soar*' -perm -u+x 2>/dev/null | grep -q .; then
+        SOAR_PRESENT=1
+    fi
+
+    if [ "$SOAR_PRESENT" -eq 1 ]; then
+        log_success "Soar already appears to be installed for user $SUDO_USER"
+        echo "Soar appears to be installed for user $SUDO_USER." | tee -a "${LOG_FILE}"
+        echo "Try: sudo -u $SUDO_USER soar --help" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        log_error "curl is required to install Soar but is not installed."
+        echo "Install curl with: sudo zypper install curl" | tee -a "${LOG_FILE}"
+        return 1
+    fi
+
+    SOAR_INSTALL_CMD='curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh'
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "This will run the official Soar installer as user $SUDO_USER:" | tee -a "${LOG_FILE}"
+    echo "  $SOAR_INSTALL_CMD" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    if sudo -u "$SUDO_USER" bash -lc "$SOAR_INSTALL_CMD"; then
+        log_success "Soar installation finished for user $SUDO_USER"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "You can now run: sudo -u $SUDO_USER soar sync" | tee -a "${LOG_FILE}"
+        return 0
+    else
+        local rc=$?
+        log_error "Soar installer exited with code $rc"
+        return $rc
+    fi
+}
+
 # Show help if requested
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
     echo "Zypper Auto-Helper - Installation and Maintenance Tool"
@@ -498,12 +547,14 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
     echo "  --diagnose        Same as --verify (alias)"
     echo "  --check           Run syntax checks only"
     echo "  --self-check      Same as --check (alias)"
+    echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
     echo "  sudo zypper-auto-helper install         # Full installation"
     echo "  sudo zypper-auto-helper --verify        # Check system health and auto-fix issues"
     echo "  sudo zypper-auto-helper --check         # Verify script syntax"
+    echo "  sudo zypper-auto-helper --soar          # Install or upgrade Soar CLI helper"
     echo ""
     echo "Verification checks (--verify):"
     echo "  - System/user services active and enabled"
@@ -523,6 +574,13 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     run_self_check
     log_success "Self-check mode completed"
     exit 0
+fi
+
+# Optional mode: Soar installation helper only
+if [[ "${1:-}" == "--soar" ]]; then
+    log_info "Soar-only installation mode requested"
+    run_soar_install_only
+    exit $?
 fi
 
 # Optional mode: run verification and auto-repair
