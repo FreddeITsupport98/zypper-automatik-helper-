@@ -2881,6 +2881,18 @@ except Exception:
     sys.exit(0)
 
 
+# Best-effort fixups for environment when launched from systemd --user or
+# via sudo -u from the installer, so that terminals can attach to the
+# correct user session.
+if "XDG_RUNTIME_DIR" not in os.environ or not os.environ["XDG_RUNTIME_DIR"]:
+    os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+if "DBUS_SESSION_BUS_ADDRESS" not in os.environ or not os.environ["DBUS_SESSION_BUS_ADDRESS"]:
+    os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={os.environ['XDG_RUNTIME_DIR']}/bus"
+if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+    # Fallback for X11-only sessions
+    os.environ["DISPLAY"] = ":0"
+
+
 def _open_terminal_with_soar_install() -> None:
     cmd = (
         "curl -fsSL \"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\" | sh; "
