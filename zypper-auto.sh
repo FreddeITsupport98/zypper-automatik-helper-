@@ -2930,6 +2930,7 @@ import subprocess
 import sys
 import traceback
 import shutil
+import time
 
 try:
     import gi
@@ -2955,6 +2956,22 @@ if not os.environ.get("PATH"):
     os.environ["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 
 
+LOG_PATH = os.path.expanduser("~/.local/share/zypper-notify/soar-install-helper.log")
+loop = None  # type: ignore[assignment]
+
+
+def _log(message: str) -> None:
+    """Best-effort logging to a user log file for debugging."""
+    try:
+        log_dir = os.path.dirname(LOG_PATH)
+        os.makedirs(log_dir, exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except Exception:
+        # Never let logging failures break the helper
+        pass
+
+
 def _open_terminal_with_soar_install() -> None:
     # Use the main helper CLI so behavior is consistent with running
     #   sudo zypper-auto-helper --soar
@@ -2965,37 +2982,67 @@ def _open_terminal_with_soar_install() -> None:
     )
     terminals = ["konsole", "gnome-terminal", "kitty", "alacritty", "xterm"]
 
+    _log("Install action triggered; attempting to open terminal for Soar install")
+    _log(f"Environment DISPLAY={os.environ.get('DISPLAY')} WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')} DBUS_SESSION_BUS_ADDRESS={os.environ.get('DBUS_SESSION_BUS_ADDRESS')}")
+    _log(f"PATH={os.environ.get('PATH')}")
+
     for term in terminals:
+        term_path = shutil.which(term)
+        _log(f"Checking terminal '{term}': path={term_path}")
         # Use shutil.which instead of external 'which' so we don't depend on
         # that binary existing in a restricted PATH.
-        if shutil.which(term) is not None:
+        if term_path is not None:
             try:
+                _log(f"Trying to launch terminal '{term}' with command: {cmd}")
                 if term == "konsole":
                     subprocess.Popen([term, "-e", "bash", "-lc", cmd])
                 elif term == "gnome-terminal":
                     subprocess.Popen([term, "--", "bash", "-lc", cmd])
                 else:
                     subprocess.Popen([term, "-e", "bash", "-lc", cmd])
+                _log(f"Successfully launched terminal '{term}'")
                 return
-            except Exception:
+            except Exception as e:
+                _log(f"Failed to launch terminal '{term}': {e}")
                 # If launching this terminal fails for any reason, try the next one.
                 continue
 
     # Fallback: run in a plain shell if no terminal was detected or all
     # launches failed. This at least ensures the installer runs, even if it
     # isn't in a separate GUI terminal.
-    subprocess.Popen(["bash", "-lc", cmd])
+    _log("No GUI terminal found or all launches failed; falling back to 'bash -lc'")
+    try:
+        subprocess.Popen(["bash", "-lc", cmd])
+        _log("Started fallback 'bash -lc' successfully")
+    except Exception as e:
+        _log(f"Failed to start fallback 'bash -lc': {e}")
+
 
 
 def _on_action(notification, action_id, user_data):
+    global loop
+    _log(f"Notification action received: {action_id}")
     if action_id == "install":
         _open_terminal_with_soar_install()
-    notification.close()
-    GLib.MainLoop().quit()
+    try:
+        notification.close()
+    except Exception as e:
+        _log(f"Error while closing notification: {e}")
+    if loop is not None:
+        try:
+            loop.quit()
+        except Exception as e:
+            _log(f"Error while quitting main loop: {e}")
+
 
 
 def main() -> None:
+    global loop
     try:
+        _log("Soar install helper started")
+        _log(f"Initial env DISPLAY={os.environ.get('DISPLAY')} WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')} DBUS_SESSION_BUS_ADDRESS={os.environ.get('DBUS_SESSION_BUS_ADDRESS')}")
+        _log(f"Initial PATH={os.environ.get('PATH')}")
+
         Notify.init("zypper-auto-helper")
         body = (
             "Soar (optional CLI helper) is not installed.\n\n"
@@ -3011,20 +3058,21 @@ def main() -> None:
         n.add_action("install", "Install Soar", _on_action, None)
 
         loop = GLib.MainLoop()
-        n.connect("closed", lambda *args: loop.quit())
+        n.connect("closed", lambda *args: (_log("Notification closed"), loop.quit()))
         n.show()
+        _log("Notification shown; entering GLib main loop")
         try:
             loop.run()
         finally:
+            _log("Exiting GLib main loop; calling Notify.uninit()")
             Notify.uninit()
     except Exception:
-        traceback.print_exc()
+        tb = traceback.format_exc()
+        _log(f"Unhandled exception in helper: {tb}")
         try:
             Notify.uninit()
-        except Exception:
-            pass
-
-
+        except Exception as e:
+            _log(f"Error during Notify.uninit after exception: {e}")
 if __name__ == "__main__":
     main()
 EOF
