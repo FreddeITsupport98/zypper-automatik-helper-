@@ -3218,7 +3218,11 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
     # running the official install script.
     if printf '%s
 ' "${MISSING_PACKAGES[@]}" | grep -qx 'soar'; then
-        if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+        # Propagate DISPLAY from the current environment so the helper
+        # can open a terminal on the correct graphical session. Without
+        # this, the helper fell back to DISPLAY=:0 which may not match
+        # the user's real display.
+        if sudo -u "$SUDO_USER" DISPLAY="$DISPLAY" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             "$USER_BIN_DIR/zypper-soar-install-helper" >/dev/null 2>&1 & then
             log_debug "Launched Soar install helper notification for user $SUDO_USER"
         fi
