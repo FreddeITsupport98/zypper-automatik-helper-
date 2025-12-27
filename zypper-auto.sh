@@ -2956,8 +2956,11 @@ if not os.environ.get("PATH"):
 
 
 def _open_terminal_with_soar_install() -> None:
+    # Use the main helper CLI so behavior is consistent with running
+    #   sudo zypper-auto-helper --soar
+    # from a regular terminal.
     cmd = (
-        "curl -fsSL \"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\" | sh; "
+        "sudo zypper-auto-helper --soar; "
         "echo; echo 'Press Enter to close this window...'; read -r"
     )
     terminals = ["konsole", "gnome-terminal", "kitty", "alacritty", "xterm"]
