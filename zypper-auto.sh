@@ -533,6 +533,46 @@ run_soar_install_only() {
     fi
 }
 
+# --- Helper: Homebrew-only installation mode (CLI) ---
+run_brew_install_only() {
+    log_info ">>> Homebrew (brew) installation helper mode..."
+    update_status "Running Homebrew installation helper..."
+
+    # Detect an existing brew installation for the target user
+    if sudo -u "$SUDO_USER" command -v brew >/dev/null 2>&1 \
+       || [ -x "$SUDO_USER_HOME/.linuxbrew/bin/brew" ] \
+       || [ -x "$SUDO_USER_HOME/.homebrew/bin/brew" ]; then
+        log_success "Homebrew already appears to be installed for user $SUDO_USER"
+        echo "brew appears to be installed for user $SUDO_USER." | tee -a "${LOG_FILE}"
+        echo "Try: sudo -u $SUDO_USER brew --version" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+
+    # Ensure basic prerequisites for the installer
+    check_and_install "curl" "curl" "Homebrew installer downloads"
+    check_and_install "git" "git" "Homebrew git operations"
+
+    BREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "This will run the official Homebrew installer as user $SUDO_USER:" | tee -a "${LOG_FILE}"
+    echo "  $BREW_INSTALL_CMD" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    if sudo -u "$SUDO_USER" bash -lc "$BREW_INSTALL_CMD"; then
+        log_success "Homebrew installation finished for user $SUDO_USER"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "You may need to add brew to your PATH. For example:" | tee -a "${LOG_FILE}"
+        echo '  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' | tee -a "${LOG_FILE}"
+        echo 'or see:  https://docs.brew.sh/Homebrew-on-Linux' | tee -a "${LOG_FILE}"
+        return 0
+    else
+        local rc=$?
+        log_error "Homebrew installer exited with code $rc"
+        return $rc
+    fi
+}
+
 # Show help if requested
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
     echo "Zypper Auto-Helper - Installation and Maintenance Tool"
@@ -548,6 +588,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
     echo "  --check           Run syntax checks only"
     echo "  --self-check      Same as --check (alias)"
     echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
+    echo "  --brew            Install/upgrade Homebrew (brew) for the user"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
@@ -580,6 +621,13 @@ fi
 if [[ "${1:-}" == "--soar" ]]; then
     log_info "Soar-only installation mode requested"
     run_soar_install_only
+    exit $?
+fi
+
+# Optional mode: Homebrew installation helper only
+if [[ "${1:-}" == "--brew" ]]; then
+    log_info "Homebrew-only installation mode requested"
+    run_brew_install_only
     exit $?
 fi
 
