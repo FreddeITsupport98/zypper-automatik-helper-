@@ -1054,6 +1054,12 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
         # Then run the usual metadata sync.
         if soar sync; then
             echo "✅ Soar sync completed."
+            # Optionally refresh Soar-managed apps that support "soar update".
+            if soar update; then
+                echo "✅ Soar update completed."
+            else
+                echo "⚠️  Soar update failed (continuing)."
+            fi
         else
             echo "⚠️  Soar sync failed (continuing)."
         fi
@@ -2703,6 +2709,12 @@ RUN_UPDATE() {
         # Then run the usual metadata sync.
         if soar sync; then
             echo "✅ Soar sync completed."
+            # Optionally refresh Soar-managed apps that support "soar update".
+            if soar update; then
+                echo "✅ Soar update completed."
+            else
+                echo "⚠️  Soar update failed (continuing)."
+            fi
         else
             echo "⚠️  Soar sync failed (continuing)."
         fi
