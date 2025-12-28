@@ -18,7 +18,7 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v55 Architecture)
+## ✨ Key Features (v56 Architecture)
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
@@ -40,7 +40,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
 * **Robust Zypper Error Handling (v54):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications.
-* **Soar / Flatpak / Snap Integration (v55):** Every `zypper dup` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), and an optional `soar sync` step, so app runtimes and Soar-managed apps stay in sync after system updates.
+* **Soar / Flatpak / Snap / Homebrew Integration (v55–v56):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), and a Homebrew `brew update` followed by conditional `brew upgrade`, so system packages, runtimes, Soar-managed apps, and Homebrew formulae stay aligned after system updates.
 * **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
 * **Improved Snapper Detection (v55):** Recognises Tumbleweed's default root snapper configuration and handles `snapper list` permission errors ("No permissions.") as "snapper configured" instead of "not configured".
 * **More Robust Notifier Timer (v55):** Uses `OnActiveSec` and an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
@@ -67,12 +67,12 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v55) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v56) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
 
 -----
 
-## 🛠️ How It Works: The v55 Architecture
+## 🛠️ How It Works: The v56 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -452,6 +452,12 @@ systemctl status zypper-autodownload.service
 - The system is working as designed - updates only run on AC power and unmetered connections
 
 ### Version History
+
+- **v56** (2025-12-28): **Soar Stable Updater & Homebrew Integration**
+  - 🧭 **NEW: Smarter Soar stable updater** – the helper and wrapper now compare `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-run the official Soar installer when a newer stable version exists, then run `soar sync` and `soar update`.
+  - 🍺 **NEW: Homebrew `--brew` helper mode** – `sudo ./zypper-auto.sh --brew` (or `sudo zypper-auto-helper --brew`) now installs Homebrew on Linux for the target user if missing, or, when brew is already installed, runs `brew update` followed by `brew outdated --quiet` and `brew upgrade` only when there are outdated formulae, with clear log messages.
+  - 🔗 **NEW: Homebrew wrapper integration** – the `zypper-with-ps` wrapper now treats `dup`, `dist-upgrade` and `update` as full updates and, after Flatpak/Snap/Soar steps, runs `brew update` and conditionally `brew upgrade`, with Soar-style status messages ("Homebrew is already up to date" vs "upgraded N formulae").
+  - 🧩 **IMPROVED: Soar & Homebrew UX** – Soar’s GitHub API check no longer emits noisy `curl: (23)` errors and both Soar and Homebrew remain fully optional; if either tool is not installed, the scripts simply log a short hint instead of failing.
 
 - **v55** (2025-12-27): **Soar Integration, Smarter Detection & Timer Fixes**
   - 🔗 **NEW: Soar integration** – every `zypper dup` triggered via the helper or the shell wrapper now runs Flatpak updates, Snap refresh, and an optional `soar sync` step so app runtimes and Soar-managed apps stay in sync with system updates.

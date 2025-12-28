@@ -538,19 +538,78 @@ run_brew_install_only() {
     log_info ">>> Homebrew (brew) installation helper mode..."
     update_status "Running Homebrew installation helper..."
 
-    # Detect an existing brew installation for the target user
-    if sudo -u "$SUDO_USER" command -v brew >/dev/null 2>&1 \
-       || [ -x "$SUDO_USER_HOME/.linuxbrew/bin/brew" ] \
-       || [ -x "$SUDO_USER_HOME/.homebrew/bin/brew" ]; then
-        log_success "Homebrew already appears to be installed for user $SUDO_USER"
-        echo "brew appears to be installed for user $SUDO_USER." | tee -a "${LOG_FILE}"
-        echo "Try: sudo -u $SUDO_USER brew --version" | tee -a "${LOG_FILE}"
-        return 0
+    # Detect an existing brew installation for the target user and, if found,
+    # prefer to run a self-update (brew update && brew upgrade) instead of
+    # re-running the installer.
+    BREW_PATH=""
+
+    # 1) In the user's PATH
+    if sudo -u "$SUDO_USER" command -v brew >/dev/null 2>&1; then
+        BREW_PATH="brew"
+    # 2) In a per-user ~/.linuxbrew or ~/.homebrew prefix
+    elif [ -x "$SUDO_USER_HOME/.linuxbrew/bin/brew" ]; then
+        BREW_PATH="$SUDO_USER_HOME/.linuxbrew/bin/brew"
+    elif [ -x "$SUDO_USER_HOME/.homebrew/bin/brew" ]; then
+        BREW_PATH="$SUDO_USER_HOME/.homebrew/bin/brew"
+    # 3) In the default Linuxbrew prefix /home/linuxbrew/.linuxbrew
+    elif [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
+        BREW_PATH="/home/linuxbrew/.linuxbrew/bin/brew"
     fi
 
-    # Ensure basic prerequisites for the installer
-    check_and_install "curl" "curl" "Homebrew installer downloads"
-    check_and_install "git" "git" "Homebrew git operations"
+    if [ -n "$BREW_PATH" ]; then
+        log_success "Homebrew already appears to be installed for user $SUDO_USER"
+        echo "brew appears to be installed for user $SUDO_USER." | tee -a "${LOG_FILE}"
+
+        # Build the brew command to run as the target user
+        if [ "$BREW_PATH" = "brew" ]; then
+            BREW_CMD=(sudo -u "$SUDO_USER" brew)
+        else
+            BREW_CMD=(sudo -u "$SUDO_USER" "$BREW_PATH")
+        fi
+
+        echo "Checking for Homebrew updates from GitHub (brew update) for user $SUDO_USER" | tee -a "${LOG_FILE}"
+        if ! "${BREW_CMD[@]}" update >> "${LOG_FILE}" 2>&1; then
+            local rc=$?
+            log_error "Homebrew 'brew update' failed for user $SUDO_USER (exit code $rc)"
+            return $rc
+        fi
+
+        # After syncing with GitHub, see if anything needs upgrading
+        OUTDATED=$("${BREW_CMD[@]}" outdated --quiet 2>/dev/null || true)
+        OUTDATED_COUNT=$(printf '%s\n' "$OUTDATED" | sed '/^$/d' | wc -l | tr -d ' ')
+
+        if [ "${OUTDATED_COUNT:-0}" -eq 0 ]; then
+            echo "Homebrew is already up to date for user $SUDO_USER (no formulae to upgrade)." | tee -a "${LOG_FILE}"
+            return 0
+        fi
+
+        echo "Homebrew has ${OUTDATED_COUNT} outdated formulae for user $SUDO_USER; running 'brew upgrade'..." | tee -a "${LOG_FILE}"
+        if "${BREW_CMD[@]}" upgrade >> "${LOG_FILE}" 2>&1; then
+            log_success "Homebrew upgrade completed for user $SUDO_USER (upgraded ${OUTDATED_COUNT} formulae)"
+            return 0
+        else
+            local rc=$?
+            log_error "Homebrew 'brew upgrade' failed for user $SUDO_USER (exit code $rc)"
+            return $rc
+        fi
+    fi
+
+    # Ensure basic prerequisites for the installer (inline to avoid ordering issues)
+    if ! command -v curl >/dev/null 2>&1; then
+        log_info "curl is required for the Homebrew installer. Installing via zypper..."
+        if ! zypper -n install curl >> "${LOG_FILE}" 2>&1; then
+            log_error "Failed to install curl. Please install it manually and re-run with --brew."
+            return 1
+        fi
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        log_info "git is required for Homebrew operations. Installing via zypper..."
+        if ! zypper -n install git >> "${LOG_FILE}" 2>&1; then
+            log_error "Failed to install git. Please install it manually and re-run with --brew."
+            return 1
+        fi
+    fi
 
     BREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
@@ -1011,8 +1070,8 @@ cat << 'EOF' > "$ZYPPER_WRAPPER_PATH"
 # Zypper wrapper that automatically runs 'zypper ps -s' after 'zypper dup'
 # This shows which services need restarting after updates
 
-# Check if we're running 'dup' or 'dist-upgrade'
-if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
+# Check if we're running 'dup', 'dist-upgrade' or 'update'
+if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"update"* ]]; then
     # Run the actual zypper command
     sudo /usr/bin/zypper "$@"
     EXIT_CODE=$?
@@ -1114,6 +1173,45 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]]; then
     else
         echo "ℹ️  Soar is not installed - skipping Soar update/sync."
         echo "    Install from: https://github.com/pkgforge/soar/releases"
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "  Homebrew (brew) Updates (optional)"
+    echo "=========================================="
+    echo ""
+
+    # Try to detect Homebrew in PATH or the default Linuxbrew prefix
+    if command -v brew >/dev/null 2>&1 || [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
+        # Normalise brew command path
+        if command -v brew >/dev/null 2>&1; then
+            BREW_BIN="brew"
+        else
+            BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
+        fi
+
+        echo "Checking for Homebrew updates from GitHub (brew update)..."
+        if ! $BREW_BIN update; then
+            echo "⚠️  Homebrew 'brew update' failed (continuing without brew upgrade)."
+        else
+            # After syncing with GitHub, see if anything needs upgrading
+            OUTDATED=$($BREW_BIN outdated --quiet 2>/dev/null || true)
+            OUTDATED_COUNT=$(printf '%s\n' "$OUTDATED" | sed '/^$/d' | wc -l | tr -d ' ')
+
+            if [ "${OUTDATED_COUNT:-0}" -eq 0 ]; then
+                echo "Homebrew is already up to date (no formulae to upgrade)."
+            else
+                echo "Homebrew has ${OUTDATED_COUNT} outdated formulae; running 'brew upgrade'..."
+                if $BREW_BIN upgrade; then
+                    echo "✅ Homebrew upgrade completed (upgraded ${OUTDATED_COUNT} formulae)."
+                else
+                    echo "⚠️  Homebrew 'brew upgrade' failed (continuing)."
+                fi
+            fi
+        fi
+    else
+        echo "ℹ️  Homebrew (brew) is not installed - skipping brew update/upgrade."
+        echo "    To install via helper: sudo zypper-auto-helper --brew"
     fi
 
     # Always show service restart info, even if zypper reported errors
