@@ -897,6 +897,9 @@ rm -f "$DRY_OUTPUT"
 # Count packages before download
 BEFORE_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
 
+# Write initial downloading status so the tracker loop sees it immediately
+echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
+
 # Start background progress tracker
 (
     while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
@@ -918,9 +921,6 @@ BEFORE_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
 ) &
 TRACKER_PID=$!
 
-# Write initial downloading status
-echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
-
 # Do the actual download
 /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only >/dev/null 2>&1
 
@@ -939,13 +939,10 @@ DURATION=$((END_TIME - START_TIME))
 
 # Only show completion notification if we actually downloaded something
 if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
-    # Write completion status
+    # Write completion status and leave it until the notifier clears it
     echo "complete:$DURATION:$ACTUAL_DOWNLOADED" > "$STATUS_FILE"
-    sleep 5  # Keep status for 5 seconds
 fi
 
-# Reset to idle
-echo "idle" > "$STATUS_FILE"
 DLSCRIPT
 chmod +x "$DOWNLOADER_SCRIPT"
 log_success "Downloader script created with progress tracking"
@@ -975,11 +972,11 @@ log_info ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 log_debug "Writing timer file: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
-Description=Run ${DL_SERVICE_NAME} every minute to download updates
+Description=Run ${DL_SERVICE_NAME} every 10 minutes to download updates
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnCalendar=*:0/10
 Persistent=true
 
 [Install]
@@ -1404,9 +1401,9 @@ Description=Run ${NT_SERVICE_NAME} frequently to check for updates
 
 [Timer]
 # First run a few seconds after the user manager starts,
-# then re-run a fixed time after the service finishes.
+# then re-run every 5 minutes.
 OnBootSec=5sec
-OnUnitInactiveSec=5min
+OnCalendar=*:0/5
 Persistent=true
 
 [Install]
@@ -2509,12 +2506,74 @@ def main():
                                 )
                                 n.set_hint("value", GLib.Variant("i", 50))
 
+                            # Common settings for the progress notification
                             n.set_timeout(5000)  # 5 seconds
                             # Set hint to replace previous download status notifications
                             n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
                             n.show()
-                            time.sleep(0.1)
-                            return  # Exit, will check again in 5 seconds
+
+                            # Keep updating the same notification until the downloader
+                            # finishes (status changes away from "downloading:").
+                            while True:
+                                time.sleep(2)
+                                try:
+                                    with open(download_status_file, 'r') as f2:
+                                        new_status = f2.read().strip()
+                                except Exception as e:
+                                    log_debug(f"Error reading download status during progress loop: {e}")
+                                    break
+
+                                if not new_status.startswith("downloading:"):
+                                    # Status changed (likely to complete: or idle) –
+                                    # update our local variable so the logic below
+                                    # can handle completion.
+                                    status = new_status
+                                    log_debug(f"Download status changed to '{status}', leaving progress loop")
+                                    break
+
+                                try:
+                                    parts = new_status.split(":")
+                                    pkg_total = parts[1] if len(parts) > 1 else "?"
+                                    download_size = parts[2] if len(parts) > 2 else "unknown size"
+                                    pkg_downloaded = parts[3] if len(parts) > 3 else "0"
+                                    percent = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+                                    log_info(f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})")
+
+                                    # Rebuild progress bar
+                                    if 0 <= percent <= 100:
+                                        bar_length = 20
+                                        filled = int(bar_length * percent / 100)
+                                        bar = "█" * filled + "░" * (bar_length - filled)
+                                        progress_text = f"[{bar}] {percent}%"
+                                    else:
+                                        progress_text = "Processing..."
+
+                                    if download_size and download_size != "unknown":
+                                        msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\n{download_size} total • HIGH priority"
+                                    else:
+                                        msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\nHIGH priority"
+
+                                    # Update the existing notification in place
+                                    n.update("Downloading updates...", msg, "emblem-downloads")
+
+                                    if 0 <= percent <= 100:
+                                        n.set_hint("value", GLib.Variant("i", percent))
+                                        n.set_category("transfer.progress")
+                                    else:
+                                        n.set_hint("value", GLib.Variant("i", 0))
+                                        n.set_category("transfer")
+
+                                    n.show()
+                                except Exception as e:
+                                    log_debug(f"Error updating download progress notification: {e}")
+                                    # If something goes wrong, just break out and
+                                    # let the rest of main() continue.
+                                    break
+
+                            # Do not return here – fall through so that a
+                            # subsequent 'complete:' status is handled by the
+                            # code below.
 
                 # Fresh 'complete:' or 'idle' status fall through to the normal logic below
                 if status.startswith("complete:"):
