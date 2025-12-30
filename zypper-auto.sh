@@ -872,16 +872,42 @@ STATUS_FILE="$LOG_DIR/download-status.txt"
 START_TIME_FILE="$LOG_DIR/download-start-time.txt"
 CACHE_DIR="/var/cache/zypp/packages"
 
+# Helper: handle "System management is locked" gracefully so the
+# downloader doesn't spam errors when the user is running zypper/Yast.
+handle_lock_or_fail() {
+    local err_file="$1"
+    if grep -q "System management is locked" "$err_file" 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Zypper is locked by another process; skipping this downloader run (will retry on next timer)" >&2
+        echo "idle" > "$STATUS_FILE"
+        rm -f "$err_file"
+        exit 0
+    fi
+}
+
 # Write status: refreshing
 echo "refreshing" > "$STATUS_FILE"
 date +%s > "$START_TIME_FILE"
 
 # Refresh repos
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>&1
+REFRESH_ERR=$(mktemp)
+if ! /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"; then
+    handle_lock_or_fail "$REFRESH_ERR"
+    cat "$REFRESH_ERR" >&2 || true
+    rm -f "$REFRESH_ERR"
+    exit 1
+fi
+rm -f "$REFRESH_ERR"
 
 # Get update info
 DRY_OUTPUT=$(mktemp)
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run 2>/dev/null > "$DRY_OUTPUT"
+DRY_ERR=$(mktemp)
+if ! /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"; then
+    handle_lock_or_fail "$DRY_ERR"
+    cat "$DRY_ERR" >&2 || true
+    rm -f "$DRY_ERR" "$DRY_OUTPUT"
+    exit 1
+fi
+rm -f "$DRY_ERR"
 
 if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
     echo "idle" > "$STATUS_FILE"
@@ -935,12 +961,18 @@ echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
 ) &
 TRACKER_PID=$!
 
-# Do the actual download. We intentionally ignore non-zero exit codes so that
-# partial downloads remain in the cache even if zypper encounters solver
-# problems that require manual intervention later.
+# Do the actual download. We intentionally ignore most non-zero exit codes so
+# that partial downloads remain in the cache even if zypper encounters solver
+# problems that require manual intervention later. We still special-case the
+# lock error to avoid noisy logs when another zypper instance is running.
 set +e
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only >/dev/null 2>&1
+DL_ERR=$(mktemp)
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only >/dev/null 2>"$DL_ERR"
 ZYP_RET=$?
+if [ $ZYP_RET -ne 0 ]; then
+    handle_lock_or_fail "$DL_ERR"
+fi
+rm -f "$DL_ERR"
 set -e
 
 # Kill the progress tracker
@@ -1764,7 +1796,7 @@ def check_network_quality() -> tuple[bool, str]:
         
         # Parse ping output for average latency
         # Example: rtt min/avg/max/mdev = 10.1/15.2/20.3/5.1 ms
-        match = re.search(r'rtt min/avg/max/mdev = [\d.]+/([\d.]+)/', result.stdout)
+        match = re.search(r'rtt min/avg/max/mdev = [\\d.]+/([\\d.]+)/', result.stdout)
         if match:
             avg_latency = float(match.group(1))
             if avg_latency > 200:
@@ -1779,6 +1811,45 @@ def check_network_quality() -> tuple[bool, str]:
     except Exception as e:
         log_debug(f"Network quality check failed: {e}")
         return True, "Could not check network"
+
+
+def is_zypper_locked(stderr_text: str | None = None) -> bool:
+    """Best-effort detection of a zypper/libzypp lock.
+
+    Checks both stderr text for the canonical message and the zypp
+    lockfile (/run/zypp.pid or /var/run/zypp.pid) to avoid false
+    positives.
+    """
+    try:
+        if stderr_text and "System management is locked" in stderr_text:
+            return True
+
+        for pid_file in ("/run/zypp.pid", "/var/run/zypp.pid"):
+            try:
+                with open(pid_file, "r", encoding="utf-8") as f:
+                    pid_str = f.read().strip()
+                if not pid_str:
+                    continue
+                pid = int(pid_str)
+            except (OSError, ValueError):
+                continue
+
+            try:
+                out = subprocess.check_output(
+                    ["ps", "-p", str(pid), "-o", "comm="],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip().lower()
+            except subprocess.CalledProcessError:
+                continue
+
+            if out and any(tok in out for tok in ("zypper", "yast")):
+                return True
+    except Exception as e:
+        log_debug(f"Lock detection failed: {e}")
+
+    return False
+
 
 # Rotate log at startup if needed
 rotate_log_if_needed()
@@ -2214,9 +2285,27 @@ def get_updates():
             stdout_text = e.stdout.decode() if isinstance(e.stdout, bytes) else str(e.stdout)
 
         # 1) Zypper is locked by another process – this is expected sometimes.
-        if "System management is locked" in stderr_text or "pid" in stderr_text.lower():
-            log_info("Zypper is currently locked by another process (likely the downloader). Skipping this check.")
+        if is_zypper_locked(stderr_text):
+            log_info("Zypper is currently locked by another process (likely the downloader or a manual zypper run). Skipping this check.")
             update_status("SKIPPED: Zypper locked by another process")
+
+            # Show a gentle desktop notification so the user knows why
+            # the background check was skipped.
+            try:
+                lock_note = Notify.Notification.new(
+                    "Updates paused while zypper is running",
+                    "Background checks will retry automatically in about a minute.",
+                    "system-software-update",
+                )
+                lock_note.set_timeout(5000)
+                lock_note.set_hint(
+                    "x-canonical-private-synchronous",
+                    GLib.Variant("s", "zypper-locked"),
+                )
+                lock_note.show()
+            except Exception as ne:
+                log_debug(f"Could not show lock notification: {ne}")
+
             return ""  # Return empty string to skip notification
 
         # 2) Check for PolicyKit / authentication style errors.
