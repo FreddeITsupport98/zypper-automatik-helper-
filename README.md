@@ -18,7 +18,7 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v56 Architecture)
+## ✨ Key Features (v57 Architecture)
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
@@ -30,20 +30,20 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Deep health checks: active + enabled + triggers scheduled
     * Nuclear options for complete service resets when needed
     * Accessible via `zypper-auto-helper --verify` after installation
-* **Real-Time Download Progress (v51):** Enhanced progress tracking with visual feedback:
-    * Updates every 5 seconds with current package count and percentage
-    * Intelligent cache detection (doesn't notify if packages already cached)
-    * Progress bar in notifications showing download percentage
-    * High-priority downloads (nice -20, ionice realtime)
-* **Smart Notification Management (v51):** Prevents notification spam:
+* **Real-Time Download Progress (v51–v56):** Enhanced progress tracking with visual feedback:
+* Background downloader writes precise status (`refreshing`, `downloading:TOTAL:SIZE:DOWNLOADED:PERCENT`, `complete`, `idle`)
+* Notifier shows a live-updating progress bar while downloads are in progress
+* Cache-aware logic skips fake progress when `zypper` reports everything is already in cache
+* High-priority downloads (nice -20, ionice realtime)
+* **Smart Notification Management (v51–v56):** Prevents notification spam and keeps state consistent:
     * Synchronous notification IDs prevent duplicate popups
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
 * **Robust Zypper Error Handling (v54):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications.
 * **Soar / Flatpak / Snap / Homebrew Integration (v55–v56):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), and a Homebrew `brew update` followed by conditional `brew upgrade`, so system packages, runtimes, Soar-managed apps, and Homebrew formulae stay aligned after system updates.
 * **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
-* **Improved Snapper Detection (v55):** Recognises Tumbleweed's default root snapper configuration and handles `snapper list` permission errors ("No permissions.") as "snapper configured" instead of "not configured".
-* **More Robust Notifier Timer (v55):** Uses `OnActiveSec` and an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
+* **Improved Snapper Detection (v55–v56):** Recognises Tumbleweed's default root snapper configuration, treats `snapper list` permission errors ("No permissions.") as "snapshots exist but are root-only", and surfaces the current Snapper state (configured/missing/snapshots available) directly in the update notification.
+* **More Robust Notifier Timer (v55–v56):** Uses calendar-based scheduling plus an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
 * **Manual Update Wrapper (v51):** Automatic post-update checks for manual updates:
     * Wraps `sudo zypper dup` command automatically
     * Runs `zypper ps -s` after successful updates
@@ -57,8 +57,8 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * **"✅ Downloads Complete!"** - Download finished with duration and package preview
     * **"Updates Ready to Install"** - Ready to apply with snapshot info
 * **Smart Download Detection (v49):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications.
-* **Safe Downloads (Root):** The downloader service only runs when `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are satisfied.
-* **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives.
+* **Safe Downloads (Root):** The downloader service is a simple, root-only worker that always runs at low priority and logs to `/var/log/zypper-auto`; network/AC safety decisions are enforced in the user-space notifier.
+* **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives. On laptops it only refreshes/inspects updates on AC power and non‑metered connections.
 * **Fixed Battery Detection (v48):** Corrected logic that was incorrectly identifying laptops as desktops, now properly detects batteries via `inxi` output.
 * **Persistent Notifications (v48):** Update notifications now persist until user interaction or timeout by keeping a GLib main loop active.
 * **Environment Change Awareness (v53):** Tracks when your machine switches between AC/battery or metered/unmetered connections and shows "updates paused" / "conditions now safe" notifications accordingly.
@@ -72,7 +72,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 -----
 
-## 🛠️ How It Works: The v56 Architecture
+## 🛠️ How It Works: The v57 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -95,7 +95,7 @@ This service's only job is to download packages when it's safe, and report progr
         * `idle` - No updates available
     * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
 * **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
-    * Default: `OnBootSec=1min`, `OnUnitActiveSec=1min` (checks for updates every minute when it's safe).
+    * Default: `OnBootSec=2min`, `OnCalendar=minutely` (checks for new updates once a minute).
     * You can edit this with `sudoedit /etc/systemd/system/zypper-autodownload.timer` and reload via `sudo systemctl daemon-reload && sudo systemctl restart zypper-autodownload.timer`.
 
 ### 3. The Notifier (User Service)
@@ -106,7 +106,7 @@ This service's job is to check for updates and remind you, running as your stand
     * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
     * Because it runs in user-space, it has the correct D-Bus environment variables to display notifications reliably.
 * **Timer:** `~/.config/systemd/user/zypper-notify-user.timer`
-    * Default (aggressive): runs a few seconds after being activated and then every few seconds (`OnActiveSec`), so checks for updates frequently while your user session is running.
+    * Default: `OnBootSec=5sec`, `OnCalendar=minutely` (checks for updates and sends notifications roughly once per minute while your user session is running).
     * You can tone this down (for example, to run only every 10 minutes or 1 hour) using:
       ```bash
       systemctl --user edit --full zypper-notify-user.timer
@@ -453,11 +453,14 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
-- **v56** (2025-12-28): **Soar Stable Updater & Homebrew Integration**
+- **v57** (2025-12-28): **Soar Stable Updater, Homebrew Integration & Notification UX**
   - 🧭 **NEW: Smarter Soar stable updater** – the helper and wrapper now compare `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-run the official Soar installer when a newer stable version exists, then run `soar sync` and `soar update`.
   - 🍺 **NEW: Homebrew `--brew` helper mode** – `sudo ./zypper-auto.sh --brew` (or `sudo zypper-auto-helper --brew`) now installs Homebrew on Linux for the target user if missing, or, when brew is already installed, runs `brew update` followed by `brew outdated --quiet` and `brew upgrade` only when there are outdated formulae, with clear log messages.
   - 🔗 **NEW: Homebrew wrapper integration** – the `zypper-with-ps` wrapper now treats `dup`, `dist-upgrade` and `update` as full updates and, after Flatpak/Snap/Soar steps, runs `brew update` and conditionally `brew upgrade`, with Soar-style status messages ("Homebrew is already up to date" vs "upgraded N formulae").
   - 🧩 **IMPROVED: Soar & Homebrew UX** – Soar’s GitHub API check no longer emits noisy `curl: (23)` errors and both Soar and Homebrew remain fully optional; if either tool is not installed, the scripts simply log a short hint instead of failing.
+  - 📡 **IMPROVED: Downloader/Notifier coordination** – the downloader writes structured status (`refreshing`, `downloading:…`, `complete:…`, `idle`) and the notifier shows live progress, a cached-aware "✅ Downloads Complete!" notification, and a separate persistent "Snapshot XXXXXXXX Ready" notification for installation.
+  - 🧱 **IMPROVED: Snapper status reporting** – Snapper root configs are detected more reliably; `snapper list` permission errors are treated as "snapshots exist (root-only)" rather than "not configured", and the current Snapper state is always surfaced in the update notification.
+  - ⏱️ **IMPROVED: Timer defaults** – both the root downloader and user notifier timers now default to a simple minutely `OnCalendar` schedule for more predictable behaviour, instead of `OnActiveSec`-based intervals that could end up `active (elapsed)` with no next trigger.
 
 - **v55** (2025-12-27): **Soar Integration, Smarter Detection & Timer Fixes**
   - 🔗 **NEW: Soar integration** – every `zypper dup` triggered via the helper or the shell wrapper now runs Flatpak updates, Snap refresh, and an optional `soar sync` step so app runtimes and Soar-managed apps stay in sync with system updates.
