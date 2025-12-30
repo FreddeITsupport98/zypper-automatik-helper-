@@ -892,6 +892,21 @@ fi
 # Extract package count and size
 PKG_COUNT=$(grep -oP "\d+(?= packages to upgrade)" "$DRY_OUTPUT" | head -1)
 DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown")
+
+# Detect case where everything is already cached so we don't show a fake
+# download progress bar. In that situation zypper's summary contains a
+# line similar to:
+#   0 B  |  -   88.3 MiB  already in cache
+if grep -q "already in cache" "$DRY_OUTPUT" && \
+   grep -qE "^[[:space:]]*0 B[[:space:]]*\|" "$DRY_OUTPUT"; then
+    # All data is already in the local cache; mark as a completed
+    # download with 0 newly-downloaded packages and skip the
+    # --download-only pass entirely.
+    echo "complete:0:0" > "$STATUS_FILE"
+    rm -f "$DRY_OUTPUT"
+    exit 0
+fi
+
 rm -f "$DRY_OUTPUT"
 
 # Count packages before download
@@ -972,11 +987,11 @@ log_info ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 log_debug "Writing timer file: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
-Description=Run ${DL_SERVICE_NAME} every 10 minutes to download updates
+Description=Run ${DL_SERVICE_NAME} every minute to download updates
 
 [Timer]
 OnBootSec=2min
-OnCalendar=*:0/10
+OnCalendar=minutely
 Persistent=true
 
 [Install]
@@ -1397,13 +1412,13 @@ log_info ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 log_debug "Writing user timer file: ${NT_TIMER_FILE}"
 cat << EOF > ${NT_TIMER_FILE}
 [Unit]
-Description=Run ${NT_SERVICE_NAME} frequently to check for updates
+Description=Run ${NT_SERVICE_NAME} every minute to check for updates
 
 [Timer]
 # First run a few seconds after the user manager starts,
-# then re-run every 5 minutes.
+# then re-run every minute.
 OnBootSec=5sec
-OnCalendar=*:0/5
+OnCalendar=minutely
 Persistent=true
 
 [Install]
@@ -1683,20 +1698,21 @@ def check_snapshots() -> tuple[bool, str]:
             return False, msg
         return False, "Could not check snapshots"
 
+    # Combine stdout/stderr for permission checks
+    out_all = (result.stdout or "") + "\n" + (result.stderr or "")
+    if "No permissions" in out_all:
+        # On openSUSE Tumbleweed with Btrfs, this usually means snapshots
+        # exist but are only visible to root. Treat this as "snapshots
+        # present" but explain the limitation.
+        if root_config or has_config:
+            msg = "Snapper snapshots exist (root-only; run as root to view)"
+        else:
+            msg = "Snapper present but requires root to view snapshots"
+        log_info(msg)
+        return True, msg
+
     if result.returncode == 0:
         lines = [ln for ln in result.stdout.split('\n') if ln.strip()]
-
-        # If snapper prints "No permissions.", that usually means there *are*
-        # snapshots but they are only visible to root (common on Tumbleweed
-        # when called as an unprivileged user). Treat this as "configured",
-        # but explain that permissions hide the details.
-        if any("No permissions" in ln for ln in lines):
-            if root_config or has_config:
-                msg = "Snapper configured (root) but snapshots require root permissions to view"
-            else:
-                msg = "Snapper present but snapshots require root permissions to view"
-            log_info(msg)
-            return False, msg
 
         # snapper list normally has 2 header lines; anything beyond that is a snapshot
         if len(lines) > 2:
@@ -1711,7 +1727,7 @@ def check_snapshots() -> tuple[bool, str]:
         log_info(msg)
         return False, msg
 
-    # Non-zero return code from snapper list
+    # Non-zero return code from snapper list (and no explicit "No permissions")
     if root_config or has_config:
         msg = "Snapper configured (root) but snapshot list failed"
         log_info(msg)
@@ -2276,13 +2292,19 @@ def extract_package_preview(output: str, max_packages: int = 5) -> list:
                 in_upgrade_section = True
                 continue
             
+            # Skip non-package summary lines that can appear in the table,
+            # such as the "Package download size" section or "0 B | ... already in cache".
+            lower = line.lower()
+            if any(tok in lower for tok in ["package download size", "overall package size", "already in cache"]):
+                continue
+            
             if in_upgrade_section and "|" in line:
                 # Parse package line
                 parts = [p.strip() for p in line.split("|")]
                 if len(parts) >= 1 and parts[0] and not parts[0].startswith("-"):
                     pkg_name = parts[0]
-                    # Skip header lines
-                    if pkg_name not in ["Name", "Status", "#"]:
+                    # Skip header lines and size-like pseudo "names" such as "0 B" or "12.3 MiB"
+                    if pkg_name not in ["Name", "Status", "#"] and not re.match(r"^[0-9].*", pkg_name):
                         packages.append(pkg_name)
                         if len(packages) >= max_packages:
                             break
@@ -2296,9 +2318,12 @@ def extract_package_preview(output: str, max_packages: int = 5) -> list:
     
     return packages
 
-def parse_output(output, include_preview: bool = True):
+
+def parse_output(output: str, include_preview: bool = True):
     """Parse zypper's output for info.
-    Returns: (title, message, snapshot, package_count) or (None, None, None, 0)
+
+    Returns: (title, message, snapshot, package_count)
+             or (None, None, None, 0).
     """
     log_debug("Parsing zypper output...")
     
@@ -2316,10 +2341,21 @@ def parse_output(output, include_preview: bool = True):
         return None, None, None, 0
 
     # Find Snapshot
-    snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb-]+)", output)
+    snapshot_match = None
+    # Preferred: product line such as
+    #   openSUSE Tumbleweed  20251227-0 -> 20251228-0
+    product_match = re.search(r"openSUSE Tumbleweed\s+\S+\s*->\s*([0-9T\-]+)", output)
+    if product_match:
+        snapshot_match = product_match
+    else:
+        # Fallback: older tumbleweed-release pattern
+        snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb\-]+)", output)
     snapshot = snapshot_match.group(1) if snapshot_match else ""
 
-    log_info(f"Found {package_count} packages to upgrade" + (f" (snapshot: {snapshot})" if snapshot else ""))
+    log_info(
+        f"Found {package_count} packages to upgrade"
+        + (f" (snapshot: {snapshot})" if snapshot else "")
+    )
 
     # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
@@ -2591,16 +2627,15 @@ def main():
                         else:
                             time_str = f"{seconds}s"
                         
-                        # Skip notification if nothing was actually downloaded (already cached)
+                        # Build a completion message for both cases:
+                        #  - actual_downloaded == 0  => everything was already in cache
+                        #  - actual_downloaded > 0   => we just downloaded new packages
                         if actual_downloaded == 0:
-                            log_info("All packages were already cached, skipping download complete notification")
-                            # Clear status immediately and continue to show install notification
-                            try:
-                                with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                    f.write("idle")
-                            except:
-                                pass
-                            # Don't return - continue to show install notification below
+                            log_info("All packages were already cached; treating as completed download")
+                            changelog_msg = (
+                                "All update packages are already present in the local cache.\n\n"
+                                "Packages are ready to install."
+                            )
                         else:
                             # Packages were actually downloaded, show notification
                             log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
@@ -2620,29 +2655,32 @@ def main():
                                     preview_packages = extract_package_preview(result.stdout, max_packages=5)
                                     if preview_packages:
                                         preview_str = ", ".join(preview_packages)
-                                        changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nIncluding: {preview_str}\n\nReady to install."
+                                        changelog_msg = (
+                                            f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
+                                            f"Including: {preview_str}\n\nReady to install."
+                                        )
                                         log_info(f"Added changelog preview: {preview_str}")
                             except Exception as e:
                                 log_debug(f"Could not fetch changelog preview: {e}")
-                            
-                            n = Notify.Notification.new(
-                                "✅ Downloads Complete!",
-                                changelog_msg,
-                                "emblem-default"
-                            )
-                            n.set_timeout(0)  # 0 = persist until user interaction
-                            n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
-                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
-                            n.show()
-                            time.sleep(0.1)  # Wait a bit before continuing
-                            # Clear the complete status so it doesn't show again
-                            try:
-                                with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                    f.write("idle")
-                            except:
-                                pass
-                            # Continue to show install notification below
-                    except:
+                        
+                        n = Notify.Notification.new(
+                            "✅ Downloads Complete!",
+                            changelog_msg,
+                            "emblem-default"
+                        )
+                        n.set_timeout(0)  # 0 = persist until user interaction
+                        n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
+                        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
+                        n.show()
+                        time.sleep(0.1)  # Wait a bit before continuing
+                        # Clear the complete status so it doesn't show again
+                        try:
+                            with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                f.write("idle")
+                        except Exception:
+                            pass
+                        # Continue to show install notification below
+                    except Exception:
                         log_debug("Could not parse completion time")
                         # Continue to show install notification below
                 
@@ -2719,12 +2757,14 @@ def main():
         log_info("Updates are pending. Sending 'updates ready' reminder.")
         update_status(f"Updates available: {title}")
         
-        # Add safety warnings to message if needed
+        # Add safety warnings / info lines to message
         warnings = []
         if not has_space:
             warnings.append(f"⚠️ {space_msg}")
-        if not has_snapshots:
-            warnings.append(f"ℹ️ {snapshot_msg}")
+        # Always show Snapper state; use ℹ️ when snapshots exist, ⚠️ when they don't
+        if snapshot_msg:
+            icon = "ℹ️" if has_snapshots else "⚠️"
+            warnings.append(f"{icon} {snapshot_msg}")
         if not net_ok:
             warnings.append(f"⚠️ {net_msg}")
         
