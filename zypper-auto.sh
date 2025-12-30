@@ -914,7 +914,6 @@ BEFORE_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
 
 # Write initial downloading status so the tracker loop sees it immediately
 echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
-
 # Start background progress tracker
 (
     while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
@@ -936,8 +935,13 @@ echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
 ) &
 TRACKER_PID=$!
 
-# Do the actual download
+# Do the actual download. We intentionally ignore non-zero exit codes so that
+# partial downloads remain in the cache even if zypper encounters solver
+# problems that require manual intervention later.
+set +e
 /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only >/dev/null 2>&1
+ZYP_RET=$?
+set -e
 
 # Kill the progress tracker
 kill $TRACKER_PID 2>/dev/null || true
@@ -952,10 +956,15 @@ START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# Only show completion notification if we actually downloaded something
+# Decide final status:
+#  - If we actually downloaded new packages, mark as complete
+#  - If nothing was downloaded but zypper returned an error, mark an error
+#    so the notifier can tell the user that manual intervention is required
+#  - Otherwise, leave the previous status (e.g. idle or complete:0:0)
 if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
-    # Write completion status and leave it until the notifier clears it
     echo "complete:$DURATION:$ACTUAL_DOWNLOADED" > "$STATUS_FILE"
+elif [ $ZYP_RET -ne 0 ]; then
+    echo "error:solver:$ZYP_RET" > "$STATUS_FILE"
 fi
 
 DLSCRIPT
@@ -2687,6 +2696,53 @@ def main():
                 elif status == "idle":
                     log_debug("Status is idle (no updates to download)")
                     # Continue to normal check below
+
+                elif status.startswith("error:solver:"):
+                    # Background downloader hit a solver/non-interactive error.
+                    # Inform the user that manual intervention is required.
+                    try:
+                        parts = status.split(":")
+                        exit_code = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+                    except Exception:
+                        exit_code = None
+
+                    if exit_code is not None:
+                        log_info(f"Background downloader encountered a zypper solver/error exit code {exit_code}")
+                        body = (
+                            f"Background download of updates hit a zypper solver error (exit code {exit_code}).\n\n"
+                            "Some packages may already be cached, but zypper needs your decision to continue.\n\n"
+                            "Open a terminal and run:\n"
+                            "  sudo zypper dup\n"
+                            "to resolve the conflicts. After that, the automatic downloader will resume as normal."
+                        )
+                    else:
+                        log_info("Background downloader reported a solver error (unknown exit code)")
+                        body = (
+                            "Background download of updates hit a zypper solver error.\n\n"
+                            "Some packages may already be cached, but zypper needs your decision to continue.\n\n"
+                            "Open a terminal and run:\n"
+                            "  sudo zypper dup\n"
+                            "to resolve the conflicts. After that, the automatic downloader will resume as normal."
+                        )
+
+                    n = Notify.Notification.new(
+                        "Background downloader needs your attention",
+                        body,
+                        "dialog-warning",
+                    )
+                    n.set_timeout(30000)
+                    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-error"))
+                    n.show()
+
+                    # Reset the status to idle so we don't spam the same notification forever.
+                    try:
+                        with open(download_status_file, "w") as f:
+                            f.write("idle")
+                    except Exception as e2:
+                        log_debug(f"Failed to reset download status after solver error: {e2}")
+
+                    # Do not run another zypper dry-run in this cycle; wait for user action.
+                    return
                     
             except Exception as e:
                 log_debug(f"Could not read download status: {e}")
