@@ -18,7 +18,7 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
-## ✨ Key Features (v57 Architecture)
+## ✨ Key Features (v58 Architecture)
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
@@ -67,12 +67,16 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
-* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v56) to ensure a clean migration.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v58) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
+* **Safe Scripted Uninstaller (v58):** New `--uninstall-zypper-helper` mode in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers, binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
+  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
+  * `--dry-run` – show exactly what would be removed without making any changes
+  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact while still clearing caches
 
 -----
 
-## 🛠️ How It Works: The v57 Architecture
+## 🛠️ How It Works: The v58 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -453,6 +457,11 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v58** (2025-12-31): **Scripted Uninstaller, Non-Interactive Flags & Log Control**
+  - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `sudo zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
+  - ⚙️ **NEW: Advanced uninstall flags** – `--yes` / `-y` / `--non-interactive` skip the confirmation prompt for automated or non-interactive environments; `--dry-run` shows exactly what **would** be removed without making any changes; `--keep-logs` preserves `/var/log/zypper-auto` install/service logs for debugging while still clearing per-user notifier caches.
+  - 🧹 **IMPROVED: Clean systemd state on uninstall** – system and user units are stopped, disabled, removed from disk, and their "failed" states cleared via `systemctl reset-failed`/`systemctl --user reset-failed` so `systemctl status` no longer reports stale failures after uninstall.
+
 - **v57** (2025-12-28): **Soar Stable Updater, Homebrew Integration & Notification UX**
   - 🧭 **NEW: Smarter Soar stable updater** – the helper and wrapper now compare `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-run the official Soar installer when a newer stable version exists, then run `soar sync` and `soar update`.
   - 🍺 **NEW: Homebrew `--brew` helper mode** – `sudo ./zypper-auto.sh --brew` (or `sudo zypper-auto-helper --brew`) now installs Homebrew on Linux for the target user if missing, or, when brew is already installed, runs `brew update` followed by `brew outdated --quiet` and `brew upgrade` only when there are outdated formulae, with clear log messages.
@@ -503,8 +512,52 @@ systemctl status zypper-autodownload.service
 
 ## 🗑️ Uninstallation
 
+### Recommended: Scripted Uninstaller (v58+)
+
+Use the built-in uninstaller to safely remove all helper components:
+
 ```bash
-# 1. Stop and disable the root timer
+# Run from the directory containing zypper-auto.sh
+sudo ./zypper-auto.sh --uninstall-zypper-helper
+
+# Or using the installed helper command
+sudo zypper-auto-helper --uninstall-zypper-helper
+```
+
+By default this will:
+- Stop and disable the root timers/services (`zypper-autodownload`, `zypper-cache-cleanup`)
+- Stop and disable the user notifier timer/service for your user
+- Remove all helper systemd unit files and helper binaries
+- Remove user helper scripts, shell aliases, and Fish config snippets
+- Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto`
+- Reload both system and user systemd daemons and clear any "failed" states
+
+#### Advanced Uninstall Flags
+
+You can customise the behaviour with optional flags:
+
+```bash
+# Skip the confirmation prompt (non-interactive)
+sudo ./zypper-auto.sh --uninstall-zypper-helper --yes
+# or
+sudo ./zypper-auto.sh --uninstall-zypper-helper --non-interactive
+
+# Show what WOULD be removed, but make no changes
+sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run
+
+# Keep logs under /var/log/zypper-auto for debugging
+sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-logs
+
+# Flags can be combined as needed
+sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run --keep-logs
+```
+
+### Manual Uninstall (Advanced / Legacy)
+
+If you prefer or need to remove components manually, the equivalent steps are:
+
+```bash
+# 1. Stop and disable the root timers
 sudo systemctl disable --now zypper-autodownload.timer
 sudo systemctl disable --now zypper-cache-cleanup.timer
 
