@@ -224,7 +224,6 @@ EOF
 #   sudo systemctl edit --full zypper-autodownload.timer
 #   systemctl --user edit --full zypper-notify-user.timer
 # and adjust the OnCalendar= value (e.g. "OnCalendar=*:0/10" for every 10 min).
-EOF
     fi
 
     # Basic numeric validation with safe fallbacks so a broken config
