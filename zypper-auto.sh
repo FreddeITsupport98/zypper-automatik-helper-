@@ -533,12 +533,6 @@ run_soar_install_only() {
     fi
 }
 
-# --- Helper: Homebrew-only installation mode (CLI) ---
-run_brew_install_only() {
-    log_info ">>> Homebrew (brew) installation helper mode..."
-    update_status "Running Homebrew installation helper..."
-}
-
 # --- Helper: Uninstall core zypper-auto-helper components ---
 run_uninstall_helper_only() {
     log_info ">>> Uninstalling zypper-auto-helper core components..."
@@ -776,7 +770,20 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     exit 0
 fi
 
-# (moved) Soar and Homebrew helper modes are handled above before dependencies.
+# Optional modes: Soar, Homebrew, and uninstall helper-only
+if [[ "${1:-}" == "--soar" ]]; then
+    log_info "Soar helper-only mode requested"
+    run_soar_install_only
+    exit $?
+elif [[ "${1:-}" == "--brew" ]]; then
+    log_info "Homebrew helper-only mode requested"
+    run_brew_install_only
+    exit $?
+elif [[ "${1:-}" == "--uninstall-zypper-helper" ]]; then
+    log_info "Uninstall zypper-auto-helper mode requested"
+    run_uninstall_helper_only
+    exit $?
+fi
 
 # Optional mode: run verification and auto-repair
 if [[ "${1:-}" == "--verify" || "${1:-}" == "--repair" || "${1:-}" == "--diagnose" ]]; then
