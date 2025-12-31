@@ -537,6 +537,105 @@ run_soar_install_only() {
 run_brew_install_only() {
     log_info ">>> Homebrew (brew) installation helper mode..."
     update_status "Running Homebrew installation helper..."
+}
+
+# --- Helper: Uninstall core zypper-auto-helper components ---
+run_uninstall_helper_only() {
+    log_info ">>> Uninstalling zypper-auto-helper core components..."
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  zypper-auto-helper Uninstall" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "This will remove timers, services, helper binaries, logs, and user" | tee -a "${LOG_FILE}"
+    echo "scripts/aliases installed by zypper-auto-helper for user $SUDO_USER." | tee -a "${LOG_FILE}"
+    echo "The installer script (zypper-auto.sh) and your Soar/Homebrew installs" | tee -a "${LOG_FILE}"
+    echo "will be left untouched." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    read -p "Are you sure you want to uninstall zypper-auto-helper components? [y/N]: " -r CONFIRM
+    echo
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        log_info "Uninstall aborted by user. No changes made."
+        update_status "ABORTED: zypper-auto-helper uninstall cancelled by user"
+        return 0
+    fi
+
+    update_status "Uninstalling zypper-auto-helper components..."
+
+    # 1. Stop and disable root timers/services
+    log_debug "Disabling root timers and services..."
+    systemctl disable --now zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
+    systemctl disable --now zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
+    systemctl stop zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
+    systemctl stop zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
+
+    # 2. Stop and disable user timer/service
+    if [ -n "${SUDO_USER:-}" ]; then
+        log_debug "Disabling user timer and service for $SUDO_USER..."
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+            systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+            systemctl --user stop zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    # 3. Remove systemd unit files and root binaries
+    log_debug "Removing root systemd units and binaries..."
+    rm -f /etc/systemd/system/zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
+    rm -f /etc/systemd/system/zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
+    rm -f /etc/systemd/system/zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
+    rm -f /etc/systemd/system/zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
+    rm -f /usr/local/bin/zypper-download-with-progress >> "${LOG_FILE}" 2>&1 || true
+    rm -f /usr/local/bin/zypper-auto-helper >> "${LOG_FILE}" 2>&1 || true
+
+    # 4. Remove user-level scripts and systemd units
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        log_debug "Removing user scripts and units under $SUDO_USER_HOME..."
+        rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.timer" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.local/bin/zypper-with-ps" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.local/bin/zypper-view-changes" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" >> "${LOG_FILE}" 2>&1 || true
+        rm -f "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" >> "${LOG_FILE}" 2>&1 || true
+
+        # Remove bash/zsh aliases we added (non-fatal if missing)
+        sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
+        sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
+        sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
+        sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
+        sed -i '/# zypper-auto-helper command alias/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
+        sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
+        sed -i '/# zypper-auto-helper command alias/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
+        sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
+    fi
+
+    # 5. Remove logs and caches
+    log_debug "Removing logs and caches..."
+    rm -rf /var/log/zypper-auto >> "${LOG_FILE}" 2>&1 || true
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        rm -rf "$SUDO_USER_HOME/.local/share/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
+        rm -rf "$SUDO_USER_HOME/.cache/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    # 6. Reload systemd daemons
+    log_debug "Reloading systemd daemons after uninstall..."
+    systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
+    if [ -n "${SUDO_USER:-}" ]; then
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+            systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    log_success "Core zypper-auto-helper components uninstalled (installer script left in place)."
+    update_status "SUCCESS: zypper-auto-helper core components uninstalled"
+}
+
+# --- Helper: Homebrew-only installation mode (CLI) ---
+run_brew_install_only() {
+    log_info ">>> Homebrew (brew) installation helper mode..."
+    update_status "Running Homebrew installation helper..."
 
     # Detect an existing brew installation for the target user and, if found,
     # prefer to run a self-update (brew update && brew upgrade) instead of
@@ -648,6 +747,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
     echo "  --self-check      Same as --check (alias)"
     echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew            Install/upgrade Homebrew (brew) for the user"
+    echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
@@ -676,19 +776,7 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     exit 0
 fi
 
-# Optional mode: Soar installation helper only
-if [[ "${1:-}" == "--soar" ]]; then
-    log_info "Soar-only installation mode requested"
-    run_soar_install_only
-    exit $?
-fi
-
-# Optional mode: Homebrew installation helper only
-if [[ "${1:-}" == "--brew" ]]; then
-    log_info "Homebrew-only installation mode requested"
-    run_brew_install_only
-    exit $?
-fi
+# (moved) Soar and Homebrew helper modes are handled above before dependencies.
 
 # Optional mode: run verification and auto-repair
 if [[ "${1:-}" == "--verify" || "${1:-}" == "--repair" || "${1:-}" == "--diagnose" ]]; then
