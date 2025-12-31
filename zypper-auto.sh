@@ -1559,6 +1559,20 @@ cat << 'EOF' > "$ZYPPER_WRAPPER_PATH"
 # Zypper wrapper that automatically runs 'zypper ps -s' after 'zypper dup'
 # This shows which services need restarting after updates
 
+# Load feature toggles from the same config used by the installer.
+CONFIG_FILE="/etc/zypper-auto.conf"
+
+# Default feature toggles (can be overridden by CONFIG_FILE)
+ENABLE_FLATPAK_UPDATES="true"
+ENABLE_SNAP_UPDATES="true"
+ENABLE_SOAR_UPDATES="true"
+ENABLE_BREW_UPDATES="true"
+
+if [ -r "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
 # Check if we're running 'dup', 'dist-upgrade' or 'update'
 if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"update"* ]]; then
     # Run the actual zypper command
@@ -1571,16 +1585,20 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     echo "  Flatpak Updates"
     echo "=========================================="
     echo ""
-
-    if command -v flatpak >/dev/null 2>&1; then
-        if sudo flatpak update -y; then
-            echo "✅ Flatpak updates completed."
+    
+    if [[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]]; then
+        if command -v flatpak >/dev/null 2>&1; then
+            if sudo flatpak update -y; then
+                echo "✅ Flatpak updates completed."
+            else
+                echo "⚠️  Flatpak update failed (continuing)."
+            fi
         else
-            echo "⚠️  Flatpak update failed (continuing)."
+            echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
+            echo "   To install: sudo zypper install flatpak"
         fi
     else
-        echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
-        echo "   To install: sudo zypper install flatpak"
+        echo "ℹ️  Flatpak updates are disabled in /etc/zypper-auto.conf (ENABLE_FLATPAK_UPDATES=false)."
     fi
 
     echo ""
@@ -3478,6 +3496,20 @@ log_debug "Writing install script to: ${INSTALL_SCRIPT_PATH}"
 cat << 'EOF' > "${INSTALL_SCRIPT_PATH}"
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Load feature toggles from the same config used by the installer.
+CONFIG_FILE="/etc/zypper-auto.conf"
+
+# Default feature toggles (can be overridden by CONFIG_FILE)
+ENABLE_FLATPAK_UPDATES="true"
+ENABLE_SNAP_UPDATES="true"
+ENABLE_SOAR_UPDATES="true"
+ENABLE_BREW_UPDATES="true"
+
+if [ -r "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
 
 # Enhanced install script with post-update service check
 TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
