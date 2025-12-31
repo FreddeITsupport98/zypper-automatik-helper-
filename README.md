@@ -212,7 +212,7 @@ notification suggesting `zypper-auto-helper --reset-config`.
 
 ## 🏃 Usage
 
-1.  **Wait.** The services run in the background. By default, the downloader runs hourly (configurable) and the notifier checks for updates every minute (also configurable via its systemd timer).
+1.  **Wait.** The services run in the background. By default, both the downloader and notifier run every minute. You can change their frequency via `/etc/zypper-auto.conf` (`DL_TIMER_INTERVAL_MINUTES` / `NT_TIMER_INTERVAL_MINUTES`) and re-run `sudo ./zypper-auto.sh install`.
 2.  **Get Notified.** You will get a notification *only* when new updates are pending.
     > **Snapshot 20251110-0 Ready**
     > 12 updates are pending. Click 'Install' to begin.
@@ -263,17 +263,14 @@ systemctl status zypper-autodownload.service
 # 4. View the detailed logs from the smart notification script
 journalctl --user -u zypper-notify-user.service
 
-# Edit the root downloader's schedule:
-sudoedit /etc/systemd/system/zypper-autodownload.timer
+# 5. Change schedules via the config file (recommended):
+sudoedit /etc/zypper-auto.conf
+# Adjust DL_TIMER_INTERVAL_MINUTES / NT_TIMER_INTERVAL_MINUTES, then re-run:
+sudo ./zypper-auto.sh install
 
-# Edit the user notifier's schedule:
-systemctl --user edit --full zypper-notify-user.timer
-
-# For the root downloader:
+# 6. (Advanced) Reload timers manually if you edited units yourself:
 sudo systemctl daemon-reload
 sudo systemctl restart zypper-autodownload.timer
-
-# For the user notifier (as your regular user):
 systemctl --user daemon-reload
 systemctl --user restart zypper-notify-user.timer
 ```
