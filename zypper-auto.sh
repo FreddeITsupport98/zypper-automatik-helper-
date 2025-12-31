@@ -547,12 +547,38 @@ run_uninstall_helper_only() {
     echo "will be left untouched." | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
-    read -p "Are you sure you want to uninstall zypper-auto-helper components? [y/N]: " -r CONFIRM
-    echo
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-        log_info "Uninstall aborted by user. No changes made."
-        update_status "ABORTED: zypper-auto-helper uninstall cancelled by user"
+    # Handle dry-run and non-interactive flags from the CLI dispatcher.
+    if [ "${UNINSTALL_DRY_RUN:-0}" -eq 1 ]; then
+        log_info "Dry-run mode active: NO changes will be made."
+        echo "" | tee -a "${LOG_FILE}"
+        echo "The following items WOULD be removed if you run without --dry-run:" | tee -a "${LOG_FILE}"
+        echo "  - System services/timers: zypper-autodownload.service, zypper-autodownload.timer" | tee -a "${LOG_FILE}"
+        echo "    and zypper-cache-cleanup.service, zypper-cache-cleanup.timer" | tee -a "${LOG_FILE}"
+        echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
+        echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
+        echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
+        echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
+        if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
+            echo "  - Logs under $LOG_DIR would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+        else
+            echo "  - Logs under $LOG_DIR (other than the current log) and notifier caches" | tee -a "${LOG_FILE}"
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Run again WITHOUT --dry-run to actually uninstall." | tee -a "${LOG_FILE}"
+        update_status "DRY-RUN: zypper-auto-helper uninstall (no changes made)"
         return 0
+    fi
+
+    if [ "${UNINSTALL_ASSUME_YES:-0}" -ne 1 ]; then
+        read -p "Are you sure you want to uninstall zypper-auto-helper components? [y/N]: " -r CONFIRM
+        echo
+        if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+            log_info "Uninstall aborted by user. No changes made."
+            update_status "ABORTED: zypper-auto-helper uninstall cancelled by user"
+            return 0
+        fi
+    else
+        log_info "Non-interactive mode: proceeding without confirmation (--yes)."
     fi
 
     update_status "Uninstalling zypper-auto-helper components..."
@@ -607,15 +633,19 @@ run_uninstall_helper_only() {
     fi
 
     # 5. Remove logs and caches
-    # Keep the current uninstall log file so we don't break logging while
-    # this function is still running, but remove other helper logs and
-    # caches.
-    log_debug "Removing logs and caches (preserving this uninstall log)..."
-    if [ -d "$LOG_DIR" ]; then
-        # Delete all files in $LOG_DIR except the current LOG_FILE
-        find "$LOG_DIR" -maxdepth 1 -type f ! -name "$(basename "$LOG_FILE")" -delete >> "${LOG_FILE}" 2>&1 || true
-        # Remove any service sub-logs directory completely
-        rm -rf "$LOG_DIR/service-logs" >> "${LOG_FILE}" 2>&1 || true
+    if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
+        log_info "Leaving all logs under $LOG_DIR intact (--keep-logs requested)."
+    else
+        # Keep the current uninstall log file so we don't break logging while
+        # this function is still running, but remove other helper logs and
+        # caches.
+        log_debug "Removing logs and caches (preserving this uninstall log)..."
+        if [ -d "$LOG_DIR" ]; then
+            # Delete all files in $LOG_DIR except the current LOG_FILE
+            find "$LOG_DIR" -maxdepth 1 -type f ! -name "$(basename "$LOG_FILE")" -delete >> "${LOG_FILE}" 2>&1 || true
+            # Remove any service sub-logs directory completely
+            rm -rf "$LOG_DIR/service-logs" >> "${LOG_FILE}" 2>&1 || true
+        fi
     fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         rm -rf "$SUDO_USER_HOME/.local/share/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
@@ -630,8 +660,30 @@ run_uninstall_helper_only() {
             systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1 || true
     fi
 
+    # 7. Clear any failed state in systemd for the removed units so
+    #    `systemctl --user status` looks clean after uninstall.
+    log_debug "Resetting failed state for removed systemd units (if any)..."
+    systemctl reset-failed zypper-autodownload.service zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
+    if [ -n "${SUDO_USER:-}" ]; then
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+            systemctl --user reset-failed zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
+    fi
+
     log_success "Core zypper-auto-helper components uninstalled (installer script left in place)."
     update_status "SUCCESS: zypper-auto-helper core components uninstalled"
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Uninstall summary:" | tee -a "${LOG_FILE}"
+    echo "  - System services and timers removed: zypper-autodownload, zypper-cache-cleanup" | tee -a "${LOG_FILE}"
+    echo "  - User notifier units and helper scripts removed for user $SUDO_USER" | tee -a "${LOG_FILE}"
+    if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
+        echo "  - Logs under $LOG_DIR left in place (--keep-logs)" | tee -a "${LOG_FILE}"
+    else
+        echo "  - Logs and caches cleaned up (current uninstall log preserved)" | tee -a "${LOG_FILE}"
+    fi
+    echo "" | tee -a "${LOG_FILE}"
+    echo "You can reinstall the helper at any time with:" | tee -a "${LOG_FILE}"
+    echo "  sudo sh zypper-auto.sh install" | tee -a "${LOG_FILE}"
 }
 
 # --- Helper: Homebrew-only installation mode (CLI) ---
@@ -788,6 +840,32 @@ elif [[ "${1:-}" == "--brew" ]]; then
     run_brew_install_only
     exit $?
 elif [[ "${1:-}" == "--uninstall-zypper-helper" ]]; then
+    shift
+    # Parse optional flags for the uninstaller:
+    #   --yes / -y / --non-interactive : skip confirmation prompt
+    #   --dry-run                      : show what would be removed, no changes
+    #   --keep-logs                    : do not delete any log files under $LOG_DIR
+    UNINSTALL_ASSUME_YES=0
+    UNINSTALL_DRY_RUN=0
+    UNINSTALL_KEEP_LOGS=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y|--non-interactive)
+                UNINSTALL_ASSUME_YES=1
+                ;;
+            --dry-run)
+                UNINSTALL_DRY_RUN=1
+                ;;
+            --keep-logs)
+                UNINSTALL_KEEP_LOGS=1
+                ;;
+            *)
+                log_error "Unknown option for --uninstall-zypper-helper: $1"
+                exit 1
+                ;;
+        esac
+        shift
+    done
     log_info "Uninstall zypper-auto-helper mode requested"
     run_uninstall_helper_only
     exit $?
