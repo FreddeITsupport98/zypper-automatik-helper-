@@ -1,7 +1,8 @@
 #!/bin/bash
 #
-#       VERSION 53 - Snooze controls, safety preflight, and CLI helper
-# This script installs the final architecture and fixes the policy lock.
+#       VERSION 58 - Scripted uninstaller, external config, and hardening
+# This script installs the current architecture with a safe uninstaller,
+# an external configuration file, and improved systemd hardening.
 # It replaces 'sudo' with 'pkexec' in the Python script to ensure
 # zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
 #
@@ -212,7 +213,9 @@ CACHE_EXPIRY_MINUTES=10
 SNOOZE_SHORT_HOURS=1
 SNOOZE_MEDIUM_HOURS=4
 SNOOZE_LONG_HOURS=24
-
+EOF
+        # Ensure config file has safe permissions (root-writable only)
+        chmod 644 "${CONFIG_FILE}" || true
 # NOTE: How often updates are checked is controlled by two systemd timers,
 # not by this file:
 #   - Root downloader:   zypper-autodownload.timer  (default: minutely)
@@ -1446,6 +1449,13 @@ Nice=-20
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
 ExecStart=${DOWNLOADER_SCRIPT}
+
+# Systemd hardening (optional but safe for this service)
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/cache/zypp /var/log/zypper-auto
 EOF
 log_success "Downloader service file created"
 
