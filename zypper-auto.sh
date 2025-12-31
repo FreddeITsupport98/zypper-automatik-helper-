@@ -1678,40 +1678,39 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         echo "ℹ️  Homebrew updates are disabled in /etc/zypper-auto.conf (ENABLE_BREW_UPDATES=false)."
         echo "    You can still run 'brew update' / 'brew upgrade' manually."
         echo ""
-        return
-    fi
-    
-    # Try to detect Homebrew in PATH or the default Linuxbrew prefix
-    if command -v brew >/dev/null 2>&1 || [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
-        # Normalise brew command path
-        if command -v brew >/dev/null 2>&1; then
-            BREW_BIN="brew"
-        else
-            BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
-        fi
-
-        echo "Checking for Homebrew updates from GitHub (brew update)..."
-        if ! $BREW_BIN update; then
-            echo "⚠️  Homebrew 'brew update' failed (continuing without brew upgrade)."
-        else
-            # After syncing with GitHub, see if anything needs upgrading
-            OUTDATED=$($BREW_BIN outdated --quiet 2>/dev/null || true)
-            OUTDATED_COUNT=$(printf '%s\n' "$OUTDATED" | sed '/^$/d' | wc -l | tr -d ' ')
-
-            if [ "${OUTDATED_COUNT:-0}" -eq 0 ]; then
-                echo "Homebrew is already up to date (no formulae to upgrade)."
+    else
+        # Try to detect Homebrew in PATH or the default Linuxbrew prefix
+        if command -v brew >/dev/null 2>&1 || [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
+            # Normalise brew command path
+            if command -v brew >/dev/null 2>&1; then
+                BREW_BIN="brew"
             else
-                echo "Homebrew has ${OUTDATED_COUNT} outdated formulae; running 'brew upgrade'..."
-                if $BREW_BIN upgrade; then
-                    echo "✅ Homebrew upgrade completed (upgraded ${OUTDATED_COUNT} formulae)."
+                BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
+            fi
+
+            echo "Checking for Homebrew updates from GitHub (brew update)..."
+            if ! $BREW_BIN update; then
+                echo "⚠️  Homebrew 'brew update' failed (continuing without brew upgrade)."
+            else
+                # After syncing with GitHub, see if anything needs upgrading
+                OUTDATED=$($BREW_BIN outdated --quiet 2>/dev/null || true)
+                OUTDATED_COUNT=$(printf '%s\n' "$OUTDATED" | sed '/^$/d' | wc -l | tr -d ' ')
+
+                if [ "${OUTDATED_COUNT:-0}" -eq 0 ]; then
+                    echo "Homebrew is already up to date (no formulae to upgrade)."
                 else
-                    echo "⚠️  Homebrew 'brew upgrade' failed (continuing)."
+                    echo "Homebrew has ${OUTDATED_COUNT} outdated formulae; running 'brew upgrade'..."
+                    if $BREW_BIN upgrade; then
+                        echo "✅ Homebrew upgrade completed (upgraded ${OUTDATED_COUNT} formulae)."
+                    else
+                        echo "⚠️  Homebrew 'brew upgrade' failed (continuing)."
+                    fi
                 fi
             fi
+        else
+            echo "ℹ️  Homebrew (brew) is not installed - skipping brew update/upgrade."
+            echo "    To install via helper: sudo zypper-auto-helper --brew"
         fi
-    else
-        echo "ℹ️  Homebrew (brew) is not installed - skipping brew update/upgrade."
-        echo "    To install via helper: sudo zypper-auto-helper --brew"
     fi
 
     # Always show service restart info, even if zypper reported errors
