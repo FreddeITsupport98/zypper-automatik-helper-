@@ -607,8 +607,16 @@ run_uninstall_helper_only() {
     fi
 
     # 5. Remove logs and caches
-    log_debug "Removing logs and caches..."
-    rm -rf /var/log/zypper-auto >> "${LOG_FILE}" 2>&1 || true
+    # Keep the current uninstall log file so we don't break logging while
+    # this function is still running, but remove other helper logs and
+    # caches.
+    log_debug "Removing logs and caches (preserving this uninstall log)..."
+    if [ -d "$LOG_DIR" ]; then
+        # Delete all files in $LOG_DIR except the current LOG_FILE
+        find "$LOG_DIR" -maxdepth 1 -type f ! -name "$(basename "$LOG_FILE")" -delete >> "${LOG_FILE}" 2>&1 || true
+        # Remove any service sub-logs directory completely
+        rm -rf "$LOG_DIR/service-logs" >> "${LOG_FILE}" 2>&1 || true
+    fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         rm -rf "$SUDO_USER_HOME/.local/share/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
         rm -rf "$SUDO_USER_HOME/.cache/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
