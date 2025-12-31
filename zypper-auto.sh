@@ -10,12 +10,31 @@
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
-# --- Logging Configuration ---
+# --- Logging / Configuration Defaults ---
 LOG_DIR="/var/log/zypper-auto"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 STATUS_FILE="${LOG_DIR}/last-status.txt"
-MAX_LOG_FILES=10  # Keep only the last 10 log files
-MAX_LOG_SIZE_MB=50  # Maximum size for a single log file in MB
+MAX_LOG_FILES=10  # Keep only the last 10 log files (overridable via /etc/zypper-auto.conf)
+MAX_LOG_SIZE_MB=50  # Maximum size for a single log file in MB (overridable)
+
+# Accumulator for any configuration warnings so we can surface them
+# once at the end of installation.
+CONFIG_WARNINGS=()
+
+# Global config file (optional but recommended for advanced users)
+CONFIG_FILE="/etc/zypper-auto.conf"
+
+# Feature toggles (may be overridden by CONFIG_FILE)
+ENABLE_FLATPAK_UPDATES="true"
+ENABLE_SNAP_UPDATES="true"
+ENABLE_SOAR_UPDATES="true"
+ENABLE_BREW_UPDATES="true"
+
+# Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
+CACHE_EXPIRY_MINUTES="10"
+SNOOZE_SHORT_HOURS="1"   # used by the "1h" snooze button
+SNOOZE_MEDIUM_HOURS="4"  # used by the "4h" snooze button
+SNOOZE_LONG_HOURS="24"   # used by the "1d" snooze button
 
 # Create log directory
 mkdir -p "${LOG_DIR}"
@@ -90,6 +109,64 @@ log_command() {
     fi
 }
 
+# Load external configuration if present, otherwise create a default template.
+load_config() {
+    if [ -f "${CONFIG_FILE}" ]; then
+        log_info "Loading configuration from ${CONFIG_FILE}"
+        # shellcheck source=/etc/zypper-auto.conf
+        . "${CONFIG_FILE}"
+    else
+        log_info "No configuration found at ${CONFIG_FILE}; generating default config"
+        cat > "${CONFIG_FILE}" << 'EOF'
+# zypper-auto-helper configuration
+# Boolean flags: true or false
+
+# Whether to run Flatpak updates after zypper dup
+ENABLE_FLATPAK_UPDATES=true
+
+# Whether to run Snap refresh after zypper dup
+ENABLE_SNAP_UPDATES=true
+
+# Whether to run Soar stable update & sync after zypper dup
+ENABLE_SOAR_UPDATES=true
+
+# Whether to run Homebrew (brew) update/upgrade after zypper dup
+ENABLE_BREW_UPDATES=true
+
+# Installer log retention
+MAX_LOG_FILES=10
+MAX_LOG_SIZE_MB=50
+
+# Notifier cache and snooze defaults
+CACHE_EXPIRY_MINUTES=10
+SNOOZE_SHORT_HOURS=1
+SNOOZE_MEDIUM_HOURS=4
+SNOOZE_LONG_HOURS=24
+EOF
+    fi
+
+    # Basic numeric validation with safe fallbacks so a broken config
+    # never crashes the installer.
+    validate_int() {
+        local name="$1" default="$2" value
+        # shellcheck disable=SC2154
+        eval "value=\"\${$name:-}\""
+        if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
+            local msg="Invalid or missing $name='$value' in ${CONFIG_FILE}, using default $default"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            eval "$name=$default"
+        fi
+    }
+
+    validate_int MAX_LOG_FILES 10
+    validate_int MAX_LOG_SIZE_MB 50
+    validate_int CACHE_EXPIRY_MINUTES 10
+    validate_int SNOOZE_SHORT_HOURS 1
+    validate_int SNOOZE_MEDIUM_HOURS 4
+    validate_int SNOOZE_LONG_HOURS 24
+}
+
 # Status update function
 update_status() {
     local status="$1"
@@ -125,6 +202,9 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 log_success "Root privileges confirmed"
+
+# Load configuration now that we have root privileges (for /etc writes)
+load_config
 
 if [ -z "${SUDO_USER:-}" ]; then
     log_error "Could not detect the user. Please run with 'sudo', not as pure root."
@@ -1333,17 +1413,21 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     echo "  Snap Updates"
     echo "=========================================="
     echo ""
-
-    if command -v snap >/dev/null 2>&1; then
-        if pkexec snap refresh; then
-            echo "✅ Snap updates completed."
+    
+    if [[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]]; then
+        if command -v snap >/dev/null 2>&1; then
+            if pkexec snap refresh; then
+                echo "✅ Snap updates completed."
+            else
+                echo "⚠️  Snap refresh failed (continuing)."
+            fi
         else
-            echo "⚠️  Snap refresh failed (continuing)."
+            echo "⚠️  Snapd is not installed - skipping Snap updates."
+            echo "   To install: sudo zypper install snapd"
+            echo "   Then enable: sudo systemctl enable --now snapd"
         fi
     else
-        echo "⚠️  Snapd is not installed - skipping Snap updates."
-        echo "   To install: sudo zypper install snapd"
-        echo "   Then enable: sudo systemctl enable --now snapd"
+        echo "ℹ️  Snap updates are disabled in /etc/zypper-auto.conf (ENABLE_SNAP_UPDATES=false)."
     fi
 
     echo ""
@@ -1414,7 +1498,14 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     echo "  Homebrew (brew) Updates (optional)"
     echo "=========================================="
     echo ""
-
+    
+    if [[ "${ENABLE_BREW_UPDATES,,}" != "true" ]]; then
+        echo "ℹ️  Homebrew updates are disabled in /etc/zypper-auto.conf (ENABLE_BREW_UPDATES=false)."
+        echo "    You can still run 'brew update' / 'brew upgrade' manually."
+        echo ""
+        return
+    fi
+    
     # Try to detect Homebrew in PATH or the default Linuxbrew prefix
     if command -v brew >/dev/null 2>&1 || [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
         # Normalise brew command path
@@ -1624,6 +1715,10 @@ After=network-online.target nss-lookup.target
 Type=oneshot
 StandardOutput=append:${USER_LOG_DIR}/notifier.log
 StandardError=append:${USER_LOG_DIR}/notifier-error.log
+Environment=ZNH_CACHE_EXPIRY_MINUTES=${CACHE_EXPIRY_MINUTES}
+Environment=ZNH_SNOOZE_SHORT_HOURS=${SNOOZE_SHORT_HOURS}
+Environment=ZNH_SNOOZE_MEDIUM_HOURS=${SNOOZE_MEDIUM_HOURS}
+Environment=ZNH_SNOOZE_LONG_HOURS=${SNOOZE_LONG_HOURS}
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
@@ -1683,7 +1778,24 @@ MAX_HISTORY_SIZE = 1 * 1024 * 1024  # 1MB
 CACHE_DIR = Path.home() / ".cache" / "zypper-notify"
 CACHE_FILE = CACHE_DIR / "last_check.txt"
 SNOOZE_FILE = CACHE_DIR / "snooze_until.txt"
-CACHE_EXPIRY_MINUTES = 10
+
+# Cache and snooze configuration (overridable via environment, see systemd unit)
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if value <= 0:
+            return default
+        return value
+    except ValueError:
+        return default
+
+CACHE_EXPIRY_MINUTES = _int_env("ZNH_CACHE_EXPIRY_MINUTES", 10)
+SNOOZE_SHORT_HOURS = _int_env("ZNH_SNOOZE_SHORT_HOURS", 1)
+SNOOZE_MEDIUM_HOURS = _int_env("ZNH_SNOOZE_MEDIUM_HOURS", 4)
+SNOOZE_LONG_HOURS = _int_env("ZNH_SNOOZE_LONG_HOURS", 24)
 
 # Ensure directories exist
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -2682,16 +2794,16 @@ def on_action(notification, action_id, user_data):
             log_error(f"Failed to launch action script: {e}")
     
     elif action_id == "snooze-1h":
-        set_snooze(1)
-        update_status("Updates snoozed for 1 hour")
+        set_snooze(SNOOZE_SHORT_HOURS)
+        update_status(f"Updates snoozed for {SNOOZE_SHORT_HOURS} hour(s)")
     
     elif action_id == "snooze-4h":
-        set_snooze(4)
-        update_status("Updates snoozed for 4 hours")
+        set_snooze(SNOOZE_MEDIUM_HOURS)
+        update_status(f"Updates snoozed for {SNOOZE_MEDIUM_HOURS} hour(s)")
     
     elif action_id == "snooze-1d":
-        set_snooze(24)
-        update_status("Updates snoozed for 1 day")
+        set_snooze(SNOOZE_LONG_HOURS)
+        update_status(f"Updates snoozed for {SNOOZE_LONG_HOURS} hour(s)")
     
     elif action_id == "view-changes":
         log_info("User clicked View Changes button")
@@ -3164,6 +3276,18 @@ chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 chmod +x "${NOTIFY_SCRIPT_PATH}"
 log_success "Python notifier script created and made executable"
 
+# If there were any configuration warnings collected during load_config,
+# surface them clearly in the status/log so the user can fix them.
+if [ "${#CONFIG_WARNINGS[@]}" -gt 0 ]; then
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Configuration warnings (from ${CONFIG_FILE}):" | tee -a "${LOG_FILE}"
+    for w in "${CONFIG_WARNINGS[@]}"; do
+        echo "  - $w" | tee -a "${LOG_FILE}"
+    done
+    echo "" | tee -a "${LOG_FILE}"
+    update_status "WARNING: One or more settings in ${CONFIG_FILE} were invalid and reset to defaults"
+fi
+
 # --- 11. Create/Update Install Script (user) ---
 log_info ">>> Creating (user) install script: ${INSTALL_SCRIPT_PATH}"
 update_status "Creating install helper script..."
@@ -3195,22 +3319,27 @@ RUN_UPDATE() {
     echo "  Update Complete - Post-Update Check"
     echo "=========================================="
     echo ""
-
-    # Always run Flatpak and Snap updates, even if dup had no updates or failed
+    
+    # Post-update integrations (Flatpak, Snap, Soar, Homebrew) are controlled
+    # by flags in /etc/zypper-auto.conf.
     echo "=========================================="
     echo "  Flatpak Updates"
     echo "=========================================="
     echo ""
-
-    if command -v flatpak >/dev/null 2>&1; then
-        if pkexec flatpak update -y; then
-            echo "✅ Flatpak updates completed."
+    
+    if [[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]]; then
+        if command -v flatpak >/dev/null 2>&1; then
+            if pkexec flatpak update -y; then
+                echo "✅ Flatpak updates completed."
+            else
+                echo "⚠️  Flatpak update failed (continuing)."
+            fi
         else
-            echo "⚠️  Flatpak update failed (continuing)."
+            echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
+            echo "   To install: sudo zypper install flatpak"
         fi
     else
-        echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
-        echo "   To install: sudo zypper install flatpak"
+        echo "ℹ️  Flatpak updates are disabled in /etc/zypper-auto.conf (ENABLE_FLATPAK_UPDATES=false)."
     fi
 
     echo ""
@@ -3219,16 +3348,20 @@ RUN_UPDATE() {
     echo "=========================================="
     echo ""
 
-    if command -v snap >/dev/null 2>&1; then
-        if pkexec snap refresh; then
-            echo "✅ Snap updates completed."
+    if [[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]]; then
+        if command -v snap >/dev/null 2>&1; then
+            if pkexec snap refresh; then
+                echo "✅ Snap updates completed."
+            else
+                echo "⚠️  Snap refresh failed (continuing)."
+            fi
         else
-            echo "⚠️  Snap refresh failed (continuing)."
+            echo "⚠️  Snapd is not installed - skipping Snap updates."
+            echo "   To install: sudo zypper install snapd"
+            echo "   Then enable: sudo systemctl enable --now snapd"
         fi
     else
-        echo "⚠️  Snapd is not installed - skipping Snap updates."
-        echo "   To install: sudo zypper install snapd"
-        echo "   Then enable: sudo systemctl enable --now snapd"
+        echo "ℹ️  Snap updates are disabled in /etc/zypper-auto.conf (ENABLE_SNAP_UPDATES=false)."
     fi
 
     echo ""
@@ -3236,8 +3369,8 @@ RUN_UPDATE() {
     echo "  Soar (stable) Update & Sync"
     echo "=========================================="
     echo ""
-
-    if command -v soar >/dev/null 2>&1; then
+    
+    if [[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]] && command -v soar >/dev/null 2>&1; then
         # First, check if a newer *stable* Soar release exists on GitHub.
         # We compare the local "soar --version" against
         # https://api.github.com/repos/pkgforge/soar/releases/latest (stable only).
@@ -3326,6 +3459,13 @@ RUN_UPDATE() {
     echo "  Homebrew (brew) Updates (optional)"
     echo "=========================================="
     echo ""
+
+    if [[ "${ENABLE_BREW_UPDATES,,}" != "true" ]]; then
+        echo "ℹ️  Homebrew updates are disabled in /etc/zypper-auto.conf (ENABLE_BREW_UPDATES=false)."
+        echo "    You can still run 'brew update' / 'brew upgrade' manually."
+        echo ""
+        return
+    fi
 
     # Try to detect Homebrew in PATH or the default Linuxbrew prefix
     if command -v brew >/dev/null 2>&1 || [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
