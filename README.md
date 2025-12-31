@@ -99,8 +99,11 @@ This service's only job is to download packages when it's safe, and report progr
         * `idle` - No updates available
     * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
 * **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
-    * Default: `OnBootSec=2min`, `OnCalendar=minutely` (checks for new updates once a minute).
-    * You can edit this with `sudoedit /etc/systemd/system/zypper-autodownload.timer` and reload via `sudo systemctl daemon-reload && sudo systemctl restart zypper-autodownload.timer`.
+    * Default schedule is derived from the config option `DL_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (allowed values: 1,5,10,15,30,60).
+    * For example:
+        * `1`  → runs minutely
+        * `10` → runs every 10 minutes (`OnCalendar=*:0/10`)
+        * `60` → runs hourly (`OnCalendar=hourly`)
 
 ### 3. The Notifier (User Service)
 
@@ -110,13 +113,8 @@ This service's job is to check for updates and remind you, running as your stand
     * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
     * Because it runs in user-space, it has the correct D-Bus environment variables to display notifications reliably.
 * **Timer:** `~/.config/systemd/user/zypper-notify-user.timer`
-    * Default: `OnBootSec=5sec`, `OnCalendar=minutely` (checks for updates and sends notifications roughly once per minute while your user session is running).
-    * You can tone this down (for example, to run only every 10 minutes or 1 hour) using:
-      ```bash
-      systemctl --user edit --full zypper-notify-user.timer
-      systemctl --user daemon-reload
-      systemctl --user restart zypper-notify-user.timer
-      ```
+    * Default schedule is derived from `NT_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (same allowed values as above).
+    * By changing `NT_TIMER_INTERVAL_MINUTES` (e.g. to 10 or 60) and re-running the installer, you can control how often the notifier checks and pops notifications.
 
 ### 4. The "Brains": `~/.local/bin/zypper-notify-updater.py`
 
@@ -173,9 +171,42 @@ zypper-auto-helper --repair        # Alias for --verify
 zypper-auto-helper --diagnose      # Alias for --verify
 zypper-auto-helper --check         # Syntax check only
 zypper-auto-helper install         # Reinstall/upgrade
+zypper-auto-helper --reset-config  # Reset /etc/zypper-auto.conf to documented defaults (with backup)
 ```
 
 The command automatically includes `sudo` when needed, so you don't need to type it.
+
+### Configuration File: `/etc/zypper-auto.conf`
+
+The installer reads an optional config file at `/etc/zypper-auto.conf` on every run.
+If the file does not exist, it generates a documented default template. You can
+safely edit this file and re-run `sudo ./zypper-auto.sh install` to apply
+changes.
+
+Key options include:
+
+- **Post-update helpers**
+  - `ENABLE_FLATPAK_UPDATES` / `ENABLE_SNAP_UPDATES` / `ENABLE_SOAR_UPDATES` /
+    `ENABLE_BREW_UPDATES` – `true` / `false` flags to control whether Flatpak,
+    Snap, Soar and Homebrew helpers run after `zypper dup`.
+
+- **Timer intervals**
+  - `DL_TIMER_INTERVAL_MINUTES` – how often the root downloader runs
+    (allowed: `1,5,10,15,30,60`).
+  - `NT_TIMER_INTERVAL_MINUTES` – how often the user notifier runs.
+  - The installer converts these into appropriate `OnCalendar` values, e.g.
+    `*:0/10` for every 10 minutes or `hourly` for 60.
+
+- **Caching / snooze**
+  - `CACHE_EXPIRY_MINUTES` – how long a cached `zypper dup --dry-run` result
+    is considered valid before forcing a fresh check.
+  - `SNOOZE_SHORT_HOURS`, `SNOOZE_MEDIUM_HOURS`, `SNOOZE_LONG_HOURS` – actual
+    durations used by the `1h` / `4h` / `1d` snooze buttons in the desktop
+    notification.
+
+If any values are invalid, the installer falls back to safe defaults, logs the
+warnings, updates `last-status.txt`, and attempts to show a small desktop
+notification suggesting `zypper-auto-helper --reset-config`.
 
 -----
 
@@ -457,10 +488,13 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
-- **v58** (2025-12-31): **Scripted Uninstaller, Non-Interactive Flags & Log Control**
+- **v58** (2025-12-31): **Scripted Uninstaller, External Config & Log Control**
   - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `sudo zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
   - ⚙️ **NEW: Advanced uninstall flags** – `--yes` / `-y` / `--non-interactive` skip the confirmation prompt for automated or non-interactive environments; `--dry-run` shows exactly what **would** be removed without making any changes; `--keep-logs` preserves `/var/log/zypper-auto` install/service logs for debugging while still clearing per-user notifier caches.
   - 🧹 **IMPROVED: Clean systemd state on uninstall** – system and user units are stopped, disabled, removed from disk, and their "failed" states cleared via `systemctl reset-failed`/`systemctl --user reset-failed` so `systemctl status` no longer reports stale failures after uninstall.
+  - 🧾 **NEW: External configuration file** – `/etc/zypper-auto.conf` now holds documented settings for post-update helpers (Flatpak/Snap/Soar/Brew), log retention, notifier cache/snooze behaviour, and timer intervals, so users can tweak behaviour without editing the script.
+  - 🕒 **NEW: Config-driven timer intervals** – `DL_TIMER_INTERVAL_MINUTES` and `NT_TIMER_INTERVAL_MINUTES` (allowed: `1,5,10,15,30,60`) control how often the downloader and notifier run; the installer converts these into appropriate `OnCalendar` expressions.
+  - 🚨 **NEW: Config validation & reset helper** – invalid values in `/etc/zypper-auto.conf` automatically fall back to safe defaults, are logged, surfaced in `last-status.txt`, and trigger a small desktop notification suggesting `zypper-auto-helper --reset-config`. A new `--reset-config` CLI mode resets the config to defaults with a timestamped backup.
 
 - **v57** (2025-12-28): **Soar Stable Updater, Homebrew Integration & Notification UX**
   - 🧭 **NEW: Smarter Soar stable updater** – the helper and wrapper now compare `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-run the official Soar installer when a newer stable version exists, then run `soar sync` and `soar update`.

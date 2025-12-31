@@ -21,6 +21,10 @@ MAX_LOG_SIZE_MB=50  # Maximum size for a single log file in MB (overridable)
 # once at the end of installation.
 CONFIG_WARNINGS=()
 
+# Timer intervals (in minutes) for downloader and notifier (1,5,10,15,30,60)
+DL_TIMER_INTERVAL_MINUTES=1
+NT_TIMER_INTERVAL_MINUTES=1
+
 # Global config file (optional but recommended for advanced users)
 CONFIG_FILE="/etc/zypper-auto.conf"
 
@@ -119,29 +123,104 @@ load_config() {
         log_info "No configuration found at ${CONFIG_FILE}; generating default config"
         cat > "${CONFIG_FILE}" << 'EOF'
 # zypper-auto-helper configuration
-# Boolean flags: true or false
+#
+# All values in this file are read by the installer at runtime. You can
+# safely edit them and re-run:
+#   sudo ./zypper-auto.sh install
+# to apply changes. Invalid values fall back to safe defaults and are
+# reported in the install log and last-status.txt.
+#
+# Boolean flags must be "true" or "false" (case-insensitive).
 
-# Whether to run Flatpak updates after zypper dup
+# ---------------------------------------------------------------------
+# Post-update helpers (run AFTER "pkexec zypper dup")
+# ---------------------------------------------------------------------
+
+# ENABLE_FLATPAK_UPDATES
+# If true, run "pkexec flatpak update -y" after a successful zypper dup
+# so Flatpak apps/runtimes are upgraded together with system packages.
 ENABLE_FLATPAK_UPDATES=true
 
-# Whether to run Snap refresh after zypper dup
+# ENABLE_SNAP_UPDATES
+# If true, run "pkexec snap refresh" after zypper dup so Snap packages
+# are refreshed along with the system. Requires snapd to be installed.
 ENABLE_SNAP_UPDATES=true
 
-# Whether to run Soar stable update & sync after zypper dup
+# ENABLE_SOAR_UPDATES
+# If true and "soar" is installed, check GitHub for the latest *stable*
+# Soar release, update if a newer version exists, then run "soar sync"
+# and "soar update" to refresh Soar-managed applications.
 ENABLE_SOAR_UPDATES=true
 
-# Whether to run Homebrew (brew) update/upgrade after zypper dup
+# ENABLE_BREW_UPDATES
+# If true and Homebrew is installed, run "brew update" followed by
+# "brew outdated --quiet" and "brew upgrade" when there are outdated
+# formulae. When false, Homebrew is left entirely to the user.
 ENABLE_BREW_UPDATES=true
 
+# ---------------------------------------------------------------------
+# Timer intervals for downloader / notifier
+# ---------------------------------------------------------------------
+
+# DL_TIMER_INTERVAL_MINUTES
+# How often (in minutes) the *root* downloader (zypper-autodownload.timer)
+# should run. Allowed values: 1,5,10,15,30,60.
+#   1  = every minute (minutely)
+#   5  = every 5 minutes
+#   10 = every 10 minutes
+#   15 = every 15 minutes
+#   30 = every 30 minutes
+#   60 = every hour (hourly)
+DL_TIMER_INTERVAL_MINUTES=1
+
+# NT_TIMER_INTERVAL_MINUTES
+# How often (in minutes) the *user* notifier (zypper-notify-user.timer)
+# should run to check for updates and send notifications.
+# Uses the same allowed values as above.
+NT_TIMER_INTERVAL_MINUTES=1
+
+# ---------------------------------------------------------------------
 # Installer log retention
+# ---------------------------------------------------------------------
+
+# MAX_LOG_FILES
+# Maximum number of install-*.log files to keep under /var/log/zypper-auto.
+# Older logs beyond this count are deleted automatically on each install.
 MAX_LOG_FILES=10
+
+# MAX_LOG_SIZE_MB
+# Maximum size (in megabytes) for individual service logs under
+# /var/log/zypper-auto/service-logs. Very large logs are rotated to
+# *.old when they exceed this size.
 MAX_LOG_SIZE_MB=50
 
-# Notifier cache and snooze defaults
+# ---------------------------------------------------------------------
+# Notifier cache and snooze behaviour
+# ---------------------------------------------------------------------
+
+# CACHE_EXPIRY_MINUTES
+# The notifier caches the result of "zypper dup --dry-run" to avoid
+# hitting zypper too often. This value controls how long (in minutes)
+# a cached result is considered valid before forcing a fresh check.
+# Higher values = fewer zypper runs but potentially more stale info.
 CACHE_EXPIRY_MINUTES=10
+
+# SNOOZE_SHORT_HOURS / SNOOZE_MEDIUM_HOURS / SNOOZE_LONG_HOURS
+# Durations (in hours) used by the Snooze buttons in the desktop
+# notification. The labels remain "1h", "4h" and "1d", but you can
+# change how long each actually snoozes notifications.
 SNOOZE_SHORT_HOURS=1
 SNOOZE_MEDIUM_HOURS=4
 SNOOZE_LONG_HOURS=24
+
+# NOTE: How often updates are checked is controlled by two systemd timers,
+# not by this file:
+#   - Root downloader:   zypper-autodownload.timer  (default: minutely)
+#   - User notifier:     zypper-notify-user.timer   (default: minutely)
+# To change their frequency, edit the timers instead. For example:
+#   sudo systemctl edit --full zypper-autodownload.timer
+#   systemctl --user edit --full zypper-notify-user.timer
+# and adjust the OnCalendar= value (e.g. "OnCalendar=*:0/10" for every 10 min).
 EOF
     fi
 
@@ -165,6 +244,32 @@ EOF
     validate_int SNOOZE_SHORT_HOURS 1
     validate_int SNOOZE_MEDIUM_HOURS 4
     validate_int SNOOZE_LONG_HOURS 24
+
+    # Validate timer intervals: allow only 1,5,10,15,30,60 minutes to
+    # keep systemd OnCalendar expressions simple and predictable.
+    validate_interval() {
+        local name="$1" default="$2" value
+        eval "value=\"\${$name:-}\""
+        if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+            local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            eval "$name=$default"
+            return
+        fi
+        case "$value" in
+            1|5|10|15|30|60) ;;
+            *)
+                local msg="Unsupported $name='$value' in ${CONFIG_FILE} (allowed: 1,5,10,15,30,60); using default $default"
+                log_info "$msg"
+                CONFIG_WARNINGS+=("$msg")
+                eval "$name=$default"
+                ;;
+        esac
+    }
+
+    validate_interval DL_TIMER_INTERVAL_MINUTES 1
+    validate_interval NT_TIMER_INTERVAL_MINUTES 1
 }
 
 # Status update function
@@ -564,6 +669,50 @@ echo "" | tee -a "${LOG_FILE}"
     return $VERIFICATION_FAILED
 }
 
+# --- Helper: Config reset mode (CLI) ---
+run_reset_config_only() {
+    log_info ">>> Resetting zypper-auto-helper configuration to defaults..."
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  zypper-auto-helper Config Reset" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "This will replace ${CONFIG_FILE} with a fresh default configuration" | tee -a "${LOG_FILE}"
+    echo "while keeping a timestamped backup copy alongside it." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    read -p "Are you sure you want to reset ${CONFIG_FILE} to defaults? [y/N]: " -r CONFIRM
+    echo
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        log_info "Config reset aborted by user. No changes made."
+        update_status "ABORTED: Config reset cancelled by user"
+        return 0
+    fi
+
+    # Backup existing config if present
+    if [ -f "${CONFIG_FILE}" ]; then
+        TS="$(date +%Y%m%d-%H%M%S)"
+        BACKUP="${CONFIG_FILE}.bak-${TS}"
+        if cp -f "${CONFIG_FILE}" "${BACKUP}" >> "${LOG_FILE}" 2>&1; then
+            log_info "Backed up existing config to ${BACKUP}"
+        else
+            log_error "Failed to back up existing config to ${BACKUP} (continuing)"
+        fi
+    fi
+
+    # Rewrite a fresh default config by removing it and letting load_config
+    # regenerate the template.
+    rm -f "${CONFIG_FILE}" >> "${LOG_FILE}" 2>&1 || true
+    load_config
+
+    log_success "Configuration reset to defaults in ${CONFIG_FILE}"
+    update_status "SUCCESS: zypper-auto-helper configuration reset to defaults"
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "You can now re-run installation to apply the new settings:" | tee -a "${LOG_FILE}"
+    echo "  sudo ./zypper-auto.sh install" | tee -a "${LOG_FILE}"
+}
+
 # --- Helper: Soar-only installation mode (CLI) ---
 run_soar_install_only() {
     log_info ">>> Soar installation helper mode..."
@@ -882,6 +1031,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
     echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew            Install/upgrade Homebrew (brew) for the user"
     echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts"
+    echo "  --reset-config    Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
@@ -918,6 +1068,10 @@ if [[ "${1:-}" == "--soar" ]]; then
 elif [[ "${1:-}" == "--brew" ]]; then
     log_info "Homebrew helper-only mode requested"
     run_brew_install_only
+    exit $?
+elif [[ "${1:-}" == "--reset-config" ]]; then
+    log_info "Config reset mode requested"
+    run_reset_config_only
     exit $?
 elif [[ "${1:-}" == "--uninstall-zypper-helper" ]]; then
     shift
@@ -1116,6 +1270,17 @@ log_info ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
 update_status "Creating system downloader service..."
 log_debug "Writing service file: ${DL_SERVICE_FILE}"
 
+# Derive systemd OnCalendar/OnBootSec values from the configured
+# DL_TIMER_INTERVAL_MINUTES. We keep this constrained to a small
+# set of safe values (1,5,10,15,30,60) via load_config.
+DL_ONBOOTSEC="${DL_TIMER_INTERVAL_MINUTES}min"
+DL_ONCALENDAR="minutely"
+if [ "$DL_TIMER_INTERVAL_MINUTES" -eq 60 ]; then
+    DL_ONCALENDAR="hourly"
+elif [ "$DL_TIMER_INTERVAL_MINUTES" -ne 1 ]; then
+    DL_ONCALENDAR="*:0/${DL_TIMER_INTERVAL_MINUTES}"
+fi
+
 # Create service log directory
 mkdir -p "${LOG_DIR}/service-logs"
 chmod 755 "${LOG_DIR}/service-logs"
@@ -1289,11 +1454,11 @@ log_info ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 log_debug "Writing timer file: ${DL_TIMER_FILE}"
 cat << EOF > ${DL_TIMER_FILE}
 [Unit]
-Description=Run ${DL_SERVICE_NAME} every minute to download updates
+Description=Run ${DL_SERVICE_NAME} periodically to download updates
 
 [Timer]
-OnBootSec=2min
-OnCalendar=minutely
+OnBootSec=${DL_ONBOOTSEC}
+OnCalendar=${DL_ONCALENDAR}
 Persistent=true
 
 [Install]
@@ -3286,6 +3451,15 @@ if [ "${#CONFIG_WARNINGS[@]}" -gt 0 ]; then
     done
     echo "" | tee -a "${LOG_FILE}"
     update_status "WARNING: One or more settings in ${CONFIG_FILE} were invalid and reset to defaults"
+
+    # Try to send a desktop notification to the target user so they
+    # notice the config issue and can fix or reset it.
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+            notify-send "Zypper Auto-Helper config warnings" \
+            "Some settings in ${CONFIG_FILE} were invalid and reset to safe defaults.\n\nCheck the install log or run: zypper-auto-helper --reset-config" \
+            >/dev/null 2>&1 || true
+    fi
 fi
 
 # --- 11. Create/Update Install Script (user) ---
