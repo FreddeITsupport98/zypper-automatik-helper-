@@ -213,6 +213,20 @@ CACHE_EXPIRY_MINUTES=10
 SNOOZE_SHORT_HOURS=1
 SNOOZE_MEDIUM_HOURS=4
 SNOOZE_LONG_HOURS=24
+
+# DUP_EXTRA_FLAGS
+# Extra arguments appended to every "zypper dup" invocation run by this
+# helper, both for the background downloader ("dup --download-only") and
+# the notifier ("dup --dry-run"). This is useful for flags like
+# "--allow-vendor-change" or "--from <repo>".
+#
+# IMPORTANT:
+#   - Do NOT include "--non-interactive", "--download-only" or "--dry-run"
+#     here; those are added automatically by the helper where needed.
+#   - If you set multiple flags, write them exactly as you would on the
+#     command line, for example:
+#         DUP_EXTRA_FLAGS="--allow-vendor-change --no-allow-vendor-change"
+DUP_EXTRA_FLAGS=""
 EOF
         # Ensure config file has safe permissions (root-writable only)
         chmod 644 "${CONFIG_FILE}" || true
@@ -272,6 +286,57 @@ EOF
 
     validate_interval DL_TIMER_INTERVAL_MINUTES 1
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
+
+    # Detect older/stale config files that are missing newer keys.
+    # We do NOT overwrite the config automatically; instead we collect
+    # warnings and suggest using the reset helper so the user can
+    # consciously regenerate `/etc/zypper-auto.conf`.
+    local missing_keys=()
+
+    # Helper: record a key as missing if it is not defined at all.
+    _mark_missing_key() {
+        local key="$1"
+        if [ -z "${!key+x}" ]; then
+            missing_keys+=("$key")
+        fi
+    }
+
+    # Keys introduced in newer versions that we depend on for full
+    # functionality. Add new ones here as the project evolves.
+    _mark_missing_key "DUP_EXTRA_FLAGS"
+
+    if [ "${#missing_keys[@]}" -gt 0 ]; then
+        local keys_joined
+        keys_joined="${missing_keys[*]}"
+        local msg
+        msg="${CONFIG_FILE} appears to be from an older version (missing keys: ${keys_joined}). Run 'sudo zypper-auto-helper --reset-config' to regenerate it with the latest options."
+        log_info "$msg"
+        CONFIG_WARNINGS+=("$msg")
+
+        # Log a short, per-key feature description so the user knows
+        # what functionality is affected.
+        log_info "Missing configuration keys and related features:"
+        for key in "${missing_keys[@]}"; do
+            case "$key" in
+                DUP_EXTRA_FLAGS)
+                    log_info "  - DUP_EXTRA_FLAGS: controls extra flags added to every 'zypper dup' run (background downloader and notifier), e.g. --allow-vendor-change."
+                    ;;
+                *)
+                    log_info "  - ${key}: (no description available)"
+                    ;;
+            esac
+        done
+
+        # Provide safe defaults for keys we rely on at runtime so the
+        # installer and services do not break even with a stale config.
+        for key in "${missing_keys[@]}"; do
+            case "$key" in
+                DUP_EXTRA_FLAGS)
+                    DUP_EXTRA_FLAGS=""
+                    ;;
+            esac
+        done
+    fi
 }
 
 # Status update function
@@ -1300,7 +1365,17 @@ STATUS_FILE="$LOG_DIR/download-status.txt"
 START_TIME_FILE="$LOG_DIR/download-start-time.txt"
 CACHE_DIR="/var/cache/zypp/packages"
 
-# Helper: handle "System management is locked" gracefully so the
+# Optional: read extra dup flags from /etc/zypper-auto.conf so users can
+# tweak solver behaviour (e.g. --allow-vendor-change) without editing
+# this script directly.
+CONFIG_FILE="/etc/zypper-auto.conf"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/etc/zypper-auto.conf
+    . "$CONFIG_FILE"
+fi
+DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
+
+# Write status: refreshing
 # downloader doesn't spam errors when the user is running zypper/Yast.
 handle_lock_or_fail() {
     local err_file="$1"
@@ -1395,7 +1470,7 @@ TRACKER_PID=$!
 # lock error to avoid noisy logs when another zypper instance is running.
 set +e
 DL_ERR=$(mktemp)
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only >/dev/null 2>"$DL_ERR"
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only $DUP_EXTRA_FLAGS >/dev/null 2>&1
 ZYP_RET=$?
 if [ $ZYP_RET -ne 0 ]; then
     handle_lock_or_fail "$DL_ERR"
@@ -1952,6 +2027,7 @@ import subprocess
 import os
 import re
 import time
+import shlex
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1969,7 +2045,10 @@ MAX_HISTORY_SIZE = 1 * 1024 * 1024  # 1MB
 CACHE_DIR = Path.home() / ".cache" / "zypper-notify"
 CACHE_FILE = CACHE_DIR / "last_check.txt"
 SNOOZE_FILE = CACHE_DIR / "snooze_until.txt"
+CACHE_EXPIRY_MINUTES = 10
 
+# Global config path for zypper-auto-helper
+CONFIG_FILE = "/etc/zypper-auto.conf"
 # Cache and snooze configuration (overridable via environment, see systemd unit)
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -2036,6 +2115,46 @@ def update_status(status: str) -> None:
             f.write(f"[{timestamp}] {status}\n")
     except Exception as e:
         log_error(f"Failed to update status file: {e}")
+
+# --- Helper: read extra dup flags from /etc/zypper-auto.conf ---
+
+def _read_dup_extra_flags() -> list[str]:
+    """Read DUP_EXTRA_FLAGS from /etc/zypper-auto.conf, if set.
+
+    The value is split using shell-like rules so users can write e.g.:
+        DUP_EXTRA_FLAGS="--allow-vendor-change --from my-repo"
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if not stripped.startswith("DUP_EXTRA_FLAGS"):
+                    continue
+                # Expect shell-style "NAME=VALUE"
+                parts = stripped.split("=", 1)
+                if len(parts) != 2:
+                    continue
+                raw = parts[1].strip()
+                # Remove optional surrounding quotes
+                if (raw.startswith("\"") and raw.endswith("\"")) or (
+                    raw.startswith("'") and raw.endswith("'")
+                ):
+                    raw = raw[1:-1]
+                try:
+                    return shlex.split(raw)
+                except Exception as e:
+                    log_debug(f"Failed to parse DUP_EXTRA_FLAGS='{raw}': {e}")
+                    return []
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        log_debug(f"Failed to read {CONFIG_FILE} for DUP_EXTRA_FLAGS: {e}")
+        return []
+
+
+DUP_EXTRA_FLAGS = _read_dup_extra_flags()
 
 # --- Caching Functions ---
 def read_cache():
@@ -2744,9 +2863,10 @@ def get_updates():
 
         update_status("Running zypper dup --dry-run...")
         log_debug("Executing: pkexec zypper dup --dry-run")
-        
+
+        dup_cmd = ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run", *DUP_EXTRA_FLAGS]
         result = subprocess.run(
-            ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
+            dup_cmd,
             check=True,
             capture_output=True,
             text=True,
@@ -3226,8 +3346,16 @@ def main():
                             changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
                             try:
                                 log_debug("Fetching update details for changelog preview...")
+                                preview_cmd = [
+                                    "pkexec",
+                                    "zypper",
+                                    "--non-interactive",
+                                    "dup",
+                                    "--dry-run",
+                                    *DUP_EXTRA_FLAGS,
+                                ]
                                 result = subprocess.run(
-                                    ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run"],
+                                    preview_cmd,
                                     capture_output=True,
                                     text=True,
                                     timeout=30
@@ -3272,7 +3400,10 @@ def main():
 
                 elif status.startswith("error:solver:"):
                     # Background downloader hit a solver/non-interactive error.
-                    # Inform the user that manual intervention is required.
+                    # Show a persistent notification that both:
+                    #   - explains the conflict, and
+                    #   - summarises how many updates are available (if possible),
+                    # with an "Install Now" action that runs the helper.
                     try:
                         parts = status.split(":")
                         exit_code = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -3281,31 +3412,89 @@ def main():
 
                     if exit_code is not None:
                         log_info(f"Background downloader encountered a zypper solver/error exit code {exit_code}")
-                        body = (
-                            f"Background download of updates hit a zypper solver error (exit code {exit_code}).\n\n"
-                            "Some packages may already be cached, but zypper needs your decision to continue.\n\n"
-                            "Open a terminal and run:\n"
-                            "  sudo zypper dup\n"
-                            "to resolve the conflicts. After that, the automatic downloader will resume as normal."
-                        )
                     else:
                         log_info("Background downloader reported a solver error (unknown exit code)")
-                        body = (
-                            "Background download of updates hit a zypper solver error.\n\n"
-                            "Some packages may already be cached, but zypper needs your decision to continue.\n\n"
-                            "Open a terminal and run:\n"
-                            "  sudo zypper dup\n"
-                            "to resolve the conflicts. After that, the automatic downloader will resume as normal."
+
+                    # Try to run a dry-run to get a summary of pending updates, even if
+                    # zypper still exits non-zero due to conflicts.
+                    dry_output = ""
+                    try:
+                        log_debug("Running zypper dup --dry-run to summarise solver-conflict state...")
+                        conflict_cmd = [
+                            "pkexec",
+                            "zypper",
+                            "--non-interactive",
+                            "dup",
+                            "--dry-run",
+                            *DUP_EXTRA_FLAGS,
+                        ]
+                        result = subprocess.run(
+                            conflict_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
                         )
+                        dry_output = result.stdout or ""
+                    except Exception as e2:
+                        log_debug(f"Failed to run zypper dry-run for solver summary: {e2}")
+                        dry_output = ""
+
+                    title = "Updates require your decision"
+                    message = ""
+
+                    # If we got useful output, reuse the normal parser to describe
+                    # how many updates are pending and a short preview.
+                    parsed_title = None
+                    parsed_message = None
+                    pkg_count = 0
+                    if dry_output:
+                        try:
+                            parsed_title, parsed_message, snapshot, pkg_count = parse_output(dry_output, include_preview=True)
+                        except Exception as e3:
+                            log_debug(f"parse_output failed for solver summary: {e3}")
+                            parsed_title, parsed_message, pkg_count = None, None, 0
+
+                    if parsed_title:
+                        title = f"{parsed_title} (manual decision needed)"
+                        message = parsed_message + "\\n\\nZypper needs your decision to resolve conflicts before these updates can be installed."
+                    else:
+                        # Fallback generic explanation
+                        if exit_code is not None:
+                            message = (
+                                f"Background download of updates hit a zypper solver error (exit code {exit_code}).\\n\\n"
+                                "Some packages may already be cached, but zypper needs your decision to continue."
+                            )
+                        else:
+                            message = (
+                                "Background download of updates hit a zypper solver error.\\n\\n"
+                                "Some packages may already be cached, but zypper needs your decision to continue."
+                            )
+
+                    # Always give clear instructions on what to do next.
+                    message += (
+                        "\\n\\nOpen a terminal and run:\n"
+                        "  sudo zypper dup\n"
+                        "or click 'Install Now' to open the helper, then follow zypper's prompts to resolve the conflicts."
+                    )
+
+                    action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
                     n = Notify.Notification.new(
-                        "Background downloader needs your attention",
-                        body,
-                        "dialog-warning",
+                        title,
+                        message,
+                        "system-software-update",
                     )
-                    n.set_timeout(30000)
-                    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-error"))
-                    n.show()
+                    # Persistent notification, high urgency.
+                    n.set_timeout(0)
+                    n.set_urgency(Notify.Urgency.CRITICAL)
+                    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-updates-conflict"))
+
+                    # Add the same actions as the normal "updates ready" notification.
+                    n.add_action("install", "Install Now", on_action, action_script)
+                    n.add_action("view-changes", "View Changes", on_action, None)
+                    n.add_action("snooze-1h", "1h", on_action, None)
+                    n.add_action("snooze-4h", "4h", on_action, None)
+                    n.add_action("snooze-1d", "1d", on_action, None)
 
                     # Reset the status to idle so we don't spam the same notification forever.
                     try:
@@ -3313,6 +3502,15 @@ def main():
                             f.write("idle")
                     except Exception as e2:
                         log_debug(f"Failed to reset download status after solver error: {e2}")
+
+                    # Run a short main loop so actions work, then exit this cycle.
+                    loop = GLib.MainLoop()
+                    n.connect("closed", lambda *args: loop.quit())
+                    n.show()
+                    try:
+                        loop.run()
+                    except KeyboardInterrupt:
+                        log_info("Solver-conflict notification main loop interrupted")
 
                     # Do not run another zypper dry-run in this cycle; wait for user action.
                     return

@@ -39,7 +39,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Synchronous notification IDs prevent duplicate popups
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
-* **Robust Zypper Error Handling (v54–v57):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications. Zypper locks are detected via both the canonical error message *and* zypp lockfiles, so the downloader/notifier will gracefully back off (and retry later) when a manual `zypper` or YaST is running.
+* **Robust Zypper Error Handling (v54–v57):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications. Zypper locks are detected via both the canonical error message *and* zypp lockfiles, so the downloader/notifier will gracefully back off (and retry later) when a manual `zypper` or YaST is running. When the background downloader hits a solver conflict it preserves any downloaded RPMs in the cache and triggers a persistent "updates require your decision" notification with an **Install Now** action, showing how many updates are pending and a short package preview once a transaction can be summarised.
 * **Soar / Flatpak / Snap / Homebrew Integration (v55–v56):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), and a Homebrew `brew update` followed by conditional `brew upgrade`, so system packages, runtimes, Soar-managed apps, and Homebrew formulae stay aligned after system updates.
 * **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
 * **Improved Snapper Detection (v55–v56):** Recognises Tumbleweed's default root snapper configuration, treats `snapper list` permission errors ("No permissions.") as "snapshots exist but are root-only", and surfaces the current Snapper state (configured/missing/snapshots available) directly in the update notification.
@@ -135,7 +135,10 @@ This Python script is the core of the system, run by the `zypper-notify-user.ser
 6.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
 7.  **Post-Update Check:** After update completes, runs `zypper ps -s` to show which services need restart and provides reboot guidance if needed.
 8.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `upower` / `nmcli` / `inxi` decisions) are printed to the journal.
-9.  **Manual-Intervention Helper (v54):** If `pkexec zypper dup --dry-run` fails due to a solver/interaction problem (such as a vendor conflict), the notifier shows a dedicated "Updates require manual decision" notification that includes the first `Problem:` line and an **"Open Helper"** button which launches `~/.local/bin/zypper-run-install` so you can resolve it in a terminal.
+9.  **Manual-Intervention Helper (v54+):** When `pkexec zypper dup --dry-run` or the background downloader encounter a solver/interaction problem (such as a vendor conflict), the notifier shows a dedicated, persistent "Updates require your decision" notification. It:
+    - Includes a concise summary of the problem (first `Problem:` line when available).
+    - Attempts to parse the dry-run output to show how many updates are pending and a short package preview, so you still see *what* is waiting to be installed even though zypper needs your choice.
+    - Provides an **"Install Now"** / **"Open Helper"** action that launches `~/.local/bin/zypper-run-install` so you can resolve the conflict interactively in a terminal, plus snooze and "View Changes" actions.
 
 -----
 
@@ -204,9 +207,48 @@ Key options include:
     durations used by the `1h` / `4h` / `1d` snooze buttons in the desktop
     notification.
 
+- **Zypper solver flags**
+  - `DUP_EXTRA_FLAGS` – extra arguments appended to every `zypper dup` invocation
+    run by the helper, for **both** the background downloader (`dup --download-only`)
+    and the notifier (`dup --dry-run`). This is the right place to add flags such
+    as `--allow-vendor-change` or `--from <repo>` without editing the scripts.
+  - Do **not** include `--non-interactive`, `--download-only`, or `--dry-run` here;
+    those are added automatically by the helper where appropriate.
+
 If any values are invalid, the installer falls back to safe defaults, logs the
 warnings, updates `last-status.txt`, and attempts to show a small desktop
 notification suggesting `zypper-auto-helper --reset-config`.
+
+### Config Health & Stale Configs
+
+Over time, new versions add new keys to `/etc/zypper-auto.conf`. To keep
+behaviour predictable, the installer performs a basic **config health check**
+whenever it runs:
+
+- If the config file is **missing** → a fresh, fully documented template is
+  generated.
+- If the config file **exists but is missing newer keys** (for example
+  `DUP_EXTRA_FLAGS`) → the installer:
+  - Detects which keys are missing.
+  - Logs a warning listing each missing key and a short description of the
+    affected feature.
+  - Adds the warning to `CONFIG_WARNINGS` so it appears in
+    `/var/log/zypper-auto/last-status.txt`.
+  - Tries to send a desktop notification suggesting:
+    `sudo zypper-auto-helper --reset-config`.
+  - Applies safe defaults for those keys at runtime so the installer and
+    services continue to work.
+
+If you see a warning that `/etc/zypper-auto.conf` is from an older version and
+lists missing keys, the **recommended fix** is:
+
+```bash
+sudo zypper-auto-helper --reset-config
+sudo ./zypper-auto.sh install
+```
+
+This backs up your existing config and regenerates it with all current options
+and comments.
 
 -----
 
@@ -489,8 +531,9 @@ systemctl status zypper-autodownload.service
   - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `sudo zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
   - ⚙️ **NEW: Advanced uninstall flags** – `--yes` / `-y` / `--non-interactive` skip the confirmation prompt for automated or non-interactive environments; `--dry-run` shows exactly what **would** be removed without making any changes; `--keep-logs` preserves `/var/log/zypper-auto` install/service logs for debugging while still clearing per-user notifier caches.
   - 🧹 **IMPROVED: Clean systemd state on uninstall** – system and user units are stopped, disabled, removed from disk, and their "failed" states cleared via `systemctl reset-failed`/`systemctl --user reset-failed` so `systemctl status` no longer reports stale failures after uninstall.
-  - 🧾 **NEW: External configuration file** – `/etc/zypper-auto.conf` now holds documented settings for post-update helpers (Flatpak/Snap/Soar/Brew), log retention, notifier cache/snooze behaviour, and timer intervals, so users can tweak behaviour without editing the script.
+  - 🧾 **NEW: External configuration file** – `/etc/zypper-auto.conf` now holds documented settings for post-update helpers (Flatpak/Snap/Soar/Brew), log retention, notifier cache/snooze behaviour, timer intervals, and per-installation zypper behaviour, so users can tweak behaviour without editing the script.
   - 🕒 **NEW: Config-driven timer intervals** – `DL_TIMER_INTERVAL_MINUTES` and `NT_TIMER_INTERVAL_MINUTES` (allowed: `1,5,10,15,30,60`) control how often the downloader and notifier run; the installer converts these into appropriate `OnCalendar` expressions.
+  - 🧩 **NEW: `DUP_EXTRA_FLAGS` support** – a new `DUP_EXTRA_FLAGS` key in `/etc/zypper-auto.conf` lets you append extra solver flags (such as `--allow-vendor-change` or `--from <repo>`) to every `zypper dup` run by the helper (background downloader and notifier) without modifying the scripts.
   - 🚨 **NEW: Config validation & reset helper** – invalid values in `/etc/zypper-auto.conf` automatically fall back to safe defaults, are logged, surfaced in `last-status.txt`, and trigger a small desktop notification suggesting `zypper-auto-helper --reset-config`. A new `--reset-config` CLI mode resets the config to defaults with a timestamped backup.
 
 - **v57** (2025-12-28): **Soar Stable Updater, Homebrew Integration & Notification UX**
