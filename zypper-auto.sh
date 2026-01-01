@@ -1375,6 +1375,24 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
 
+# Helper: trigger the user notifier immediately after downloads complete
+trigger_notifier() {
+    # Best-effort detection of the primary non-root user with a systemd user session.
+    local user uid
+    user=$(loginctl list-users --no-legend 2>/dev/null | awk '$1 != 0 {print $2; exit}') || user=""
+    if [ -z "$user" ]; then
+        return 0
+    fi
+    uid=$(id -u "$user" 2>/dev/null || echo "")
+    if [ -z "$uid" ]; then
+        return 0
+    fi
+    sudo -u "$user" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+        systemctl --user start zypper-notify-user.service \
+        >/dev/null 2>&1 || true
+}
+
 # Write status: refreshing
 # downloader doesn't spam errors when the user is running zypper/Yast.
 handle_lock_or_fail() {
@@ -1427,11 +1445,12 @@ DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT"
 # line similar to:
 #   0 B  |  -   88.3 MiB  already in cache
 if grep -q "already in cache" "$DRY_OUTPUT" && \
-   grep -qE "^[[:space:]]*0 B[[:space:]]*\|" "$DRY_OUTPUT"; then
+   grep -qE "^[[:space:]]*0 B[[:space:]]*\\|" "$DRY_OUTPUT"; then
     # All data is already in the local cache; mark as a completed
     # download with 0 newly-downloaded packages and skip the
     # --download-only pass entirely.
     echo "complete:0:0" > "$STATUS_FILE"
+    trigger_notifier
     rm -f "$DRY_OUTPUT"
     exit 0
 fi
@@ -1498,6 +1517,7 @@ DURATION=$((END_TIME - START_TIME))
 #  - Otherwise, leave the previous status (e.g. idle or complete:0:0)
 if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
     echo "complete:$DURATION:$ACTUAL_DOWNLOADED" > "$STATUS_FILE"
+    trigger_notifier
 elif [ $ZYP_RET -ne 0 ]; then
     echo "error:solver:$ZYP_RET" > "$STATUS_FILE"
 fi
@@ -1712,63 +1732,65 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     fi
 
     echo ""
-    echo "=========================================="
+    echo "==========================================" 
     echo "  Soar (stable) Update & Sync (optional)"
     echo "=========================================="
     echo ""
 
     if command -v soar >/dev/null 2>&1; then
-        # First, check if a newer *stable* Soar release exists on GitHub.
-        # We compare the local "soar --version" against
-        # https://api.github.com/repos/pkgforge/soar/releases/latest (stable only).
-        if command -v curl >/dev/null 2>&1; then
-            echo "Checking for newer stable Soar release from GitHub..."
+        # Run the Soar installer/updater in a subshell with set +e to ensure
+        # that any errors cannot kill the interactive zypper session.
+        (
+            set +e
 
-            LOCAL_VER_RAW=$(soar --version 2>/dev/null | head -n1)
-            LOCAL_VER=$(echo "$LOCAL_VER_RAW" | grep -oE 'v?[0-9]+(\.[0-9]+)*' | head -n1 || true)
-            LOCAL_BASE=${LOCAL_VER#v}
+            # First, check if a newer *stable* Soar release exists on GitHub.
+            # We compare the local "soar --version" against
+            # https://api.github.com/repos/pkgforge/soar/releases/latest (stable only).
+            if command -v curl >/dev/null 2>&1; then
+                echo "Checking for newer stable Soar release from GitHub..."
 
-            REMOTE_JSON=$(curl -fsSL "https://api.github.com/repos/pkgforge/soar/releases/latest" 2>/dev/null || true)
-            REMOTE_VER=$(printf '%s\n' "$REMOTE_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' || true)
-            REMOTE_BASE=${REMOTE_VER#v}
+                LOCAL_VER_RAW=$(soar --version 2>/dev/null | head -n1)
+                LOCAL_VER=$(echo "$LOCAL_VER_RAW" | grep -oE 'v?[0-9]+(\\.[0-9]+)*' | head -n1 || true)
+                LOCAL_BASE=${LOCAL_VER#v}
 
-            if [ -n "$LOCAL_BASE" ] && [ -n "$REMOTE_BASE" ]; then
-                LATEST=$(printf '%s\n%s\n' "$LOCAL_BASE" "$REMOTE_BASE" | sort -V | tail -n1)
-                if [ "$LATEST" = "$REMOTE_BASE" ] && [ "$LOCAL_BASE" != "$REMOTE_BASE" ]; then
-                    echo "New stable Soar available ($LOCAL_VER -> $REMOTE_VER), updating..."
-                    if curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh; then
-                        echo "✅ Soar updated to latest stable release."
+                REMOTE_JSON=$(curl -fsSL "https://api.github.com/repos/pkgforge/soar/releases/latest" 2>/dev/null || true)
+                REMOTE_VER=$(printf '%s\\n' "$REMOTE_JSON" | grep -m1 '\"tag_name\"' | sed -E 's/.*\"tag_name\" *: *\"([^\"]+)\".*/\\1/' || true)
+                REMOTE_BASE=${REMOTE_VER#v}
+
+                if [ -n "$LOCAL_BASE" ] && [ -n "$REMOTE_BASE" ]; then
+                    LATEST=$(printf '%s\\n%s\\n' "$LOCAL_BASE" "$REMOTE_BASE" | sort -V | tail -n1)
+                    if [ "$LATEST" = "$REMOTE_BASE" ] && [ "$LOCAL_BASE" != "$REMOTE_BASE" ]; then
+                        echo "New stable Soar available ($LOCAL_VER -> $REMOTE_VER), updating..."
+                        if ! curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh; then
+                            echo "⚠️  Soar update from GitHub failed (continuing)."
+                        fi
                     else
-                        echo "⚠️  Failed to update Soar from GitHub (continuing with existing version)."
+                        echo "Soar is already up to date (local: ${LOCAL_VER:-unknown}, latest stable: ${REMOTE_VER:-unknown})."
                     fi
                 else
-                    echo "Soar is already up to date (local: ${LOCAL_VER:-unknown}, latest stable: ${REMOTE_VER:-unknown})."
+                    echo "Could not determine Soar versions; running installer to ensure latest stable."
+                    if ! curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh; then
+                        echo "⚠️  Soar installer from GitHub failed (continuing)."
+                    fi
                 fi
             else
-                echo "Could not determine Soar versions; running installer to ensure latest stable."
-                if curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh; then
-                    echo "✅ Soar updated to latest stable release."
-                else
-                    echo "⚠️  Failed to update Soar from GitHub (continuing with existing version)."
-                fi
+                echo "⚠️  curl is not installed; skipping automatic Soar update from GitHub."
+                echo "    You can update Soar manually from: https://github.com/pkgforge/soar/releases"
             fi
-        else
-            echo "⚠️  curl is not installed; skipping automatic Soar update from GitHub."
-            echo "    You can update Soar manually from: https://github.com/pkgforge/soar/releases"
-        fi
 
-        # Then run the usual metadata sync.
-        if soar sync; then
-            echo "✅ Soar sync completed."
-            # Optionally refresh Soar-managed apps that support "soar update".
-            if soar update; then
-                echo "✅ Soar update completed."
+            # Then run the usual metadata sync.
+            if soar sync; then
+                echo "✅ Soar sync completed."
+                # Optionally refresh Soar-managed apps that support "soar update".
+                if soar update; then
+                    echo "✅ Soar update completed."
+                else
+                    echo "⚠️  Soar update failed (continuing)."
+                fi
             else
-                echo "⚠️  Soar update failed (continuing)."
+                echo "⚠️  Soar sync failed (continuing)."
             fi
-        else
-            echo "⚠️  Soar sync failed (continuing)."
-        fi
+        )
     else
         echo "ℹ️  Soar is not installed - skipping Soar update/sync."
         echo "    Install from: https://github.com/pkgforge/soar/releases"
