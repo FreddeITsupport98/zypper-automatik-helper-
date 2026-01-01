@@ -40,7 +40,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
 * **Robust Zypper Error Handling (v54–v57):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications. Zypper locks are detected via both the canonical error message *and* zypp lockfiles, so the downloader/notifier will gracefully back off (and retry later) when a manual `zypper` or YaST is running. When the background downloader hits a solver conflict it preserves any downloaded RPMs in the cache and triggers a persistent "updates require your decision" notification with an **Install Now** action, showing how many updates are pending and a short package preview once a transaction can be summarised.
-* **Soar / Flatpak / Snap / Homebrew Integration (v55–v56):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), and a Homebrew `brew update` followed by conditional `brew upgrade`, so system packages, runtimes, Soar-managed apps, and Homebrew formulae stay aligned after system updates.
+* **Soar / Flatpak / Snap / Homebrew Integration (v55–v58):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), and a Homebrew `brew update` followed by conditional `brew upgrade`, so system packages, runtimes, Soar-managed apps, and Homebrew formulae stay aligned after system updates. Optional Soar/Homebrew helper commands are provided via `zypper-auto-helper --soar` and `zypper-auto-helper --brew`.
 * **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
 * **Improved Snapper Detection (v55–v56):** Recognises Tumbleweed's default root snapper configuration, treats `snapper list` permission errors ("No permissions.") as "snapshots exist but are root-only", and surfaces the current Snapper state (configured/missing/snapshots available) directly in the update notification.
 * **More Robust Notifier Timer (v55–v56):** Uses calendar-based scheduling plus an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
@@ -73,6 +73,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
   * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
   * `--dry-run` – show exactly what would be removed without making any changes
   * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact while still clearing caches
+  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
 
 -----
 
@@ -175,9 +176,12 @@ zypper-auto-helper --diagnose      # Alias for --verify
 zypper-auto-helper --check         # Syntax check only
 zypper-auto-helper install         # Reinstall/upgrade
 zypper-auto-helper --reset-config  # Reset /etc/zypper-auto.conf to documented defaults (with backup)
+zypper-auto-helper --soar          # Install/upgrade the optional Soar CLI helper
+zypper-auto-helper --brew          # Install/upgrade Homebrew (brew) for the system/user
+zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs
 ```
 
-The command automatically includes `sudo` when needed, so you don't need to type it.
+You normally run `zypper-auto-helper` **without** `sudo`; it will prompt for elevation internally when needed.
 
 ### Configuration File: `/etc/zypper-auto.conf`
 

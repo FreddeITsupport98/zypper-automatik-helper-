@@ -840,7 +840,8 @@ run_uninstall_helper_only() {
     echo "This will remove timers, services, helper binaries, logs, and user" | tee -a "${LOG_FILE}"
     echo "scripts/aliases installed by zypper-auto-helper for user $SUDO_USER." | tee -a "${LOG_FILE}"
     echo "The installer script (zypper-auto.sh) and your Soar/Homebrew installs" | tee -a "${LOG_FILE}"
-    echo "will be left untouched." | tee -a "${LOG_FILE}"
+    echo "will be left untouched. It also does NOT remove snapd, Flatpak, Soar," | tee -a "${LOG_FILE}"
+    echo "Homebrew itself, or any zypper configuration such as /etc/zypp/zypper.conf." | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
     # Handle dry-run and non-interactive flags from the CLI dispatcher.
@@ -972,6 +973,7 @@ run_uninstall_helper_only() {
     echo "Uninstall summary:" | tee -a "${LOG_FILE}"
     echo "  - System services and timers removed: zypper-autodownload, zypper-cache-cleanup" | tee -a "${LOG_FILE}"
     echo "  - User notifier units and helper scripts removed for user $SUDO_USER" | tee -a "${LOG_FILE}"
+    echo "  - No changes made to snapd, Flatpak, Soar, Homebrew or /etc/zypp/zypper.conf" | tee -a "${LOG_FILE}"
     if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
         echo "  - Logs under $LOG_DIR left in place (--keep-logs)" | tee -a "${LOG_FILE}"
     else
