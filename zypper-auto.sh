@@ -1070,6 +1070,44 @@ run_brew_install_only() {
     if sudo -u "$SUDO_USER" bash -lc "$BREW_INSTALL_CMD"; then
         log_success "Homebrew installation finished for user $SUDO_USER"
         echo "" | tee -a "${LOG_FILE}"
+
+        # Best-effort: automatically add Homebrew to the user's shell PATH if
+        # they are using common shells and the recommended snippet is not
+        # already present. This avoids the common "brew not in PATH" warning.
+        BREW_SHELLENV_LINE='eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"'
+
+        # fish
+        FISH_CONFIG_DIR="$SUDO_USER_HOME/.config/fish"
+        FISH_CONFIG_FILE="$FISH_CONFIG_DIR/config.fish"
+        if [ -d "$FISH_CONFIG_DIR" ]; then
+            if ! sudo -u "$SUDO_USER" grep -F "$BREW_SHELLENV_LINE" "$FISH_CONFIG_FILE" >/dev/null 2>&1; then
+                mkdir -p "$FISH_CONFIG_DIR"
+                sudo -u "$SUDO_USER" bash -lc "echo >> '$FISH_CONFIG_FILE'"
+                sudo -u "$SUDO_USER" bash -lc "echo '$BREW_SHELLENV_LINE' >> '$FISH_CONFIG_FILE'"
+                echo "Added Homebrew PATH setup to $FISH_CONFIG_FILE" | tee -a "${LOG_FILE}"
+            fi
+        fi
+
+        # bash
+        BASH_RC="$SUDO_USER_HOME/.bashrc"
+        if [ -f "$BASH_RC" ]; then
+            if ! sudo -u "$SUDO_USER" grep -F "$BREW_SHELLENV_LINE" "$BASH_RC" >/dev/null 2>&1; then
+                sudo -u "$SUDO_USER" bash -lc "echo >> '$BASH_RC'"
+                sudo -u "$SUDO_USER" bash -lc "echo '$BREW_SHELLENV_LINE' >> '$BASH_RC'"
+                echo "Added Homebrew PATH setup to $BASH_RC" | tee -a "${LOG_FILE}"
+            fi
+        fi
+
+        # zsh
+        ZSH_RC="$SUDO_USER_HOME/.zshrc"
+        if [ -f "$ZSH_RC" ]; then
+            if ! sudo -u "$SUDO_USER" grep -F "$BREW_SHELLENV_LINE" "$ZSH_RC" >/dev/null 2>&1; then
+                sudo -u "$SUDO_USER" bash -lc "echo >> '$ZSH_RC'"
+                sudo -u "$SUDO_USER" bash -lc "echo '$BREW_SHELLENV_LINE' >> '$ZSH_RC'"
+                echo "Added Homebrew PATH setup to $ZSH_RC" | tee -a "${LOG_FILE}"
+            fi
+        fi
+
         echo "You may need to add brew to your PATH. For example:" | tee -a "${LOG_FILE}"
         echo '  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' | tee -a "${LOG_FILE}"
         echo 'or see:  https://docs.brew.sh/Homebrew-on-Linux' | tee -a "${LOG_FILE}"
@@ -1081,8 +1119,9 @@ run_brew_install_only() {
     fi
 }
 
-# Show help if requested
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+# Show help if requested, or when invoked as the installed CLI with no arguments
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
+   || ( $# -eq 0 && "$(basename "$0")" == "zypper-auto-helper" ) ]]; then
     echo "Zypper Auto-Helper - Installation and Maintenance Tool"
     echo ""
     echo "Usage: sudo zypper-auto-helper [COMMAND]"
@@ -1754,7 +1793,8 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
                 LOCAL_BASE=${LOCAL_VER#v}
 
                 REMOTE_JSON=$(curl -fsSL "https://api.github.com/repos/pkgforge/soar/releases/latest" 2>/dev/null || true)
-                REMOTE_VER=$(printf '%s\\n' "$REMOTE_JSON" | grep -m1 '\"tag_name\"' | sed -E 's/.*\"tag_name\" *: *\"([^\"]+)\".*/\\1/' || true)
+                # Extract the tag_name value in a simple, portable way to avoid sed backref issues
+                REMOTE_VER=$(printf '%s\\n' "$REMOTE_JSON" | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
                 REMOTE_BASE=${REMOTE_VER#v}
 
                 if [ -n "$LOCAL_BASE" ] && [ -n "$REMOTE_BASE" ]; then
@@ -1794,6 +1834,9 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     else
         echo "ℹ️  Soar is not installed - skipping Soar update/sync."
         echo "    Install from: https://github.com/pkgforge/soar/releases"
+        if [ -x /usr/local/bin/zypper-auto-helper ]; then
+            echo "    Or via helper: zypper-auto-helper --soar"
+        fi
     fi
 
     echo ""
@@ -3906,6 +3949,9 @@ RUN_UPDATE() {
         else
             echo "⚠️  curl is not installed; skipping automatic Soar update from GitHub."
             echo "    You can update Soar manually from: https://github.com/pkgforge/soar/releases"
+            if [ -x /usr/local/bin/zypper-auto-helper ]; then
+                echo "    Or via helper: zypper-auto-helper --soar"
+            fi
         fi
 
         # Then run the usual metadata sync.
@@ -3944,10 +3990,16 @@ RUN_UPDATE() {
             else
                 echo "Skipping Soar installation. You can install it later from:"
                 echo "    https://github.com/pkgforge/soar/releases"
+                if [ -x /usr/local/bin/zypper-auto-helper ]; then
+                    echo "    Or via helper: zypper-auto-helper --soar"
+                fi
             fi
         else
             echo "⚠️  curl is not installed; cannot automatically install Soar."
             echo "    Please install curl or install Soar manually from: https://github.com/pkgforge/soar/releases"
+            if [ -x /usr/local/bin/zypper-auto-helper ]; then
+                echo "    Or via helper: zypper-auto-helper --soar"
+            fi
         fi
     fi
 
@@ -3995,7 +4047,9 @@ RUN_UPDATE() {
         fi
     else
         echo "ℹ️  Homebrew (brew) is not installed - skipping brew update/upgrade."
-        echo "    To install via helper: sudo zypper-auto-helper --brew"
+        if [ -x /usr/local/bin/zypper-auto-helper ]; then
+            echo "    To install via helper: zypper-auto-helper --brew"
+        fi
     fi
 
     echo ""
