@@ -1648,10 +1648,24 @@ if [ -r "$CONFIG_FILE" ]; then
 fi
 
 # Check if we're running 'dup', 'dist-upgrade' or 'update'
+STATUS_DIR="/var/log/zypper-auto"
+STATUS_FILE="$STATUS_DIR/download-status.txt"
+
 if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"update"* ]]; then
+    # For interactive runs, publish a best-effort "downloading" status so the
+    # desktop notifier can show a progress bar while the user is running
+    # zypper manually. We don't know the package count in advance here, so we
+    # mark the total as 0 and treat that as "unknown" on the notifier side.
+    sudo mkdir -p "$STATUS_DIR" >/dev/null 2>&1 || true
+    sudo bash -c "echo 'downloading:0:manual:0:0' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+
     # Run the actual zypper command
     sudo /usr/bin/zypper "$@"
     EXIT_CODE=$?
+
+    # Clear the manual downloading state so the notifier stops showing
+    # a progress bar once the interactive session has finished.
+    sudo bash -c "echo 'idle' > '$STATUS_FILE'" >/dev/null 2>&1 || true
 
     # Always run Flatpak and Snap updates after dup, even if dup had no updates or failed
     echo ""
@@ -3198,12 +3212,14 @@ def main():
                             # Extract from "downloading:TOTAL:SIZE:DOWNLOADED:PERCENT" format
                             try:
                                 parts = status.split(":")
-                                pkg_total = parts[1] if len(parts) > 1 else "?"
+                                pkg_total = parts[1] if len(parts) > 1 else "0"
                                 download_size = parts[2] if len(parts) > 2 else "unknown size"
                                 pkg_downloaded = parts[3] if len(parts) > 3 else "0"
                                 percent = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
 
-                                log_info(f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})")
+                                log_info(
+                                    f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})"
+                                )
 
                                 # Build progress bar visual
                                 if 0 <= percent <= 100:
@@ -3215,10 +3231,34 @@ def main():
                                     progress_text = "Processing..."
 
                                 # Build message with progress
-                                if download_size and download_size != "unknown":
-                                    msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\n{download_size} total • HIGH priority"
+                                total_int = int(pkg_total) if pkg_total.isdigit() else 0
+                                if total_int > 0:
+                                    if download_size and download_size not in ("unknown", "manual"):
+                                        msg = (
+                                            f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
+                                            f"{progress_text}\n"
+                                            f"{download_size} total • HIGH priority"
+                                        )
+                                    else:
+                                        msg = (
+                                            f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
+                                            f"{progress_text}\n"
+                                            "HIGH priority"
+                                        )
                                 else:
-                                    msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\nHIGH priority"
+                                    # Manual or unknown total: avoid misleading "0 of 0" text
+                                    if download_size and download_size not in ("unknown", "manual"):
+                                        msg = (
+                                            "Downloading updates\n"
+                                            f"{progress_text}\n"
+                                            f"{download_size} total • HIGH priority"
+                                        )
+                                    else:
+                                        msg = (
+                                            "Downloading updates\n"
+                                            f"{progress_text}\n"
+                                            "HIGH priority"
+                                        )
 
                                 n = Notify.Notification.new(
                                     "Downloading updates...",
@@ -3287,10 +3327,34 @@ def main():
                                     else:
                                         progress_text = "Processing..."
 
-                                    if download_size and download_size != "unknown":
-                                        msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\n{download_size} total • HIGH priority"
+                                    total_int = int(pkg_total) if pkg_total.isdigit() else 0
+
+                                    if total_int > 0:
+                                        if download_size and download_size not in ("unknown", "manual"):
+                                            msg = (
+                                                f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
+                                                f"{progress_text}\n"
+                                                f"{download_size} total • HIGH priority"
+                                            )
+                                        else:
+                                            msg = (
+                                                f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
+                                                f"{progress_text}\n"
+                                                "HIGH priority"
+                                            )
                                     else:
-                                        msg = f"Downloading {pkg_downloaded} of {pkg_total} packages\n{progress_text}\nHIGH priority"
+                                        if download_size and download_size not in ("unknown", "manual"):
+                                            msg = (
+                                                "Downloading updates\n"
+                                                f"{progress_text}\n"
+                                                f"{download_size} total • HIGH priority"
+                                            )
+                                        else:
+                                            msg = (
+                                                "Downloading updates\n"
+                                                f"{progress_text}\n"
+                                                "HIGH priority"
+                                            )
 
                                     # Update the existing notification in place
                                     n.update("Downloading updates...", msg, "emblem-downloads")
