@@ -3825,6 +3825,24 @@ cat << 'EOF' > "${INSTALL_SCRIPT_PATH}"
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Simple logging helper so we can debug why the install window may be
+# opening and closing immediately.
+LOG_FILE="$HOME/.local/share/zypper-notify/run-install.log"
+LOG_DIR="$(dirname "$LOG_FILE")"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+log() {
+    # Best-effort logging; never fail the script because of logging issues.
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    {
+        printf '[%s] %s\n' "$ts" "$*" >>"$LOG_FILE" 2>/dev/null || true
+    } || true
+}
+
+log "===== zypper-run-install started (PID $$) ====="
+log "ENV: TERM=${TERM:-} DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-}"
+log "ENV: SHELL=${SHELL:-} USER=${USER:-} PWD=${PWD:-}"
+
 # Load feature toggles from the same config used by the installer.
 CONFIG_FILE="/etc/zypper-auto.conf"
 
@@ -3850,11 +3868,18 @@ RUN_UPDATE() {
     echo "=========================================="
     echo ""
     
+    log "RUN_UPDATE: starting pkexec zypper dup..."
     # Run the update
-    if pkexec zypper dup; then
+    set +e
+    pkexec zypper dup
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
         UPDATE_SUCCESS=true
+        log "RUN_UPDATE: pkexec zypper dup completed successfully (rc=$rc)"
     else
         UPDATE_SUCCESS=false
+        log "RUN_UPDATE: pkexec zypper dup FAILED (rc=$rc)"
     fi
     
     echo ""
@@ -3912,15 +3937,30 @@ RUN_UPDATE() {
     echo "  Soar (stable) Update & Sync"
     echo "=========================================="
     echo ""
-    
-    if [[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]] && command -v soar >/dev/null 2>&1; then
+
+    # Detect Soar in common per-user locations so we don't offer to install
+    # it when it's already present but not yet on PATH for non-interactive
+    # shells.
+    SOAR_BIN=""
+    if command -v soar >/dev/null 2>&1; then
+        SOAR_BIN=$(command -v soar)
+    elif [ -x "$HOME/.local/bin/soar" ]; then
+        SOAR_BIN="$HOME/.local/bin/soar"
+    elif [ -d "$HOME/pkgforge" ] && \
+         find "$HOME/pkgforge" -maxdepth 1 -type f -name 'soar*' -perm -u+x 2>/dev/null | grep -q .; then
+        SOAR_BIN=$(find "$HOME/pkgforge" -maxdepth 1 -type f -name 'soar*' -perm -u+x 2>/dev/null | head -n1)
+    fi
+
+    if [[ "${ENABLE_SOAR_UPDATES,,}" != "true" ]]; then
+        echo "ℹ️  Soar updates are disabled in /etc/zypper-auto.conf (ENABLE_SOAR_UPDATES=false)."
+    elif [ -n "$SOAR_BIN" ]; then
         # First, check if a newer *stable* Soar release exists on GitHub.
         # We compare the local "soar --version" against
         # https://api.github.com/repos/pkgforge/soar/releases/latest (stable only).
         if command -v curl >/dev/null 2>&1; then
             echo "Checking for newer stable Soar release from GitHub..."
 
-            LOCAL_VER_RAW=$(soar --version 2>/dev/null | head -n1)
+            LOCAL_VER_RAW=$("$SOAR_BIN" --version 2>/dev/null | head -n1)
             LOCAL_VER=$(echo "$LOCAL_VER_RAW" | grep -oE 'v?[0-9]+(\.[0-9]+)*' | head -n1 || true)
             LOCAL_BASE=${LOCAL_VER#v}
 
@@ -3957,10 +3997,10 @@ RUN_UPDATE() {
         fi
 
         # Then run the usual metadata sync.
-        if soar sync; then
+        if "$SOAR_BIN" sync; then
             echo "✅ Soar sync completed."
             # Optionally refresh Soar-managed apps that support "soar update".
-            if soar update; then
+            if "$SOAR_BIN" update; then
                 echo "✅ Soar update completed."
             else
                 echo "⚠️  Soar update failed (continuing)."
@@ -4084,34 +4124,70 @@ RUN_UPDATE() {
         echo "⚠️  Zypper dup reported errors (see above), but Flatpak/Snap updates were attempted."
         echo ""
     fi
-    
+
+    log "RUN_UPDATE: finished (UPDATE_SUCCESS=$UPDATE_SUCCESS)"
+
+    # Keep the terminal open so the user can read the output, even if stdin
+    # is not a normal TTY or "read" would normally fail under set -e.
     echo "Press Enter to close this window..."
-    read -r
+    set +e
+    if ! read -r _ </dev/tty 2>/dev/null; then
+        # If /dev/tty is not available (or read fails instantly), pause briefly
+        # so the user still has a chance to see the final output.
+        sleep 5
+    fi
+    set -e
 }
 
-# Export the function so it's available in subshells
-export -f RUN_UPDATE
+# If invoked with --inner, run the update directly in this process instead of
+# spawning another terminal. This avoids relying on exported shell functions
+# inside a separate konsole/gnome-terminal bash.
+if [[ "${1:-}" == "--inner" ]]; then
+    log "Inner mode (--inner) invoked; running RUN_UPDATE directly"
+    shift || true
+    RUN_UPDATE
+    exit $?
+fi
+
+# Export the function (harmless, but not relied upon anymore)
+export -f RUN_UPDATE || true
 
 # Run the update in a terminal
+log "Terminal selection: candidates: ${TERMINALS[*]}"
 for term in "${TERMINALS[@]}"; do
+    log "Checking terminal: $term"
     if command -v "$term" >/dev/null 2>&1; then
+        log "Using terminal '$term' to run inner helper (--inner)"
         case "$term" in
             konsole)
-                konsole -e bash -c "RUN_UPDATE"
+                set +e
+                konsole -e bash -lc '"$HOME"/.local/bin/zypper-run-install --inner'
+                rc=$?
+                set -e
+                log "konsole finished with exit code $rc"
                 exit 0
                 ;;
             gnome-terminal)
-                gnome-terminal -- bash -c "RUN_UPDATE"
+                set +e
+                gnome-terminal -- bash -lc '"$HOME"/.local/bin/zypper-run-install --inner'
+                rc=$?
+                set -e
+                log "gnome-terminal finished with exit code $rc"
                 exit 0
                 ;;
             kitty|alacritty|xterm)
-                "$term" -e bash -c "RUN_UPDATE"
+                set +e
+                "$term" -e bash -lc '"$HOME"/.local/bin/zypper-run-install --inner'
+                rc=$?
+                set -e
+                log "${term} finished with exit code $rc"
                 exit 0
                 ;;
         esac
     fi
 done
 
+log "No GUI terminal found; falling back to running RUN_UPDATE directly"
 # Fallback: run directly if no terminal found
 RUN_UPDATE
 EOF

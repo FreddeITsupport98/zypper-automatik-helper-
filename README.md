@@ -531,6 +531,12 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **v59** (2026-01-02): **Ready-to-Install Konsole Fix & Install Helper Diagnostics**
+  - 🪟 **FIXED: "Install Now" window closing immediately in Konsole** – the Ready-to-Install helper now runs via a dedicated `zypper-run-install --inner` mode inside the spawned terminal instead of relying on exported shell functions, so the Konsole window stays open reliably until you press Enter.
+  - 📜 **NEW: `run-install.log` for install helper** – every Ready-to-Install run is logged to `~/.local/share/zypper-notify/run-install.log` with environment, terminal selection, and `pkexec zypper dup` status, making it much easier to debug installer-window issues.
+  - 🧭 **IMPROVED: Soar detection in wrappers & helper** – the Soar post-update steps and the install helper now detect Soar from common per-user locations (like `~/.local/bin/soar` and `~/pkgforge`) before offering to install it, avoiding false "Soar is not installed" prompts when it is actually present.
+  - 🧪 **IMPROVED: Test harness integration** – the Python test script and notifier paths now exercise the same helper/terminal flow as real updates, so Ready-to-Install behaviour can be reproduced and debugged consistently.
+
 - **v58** (2025-12-31): **Scripted Uninstaller, External Config & Log Control**
   - 📝 **Short:** Safer uninstall, externalised config (including `DUP_EXTRA_FLAGS`), smarter config health warnings, and improved solver-conflict notifications that keep cached downloads and guide you to resolve conflicts.
   - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `sudo zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
