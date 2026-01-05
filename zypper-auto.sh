@@ -214,6 +214,33 @@ SNOOZE_SHORT_HOURS=1
 SNOOZE_MEDIUM_HOURS=4
 SNOOZE_LONG_HOURS=24
 
+# ---------------------------------------------------------------------
+# Zypper lock handling and downloader behaviour
+# ---------------------------------------------------------------------
+
+# LOCK_RETRY_MAX_ATTEMPTS
+# How many times the "Ready to install" helper should retry when
+# another zypper/YaST instance holds the system management lock
+# before giving up and showing a message. Each attempt waits a
+# little longer than the previous one.
+LOCK_RETRY_MAX_ATTEMPTS=10
+
+# LOCK_RETRY_INITIAL_DELAY_SECONDS
+# Base delay (in seconds) used for the first lock retry. Subsequent
+# retries add this delay again (1,2,3,... style). Set to 0 to disable
+# waiting and fail fast when the lock is held.
+LOCK_RETRY_INITIAL_DELAY_SECONDS=1
+
+# DOWNLOADER_DOWNLOAD_MODE
+# Controls how the background downloader behaves (value is case-sensitive):
+#   full        - (default) run "zypper dup --download-only" to
+#                 prefetch all packages into the cache.
+#   detect-only - only run "zypper dup --dry-run" to detect whether
+#                 updates are available; no pre-download is done.
+# Any other value is treated as invalid and will be reported in the
+# installer log, then reset to the safe default "full".
+DOWNLOADER_DOWNLOAD_MODE="full"
+
 # DUP_EXTRA_FLAGS
 # Extra arguments appended to every "zypper dup" invocation run by this
 # helper, both for the background downloader ("dup --download-only") and
@@ -260,6 +287,33 @@ EOF
     validate_int SNOOZE_SHORT_HOURS 1
     validate_int SNOOZE_MEDIUM_HOURS 4
     validate_int SNOOZE_LONG_HOURS 24
+    validate_int LOCK_RETRY_MAX_ATTEMPTS 10
+    validate_int LOCK_RETRY_INITIAL_DELAY_SECONDS 1
+
+    # Validate enumerated string options with safe fallbacks so typos
+    # in the config are reported clearly in the log and do not break
+    # the installer.
+    validate_mode() {
+        local name="$1" default="$2" allowed_pattern="$3" value
+        eval "value=\"\${$name:-}\""
+        case "$value" in
+            $allowed_pattern)
+                # valid, leave as-is
+                ;;
+            "")
+                local msg="Missing $name in ${CONFIG_FILE}, using default '$default'"
+                log_info "$msg"
+                CONFIG_WARNINGS+=("$msg")
+                eval "$name=$default"
+                ;;
+            *)
+                local msg="Invalid $name='$value' in ${CONFIG_FILE} (allowed: $allowed_pattern); using default '$default'"
+                log_info "$msg"
+                CONFIG_WARNINGS+=("$msg")
+                eval "$name=$default"
+                ;;
+        esac
+    }
 
     # Validate timer intervals: allow only 1,5,10,15,30,60 minutes to
     # keep systemd OnCalendar expressions simple and predictable.
@@ -287,6 +341,11 @@ EOF
     validate_interval DL_TIMER_INTERVAL_MINUTES 1
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
 
+    # DOWNLOADER_DOWNLOAD_MODE must be spelled exactly "full" or
+    # "detect-only" (case-sensitive). Anything else is reported as
+    # invalid and reset to the safe default "full".
+    validate_mode DOWNLOADER_DOWNLOAD_MODE full "full|detect-only"
+
     # Detect older/stale config files that are missing newer keys.
     # We do NOT overwrite the config automatically; instead we collect
     # warnings and suggest using the reset helper so the user can
@@ -304,6 +363,9 @@ EOF
     # Keys introduced in newer versions that we depend on for full
     # functionality. Add new ones here as the project evolves.
     _mark_missing_key "DUP_EXTRA_FLAGS"
+    _mark_missing_key "LOCK_RETRY_MAX_ATTEMPTS"
+    _mark_missing_key "LOCK_RETRY_INITIAL_DELAY_SECONDS"
+    _mark_missing_key "DOWNLOADER_DOWNLOAD_MODE"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -321,6 +383,15 @@ EOF
                 DUP_EXTRA_FLAGS)
                     log_info "  - DUP_EXTRA_FLAGS: controls extra flags added to every 'zypper dup' run (background downloader and notifier), e.g. --allow-vendor-change."
                     ;;
+                LOCK_RETRY_MAX_ATTEMPTS)
+                    log_info "  - LOCK_RETRY_MAX_ATTEMPTS: how many times the Ready-to-Install helper retries when zypper is locked before giving up."
+                    ;;
+                LOCK_RETRY_INITIAL_DELAY_SECONDS)
+                    log_info "  - LOCK_RETRY_INITIAL_DELAY_SECONDS: base delay (in seconds) between lock retries for the Ready-to-Install helper."
+                    ;;
+                DOWNLOADER_DOWNLOAD_MODE)
+                    log_info "  - DOWNLOADER_DOWNLOAD_MODE: controls whether the background helper only detects updates (detect-only) or also pre-downloads them (full)."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -333,6 +404,15 @@ EOF
             case "$key" in
                 DUP_EXTRA_FLAGS)
                     DUP_EXTRA_FLAGS=""
+                    ;;
+                LOCK_RETRY_MAX_ATTEMPTS)
+                    LOCK_RETRY_MAX_ATTEMPTS=10
+                    ;;
+                LOCK_RETRY_INITIAL_DELAY_SECONDS)
+                    LOCK_RETRY_INITIAL_DELAY_SECONDS=1
+                    ;;
+                DOWNLOADER_DOWNLOAD_MODE)
+                    DOWNLOADER_DOWNLOAD_MODE="full"
                     ;;
             esac
         done
@@ -1415,6 +1495,27 @@ if [ -f "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
+CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-10}"
+DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
+
+# Smart minimum interval between refresh/dry-run runs. This reuses the
+# same CACHE_EXPIRY_MINUTES knob as the notifier so we don't hammer
+# mirrors with constant metadata/solver checks when the timer is very
+# frequent (e.g. every minute).
+LAST_CHECK_FILE="$LOG_DIR/download-last-check.txt"
+NOW=$(date +%s)
+if [ -f "$LAST_CHECK_FILE" ]; then
+    LAST=$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)
+    if [ "$LAST" -gt 0 ] 2>/dev/null; then
+        MIN_INTERVAL=$((CACHE_EXPIRY_MINUTES * 60))
+        if [ "$MIN_INTERVAL" -gt 0 ] && [ $((NOW - LAST)) -lt "$MIN_INTERVAL" ]; then
+            # Too soon since last full check; skip this run quietly and
+            # let the existing status/notifications stand.
+            exit 0
+        fi
+    fi
+fi
+echo "$NOW" > "$LAST_CHECK_FILE"
 
 # Helper: trigger the user notifier immediately after downloads complete
 trigger_notifier() {
@@ -1523,6 +1624,19 @@ echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
     done
 ) &
 TRACKER_PID=$!
+
+# If the downloader is running in detect-only mode, skip the heavy
+# "dup --download-only" pass and just trigger the notifier so it can
+# inform the user that updates are available. This avoids extra
+# bandwidth and disk usage when the user only cares about detection.
+if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
+    # Mark as a completed detection-only cycle; no new packages were
+    # downloaded by this helper, but the notifier will see that updates
+    # exist from its own dry-run.
+    echo "complete:0:0" > "$STATUS_FILE"
+    trigger_notifier
+    exit 0
+fi
 
 # Do the actual download. We intentionally ignore most non-zero exit codes so
 # that partial downloads remain in the cache even if zypper encounters solver
@@ -3868,18 +3982,78 @@ RUN_UPDATE() {
     echo "=========================================="
     echo ""
     
-    log "RUN_UPDATE: starting pkexec zypper dup..."
-    # Run the update
+    # Track whether zypper failed specifically because of a lock so we can
+    # show a clearer message later.
+    LOCKED_DURING_UPDATE=0
+    
+    # Best-effort: stop the background downloader so it doesn't compete
+    # for the zypper lock while we're doing an interactive update.
+    log "RUN_UPDATE: stopping zypper-autodownload.service/timer to avoid lock conflicts"
     set +e
-    pkexec zypper dup
+    pkexec systemctl stop zypper-autodownload.service zypper-autodownload.timer >/dev/null 2>&1
+    set -e
+
+    # If any other zypper process is still running at this point (for example
+    # an open YaST or another terminal zypper), retry a few times with
+    # increasing delays (1, 2, 3, ... seconds) before giving up and telling
+    # the user what to do. The number of attempts and base delay are
+    # controlled from /etc/zypper-auto.conf.
+    max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
+    base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
+    attempt=1
+    while pgrep -x zypper >/dev/null 2>&1 && [ "$attempt" -le "$max_attempts" ]; do
+        delay=$((base_delay * attempt))
+        echo ""
+        echo "System management is currently locked by another zypper process."
+        echo "Waiting $delay second(s) for the other zypper to finish (attempt $attempt/$max_attempts)..."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+
+    # After retries, if zypper is still running, show a clear message and exit
+    # cleanly instead of letting pkexec/zypper print the raw lock error.
+    if pgrep -x zypper >/dev/null 2>&1; then
+        echo ""
+        echo "System management is still locked by another zypper process."
+        echo "Close that other update tool (or wait for it to finish), then run"
+        echo "this 'Ready to Install' action again."
+        echo ""
+        log "RUN_UPDATE: aborting after $max_attempts lock retries because another zypper process is still running"
+        echo "Press Enter to close this window..."
+        set +e
+        if ! read -r _ </dev/tty 2>/dev/null; then
+            # If /dev/tty is not available (or read fails instantly), pause briefly
+            # so the user still has a chance to see the message.
+            sleep 5
+        fi
+        set -e
+        return 0
+    fi
+
+    log "RUN_UPDATE: starting pkexec zypper dup..."
+    # Run the update, capturing stderr so we can detect a lock even if it
+    # appears after our pre-check.
+    set +e
+    ZYPPER_ERR_FILE=$(mktemp)
+    pkexec zypper dup 2> >(tee "$ZYPPER_ERR_FILE" >&2)
     rc=$?
     set -e
+
+    if [ "$rc" -ne 0 ] && grep -q "System management is locked" "$ZYPPER_ERR_FILE" 2>/dev/null; then
+        LOCKED_DURING_UPDATE=1
+    fi
+    rm -f "$ZYPPER_ERR_FILE"
+
     if [ "$rc" -eq 0 ]; then
         UPDATE_SUCCESS=true
         log "RUN_UPDATE: pkexec zypper dup completed successfully (rc=$rc)"
     else
         UPDATE_SUCCESS=false
-        log "RUN_UPDATE: pkexec zypper dup FAILED (rc=$rc)"
+        if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
+            log "RUN_UPDATE: pkexec zypper dup failed due to existing zypper lock (rc=$rc)"
+        else
+            log "RUN_UPDATE: pkexec zypper dup FAILED (rc=$rc)"
+        fi
     fi
     
     echo ""
@@ -4121,7 +4295,11 @@ RUN_UPDATE() {
     fi
 
     if [ "$UPDATE_SUCCESS" = false ]; then
-        echo "⚠️  Zypper dup reported errors (see above), but Flatpak/Snap updates were attempted."
+        if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
+            echo "⚠  Zypper could not run because system management is locked by another tool. No system packages were changed."
+        else
+            echo "⚠️  Zypper dup reported errors (see above), but Flatpak/Snap updates were attempted."
+        fi
         echo ""
     fi
 

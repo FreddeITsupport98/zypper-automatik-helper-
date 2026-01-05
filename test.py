@@ -17,16 +17,17 @@ import time
 
 # --- Setup Logging (v2 - Log to script directory) ---
 try:
-    # Get the directory where this script is located
+    # Get the directory where this script is located (normally the repo root)
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    # Create the log file in that same directory
-    LOG_FILE = os.path.join(SCRIPT_DIR, "zypper-test.log")
+    # Create the log file in that same directory, named test.log so other
+    # developers can easily grab it from the repository folder.
+    LOG_FILE = os.path.join(SCRIPT_DIR, "test.log")
 
     logging.basicConfig(
         filename=LOG_FILE,
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        filemode='w'  # Overwrite log each time
+        filemode='a'  # Append new runs to a shared test.log
     )
 except Exception as e:
     print(f"Error setting up logging: {e}")
@@ -175,17 +176,107 @@ def _show_updates_ready_stage():
     logging.info("Updates Ready stage finished (user interacted or closed notification)")
 
 
+def _show_solver_error_notification():
+    """Simulate the solver/conflict error notification from the real helper."""
+    logging.info("Showing SOLVER-ERROR test notification")
+
+    title = "Updates require your decision (Test)"
+    message = (
+        "Background download of updates hit a zypper solver error.\n\n"
+        "Some packages may already be cached, but zypper needs your decision to continue.\n\n"
+        "Open a terminal and run:\n"
+        "  sudo zypper dup\n"
+        "or click 'Install Now' to open the helper, then follow zypper's prompts to resolve the conflicts."
+    )
+
+    action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
+
+    n = Notify.Notification.new(
+        title,
+        message,
+        "system-software-update",
+    )
+    n.set_timeout(0)
+    n.set_urgency(Notify.Urgency.CRITICAL)
+    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-updates-conflict"))
+
+    n.add_action("install", "Install Now", on_action, action_script)
+    n.add_action("view-changes", "View Changes", on_action, None)
+    n.add_action("snooze-1h", "1h", on_action, None)
+    n.add_action("snooze-4h", "4h", on_action, None)
+    n.add_action("snooze-1d", "1d", on_action, None)
+
+    loop = GLib.MainLoop()
+    n.connect("closed", lambda *args: loop.quit())
+
+    n.show()
+    logging.info("Solver-error notification sent. Waiting for user interaction...")
+    loop.run()
+    logging.info("Solver-error test notification finished")
+
+
+def _show_policykit_error_notification():
+    """Simulate the PolicyKit/auth failure notification used by the helper."""
+    logging.info("Showing POLICYKIT-ERROR test notification")
+
+    title = "Update check failed (Test)"
+    message = (
+        "The updater could not authenticate with PolicyKit.\n"
+        "This may be a configuration issue.\n\n"
+        "Try running 'pkexec zypper dup --dry-run' manually to test."
+    )
+
+    n = Notify.Notification.new(title, message, "dialog-error")
+    n.set_timeout(30000)  # 30 seconds
+    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-error"))
+    n.set_urgency(Notify.Urgency.CRITICAL)
+    n.show()
+
+    logging.info("PolicyKit-error notification sent (30s timeout)")
+    time.sleep(3)
+
+
+def _show_config_warning_notification():
+    """Simulate the config-warning notification from zypper-auto-helper."""
+    logging.info("Showing CONFIG-WARNING test notification")
+
+    title = "Zypper Auto-Helper config warnings (Test)"
+    message = (
+        "Some settings in /etc/zypper-auto.conf were invalid and reset to safe defaults.\n\n"
+        "Check the install log or run: zypper-auto-helper --reset-config"
+    )
+
+    n = Notify.Notification.new(title, message, "dialog-warning")
+    n.set_timeout(20000)
+    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-config-warning"))
+    n.set_urgency(Notify.Urgency.NORMAL)
+    n.show()
+
+    logging.info("Config-warning notification sent (20s timeout)")
+    time.sleep(2)
+
+
 def main():
-    logging.info("--- TEST SCRIPT STARTED ---")
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    logging.info("================ RUN %s START ================", run_id)
+    logging.info("Python version: %s", sys.version.replace("\n", " "))
+    logging.info("ENV DISPLAY=%s WAYLAND_DISPLAY=%s XDG_SESSION_TYPE=%s", os.environ.get("DISPLAY"), os.environ.get("WAYLAND_DISPLAY"), os.environ.get("XDG_SESSION_TYPE"))
+    logging.info("User: %s, HOME=%s, PWD=%s", os.environ.get("USER"), os.environ.get("HOME"), os.getcwd())
     print(f"Sending staged test notifications... Log file at: {LOG_FILE}")
     try:
         Notify.init("zypper-updater-test")
 
-        # Simulate the same stages the real system uses
+        # Simulate the main happy-path stages the real system uses
         _show_checking_stage()
         _show_downloading_stage()
         _show_complete_stage()
         _show_updates_ready_stage()
+
+        # Simulate the main error / edge-case notifications used by the
+        # real notifier and installer so we can visually verify them.
+        _show_solver_error_notification()
+        _show_policykit_error_notification()
+        _show_config_warning_notification()
 
         logging.info("Test finished.")
         print("Test finished.")
@@ -195,7 +286,7 @@ def main():
         logging.error(traceback.format_exc())
     finally:
         Notify.uninit()
-        logging.info("--- TEST SCRIPT FINISHED ---")
+        logging.info("================ RUN %s END ==================", run_id)
 
 if __name__ == "__main__":
     main()
