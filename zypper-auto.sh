@@ -341,6 +341,19 @@ EOF
     validate_interval DL_TIMER_INTERVAL_MINUTES 1
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
 
+    # Log effective configuration summary for easier diagnostics
+    log_debug "Effective configuration after validation:"
+    log_debug "  DL_TIMER_INTERVAL_MINUTES=${DL_TIMER_INTERVAL_MINUTES}"
+    log_debug "  NT_TIMER_INTERVAL_MINUTES=${NT_TIMER_INTERVAL_MINUTES}"
+    log_debug "  CACHE_EXPIRY_MINUTES=${CACHE_EXPIRY_MINUTES}"
+    log_debug "  SNOOZE_SHORT_HOURS=${SNOOZE_SHORT_HOURS}"
+    log_debug "  SNOOZE_MEDIUM_HOURS=${SNOOZE_MEDIUM_HOURS}"
+    log_debug "  SNOOZE_LONG_HOURS=${SNOOZE_LONG_HOURS}"
+    log_debug "  LOCK_RETRY_MAX_ATTEMPTS=${LOCK_RETRY_MAX_ATTEMPTS}"
+    log_debug "  LOCK_RETRY_INITIAL_DELAY_SECONDS=${LOCK_RETRY_INITIAL_DELAY_SECONDS}"
+    log_debug "  DOWNLOADER_DOWNLOAD_MODE=${DOWNLOADER_DOWNLOAD_MODE}"
+    log_debug "  DUP_EXTRA_FLAGS=${DUP_EXTRA_FLAGS}"
+
     # DOWNLOADER_DOWNLOAD_MODE must be spelled exactly "full" or
     # "detect-only" (case-sensitive). Anything else is reported as
     # invalid and reset to the safe default "full".
@@ -1554,10 +1567,26 @@ date +%s > "$START_TIME_FILE"
 # Refresh repos
 REFRESH_ERR=$(mktemp)
 if ! /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"; then
+    # If another zypper instance holds the lock, handle_lock_or_fail will
+    # mark the status as idle and exit 0 so we do not treat it as an
+    # error here.
     handle_lock_or_fail "$REFRESH_ERR"
+
+    # At this point we know the error was not a simple lock. Classify it
+    # as a network/repository problem so the notifier can surface a clear
+    # error message instead of silently doing nothing.
+    if grep -qi "could not resolve host" "$REFRESH_ERR" || \
+       grep -qi "Failed to retrieve new repository metadata" "$REFRESH_ERR"; then
+        echo "error:network" > "$STATUS_FILE"
+    else
+        echo "error:repo" > "$STATUS_FILE"
+    fi
+
     cat "$REFRESH_ERR" >&2 || true
     rm -f "$REFRESH_ERR"
-    exit 1
+    # Exit 0 so systemd does not mark the service failed; the notifier
+    # will pick up the error:* status on the next run.
+    exit 0
 fi
 rm -f "$REFRESH_ERR"
 
@@ -1565,10 +1594,22 @@ rm -f "$REFRESH_ERR"
 DRY_OUTPUT=$(mktemp)
 DRY_ERR=$(mktemp)
 if ! /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"; then
+    # Handle lock first; if it is just a lock, this will mark status idle
+    # and exit 0 so we do not need to set an additional error state.
     handle_lock_or_fail "$DRY_ERR"
+
+    # Non-lock failure at the dry-run stage – mirror the refresh handling
+    # so the notifier can display a meaningful error notification.
+    if grep -qi "could not resolve host" "$DRY_ERR" || \
+       grep -qi "Failed to retrieve new repository metadata" "$DRY_ERR"; then
+        echo "error:network" > "$STATUS_FILE"
+    else
+        echo "error:repo" > "$STATUS_FILE"
+    fi
+
     cat "$DRY_ERR" >&2 || true
     rm -f "$DRY_ERR" "$DRY_OUTPUT"
-    exit 1
+    exit 0
 fi
 rm -f "$DRY_ERR"
 
@@ -3642,6 +3683,64 @@ def main():
                 elif status == "idle":
                     log_debug("Status is idle (no updates to download)")
                     # Continue to normal check below
+
+                elif status.startswith("error:network"):
+                    # Downloader could not talk to the repositories (DNS or
+                    # similar network problem). Surface a clear error to the
+                    # user instead of silently failing.
+                    log_error("Background downloader reported a network error while checking for updates")
+                    msg = (
+                        "The background updater could not reach the openSUSE repositories.\n\n"
+                        "This is usually a temporary network or DNS problem.\n\n"
+                        "Check your connection and DNS settings, then try again."
+                    )
+                    n = Notify.Notification.new(
+                        "Update check failed (network)",
+                        msg,
+                        "network-error",
+                    )
+                    n.set_timeout(30000)
+                    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-network-error"))
+                    n.set_urgency(Notify.Urgency.NORMAL)
+                    n.show()
+
+                    # Reset status to idle so we do not spam the same
+                    # notification on every timer tick.
+                    try:
+                        with open(download_status_file, "w") as f:
+                            f.write("idle")
+                    except Exception as e2:
+                        log_debug(f"Failed to reset download status after network error: {e2}")
+
+                    return
+
+                elif status.startswith("error:repo"):
+                    # Repositories themselves reported an error (e.g. invalid
+                    # metadata). Treat similarly to network errors but use a
+                    # slightly different message.
+                    log_error("Background downloader reported a repository error while checking for updates")
+                    msg = (
+                        "The background updater hit an error while talking to configured repositories.\n\n"
+                        "Zypper reported repository failures or invalid metadata.\n\n"
+                        "Run 'sudo zypper refresh' in a terminal for full details."
+                    )
+                    n = Notify.Notification.new(
+                        "Update check failed (repositories)",
+                        msg,
+                        "dialog-warning",
+                    )
+                    n.set_timeout(30000)
+                    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-repo-error"))
+                    n.set_urgency(Notify.Urgency.NORMAL)
+                    n.show()
+
+                    try:
+                        with open(download_status_file, "w") as f:
+                            f.write("idle")
+                    except Exception as e2:
+                        log_debug(f"Failed to reset download status after repo error: {e2}")
+
+                    return
 
                 elif status.startswith("error:solver:"):
                     # Background downloader hit a solver/non-interactive error.
