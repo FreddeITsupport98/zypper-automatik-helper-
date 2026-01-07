@@ -4073,6 +4073,38 @@ fi
 # Enhanced install script with post-update service check
 TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
 
+# Helper to detect whether system management is currently locked by
+# zypp/zypper (e.g. YaST, another zypper, systemd-zypp-refresh, etc.).
+ZYPP_LOCK_FILE="/run/zypp.pid"
+
+has_zypp_lock() {
+    # Prefer the zypp.pid lock file, which is what YaST/zypper use.
+    if [ -f "$ZYPP_LOCK_FILE" ]; then
+        local pid
+        pid=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
+        if [ -n "$pid" ]; then
+            if kill -0 "$pid" 2>/dev/null; then
+                log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid"
+                return 0
+            else
+                log "has_zypp_lock: ignoring stale zypp lock file $ZYPP_LOCK_FILE with pid $pid"
+            fi
+        else
+            log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE present but empty"
+        fi
+    fi
+
+    # Fallback: any running zypper process.
+    if pgrep -x zypper >/dev/null 2>&1; then
+        local zpid
+        zpid=$(pgrep -x zypper | head -n1 || true)
+        log "has_zypp_lock: detected running zypper process pid ${zpid:-unknown}"
+        return 0
+    fi
+
+    return 1
+}
+
 # Create a wrapper script that will run in the terminal
 RUN_UPDATE() {
     echo ""
@@ -4100,24 +4132,25 @@ RUN_UPDATE() {
     max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
     base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
     attempt=1
-    while pgrep -x zypper >/dev/null 2>&1 && [ "$attempt" -le "$max_attempts" ]; do
+    while has_zypp_lock && [ "$attempt" -le "$max_attempts" ]; do
         delay=$((base_delay * attempt))
         echo ""
-        echo "System management is currently locked by another zypper process."
-        echo "Waiting $delay second(s) for the other zypper to finish (attempt $attempt/$max_attempts)..."
+        echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
+        echo "Waiting $delay second(s) for the other updater to finish (attempt $attempt/$max_attempts)..."
+        log "RUN_UPDATE: lock still active before attempt $attempt/$max_attempts; sleeping ${delay}s"
         sleep "$delay"
         attempt=$((attempt + 1))
     done
 
-    # After retries, if zypper is still running, show a clear message and exit
+    # After retries, if a lock is still present, show a clear message and exit
     # cleanly instead of letting pkexec/zypper print the raw lock error.
-    if pgrep -x zypper >/dev/null 2>&1; then
+    if has_zypp_lock; then
         echo ""
-        echo "System management is still locked by another zypper process."
+        echo "System management is still locked by another update tool."
         echo "Close that other update tool (or wait for it to finish), then run"
         echo "this 'Ready to Install' action again."
         echo ""
-        log "RUN_UPDATE: aborting after $max_attempts lock retries because another zypper process is still running"
+        log "RUN_UPDATE: aborting after $max_attempts lock retries because another updater is still holding the lock"
         echo "Press Enter to close this window..."
         set +e
         if ! read -r _ </dev/tty 2>/dev/null; then
@@ -4134,7 +4167,7 @@ RUN_UPDATE() {
     # appears after our pre-check.
     set +e
     ZYPPER_ERR_FILE=$(mktemp)
-    pkexec zypper dup 2> >(tee "$ZYPPER_ERR_FILE" >&2)
+    pkexec zypper dup 2> >(tee "$ZYPPER_ERR_FILE" | sed -E '/System management is locked/d;/Close this application before trying again/d' >&2)
     rc=$?
     set -e
 
