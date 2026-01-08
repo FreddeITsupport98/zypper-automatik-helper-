@@ -1863,6 +1863,28 @@ if [ -r "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 
+# Helper to detect whether system management is currently locked by
+# zypp/zypper (e.g. YaST, another zypper, systemd-zypp-refresh, etc.).
+ZYPP_LOCK_FILE="/run/zypp.pid"
+
+has_zypp_lock() {
+    # Prefer the zypp.pid lock file, which is what YaST/zypper use.
+    if [ -f "$ZYPP_LOCK_FILE" ]; then
+        local pid
+        pid=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Fallback: any running zypper process.
+    if pgrep -x zypper >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
+
 # Check if we're running 'dup', 'dist-upgrade' or 'update'
 STATUS_DIR="/var/log/zypper-auto"
 STATUS_FILE="$STATUS_DIR/download-status.txt"
@@ -1874,6 +1896,34 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # mark the total as 0 and treat that as "unknown" on the notifier side.
     sudo mkdir -p "$STATUS_DIR" >/dev/null 2>&1 || true
     sudo bash -c "echo 'downloading:0:manual:0:0' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+
+    # Before running zypper, respect the global system management lock and
+    # retry a few times with increasing delays so the user can see that we
+    # are waiting instead of failing immediately.
+    max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
+    base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
+    attempt=1
+    while has_zypp_lock && [ "$attempt" -le "$max_attempts" ]; do
+        delay=$((base_delay * attempt))
+        echo ""
+        echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
+        echo "Waiting $delay second(s) for the other updater to finish (attempt $attempt/$max_attempts)..."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+
+    # After retries, if a lock is still present, show a clear message and exit
+    # cleanly instead of letting zypper print the raw lock error.
+    if has_zypp_lock; then
+        echo ""
+        echo "System management is still locked by another update tool."
+        echo "Close that other update tool (or wait for it to finish), then run this zypper command again."
+        echo ""
+        # Clear the manual downloading state so the notifier does not show a
+        # stuck progress bar when we never actually ran zypper.
+        sudo bash -c "echo 'idle' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+        exit 1
+    fi
 
     # Run the actual zypper command
     sudo /usr/bin/zypper "$@"
