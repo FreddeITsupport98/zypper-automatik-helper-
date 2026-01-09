@@ -239,7 +239,7 @@ LOCK_RETRY_INITIAL_DELAY_SECONDS=1
 #                 updates are available; no pre-download is done.
 # Any other value is treated as invalid and will be reported in the
 # installer log, then reset to the safe default "full".
-DOWNLOADER_DOWNLOAD_MODE="full"
+DOWNLOADER_DOWNLOAD_MODE=full
 
 # DUP_EXTRA_FLAGS
 # Extra arguments appended to every "zypper dup" invocation run by this
@@ -294,25 +294,40 @@ EOF
     # in the config are reported clearly in the log and do not break
     # the installer.
     validate_mode() {
-        local name="$1" default="$2" allowed_pattern="$3" value
+        local name="$1" default="$2" allowed_pattern="$3" value raw_value
         eval "value=\"\${$name:-}\""
-        case "$value" in
-            $allowed_pattern)
-                # valid, leave as-is
-                ;;
-            "")
-                local msg="Missing $name in ${CONFIG_FILE}, using default '$default'"
-                log_info "$msg"
-                CONFIG_WARNINGS+=("$msg")
-                eval "$name=$default"
-                ;;
-            *)
-                local msg="Invalid $name='$value' in ${CONFIG_FILE} (allowed: $allowed_pattern); using default '$default'"
-                log_info "$msg"
-                CONFIG_WARNINGS+=("$msg")
-                eval "$name=$default"
-                ;;
-        esac
+        raw_value="$value"
+        # Normalise by stripping CR, surrounding whitespace, and simple outer quotes
+        value="$(printf '%s' "$value" | tr -d '\r' | sed -e 's/^\s*//' -e 's/\s*$//' -e 's/^"//' -e 's/"$//')"
+
+        # If empty after normalisation -> use default
+        if [ -z "$value" ]; then
+            local msg="Missing $name in ${CONFIG_FILE}, using default '$default'"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            eval "$name=$default"
+            return
+        fi
+
+        # Split allowed_pattern on '|' and compare literally (no globbing)
+        local IFS='|'
+        local allowed ok=0
+        for allowed in $allowed_pattern; do
+            if [ "$value" = "$allowed" ]; then
+                ok=1
+                break
+            fi
+        done
+
+        if [ "$ok" -eq 1 ]; then
+            # Valid value, store normalised form
+            eval "$name=$value"
+        else
+            local msg="Invalid $name='$raw_value' in ${CONFIG_FILE} (allowed: $allowed_pattern); using default '$default'"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            eval "$name=$default"
+        fi
     }
 
     # Validate timer intervals: allow only 1,5,10,15,30,60 minutes to
@@ -449,6 +464,11 @@ DL_TIMER_FILE="/etc/systemd/system/${DL_SERVICE_NAME}.timer"
 CLEANUP_SERVICE_NAME="zypper-cache-cleanup"
 CLEANUP_SERVICE_FILE="/etc/systemd/system/${CLEANUP_SERVICE_NAME}.service"
 CLEANUP_TIMER_FILE="/etc/systemd/system/${CLEANUP_SERVICE_NAME}.timer"
+
+# Periodic verification / auto-repair service (root)
+VERIFY_SERVICE_NAME="zypper-auto-verify"
+VERIFY_SERVICE_FILE="/etc/systemd/system/${VERIFY_SERVICE_NAME}.service"
+VERIFY_TIMER_FILE="/etc/systemd/system/${VERIFY_SERVICE_NAME}.timer"
 
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
@@ -943,7 +963,8 @@ run_uninstall_helper_only() {
         echo "" | tee -a "${LOG_FILE}"
         echo "The following items WOULD be removed if you run without --dry-run:" | tee -a "${LOG_FILE}"
         echo "  - System services/timers: zypper-autodownload.service, zypper-autodownload.timer" | tee -a "${LOG_FILE}"
-        echo "    and zypper-cache-cleanup.service, zypper-cache-cleanup.timer" | tee -a "${LOG_FILE}"
+        echo "    zypper-cache-cleanup.service, zypper-cache-cleanup.timer" | tee -a "${LOG_FILE}"
+        echo "    zypper-auto-verify.service, zypper-auto-verify.timer" | tee -a "${LOG_FILE}"
         echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
@@ -977,8 +998,10 @@ run_uninstall_helper_only() {
     log_debug "Disabling root timers and services..."
     systemctl disable --now zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
     systemctl disable --now zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
+    systemctl disable --now zypper-auto-verify.timer >> "${LOG_FILE}" 2>&1 || true
     systemctl stop zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
     systemctl stop zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
+    systemctl stop zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
 
     # 2. Stop and disable user timer/service
     if [ -n "${SUDO_USER:-}" ]; then
@@ -995,6 +1018,8 @@ run_uninstall_helper_only() {
     rm -f /etc/systemd/system/zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
     rm -f /etc/systemd/system/zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
     rm -f /etc/systemd/system/zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
+    rm -f /etc/systemd/system/zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
+    rm -f /etc/systemd/system/zypper-auto-verify.timer >> "${LOG_FILE}" 2>&1 || true
     rm -f /usr/local/bin/zypper-download-with-progress >> "${LOG_FILE}" 2>&1 || true
     rm -f /usr/local/bin/zypper-auto-helper >> "${LOG_FILE}" 2>&1 || true
 
@@ -1053,7 +1078,7 @@ run_uninstall_helper_only() {
     # 7. Clear any failed state in systemd for the removed units so
     #    `systemctl --user status` looks clean after uninstall.
     log_debug "Resetting failed state for removed systemd units (if any)..."
-    systemctl reset-failed zypper-autodownload.service zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
+    systemctl reset-failed zypper-autodownload.service zypper-cache-cleanup.service zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
     if [ -n "${SUDO_USER:-}" ]; then
         sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
             systemctl --user reset-failed zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
@@ -1064,7 +1089,7 @@ run_uninstall_helper_only() {
 
     echo "" | tee -a "${LOG_FILE}"
     echo "Uninstall summary:" | tee -a "${LOG_FILE}"
-    echo "  - System services and timers removed: zypper-autodownload, zypper-cache-cleanup" | tee -a "${LOG_FILE}"
+    echo "  - System services and timers removed: zypper-autodownload, zypper-cache-cleanup, zypper-auto-verify" | tee -a "${LOG_FILE}"
     echo "  - User notifier units and helper scripts removed for user $SUDO_USER" | tee -a "${LOG_FILE}"
     echo "  - No changes made to snapd, Flatpak, Soar, Homebrew or /etc/zypp/zypper.conf" | tee -a "${LOG_FILE}"
     if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
@@ -1219,8 +1244,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
    || ( $# -eq 0 && "$(basename "$0")" == "zypper-auto-helper" ) ]]; then
     echo "Zypper Auto-Helper - Installation and Maintenance Tool"
     echo ""
-    echo "Usage: sudo zypper-auto-helper [COMMAND]"
-    echo "   or: sudo $0 [COMMAND]"
+    echo "Usage: zypper-auto-helper [COMMAND]"
+    echo "   or: sudo $0 [COMMAND]  # when running the script directly without the shell alias"
     echo ""
     echo "Commands:"
     echo "  install           Install or update the zypper auto-updater system (default)"
@@ -1232,14 +1257,15 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew            Install/upgrade Homebrew (brew) for the user"
     echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts"
+    echo "                       (alias: --uninstall-zypper)"
     echo "  --reset-config    Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
-    echo "  sudo zypper-auto-helper install         # Full installation"
-    echo "  sudo zypper-auto-helper --verify        # Check system health and auto-fix issues"
-    echo "  sudo zypper-auto-helper --check         # Verify script syntax"
-    echo "  sudo zypper-auto-helper --soar          # Install or upgrade Soar CLI helper"
+    echo "  zypper-auto-helper install         # Full installation (via shell alias, runs with sudo)"
+    echo "  zypper-auto-helper --verify        # Check system health and auto-fix issues"
+    echo "  zypper-auto-helper --check         # Verify script syntax"
+    echo "  zypper-auto-helper --soar          # Install or upgrade Soar CLI helper"
     echo ""
     echo "Verification checks (--verify):"
     echo "  - System/user services active and enabled"
@@ -1274,7 +1300,7 @@ elif [[ "${1:-}" == "--reset-config" ]]; then
     log_info "Config reset mode requested"
     run_reset_config_only
     exit $?
-elif [[ "${1:-}" == "--uninstall-zypper-helper" ]]; then
+elif [[ "${1:-}" == "--uninstall-zypper-helper" || "${1:-}" == "--uninstall-zypper" ]]; then
     shift
     # Parse optional flags for the uninstaller:
     #   --yes / -y / --non-interactive : skip confirmation prompt
@@ -1816,9 +1842,58 @@ log_info ">>> Enabling (root) cache cleanup timer: ${CLEANUP_SERVICE_NAME}.timer
 update_status "Enabling cache cleanup timer..."
 systemctl daemon-reload >> "${LOG_FILE}" 2>&1
 if systemctl enable --now "${CLEANUP_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
-    log_success "Cache cleanup timer enabled and started"
+log_success "Cache cleanup timer enabled and started"
 else
     log_error "Failed to enable cache cleanup timer (non-fatal)"
+fi
+
+# --- 6c. Create verification/auto-repair service and timer ---
+log_info ">>> Creating (root) verification/auto-repair service: ${VERIFY_SERVICE_FILE}"
+update_status "Creating verification service..."
+log_debug "Writing service file: ${VERIFY_SERVICE_FILE}"
+cat << EOF > ${VERIFY_SERVICE_FILE}
+[Unit]
+Description=Verify and auto-repair zypper-auto-helper installation
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/zypper-auto-helper --verify
+StandardOutput=append:${LOG_DIR}/service-logs/verify.log
+StandardError=append:${LOG_DIR}/service-logs/verify-error.log
+
+# Hardening
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+EOF
+log_success "Verification service file created"
+
+log_info ">>> Creating (root) verification timer: ${VERIFY_TIMER_FILE}"
+log_debug "Writing timer file: ${VERIFY_TIMER_FILE}"
+cat << EOF > ${VERIFY_TIMER_FILE}
+[Unit]
+Description=Run ${VERIFY_SERVICE_NAME} periodically to verify and auto-repair helper
+
+[Timer]
+OnBootSec=15min
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+log_success "Verification timer file created"
+
+log_info ">>> Enabling (root) verification timer: ${VERIFY_SERVICE_NAME}.timer"
+update_status "Enabling verification timer..."
+systemctl daemon-reload >> "${LOG_FILE}" 2>&1
+if systemctl enable --now "${VERIFY_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
+    log_success "Verification timer enabled and started"
+else
+    log_error "Failed to enable verification timer (non-fatal)"
 fi
 
 # --- 7. Create User Directories ---
