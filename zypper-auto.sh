@@ -3740,69 +3740,98 @@ def main():
                         else:
                             time_str = f"{seconds}s"
                         
-                        # Build a completion message for both cases:
-                        #  - actual_downloaded == 0  => everything was already in cache
-                        #  - actual_downloaded > 0   => we just downloaded new packages
-                        if actual_downloaded == 0:
-                            log_info("All packages were already cached; treating as completed download")
-                            changelog_msg = (
-                                "All update packages are already present in the local cache.\n\n"
-                                "Packages are ready to install."
-                            )
-                        else:
-                            # Packages were actually downloaded, show notification
-                            log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
-                            
-                            # Get changelog preview by running zypper dup --dry-run
-                            changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
-                            try:
-                                log_debug("Fetching update details for changelog preview...")
-                                preview_cmd = [
-                                    "pkexec",
-                                    "zypper",
-                                    "--non-interactive",
-                                    "dup",
-                                    "--dry-run",
-                                    *DUP_EXTRA_FLAGS,
-                                ]
-                                result = subprocess.run(
-                                    preview_cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=30
-                                )
-                                if result.returncode == 0:
-                                    # Extract package preview
-                                    preview_packages = extract_package_preview(result.stdout, max_packages=5)
-                                    if preview_packages:
-                                        preview_str = ", ".join(preview_packages)
-                                        changelog_msg = (
-                                            f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
-                                            f"Including: {preview_str}\n\nReady to install."
-                                        )
-                                        log_info(f"Added changelog preview: {preview_str}")
-                            except Exception as e:
-                                log_debug(f"Could not fetch changelog preview: {e}")
-                        
-                        n = Notify.Notification.new(
-                            "✅ Downloads Complete!",
-                            changelog_msg,
-                            "emblem-default"
-                        )
-                        n.set_timeout(0)  # 0 = persist until user interaction
-                        n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
-                        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
-                        n.show()
-                        time.sleep(0.1)  # Wait a bit before continuing
-                        # Clear the complete status so it doesn't show again
+                        # Before we show any "Downloads Complete" message, double‑check that
+                        # there are still updates pending. If zypper dup --dry-run reports
+                        # nothing to do, this completion status is stale (the user probably
+                        # installed updates manually) and we should skip the download
+                        # notification entirely so it doesn't appear after everything
+                        # is already installed.
+                        dry_output = ""
+                        pending_count = None
                         try:
-                            with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                f.write("idle")
-                        except Exception:
-                            pass
+                            log_debug("Verifying pending updates for downloads-complete status...")
+                            preview_cmd = [
+                                "pkexec",
+                                "zypper",
+                                "--non-interactive",
+                                "dup",
+                                "--dry-run",
+                                *DUP_EXTRA_FLAGS,
+                            ]
+                            result = subprocess.run(
+                                preview_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                            )
+                            if result.returncode == 0:
+                                dry_output = result.stdout or ""
+                                _, _, _, pending_count = parse_output(dry_output, include_preview=False)
+                                pending_count = pending_count or 0
+                        except Exception as e:
+                            log_debug(f"Verification dry-run for downloads-complete status failed: {e}")
+                            dry_output = ""
+                            pending_count = None
+                        
+                        if pending_count == 0:
+                            log_info("Download status was 'complete' but zypper reports no pending updates; treating completion as stale and skipping 'Downloads Complete' notification.")
+                            try:
+                                with open(download_status_file, "w") as f:
+                                    f.write("idle")
+                            except Exception as e2:
+                                log_debug(f"Failed to reset download status after stale completion: {e2}")
+                            # Skip the downloads-complete popup; normal update check below
+                            # will show the usual 'system up to date' message instead.
+                        else:
+                            # Build a completion message for both cases:
+                            #  - actual_downloaded == 0  => everything was already in cache
+                            #  - actual_downloaded > 0   => we just downloaded new packages
+                            if actual_downloaded == 0:
+                                log_info("All packages were already cached; treating as completed download")
+                                changelog_msg = (
+                                    "All update packages are already present in the local cache.\n\n"
+                                    "Packages are ready to install."
+                                )
+                            else:
+                                # Packages were actually downloaded, show notification
+                                log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
+                                
+                                # Base message
+                                changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
+                                # If we have fresh dry-run output, attach a short preview
+                                if dry_output:
+                                    try:
+                                        preview_packages = extract_package_preview(dry_output, max_packages=5)
+                                        if preview_packages:
+                                            preview_str = ", ".join(preview_packages)
+                                            changelog_msg = (
+                                                f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
+                                                f"Including: {preview_str}\n\nReady to install."
+                                            )
+                                            log_info(f"Added changelog preview: {preview_str}")
+                                    except Exception as e:
+                                        log_debug(f"Could not build changelog preview: {e}")
+                            
+                            if pending_count is None or pending_count > 0:
+                                n = Notify.Notification.new(
+                                    "✅ Downloads Complete!",
+                                    changelog_msg,
+                                    "emblem-default"
+                                )
+                                n.set_timeout(0)  # 0 = persist until user interaction
+                                n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
+                                n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
+                                n.show()
+                                time.sleep(0.1)  # Wait a bit before continuing
+                                # Clear the complete status so it doesn't show again
+                                try:
+                                    with open("/var/log/zypper-auto/download-status.txt", "w") as f:
+                                        f.write("idle")
+                                except Exception:
+                                    pass
                         # Continue to show install notification below
                     except Exception:
-                        log_debug("Could not parse completion time")
+                        log_debug("Could not process completion status")
                         # Continue to show install notification below
                 
                 elif status == "idle":
