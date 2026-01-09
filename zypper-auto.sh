@@ -34,6 +34,7 @@ ENABLE_FLATPAK_UPDATES="true"
 ENABLE_SNAP_UPDATES="true"
 ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
+ENABLE_PIPX_UPDATES="true"  # new: pipx-based Python CLI updates
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
 CACHE_EXPIRY_MINUTES="10"
@@ -158,6 +159,13 @@ ENABLE_SOAR_UPDATES=true
 # "brew outdated --quiet" and "brew upgrade" when there are outdated
 # formulae. When false, Homebrew is left entirely to the user.
 ENABLE_BREW_UPDATES=true
+
+# ENABLE_PIPX_UPDATES
+# If true and pipx is installed for the user, run "pipx upgrade-all"
+# after zypper dup so that Python command-line tools (yt-dlp, black,
+# ansible, httpie, etc.) are upgraded in their isolated environments.
+# When false, pipx-based tools are left entirely to the user.
+ENABLE_PIPX_UPDATES=true
 
 # ---------------------------------------------------------------------
 # Timer intervals for downloader / notifier
@@ -1239,6 +1247,89 @@ run_brew_install_only() {
     fi
 }
 
+# --- Helper: pipx / Python CLI tools helper mode (CLI) ---
+run_pipx_helper_only() {
+    log_info ">>> pipx (Python CLI tools) helper mode..."
+    update_status "Running pipx helper..."
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  Python command-line tools via pipx" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "Path A: You want to install a command-line tool (yt-dlp, black, ansible, httpie, etc.)." | tee -a "${LOG_FILE}"
+    echo "Use pipx so each tool lives in its own isolated environment and won't break your system Python." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    # Check if pipx is already available for the target user
+    if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+        log_success "pipx already appears to be installed for user $SUDO_USER"
+        echo "pipx is already installed for user $SUDO_USER." | tee -a "${LOG_FILE}"
+    else
+        echo "pipx is not installed yet for user $SUDO_USER." | tee -a "${LOG_FILE}"
+        echo "The recommended way on openSUSE is:" | tee -a "${LOG_FILE}"
+        echo "  sudo zypper install python313-pipx" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+
+        read -p "May I install python313-pipx for you now via zypper? [y/N]: " -r REPLY
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Installing python313-pipx via zypper..."
+            update_status "Installing dependency: python313-pipx"
+            if ! zypper -n install python313-pipx >> "${LOG_FILE}" 2>&1; then
+                log_error "Failed to install python313-pipx. Please install it manually and re-run with --pip-package."
+                update_status "FAILED: Could not install python313-pipx"
+                return 1
+            fi
+            log_success "Successfully installed python313-pipx"
+
+            # Best-effort: ensure pipx adds its binaries to the user's PATH
+            if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+                sudo -u "$SUDO_USER" pipx ensurepath >> "${LOG_FILE}" 2>&1 || true
+            fi
+        else
+            log_info "User declined automatic pipx installation"
+        fi
+    fi
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "How to use pipx for Python CLI tools:" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    echo "  1) Install a tool into its own isolated environment:" | tee -a "${LOG_FILE}"
+    echo "       pipx install <package_name>" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    echo "  2) Upgrade all your pipx-installed tools at once (recommended instead of 'pip install --upgrade'):" | tee -a "${LOG_FILE}"
+    echo "       pipx upgrade-all" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    # Offer to run a safe upgrade-all for the user
+    if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+        read -p "Do you want me to run 'pipx upgrade-all' for user $SUDO_USER now? [y/N]: " -r UPGRADE
+        echo
+        if [[ $UPGRADE =~ ^[Yy]$ ]]; then
+            log_info "Running 'pipx upgrade-all' for user $SUDO_USER..."
+            update_status "Running pipx upgrade-all for $SUDO_USER"
+            if sudo -u "$SUDO_USER" pipx upgrade-all >> "${LOG_FILE}" 2>&1; then
+                log_success "pipx upgrade-all completed for user $SUDO_USER"
+            else
+                local rc=$?
+                log_error "pipx upgrade-all failed for user $SUDO_USER (exit code $rc)"
+                return $rc
+            fi
+        else
+            log_info "User chose not to run pipx upgrade-all automatically"
+        fi
+    fi
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Summary:" | tee -a "${LOG_FILE}"
+    echo "  - pipx is now the recommended/default way to install and upgrade standalone Python CLI tools." | tee -a "${LOG_FILE}"
+    echo "  - Use 'pipx install <package>' to add a new tool." | tee -a "${LOG_FILE}"
+    echo "  - Use 'pipx upgrade-all' instead of 'pip install --upgrade' for those tools." | tee -a "${LOG_FILE}"
+
+    update_status "SUCCESS: pipx helper completed"
+    return 0
+}
+
 # Show help if requested, or when invoked as the installed CLI with no arguments
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
    || ( $# -eq 0 && "$(basename "$0")" == "zypper-auto-helper" ) ]]; then
@@ -1256,6 +1347,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --self-check      Same as --check (alias)"
     echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew            Install/upgrade Homebrew (brew) for the user"
+    echo "  --pip-package     Install/upgrade pipx and show how to manage Python CLI tools with pipx"
     echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "                       (alias: --uninstall-zypper)"
     echo "  --reset-config    Reset /etc/zypper-auto.conf to documented defaults (with backup)"
@@ -1287,7 +1379,7 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     exit 0
 fi
 
-# Optional modes: Soar, Homebrew, and uninstall helper-only
+# Optional modes: Soar, Homebrew, pipx, and uninstall helper-only
 if [[ "${1:-}" == "--soar" ]]; then
     log_info "Soar helper-only mode requested"
     run_soar_install_only
@@ -1295,6 +1387,10 @@ if [[ "${1:-}" == "--soar" ]]; then
 elif [[ "${1:-}" == "--brew" ]]; then
     log_info "Homebrew helper-only mode requested"
     run_brew_install_only
+    exit $?
+elif [[ "${1:-}" == "--pip-package" || "${1:-}" == "--pipx" ]]; then
+    log_info "pipx helper-only mode requested"
+    run_pipx_helper_only
     exit $?
 elif [[ "${1:-}" == "--reset-config" ]]; then
     log_info "Config reset mode requested"
@@ -1932,6 +2028,7 @@ ENABLE_FLATPAK_UPDATES="true"
 ENABLE_SNAP_UPDATES="true"
 ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
+ENABLE_PIPX_UPDATES="true"
 
 if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
@@ -2126,7 +2223,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     echo "  Homebrew (brew) Updates (optional)"
     echo "=========================================="
     echo ""
-    
+
     if [[ "${ENABLE_BREW_UPDATES,,}" != "true" ]]; then
         echo "ℹ️  Homebrew updates are disabled in /etc/zypper-auto.conf (ENABLE_BREW_UPDATES=false)."
         echo "    You can still run 'brew update' / 'brew upgrade' manually."
@@ -2165,6 +2262,35 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
             echo "    To install via helper: sudo zypper-auto-helper --brew"
         fi
     fi
+
+    echo ""
+    echo "=========================================="
+    echo "  Python (pipx) Updates (optional)"
+    echo "=========================================="
+    echo ""
+
+    if [[ "${ENABLE_PIPX_UPDATES,,}" != "true" ]]; then
+        echo "ℹ️  pipx updates are disabled in /etc/zypper-auto.conf (ENABLE_PIPX_UPDATES=false)."
+        echo "    You can still manage Python CLI tools manually with pipx."
+        echo ""
+    else
+        if command -v pipx >/dev/null 2>&1; then
+            echo "Upgrading all pipx-managed Python command-line tools (pipx upgrade-all)..."
+            if pipx upgrade-all; then
+                echo "✅ pipx upgrade-all completed."
+            else
+                echo "⚠️  pipx upgrade-all failed (continuing)."
+            fi
+        else
+            echo "ℹ️  pipx is not installed - skipping Python CLI (pipx) updates."
+            echo "    Recommended: zypper-auto-helper --pip-package (run without sudo)"
+        fi
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "  Soar (stable) Update & Sync"
+    echo ""
 
     # Always show service restart info, even if zypper reported errors
     echo ""
@@ -4218,6 +4344,7 @@ ENABLE_FLATPAK_UPDATES="true"
 ENABLE_SNAP_UPDATES="true"
 ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
+ENABLE_PIPX_UPDATES="true"
 
 if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
