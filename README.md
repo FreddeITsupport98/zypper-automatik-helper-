@@ -69,11 +69,11 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
 * **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v58) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `inxi`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
-* **Safe Scripted Uninstaller (v58):** New `--uninstall-zypper-helper` mode in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers, binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
-  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
-  * `--dry-run` – show exactly what would be removed without making any changes
-  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact while still clearing caches
-  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
+* **Safe Scripted Uninstaller (v58):** New `--uninstall-zypper-helper` mode (alias: `--uninstall-zypper`) in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
+*  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
+*  * `--dry-run` – show exactly what would be removed without making any changes
+*  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact while still clearing caches
+*  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
 
 -----
 
@@ -100,13 +100,25 @@ This service's only job is to download packages when it's safe, and report progr
         * `idle` - No updates available
     * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
 * **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
-    * Default schedule is derived from the config option `DL_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (allowed values: 1,5,10,15,30,60).
-    * For example:
-        * `1`  → runs minutely
-        * `10` → runs every 10 minutes (`OnCalendar=*:0/10`)
-        * `60` → runs hourly (`OnCalendar=hourly`)
-
-### 3. The Notifier (User Service)
+*    * Default schedule is derived from the config option `DL_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (allowed values: 1,5,10,15,30,60).
+*    * For example:
+*        * `1`  → runs minutely
+*        * `10` → runs every 10 minutes (`OnCalendar=*:0/10`)
+*        * `60` → runs hourly (`OnCalendar=hourly`)
+*
++### 3. Periodic Verification / Auto-Repair Service
++
++In addition to the downloader, a small root service periodically runs the same
++12-point verification and auto-repair logic as `zypper-auto-helper --verify`:
++
++* **Service:** `/etc/systemd/system/zypper-auto-verify.service`
++    * Runs `zypper-auto-helper --verify` as a oneshot root service.
++    * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
++* **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
++    * Defaults to `OnBootSec=15min` and `OnCalendar=daily`, so health checks run
++      shortly after boot and then once per day.
++
++### 4. The Notifier (User Service)
 
 This service's job is to check for updates and remind you, running as your standard user.
 
@@ -178,7 +190,7 @@ zypper-auto-helper install         # Reinstall/upgrade
 zypper-auto-helper --reset-config  # Reset /etc/zypper-auto.conf to documented defaults (with backup)
 zypper-auto-helper --soar          # Install/upgrade the optional Soar CLI helper
 zypper-auto-helper --brew          # Install/upgrade Homebrew (brew) for the system/user
-zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs
+zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
 
 You normally run `zypper-auto-helper` **without** `sudo`; it will prompt for elevation internally when needed.
@@ -726,15 +738,17 @@ systemctl status zypper-autodownload.service
 Use the built-in uninstaller to safely remove all helper components:
 
 ```bash
-# Run from the directory containing zypper-auto.sh
+# Run from the directory containing zypper-auto.sh (as root)
 sudo ./zypper-auto.sh --uninstall-zypper-helper
 
-# Or using the installed helper command
-sudo zypper-auto-helper --uninstall-zypper-helper
+# Or using the installed helper command (typically without sudo via shell alias)
+zypper-auto-helper --uninstall-zypper-helper
+# Shorthand alias:
+zypper-auto-helper --uninstall-zypper
 ```
 
 By default this will:
-- Stop and disable the root timers/services (`zypper-autodownload`, `zypper-cache-cleanup`)
+- Stop and disable the root timers/services (`zypper-autodownload`, `zypper-cache-cleanup`, `zypper-auto-verify`)
 - Stop and disable the user notifier timer/service for your user
 - Remove all helper systemd unit files and helper binaries
 - Remove user helper scripts, shell aliases, and Fish config snippets
@@ -769,6 +783,7 @@ If you prefer or need to remove components manually, the equivalent steps are:
 # 1. Stop and disable the root timers
 sudo systemctl disable --now zypper-autodownload.timer
 sudo systemctl disable --now zypper-cache-cleanup.timer
+sudo systemctl disable --now zypper-auto-verify.timer
 
 # 2. Stop and disable the user timer (run as regular user)
 systemctl --user disable --now zypper-notify-user.timer
@@ -778,6 +793,8 @@ sudo rm /etc/systemd/system/zypper-autodownload.service
 sudo rm /etc/systemd/system/zypper-autodownload.timer
 sudo rm /etc/systemd/system/zypper-cache-cleanup.service
 sudo rm /etc/systemd/system/zypper-cache-cleanup.timer
+sudo rm /etc/systemd/system/zypper-auto-verify.service
+sudo rm /etc/systemd/system/zypper-auto-verify.timer
 sudo rm /usr/local/bin/zypper-download-with-progress
 sudo rm /usr/local/bin/zypper-auto-helper
 
