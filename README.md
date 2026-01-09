@@ -40,7 +40,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
 * **Robust Zypper Error Handling (v54–v57):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications. Zypper locks are detected via both the canonical error message *and* zypp lockfiles, so the downloader/notifier will gracefully back off (and retry later) when a manual `zypper` or YaST is running. When the background downloader hits a solver conflict it preserves any downloaded RPMs in the cache and triggers a persistent "updates require your decision" notification with an **Install Now** action, showing how many updates are pending and a short package preview once a transaction can be summarised.
-* **Soar / Flatpak / Snap / Homebrew Integration (v55–v58):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), and a Homebrew `brew update` followed by conditional `brew upgrade`, so system packages, runtimes, Soar-managed apps, and Homebrew formulae stay aligned after system updates. Optional Soar/Homebrew helper commands are provided via `zypper-auto-helper --soar` and `zypper-auto-helper --brew`.
+* **Soar / Flatpak / Snap / Homebrew / pipx Integration (v55–v61):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), a Homebrew `brew update` followed by conditional `brew upgrade`, **and** (when enabled) `pipx upgrade-all` so that system packages, runtimes, Soar-managed apps, Homebrew formulae, and pipx‑managed Python CLI tools stay aligned after system updates. Optional helper commands are provided via `zypper-auto-helper --soar`, `zypper-auto-helper --brew`, and `zypper-auto-helper --pip-package` (alias: `--pipx`).
 * **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
 * **Improved Snapper Detection (v55–v56):** Recognises Tumbleweed's default root snapper configuration, treats `snapper list` permission errors ("No permissions.") as "snapshots exist but are root-only", and surfaces the current Snapper state (configured/missing/snapshots available) directly in the update notification.
 * **More Robust Notifier Timer (v55–v56):** Uses calendar-based scheduling plus an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
@@ -51,12 +51,12 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Works across all shells (Bash, Zsh, Fish)
 * **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
 * **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
-* **Stage-Based Download Progress (v50):** Real-time notifications showing download stages:
+* **Stage-Based Download Progress (v50–v61):** Real-time notifications showing download stages:
     * **"Checking for updates..."** - Refreshing repositories
     * **"Downloading updates... (X of Y packages)"** - Active download with real-time progress
     * **"✅ Downloads Complete!"** - Download finished with duration and package preview
     * **"Updates Ready to Install"** - Ready to apply with snapshot info
-* **Smart Download Detection (v49):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications.
+* **Smart Download Detection (v49–v61):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications. In v61 the notifier additionally re-checks `zypper dup --dry-run` when the downloader reports `complete:` and suppresses the "✅ Downloads Complete!" popup if there are no remaining updates, avoiding stale completion notifications after you have already installed everything manually.
 * **Safe Downloads (Root):** The downloader service is a simple, root-only worker that always runs at low priority and logs to `/var/log/zypper-auto`; network/AC safety decisions are enforced in the user-space notifier.
 * **Smart Safety Logic (User):** The notifier Python script uses `upower`, `inxi` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives. On laptops it only refreshes/inspects updates on AC power and non‑metered connections.
 * **Fixed Battery Detection (v48):** Corrected logic that was incorrectly identifying laptops as desktops, now properly detects batteries via `inxi` output.
@@ -190,6 +190,7 @@ zypper-auto-helper install         # Reinstall/upgrade
 zypper-auto-helper --reset-config  # Reset /etc/zypper-auto.conf to documented defaults (with backup)
 zypper-auto-helper --soar          # Install/upgrade the optional Soar CLI helper
 zypper-auto-helper --brew          # Install/upgrade Homebrew (brew) for the system/user
+zypper-auto-helper --pip-package    # Install/guide pipx and manage Python CLI tools (alias: --pipx)
 zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
 
@@ -206,8 +207,11 @@ Key options include:
 
 - **Post-update helpers**
   - `ENABLE_FLATPAK_UPDATES` / `ENABLE_SNAP_UPDATES` / `ENABLE_SOAR_UPDATES` /
-    `ENABLE_BREW_UPDATES` – `true` / `false` flags to control whether Flatpak,
-    Snap, Soar and Homebrew helpers run after `zypper dup`.
+    `ENABLE_BREW_UPDATES` / `ENABLE_PIPX_UPDATES` – `true` / `false` flags to
+    control whether Flatpak, Snap, Soar, Homebrew, and pipx helpers run after
+    `zypper dup`. When `ENABLE_PIPX_UPDATES=true` and `pipx` is installed, the
+    wrapper and Ready‑to‑Install helper automatically run `pipx upgrade-all`
+    after system updates to keep Python command‑line tools up to date.
 
 - **Timer intervals**
   - `DL_TIMER_INTERVAL_MINUTES` – how often the root downloader runs
@@ -666,6 +670,12 @@ systemctl status zypper-autodownload.service
 - The system is working as designed - updates only run on AC power and unmetered connections
 
 ### Version History
+
+- **v61** (2026-01-09): **pipx Integration & Smarter Download Completion**
+  - 🐍 **NEW: pipx helper and automatic upgrades** – added a dedicated `zypper-auto-helper --pip-package` (alias: `--pipx`) mode that installs `python313-pipx` via zypper (on request), runs `pipx ensurepath`, and can optionally run `pipx upgrade-all` for the target user. This makes pipx the recommended/default way to manage Python command‑line tools like `yt-dlp`, `black`, `ansible`, and `httpie`.
+  - 📦 **NEW: Config‑driven pipx post‑update step** – a new `ENABLE_PIPX_UPDATES` flag in `/etc/zypper-auto.conf` controls whether the zypper wrapper (`zypper-with-ps`) and the Ready‑to‑Install helper (`zypper-run-install`) run `pipx upgrade-all` after each `zypper dup`, so your pipx‑managed tools stay in sync with system updates.
+  - 🧠 **IMPROVED: "Downloads Complete" notification logic** – the notifier now re‑runs `pkexec zypper dup --dry-run` when it sees a `complete:` status from the downloader and **suppresses** the "✅ Downloads Complete!" popup if zypper reports "Nothing to do." This prevents misleading completion notifications after you have already installed all updates manually.
+  - 🧹 **FIXED: duplicate Soar summary header** – the zypper wrapper no longer prints a second stray "Soar (stable) Update & Sync" header after the pipx section; Soar’s update/sync block now appears exactly once in the post‑update flow.
 
 - **v59** (2026-01-02): **Ready-to-Install Konsole Fix & Install Helper Diagnostics**
   - 🪟 **FIXED: "Install Now" window closing immediately in Konsole** – the Ready-to-Install helper now runs via a dedicated `zypper-run-install --inner` mode inside the spawned terminal instead of relying on exported shell functions, so the Konsole window stays open reliably until you press Enter.
