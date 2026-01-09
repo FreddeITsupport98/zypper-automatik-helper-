@@ -2288,12 +2288,8 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     fi
 
     echo ""
-    echo "=========================================="
-    echo "  Soar (stable) Update & Sync"
-    echo ""
 
     # Always show service restart info, even if zypper reported errors
-    echo ""
     echo "=========================================="
     echo "  Post-Update Service Check"
     echo "=========================================="
