@@ -2079,12 +2079,29 @@ has_zypp_lock() {
         local pid
         pid=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            return 0
+            # Best-effort check that the recorded PID really looks like a
+            # zypper/YaST/zypp-related process and not some unrelated PID
+            # that re-used the number.
+            local comm cmd
+            comm=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
+            cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
+            if printf '%s\n%s\n' "$comm" "$cmd" | grep -qiE 'zypper|yast|y2base|zypp|packagekitd'; then
+                return 0
+            fi
+            # If the process is alive but not obviously zypper/YaST, treat the
+            # lock file as stale and fall through to the process scan below.
         fi
     fi
 
-    # Fallback: any running zypper process.
+    # Fallback: any obviously zypper/YaST/zypp-related process. This is a
+    # broader net than just "zypper" so we also catch YaST and zypp-refresh.
     if pgrep -x zypper >/dev/null 2>&1; then
+        return 0
+    fi
+    if pgrep -f -i 'yast' >/dev/null 2>&1; then
+        return 0
+    fi
+    if pgrep -f 'zypp.*refresh' >/dev/null 2>&1; then
         return 0
     fi
 
@@ -2971,13 +2988,17 @@ def is_zypper_locked(stderr_text: str | None = None) -> bool:
     """Best-effort detection of a zypper/libzypp lock.
 
     Checks both stderr text for the canonical message and the zypp
-    lockfile (/run/zypp.pid or /var/run/zypp.pid) to avoid false
-    positives.
+    lockfile (/run/zypp.pid or /var/run/zypp.pid) plus a few common
+    lock-owner processes (zypper, YaST/y2base, zypp-refresh, etc.).
     """
+    KNOWN_LOCK_OWNERS = ("zypper", "yast", "y2base", "zypp", "packagekitd")
     try:
+        # If zypper already told us "System management is locked", trust that.
         if stderr_text and "System management is locked" in stderr_text:
             return True
 
+        # Look at the canonical zypp lock files first; verify that the PID
+        # really belongs to a known zypper/YaST/zypp-style process.
         for pid_file in ("/run/zypp.pid", "/var/run/zypp.pid"):
             try:
                 with open(pid_file, "r", encoding="utf-8") as f:
@@ -2989,16 +3010,38 @@ def is_zypper_locked(stderr_text: str | None = None) -> bool:
                 continue
 
             try:
-                out = subprocess.check_output(
+                comm = subprocess.check_output(
                     ["ps", "-p", str(pid), "-o", "comm="],
                     text=True,
                     stderr=subprocess.DEVNULL,
                 ).strip().lower()
             except subprocess.CalledProcessError:
-                continue
+                comm = ""
 
-            if out and any(tok in out for tok in ("zypper", "yast")):
+            try:
+                cmd = subprocess.check_output(
+                    ["ps", "-p", str(pid), "-o", "args="],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip().lower()
+            except subprocess.CalledProcessError:
+                cmd = ""
+
+            candidate = comm + " " + cmd
+            if candidate and any(tok in candidate for tok in KNOWN_LOCK_OWNERS):
                 return True
+
+        # Fallback: scan the process list for any obviously zypper/YaST/zypp
+        # style processes even if the lock file is missing or stale.
+        try:
+            ps_out = subprocess.check_output(
+                ["ps", "-eo", "comm="], text=True, stderr=subprocess.DEVNULL
+            ).lower()
+            if any(owner in ps_out for owner in KNOWN_LOCK_OWNERS):
+                return True
+        except Exception:
+            pass
+
     except Exception as e:
         log_debug(f"Lock detection failed: {e}")
 
@@ -4437,8 +4480,16 @@ has_zypp_lock() {
         pid=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
         if [ -n "$pid" ]; then
             if kill -0 "$pid" 2>/dev/null; then
-                log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid"
-                return 0
+                # Double-check that this PID really looks like a zypper/YaST
+                # style process so we don't treat a reused PID as a live lock.
+                local comm cmd
+                comm=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
+                cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
+                if printf '%s\n%s\n' "$comm" "$cmd" | grep -qiE 'zypper|yast|y2base|zypp|packagekitd'; then
+                    log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid (comm='$comm')"
+                    return 0
+                fi
+                log "has_zypp_lock: ignoring non-zypp-looking process for lock file $ZYPP_LOCK_FILE (pid $pid, comm='$comm')"
             else
                 log "has_zypp_lock: ignoring stale zypp lock file $ZYPP_LOCK_FILE with pid $pid"
             fi
@@ -4447,11 +4498,24 @@ has_zypp_lock() {
         fi
     fi
 
-    # Fallback: any running zypper process.
+    # Fallback: any obviously zypper/YaST/zypp-related process. This is a
+    # broader net than just "zypper" so we also catch YaST and zypp-refresh.
     if pgrep -x zypper >/dev/null 2>&1; then
         local zpid
         zpid=$(pgrep -x zypper | head -n1 || true)
         log "has_zypp_lock: detected running zypper process pid ${zpid:-unknown}"
+        return 0
+    fi
+    if pgrep -f -i 'yast' >/dev/null 2>&1; then
+        local ypid
+        ypid=$(pgrep -f -i 'yast' | head -n1 || true)
+        log "has_zypp_lock: detected running YaST process pid ${ypid:-unknown}"
+        return 0
+    fi
+    if pgrep -f 'zypp.*refresh' >/dev/null 2>&1; then
+        local rpid
+        rpid=$(pgrep -f 'zypp.*refresh' | head -n1 || true)
+        log "has_zypp_lock: detected running zypp-refresh process pid ${rpid:-unknown}"
         return 0
     fi
 
