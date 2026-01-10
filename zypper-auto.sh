@@ -168,25 +168,41 @@ ENABLE_BREW_UPDATES=true
 ENABLE_PIPX_UPDATES=true
 
 # ---------------------------------------------------------------------
-# Timer intervals for downloader / notifier
+# Timer intervals for downloader / notifier / verification
 # ---------------------------------------------------------------------
 
 # DL_TIMER_INTERVAL_MINUTES
 # How often (in minutes) the *root* downloader (zypper-autodownload.timer)
-# should run. Allowed values: 1,5,10,15,30,60.
+# should run. Allowed values (MUST be one of these exact integers):
+#   1,5,10,15,30,60
 #   1  = every minute (minutely)
 #   5  = every 5 minutes
 #   10 = every 10 minutes
 #   15 = every 15 minutes
 #   30 = every 30 minutes
 #   60 = every hour (hourly)
+# Any other value is treated as invalid and will be reset to a safe default.
 DL_TIMER_INTERVAL_MINUTES=1
 
 # NT_TIMER_INTERVAL_MINUTES
 # How often (in minutes) the *user* notifier (zypper-notify-user.timer)
 # should run to check for updates and send notifications.
-# Uses the same allowed values as above.
+# Uses the same allowed values and rules as above (MUST be exactly one of
+# 1,5,10,15,30,60; anything else falls back to a safe default).
 NT_TIMER_INTERVAL_MINUTES=1
+
+# VERIFY_TIMER_INTERVAL_MINUTES
+# How often (in minutes) the verification/auto-repair timer
+# (zypper-auto-verify.timer) should run. Allowed values (MUST be one of
+# these exact integers): 1,5,10,15,30,60.
+#   1  = every minute (minutely)
+#   5  = every 5 minutes
+#   10 = every 10 minutes
+#   15 = every 15 minutes
+#   30 = every 30 minutes
+#   60 = every hour (hourly)
+# Any other value is treated as invalid and will be reset to a safe default.
+VERIFY_TIMER_INTERVAL_MINUTES=60
 
 # ---------------------------------------------------------------------
 # Installer log retention
@@ -270,6 +286,15 @@ NO_UPDATES_REMINDER_REPEAT_ENABLED=true
 # Valid values: true / false (case-sensitive). Default: true.
 UPDATES_READY_REMINDER_REPEAT_ENABLED=true
 
+# VERIFY_NOTIFY_USER_ENABLED
+# When "true", the periodic verification/auto-repair service sends a
+# desktop notification to the primary user when it detects and fixes
+# at least one problem. When "false", verification still runs and logs
+# repairs to /var/log/zypper-auto but does not notify on the desktop.
+#
+# Valid values: true / false (case-sensitive). Default: true.
+VERIFY_NOTIFY_USER_ENABLED=true
+
 # DOWNLOADER_DOWNLOAD_MODE
 # Controls how the background downloader behaves (value is case-sensitive):
 #   full        - (default) run "zypper dup --download-only" to
@@ -296,14 +321,12 @@ DUP_EXTRA_FLAGS=""
 EOF
         # Ensure config file has safe permissions (root-writable only)
         chmod 644 "${CONFIG_FILE}" || true
-# NOTE: How often updates are checked is controlled by two systemd timers,
-# not by this file:
-#   - Root downloader:   zypper-autodownload.timer  (default: minutely)
-#   - User notifier:     zypper-notify-user.timer   (default: minutely)
-# To change their frequency, edit the timers instead. For example:
-#   sudo systemctl edit --full zypper-autodownload.timer
-#   systemctl --user edit --full zypper-notify-user.timer
-# and adjust the OnCalendar= value (e.g. "OnCalendar=*:0/10" for every 10 min).
+# NOTE: The downloader, notifier, and verification timer schedules are
+# derived from DL_TIMER_INTERVAL_MINUTES, NT_TIMER_INTERVAL_MINUTES, and
+# VERIFY_TIMER_INTERVAL_MINUTES in this file. After changing these values,
+# re-run:
+#   sudo ./zypper-auto.sh install
+# so the systemd units are regenerated with the new schedule.
     fi
 
     # Basic numeric validation with safe fallbacks so a broken config
@@ -318,6 +341,30 @@ EOF
             CONFIG_WARNINGS+=("$msg")
             eval "$name=$default"
         fi
+    }
+
+    # Basic boolean validation for true/false style flags. When the key is
+    # completely unset we quietly use the default without logging a warning,
+    # so older configs without newer flags do not spam the logs.
+    validate_bool_flag() {
+        local name="$1" default="$2" value lower
+        eval "value=\"\${$name:-}\""
+        if [ -z "$value" ]; then
+            eval "$name=$default"
+            return
+        fi
+        lower="${value,,}"
+        case "$lower" in
+            true|false)
+                eval "$name=$lower"
+                ;;
+            *)
+                local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
+                log_info "$msg"
+                CONFIG_WARNINGS+=("$msg")
+                eval "$name=$default"
+                ;;
+        esac
     }
 
     validate_int MAX_LOG_FILES 10
@@ -369,8 +416,9 @@ EOF
         fi
     }
 
-    # Validate timer intervals: allow only 1,5,10,15,30,60 minutes to
-    # keep systemd OnCalendar expressions simple and predictable.
+    # Validate timer intervals (minutes) for downloader/notifier/verification:
+    # allow only 1,5,10,15,30,60 minutes to keep systemd OnCalendar
+    # expressions simple and predictable.
     validate_interval() {
         local name="$1" default="$2" value
         eval "value=\"\${$name:-}\""
@@ -394,17 +442,21 @@ EOF
 
     validate_interval DL_TIMER_INTERVAL_MINUTES 1
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
+    validate_interval VERIFY_TIMER_INTERVAL_MINUTES 60
+    validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
 
     # Log effective configuration summary for easier diagnostics
     log_debug "Effective configuration after validation:"
     log_debug "  DL_TIMER_INTERVAL_MINUTES=${DL_TIMER_INTERVAL_MINUTES}"
     log_debug "  NT_TIMER_INTERVAL_MINUTES=${NT_TIMER_INTERVAL_MINUTES}"
+    log_debug "  VERIFY_TIMER_INTERVAL_MINUTES=${VERIFY_TIMER_INTERVAL_MINUTES}"
     log_debug "  CACHE_EXPIRY_MINUTES=${CACHE_EXPIRY_MINUTES}"
     log_debug "  SNOOZE_SHORT_HOURS=${SNOOZE_SHORT_HOURS}"
     log_debug "  SNOOZE_MEDIUM_HOURS=${SNOOZE_MEDIUM_HOURS}"
     log_debug "  SNOOZE_LONG_HOURS=${SNOOZE_LONG_HOURS}"
     log_debug "  LOCK_RETRY_MAX_ATTEMPTS=${LOCK_RETRY_MAX_ATTEMPTS}"
     log_debug "  LOCK_RETRY_INITIAL_DELAY_SECONDS=${LOCK_RETRY_INITIAL_DELAY_SECONDS}"
+    log_debug "  VERIFY_NOTIFY_USER_ENABLED=${VERIFY_NOTIFY_USER_ENABLED}"
     log_debug "  DOWNLOADER_DOWNLOAD_MODE=${DOWNLOADER_DOWNLOAD_MODE}"
     log_debug "  DUP_EXTRA_FLAGS=${DUP_EXTRA_FLAGS}"
 
@@ -608,9 +660,21 @@ attempt_repair() {
     local repair_command="$2"
     local verify_command="$3"
     local max_attempts="${4:-2}"
-    
+
+    # Before attempting any repair, clear potential "failed" states on
+    # the core units we manage so systemd is willing to restart them.
+    # This is safe to run even when we're repairing something else.
+    systemctl reset-failed "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" \
+        >> "${LOG_FILE}" 2>&1 || true
+    if [ -n "${SUDO_USER:-}" ] && [ -n "${USER_BUS_PATH:-}" ]; then
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user reset-failed \
+                "${NT_SERVICE_NAME}.service" "${NT_SERVICE_NAME}.timer" \
+                >> "${LOG_FILE}" 2>&1 || true
+    fi
+
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))  # Track that we're attempting a repair
-    
+
     for i in $(seq 1 $max_attempts); do
         log_info "  → Repair attempt $i/$max_attempts: $check_name"
         if eval "$repair_command" >> "${LOG_FILE}" 2>&1; then
@@ -634,7 +698,7 @@ if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
     else
         log_error "✗ System downloader timer is active but NOT enabled (won't survive reboot)"
         if attempt_repair "enable timer for persistence" \
-            "systemctl enable ${DL_SERVICE_NAME}.timer" \
+            "systemctl unmask ${DL_SERVICE_NAME}.timer >/dev/null 2>&1 || true; systemctl enable ${DL_SERVICE_NAME}.timer" \
             "systemctl is-enabled ${DL_SERVICE_NAME}.timer"; then
             log_success "  ✓ Timer is now enabled for persistence"
         else
@@ -643,9 +707,9 @@ if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
     fi
 else
     log_error "✗ System downloader timer is NOT active"
-    # Try comprehensive repair
+    # Try comprehensive repair (including unmask in case the unit was masked)
     if attempt_repair "restart system downloader" \
-        "systemctl daemon-reload && systemctl enable --now ${DL_SERVICE_NAME}.timer" \
+        "systemctl unmask ${DL_SERVICE_NAME}.timer >/dev/null 2>&1 || true; systemctl daemon-reload && systemctl enable --now ${DL_SERVICE_NAME}.timer" \
         "systemctl is-active ${DL_SERVICE_NAME}.timer" 3; then
         log_success "  ✓ System downloader timer repaired"
     else
@@ -686,7 +750,7 @@ if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --us
     else
         log_error "✗ User timer is active but NOT enabled"
         if attempt_repair "enable user timer" \
-            "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user enable ${NT_SERVICE_NAME}.timer" \
+            "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user unmask ${NT_SERVICE_NAME}.timer >/dev/null 2>&1 || true; sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user enable ${NT_SERVICE_NAME}.timer" \
             "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user is-enabled ${NT_SERVICE_NAME}.timer"; then
             log_success "  ✓ User timer enabled"
         else
@@ -698,7 +762,7 @@ else
     # Multi-stage repair process
     log_info "  → Stage 1: Daemon reload and restart..."
     if attempt_repair "restart user service" \
-        "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user daemon-reload && sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user enable --now ${NT_SERVICE_NAME}.timer" \
+        "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user unmask ${NT_SERVICE_NAME}.timer >/dev/null 2>&1 || true; sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user daemon-reload && sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user enable --now ${NT_SERVICE_NAME}.timer" \
         "sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$USER_BUS_PATH systemctl --user is-active ${NT_SERVICE_NAME}.timer" 3; then
         log_success "  ✓ User notifier timer repaired"
     else
@@ -718,6 +782,7 @@ else
             log_info "  → Stage 3: Nuclear option - full service reset..."
             sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user stop "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
             sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user unmask "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
             sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1
             sleep 1
             sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
@@ -857,6 +922,53 @@ else
     log_info "ℹ Status file will be created on first run"
 fi
 
+# Check 11: Stale zypp lock cleanup
+log_debug "[11/12] Checking for stale zypp lock file..."
+if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
+    ZYPP_LOCK_FILE="/run/zypp.pid"
+    [ -f "/var/run/zypp.pid" ] && ZYPP_LOCK_FILE="/var/run/zypp.pid"
+    ZYPP_LOCK_PID=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
+    if [ -n "$ZYPP_LOCK_PID" ]; then
+        if ! kill -0 "$ZYPP_LOCK_PID" 2>/dev/null; then
+            log_error "⚠ Warning: Found stale zypp lock at $ZYPP_LOCK_FILE (PID $ZYPP_LOCK_PID is not running)"
+            log_info "  → Attempting to remove stale lock file..."
+            if rm -f "$ZYPP_LOCK_FILE" >> "${LOG_FILE}" 2>&1; then
+                log_success "  ✓ Removed stale zypp lock file"
+            else
+                log_error "  ✗ Failed to remove stale zypp lock file"
+                VERIFICATION_FAILED=1
+            fi
+        else
+            log_debug "  → zypp lock PID $ZYPP_LOCK_PID is alive; leaving lock in place"
+        fi
+    fi
+else
+    log_debug "No zypp lock file present"
+fi
+
+# Check 12: Root filesystem free space and cleanup
+log_debug "[12/12] Checking root filesystem free space..."
+ROOT_FREE_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
+    log_error "⚠ Warning: Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
+    log_info "  → Attempting to free space with 'zypper clean --all'..."
+    if zypper --non-interactive clean --all >> "${LOG_FILE}" 2>&1; then
+        sleep 1
+        ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
+        if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
+            log_success "  ✓ Free space after cleanup: ${ROOT_FREE_MB_AFTER}MB (>= 1024MB)"
+        else
+            log_error "  ✗ Still low on space after cleanup (currently ${ROOT_FREE_MB_AFTER:-unknown}MB)"
+            VERIFICATION_FAILED=1
+        fi
+    else
+        log_error "  ✗ 'zypper clean --all' failed; please free space manually"
+        VERIFICATION_FAILED=1
+    fi
+else
+    log_success "✓ Root filesystem has sufficient free space (${ROOT_FREE_MB:-unknown}MB)"
+fi
+
 # Calculate repair statistics
 PROBLEMS_FOUND=$REPAIR_ATTEMPTS
 PROBLEMS_FIXED=$((REPAIR_ATTEMPTS - VERIFICATION_FAILED))
@@ -880,13 +992,39 @@ else
     log_error ">>> $VERIFICATION_FAILED verification check(s) failed!"
     log_error "  → Auto-repair attempted but could not fix all issues"
     log_info "  → Review logs: ${LOG_FILE}"
+    if [ "${#CONFIG_WARNINGS[@]:-0}" -gt 0 ]; then
+        log_info "  → Config warnings detected; consider: sudo zypper-auto-helper --reset-config"
+    fi
     log_info "  → Common fixes:"
     log_info "     - Check systemd permissions: sudo loginctl enable-linger $SUDO_USER"
     log_info "     - Verify DBUS session: echo \$DBUS_SESSION_BUS_ADDRESS"
     log_info "     - Re-run installation: sudo $0 install"
 fi
 echo "" | tee -a "${LOG_FILE}"
-    
+
+# Optionally notify the primary user when auto-repair fixed issues.
+# This is primarily intended for the periodic zypper-auto-verify.timer
+# service, but also applies when --verify is run manually.
+if [ "$PROBLEMS_FIXED" -gt 0 ] && [[ "${VERIFY_NOTIFY_USER_ENABLED,,}" == "true" ]]; then
+    if command -v notify-send >/dev/null 2>&1; then
+        local summary details
+        summary="Fixed ${PROBLEMS_FIXED} issue(s) with the update system"
+        if [ "$VERIFICATION_FAILED" -gt 0 ]; then
+            details="Some issues remain; see ${LOG_FILE} for details."
+        else
+            details="All detected issues were repaired successfully."
+        fi
+
+        if [ -n "${SUDO_USER:-}" ] && [ -n "${USER_BUS_PATH:-}" ]; then
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+                notify-send -u normal -t 15000 \
+                -i "dialog-information" \
+                "${summary}" "${details}" \
+                >> "${LOG_FILE}" 2>&1 || true
+        fi
+    fi
+fi
+
     # Return exit code based on verification results
     return $VERIFICATION_FAILED
 }
@@ -1981,6 +2119,18 @@ fi
 log_info ">>> Creating (root) verification/auto-repair service: ${VERIFY_SERVICE_FILE}"
 update_status "Creating verification service..."
 log_debug "Writing service file: ${VERIFY_SERVICE_FILE}"
+
+# Derive systemd schedule for the verification timer from
+# VERIFY_TIMER_INTERVAL_MINUTES. We mirror the downloader's
+# behaviour: minutely/hourly for 1/60, or "*:0/N" for other values.
+VERIFY_ONBOOTSEC="${VERIFY_TIMER_INTERVAL_MINUTES}min"
+VERIFY_ONCALENDAR="minutely"
+if [ "${VERIFY_TIMER_INTERVAL_MINUTES}" -eq 60 ]; then
+    VERIFY_ONCALENDAR="hourly"
+elif [ "${VERIFY_TIMER_INTERVAL_MINUTES}" -ne 1 ]; then
+    VERIFY_ONCALENDAR="*:0/${VERIFY_TIMER_INTERVAL_MINUTES}"
+fi
+
 cat << EOF > ${VERIFY_SERVICE_FILE}
 [Unit]
 Description=Verify and auto-repair zypper-auto-helper installation
@@ -1992,12 +2142,15 @@ Type=oneshot
 ExecStart=/usr/local/bin/zypper-auto-helper --verify
 StandardOutput=append:${LOG_DIR}/service-logs/verify.log
 StandardError=append:${LOG_DIR}/service-logs/verify-error.log
+Restart=on-failure
+RestartSec=1h
 
 # Hardening
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
+ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp
 EOF
 log_success "Verification service file created"
 
@@ -2008,8 +2161,8 @@ cat << EOF > ${VERIFY_TIMER_FILE}
 Description=Run ${VERIFY_SERVICE_NAME} periodically to verify and auto-repair helper
 
 [Timer]
-OnBootSec=15min
-OnCalendar=daily
+OnBootSec=${VERIFY_ONBOOTSEC}
+OnCalendar=${VERIFY_ONCALENDAR}
 Persistent=true
 
 [Install]
@@ -5316,6 +5469,16 @@ fi
 # we don't warn when it is already present.
 SOAR_PRESENT=0
 
+# Optional: pipx helper (for Python CLI tools). Only warn when
+# ENABLE_PIPX_UPDATES=true and pipx is missing for the target user.
+PIPX_MISSING_FOR_UPDATES=0
+if [[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]]; then
+    if ! sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+        PIPX_MISSING_FOR_UPDATES=1
+        log_info "pipx is not installed for user $SUDO_USER but ENABLE_PIPX_UPDATES=true (optional)"
+    fi
+fi
+
 # 1) Check via the user's PATH
 if sudo -u "$SUDO_USER" command -v soar >/dev/null 2>&1; then
     SOAR_PRESENT=1
@@ -5330,6 +5493,10 @@ fi
 if [ "$SOAR_PRESENT" -eq 0 ]; then
     log_info "Soar CLI is not installed for user $SUDO_USER (optional)"
     MISSING_PACKAGES+=("soar")
+fi
+
+if [ "$PIPX_MISSING_FOR_UPDATES" -eq 1 ]; then
+    MISSING_PACKAGES+=("pipx")
 fi
 
 # Notify user about missing packages if any
@@ -5394,6 +5561,12 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
             echo "  Purpose: Optional CLI helper for keeping metadata in sync after updates" | tee -a "${LOG_FILE}"
             echo "  Install: curl -fsSL \"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\" | sh" | tee -a "${LOG_FILE}"
             echo "  Usage after install: soar sync" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+        elif [ "$pkg" = "pipx" ]; then
+            echo "pipx:" | tee -a "${LOG_FILE}"
+            echo "  Purpose: Manage standalone Python CLI tools (yt-dlp, black, ansible, httpie, etc.)" | tee -a "${LOG_FILE}"
+            echo "  Install: sudo zypper install python313-pipx" | tee -a "${LOG_FILE}"
+            echo "  Helper:  zypper-auto-helper --pip-package  (run without sudo)" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
         fi
     done

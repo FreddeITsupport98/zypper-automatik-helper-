@@ -115,12 +115,12 @@ This service's only job is to download packages when it's safe, and report progr
 +    * Runs `zypper-auto-helper --verify` as a oneshot root service.
 +    * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
 +* **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
-+    * Defaults to `OnBootSec=15min` and `OnCalendar=daily`, so health checks run
-+      shortly after boot and then once per day.
++    * Default schedule is derived from `VERIFY_TIMER_INTERVAL_MINUTES` in
++      `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
++      installer converts this into a simple calendar schedule in the same
++      way as the downloader timer (minutely, hourly, or `*:0/N`).
 +
 +### 4. The Notifier (User Service)
-
-This service's job is to check for updates and remind you, running as your standard user.
 
 * **Service:** `~/.config/systemd/user/zypper-notify-user.service`
     * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
@@ -215,8 +215,12 @@ Key options include:
 
 - **Timer intervals**
   - `DL_TIMER_INTERVAL_MINUTES` – how often the root downloader runs
-    (allowed: `1,5,10,15,30,60`).
-  - `NT_TIMER_INTERVAL_MINUTES` – how often the user notifier runs.
+    (allowed **only**: `1,5,10,15,30,60`; any other value is ignored and
+    replaced with a safe default).
+  - `NT_TIMER_INTERVAL_MINUTES` – how often the user notifier runs (same
+    allowed set and behaviour as above).
+  - `VERIFY_TIMER_INTERVAL_MINUTES` – how often the root verification/auto‑repair
+    service runs (again, allowed **only**: `1,5,10,15,30,60`).
   - The installer converts these into appropriate `OnCalendar` values, e.g.
     `*:0/10` for every 10 minutes or `hourly` for 60.
 
@@ -255,6 +259,10 @@ Key options include:
     "Snapshot XXXX Ready" / "Updates ready" notifications may be re-shown on
     later checks while the same snapshot is still pending. When `false`, each
     "Updates ready" state only generates one popup until the snapshot changes.
+  - `VERIFY_NOTIFY_USER_ENABLED` – when `true` (default), the periodic
+    verification/auto‑repair service sends a short desktop notification when it
+    detects and fixes at least one issue; when `false`, verification remains
+    fully automatic but quiet.
   - `DOWNLOADER_DOWNLOAD_MODE` – controls how the background downloader behaves.
     This value is **case-sensitive** and must be exactly:
       - `full`        – (default) run `zypper dup --download-only` to prefetch all
@@ -687,6 +695,7 @@ systemctl status zypper-autodownload.service
   - 🐍 **NEW: pipx helper and automatic upgrades** – added a dedicated `zypper-auto-helper --pip-package` (alias: `--pipx`) mode that installs `python313-pipx` via zypper (on request), runs `pipx ensurepath`, and can optionally run `pipx upgrade-all` for the target user. This makes pipx the recommended/default way to manage Python command‑line tools like `yt-dlp`, `black`, `ansible`, and `httpie`.
   - 📦 **NEW: Config‑driven pipx post‑update step** – a new `ENABLE_PIPX_UPDATES` flag in `/etc/zypper-auto.conf` controls whether the zypper wrapper (`zypper-with-ps`) and the Ready‑to‑Install helper (`zypper-run-install`) run `pipx upgrade-all` after each `zypper dup`, so your pipx‑managed tools stay in sync with system updates.
   - 🔔 **NEW: Reminder control flags** – added `LOCK_REMINDER_ENABLED`, `NO_UPDATES_REMINDER_REPEAT_ENABLED`, and `UPDATES_READY_REMINDER_REPEAT_ENABLED` so you can choose whether lock notifications, "No updates found" messages, and "Updates ready" popups repeat on every check or only once per state.
+  - 🩺 **NEW: Configurable auto‑verification timer & repair notifications** – added `VERIFY_TIMER_INTERVAL_MINUTES` to control how often the root health‑check service runs (using the same minute‑based presets as other timers) and `VERIFY_NOTIFY_USER_ENABLED` to toggle a short desktop notification whenever the periodic auto‑repair fixes at least one issue.
   - 🧠 **IMPROVED: "Downloads Complete" notification logic** – the notifier now re‑runs `pkexec zypper dup --dry-run` when it sees a `complete:` status from the downloader and **suppresses** the "✅ Downloads Complete!" popup if zypper reports "Nothing to do." This prevents misleading completion notifications after you have already installed all updates manually.
   - 🧹 **FIXED: duplicate Soar summary header** – the zypper wrapper no longer prints a second stray "Soar (stable) Update & Sync" header after the pipx section; Soar’s update/sync block now appears exactly once in the post‑update flow.
 
