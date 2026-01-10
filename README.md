@@ -243,6 +243,18 @@ Key options include:
   - `LOCK_RETRY_INITIAL_DELAY_SECONDS` – base delay (in seconds) used for the first
     lock retry. Subsequent retries multiply this base (1×, 2×, 3×, …). Set to `0`
     to fail fast when the lock is held. Default: `1`.
+  - `LOCK_REMINDER_ENABLED` – when `true` (default), the notifier shows a small
+    "Updates paused while zypper is running" notification on every check while
+    zypper/YaST holds the system management lock. When `false`, lock situations
+    are logged but no desktop popup is shown.
+  - `NO_UPDATES_REMINDER_REPEAT_ENABLED` – when `true` (default), identical
+    "No updates found" notifications may be re-shown on later checks while the
+    system remains fully up to date. When `false`, the "No updates" message is
+    shown once per state and then suppressed until new updates appear.
+  - `UPDATES_READY_REMINDER_REPEAT_ENABLED` – when `true` (default), identical
+    "Snapshot XXXX Ready" / "Updates ready" notifications may be re-shown on
+    later checks while the same snapshot is still pending. When `false`, each
+    "Updates ready" state only generates one popup until the snapshot changes.
   - `DOWNLOADER_DOWNLOAD_MODE` – controls how the background downloader behaves.
     This value is **case-sensitive** and must be exactly:
       - `full`        – (default) run `zypper dup --download-only` to prefetch all
@@ -671,9 +683,10 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
-- **v61** (2026-01-09): **pipx Integration & Smarter Download Completion**
+- **v61** (2026-01-09): **pipx Integration, Reminder Controls & Smarter Download Completion**
   - 🐍 **NEW: pipx helper and automatic upgrades** – added a dedicated `zypper-auto-helper --pip-package` (alias: `--pipx`) mode that installs `python313-pipx` via zypper (on request), runs `pipx ensurepath`, and can optionally run `pipx upgrade-all` for the target user. This makes pipx the recommended/default way to manage Python command‑line tools like `yt-dlp`, `black`, `ansible`, and `httpie`.
   - 📦 **NEW: Config‑driven pipx post‑update step** – a new `ENABLE_PIPX_UPDATES` flag in `/etc/zypper-auto.conf` controls whether the zypper wrapper (`zypper-with-ps`) and the Ready‑to‑Install helper (`zypper-run-install`) run `pipx upgrade-all` after each `zypper dup`, so your pipx‑managed tools stay in sync with system updates.
+  - 🔔 **NEW: Reminder control flags** – added `LOCK_REMINDER_ENABLED`, `NO_UPDATES_REMINDER_REPEAT_ENABLED`, and `UPDATES_READY_REMINDER_REPEAT_ENABLED` so you can choose whether lock notifications, "No updates found" messages, and "Updates ready" popups repeat on every check or only once per state.
   - 🧠 **IMPROVED: "Downloads Complete" notification logic** – the notifier now re‑runs `pkexec zypper dup --dry-run` when it sees a `complete:` status from the downloader and **suppresses** the "✅ Downloads Complete!" popup if zypper reports "Nothing to do." This prevents misleading completion notifications after you have already installed all updates manually.
   - 🧹 **FIXED: duplicate Soar summary header** – the zypper wrapper no longer prints a second stray "Soar (stable) Update & Sync" header after the pipx section; Soar’s update/sync block now appears exactly once in the post‑update flow.
 
