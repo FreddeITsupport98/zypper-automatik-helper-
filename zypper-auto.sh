@@ -4754,6 +4754,30 @@ RUN_UPDATE() {
     fi
 
     echo ""
+    echo "=========================================="
+    echo "  Python (pipx) Updates (optional)"
+    echo "=========================================="
+    echo ""
+
+    if [[ "${ENABLE_PIPX_UPDATES,,}" != "true" ]]; then
+        echo "ℹ️  pipx updates are disabled in /etc/zypper-auto.conf (ENABLE_PIPX_UPDATES=false)."
+        echo "    You can still manage Python CLI tools manually with pipx."
+        echo ""
+    else
+        if command -v pipx >/dev/null 2>&1; then
+            echo "Upgrading all pipx-managed Python command-line tools (pipx upgrade-all)..."
+            if pipx upgrade-all; then
+                echo "✅ pipx upgrade-all completed."
+            else
+                echo "⚠️  pipx upgrade-all failed (continuing)."
+            fi
+        else
+            echo "ℹ️  pipx is not installed - skipping Python CLI (pipx) updates."
+            echo "    Recommended: zypper-auto-helper --pip-package (run without sudo)"
+        fi
+    fi
+
+    echo ""
     echo "Checking which services need to be restarted..."
     echo ""
     
