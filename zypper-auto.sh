@@ -239,6 +239,37 @@ LOCK_RETRY_MAX_ATTEMPTS=10
 # waiting and fail fast when the lock is held.
 LOCK_RETRY_INITIAL_DELAY_SECONDS=1
 
+# LOCK_REMINDER_ENABLED
+# When "true", the user-space notifier shows a small desktop notification
+# whenever zypper/libzypp is locked by another process (YaST, another
+# zypper, systemd-zypp-refresh, etc.), and will repeat this reminder on
+# each notifier run while the lock is present.
+#
+# When "false", lock situations are still logged to
+# ~/.local/share/zypper-notify/notifier-detailed.log and reflected in
+# last-run-status.txt, but no desktop popup is shown.
+#
+# Valid values: true / false (case-sensitive). Default: true.
+LOCK_REMINDER_ENABLED=true
+
+# NO_UPDATES_REMINDER_REPEAT_ENABLED
+# When "true", the notifier may re-show identical "No updates found" messages
+# on subsequent checks while the system remains fully up to date.
+# When "false", the "No updates" notification is shown once per state and
+# then suppressed until the update state changes.
+#
+# Valid values: true / false (case-sensitive). Default: true.
+NO_UPDATES_REMINDER_REPEAT_ENABLED=true
+
+# UPDATES_READY_REMINDER_REPEAT_ENABLED
+# When "true", the notifier may re-show identical "Updates ready" messages
+# on subsequent checks while the same snapshot / update set is still pending.
+# When "false", the "Updates ready" notification is shown once per state and
+# then suppressed until a new snapshot or different set of updates is detected.
+#
+# Valid values: true / false (case-sensitive). Default: true.
+UPDATES_READY_REMINDER_REPEAT_ENABLED=true
+
 # DOWNLOADER_DOWNLOAD_MODE
 # Controls how the background downloader behaves (value is case-sensitive):
 #   full        - (default) run "zypper dup --download-only" to
@@ -402,6 +433,9 @@ EOF
     _mark_missing_key "LOCK_RETRY_MAX_ATTEMPTS"
     _mark_missing_key "LOCK_RETRY_INITIAL_DELAY_SECONDS"
     _mark_missing_key "DOWNLOADER_DOWNLOAD_MODE"
+    _mark_missing_key "LOCK_REMINDER_ENABLED"
+    _mark_missing_key "NO_UPDATES_REMINDER_REPEAT_ENABLED"
+    _mark_missing_key "UPDATES_READY_REMINDER_REPEAT_ENABLED"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -2079,7 +2113,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         delay=$((base_delay * attempt))
         echo ""
         echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
-        echo "Waiting $delay second(s) for the other updater to finish (attempt $attempt/$max_attempts)..."
+        echo "Retry $attempt/$max_attempts: waiting $delay second(s) for the other updater to finish..."
         sleep "$delay"
         attempt=$((attempt + 1))
     done
@@ -2637,7 +2671,41 @@ def _read_dup_extra_flags() -> list[str]:
         return []
 
 
+def _read_bool_from_config(name: str, default: bool) -> bool:
+    """Best-effort boolean reader for /etc/zypper-auto.conf.
+
+    Accepts typical shell-style booleans such as true/false, yes/no,
+    on/off, 1/0 (case-insensitive after stripping quotes and spaces).
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if not stripped.startswith(name + "="):
+                    continue
+                parts = stripped.split("=", 1)
+                if len(parts) != 2:
+                    continue
+                raw = parts[1].strip().strip("'\"").strip()
+                value = raw.lower()
+                if value in ("1", "true", "yes", "on", "enabled"):
+                    return True
+                if value in ("0", "false", "no", "off", "disabled"):
+                    return False
+        return default
+    except FileNotFoundError:
+        return default
+    except Exception as e:
+        log_debug(f"Failed to read {CONFIG_FILE} for {name}: {e}")
+        return default
+
+
 DUP_EXTRA_FLAGS = _read_dup_extra_flags()
+LOCK_REMINDER_ENABLED = _read_bool_from_config("LOCK_REMINDER_ENABLED", True)
+NO_UPDATES_REMINDER_REPEAT_ENABLED = _read_bool_from_config("NO_UPDATES_REMINDER_REPEAT_ENABLED", True)
+UPDATES_READY_REMINDER_REPEAT_ENABLED = _read_bool_from_config("UPDATES_READY_REMINDER_REPEAT_ENABLED", True)
 
 # --- Caching Functions ---
 def read_cache():
@@ -3377,23 +3445,28 @@ def get_updates():
             update_status("SKIPPED: Zypper locked by another process")
 
             # Show a gentle desktop notification so the user knows why
-            # the background check was skipped.
-            try:
-                lock_note = Notify.Notification.new(
-                    "Updates paused while zypper is running",
-                    "Background checks will retry automatically in about a minute.",
-                    "system-software-update",
-                )
-                lock_note.set_timeout(5000)
-                lock_note.set_hint(
-                    "x-canonical-private-synchronous",
-                    GLib.Variant("s", "zypper-locked"),
-                )
-                lock_note.show()
-            except Exception as ne:
-                log_debug(f"Could not show lock notification: {ne}")
+            # the background check was skipped. This reminder runs on
+            # every notifier cycle while the lock is present, unless
+            # LOCK_REMINDER_ENABLED=false in /etc/zypper-auto.conf.
+            if LOCK_REMINDER_ENABLED:
+                try:
+                    lock_note = Notify.Notification.new(
+                        "Updates paused while zypper is running",
+                        "Background checks will retry automatically in about a minute.",
+                        "system-software-update",
+                    )
+                    lock_note.set_timeout(5000)
+                    lock_note.set_hint(
+                        "x-canonical-private-synchronous",
+                        GLib.Variant("s", "zypper-locked"),
+                    )
+                    lock_note.show()
+                except Exception as ne:
+                    log_debug(f"Could not show lock notification: {ne}")
+            else:
+                log_info("Lock reminder notifications are disabled via LOCK_REMINDER_ENABLED=false; skipping desktop popup.")
 
-            return ""  # Return empty string to skip notification
+            return ""  # Return empty string to skip further processing in this cycle
 
         # 2) Check for PolicyKit / authentication style errors.
         lower_stderr = stderr_text.lower()
@@ -4180,12 +4253,12 @@ def main():
             last_notification = _read_last_notification()
             no_updates_key = "No updates found|Your system is already up to date."
             
-            if last_notification == no_updates_key:
-                log_info("'No updates' notification already shown, skipping duplicate")
+            if (not NO_UPDATES_REMINDER_REPEAT_ENABLED) and last_notification == no_updates_key:
+                log_info("'No updates' notification already shown, skipping duplicate (NO_UPDATES_REMINDER_REPEAT_ENABLED=false)")
                 return
             
-            # First time or changed - show notification
-            log_info("Showing 'no updates found' notification for the first time")
+            # First time or repeat - show notification and remember it
+            log_info("Showing 'no updates found' notification")
             _write_last_notification("No updates found", "Your system is already up to date.")
             
             n = Notify.Notification.new(
@@ -4222,9 +4295,12 @@ def main():
         last_notification = _read_last_notification()
         current_notification = f"{title}|{message}"
         
+        if (not UPDATES_READY_REMINDER_REPEAT_ENABLED) and last_notification == current_notification:
+            log_info("'Updates ready' notification already shown, skipping duplicate (UPDATES_READY_REMINDER_REPEAT_ENABLED=false)")
+            return
+        
         if last_notification == current_notification:
             log_debug("Notification unchanged, re-showing to keep it visible")
-            # Don't return - we need to keep showing it to keep it persistent
         else:
             log_info(f"Notification changed from [{last_notification}] to [{current_notification}]")
         
@@ -4413,7 +4489,7 @@ RUN_UPDATE() {
         delay=$((base_delay * attempt))
         echo ""
         echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
-        echo "Waiting $delay second(s) for the other updater to finish (attempt $attempt/$max_attempts)..."
+        echo "Retry $attempt/$max_attempts: waiting $delay second(s) for the other updater to finish..."
         log "RUN_UPDATE: lock still active before attempt $attempt/$max_attempts; sleeping ${delay}s"
         sleep "$delay"
         attempt=$((attempt + 1))
