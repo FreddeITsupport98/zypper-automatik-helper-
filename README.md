@@ -106,19 +106,25 @@ This service's only job is to download packages when it's safe, and report progr
 *        * `10` → runs every 10 minutes (`OnCalendar=*:0/10`)
 *        * `60` → runs hourly (`OnCalendar=hourly`)
 *
-+### 3. Periodic Verification / Auto-Repair Service
-+
-+In addition to the downloader, a small root service periodically runs the same
-+12-point verification and auto-repair logic as `zypper-auto-helper --verify`:
-+
-+* **Service:** `/etc/systemd/system/zypper-auto-verify.service`
-+    * Runs `zypper-auto-helper --verify` as a oneshot root service.
-+    * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
-+* **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
-+    * Default schedule is derived from `VERIFY_TIMER_INTERVAL_MINUTES` in
-+      `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
-+      installer converts this into a simple calendar schedule in the same
-+      way as the downloader timer (minutely, hourly, or `*:0/N`).
+### 3. Periodic Verification / Auto-Repair Service
+
+In addition to the downloader, a small root service periodically runs the same
+12-point verification and auto-repair logic as `zypper-auto-helper --verify`:
+
+* **Service:** `/etc/systemd/system/zypper-auto-verify.service`
+    * Runs `zypper-auto-helper --verify` as a oneshot root service.
+    * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
+    * Automatically resets failed states for the core units it manages and,
+      when configured, sends a short desktop notification whenever it fixes
+      one or more issues.
+    * Performs safety checks such as cleaning up stale `/run/zypp.pid`
+      locks (when the PID is no longer running) and running
+      `zypper clean --all` when free space on `/` falls below ~1 GiB.
+* **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
+    * Default schedule is derived from `VERIFY_TIMER_INTERVAL_MINUTES` in
+      `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
+      installer converts this into a simple calendar schedule in the same
+      way as the downloader timer (minutely, hourly, or `*:0/N`).
 +
 +### 4. The Notifier (User Service)
 
@@ -696,6 +702,7 @@ systemctl status zypper-autodownload.service
   - 📦 **NEW: Config‑driven pipx post‑update step** – a new `ENABLE_PIPX_UPDATES` flag in `/etc/zypper-auto.conf` controls whether the zypper wrapper (`zypper-with-ps`) and the Ready‑to‑Install helper (`zypper-run-install`) run `pipx upgrade-all` after each `zypper dup`, so your pipx‑managed tools stay in sync with system updates.
   - 🔔 **NEW: Reminder control flags** – added `LOCK_REMINDER_ENABLED`, `NO_UPDATES_REMINDER_REPEAT_ENABLED`, and `UPDATES_READY_REMINDER_REPEAT_ENABLED` so you can choose whether lock notifications, "No updates found" messages, and "Updates ready" popups repeat on every check or only once per state.
   - 🩺 **NEW: Configurable auto‑verification timer & repair notifications** – added `VERIFY_TIMER_INTERVAL_MINUTES` to control how often the root health‑check service runs (using the same minute‑based presets as other timers) and `VERIFY_NOTIFY_USER_ENABLED` to toggle a short desktop notification whenever the periodic auto‑repair fixes at least one issue.
+  - 🛠️ **IMPROVED: Auto‑repair robustness** – the verification helper now resets failed states on the core systemd units before attempting repairs, cleans up stale `/run/zypp.pid` locks when the recorded PID is no longer running, and runs `zypper clean --all` when free space on `/` falls below ~1 GiB (with a follow‑up check).
   - 🧠 **IMPROVED: "Downloads Complete" notification logic** – the notifier now re‑runs `pkexec zypper dup --dry-run` when it sees a `complete:` status from the downloader and **suppresses** the "✅ Downloads Complete!" popup if zypper reports "Nothing to do." This prevents misleading completion notifications after you have already installed all updates manually.
   - 🧹 **FIXED: duplicate Soar summary header** – the zypper wrapper no longer prints a second stray "Soar (stable) Update & Sync" header after the pipx section; Soar’s update/sync block now appears exactly once in the post‑update flow.
 
