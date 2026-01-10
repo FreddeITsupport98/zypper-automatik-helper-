@@ -46,6 +46,64 @@ except ImportError:
     print(error_msg) # Also print to terminal
     sys.exit(1)
 
+def _launch_fake_lock_retry_terminal() -> None:
+    """Open a konsole window that *simulates* the zypper lock-retry loop.
+
+    This does not touch the real /run/zypp.pid lock file or run zypper.
+    Instead, it reads the same LOCK_RETRY_* config from /etc/zypper-auto.conf
+    and prints the "Retry 1/10..." style messages so we can visually check
+    the UX of the prebuilt lock retry behaviour.
+    """
+
+    bash_script = r"""
+CONFIG_FILE="/etc/zypper-auto.conf"
+# Default values (will be overridden by the config if present)
+LOCK_RETRY_MAX_ATTEMPTS=${LOCK_RETRY_MAX_ATTEMPTS:-10}
+LOCK_RETRY_INITIAL_DELAY_SECONDS=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
+
+if [ -r "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
+max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
+base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
+
+echo ""
+echo "=========================================="
+echo "  Running System Update (LOCK TEST)"
+echo "=========================================="
+echo ""
+
+attempt=1
+while [ "$attempt" -le "$max_attempts" ]; do
+    delay=$((base_delay * attempt))
+    echo ""
+    echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
+    echo "Retry $attempt/$max_attempts: waiting $delay second(s) for the other updater to finish..."
+    sleep "$delay"
+    attempt=$((attempt + 1))
+done
+
+echo ""
+echo "System management is still locked by another update tool."
+echo "Close that other update tool (or wait for it to finish), then run"
+echo "this 'Ready to Install' action again."
+echo ""
+echo "Press Enter to close this window..."
+read || sleep 5
+"""
+
+    try:
+        logging.info("lock-test: launching konsole with fake lock-retry script")
+        subprocess.Popen(
+            ["konsole", "-e", "bash", "-lc", bash_script]
+        )
+    except Exception:
+        logging.error("lock-test: failed to launch konsole for fake lock retry")
+        logging.error(traceback.format_exc())
+
+
 def on_action(notification, action_id, user_data_script):
     """Callback to run when a notification action button is clicked.
 
@@ -53,6 +111,19 @@ def on_action(notification, action_id, user_data_script):
     the resolved script path, and any launcher process that is started.
     """
     logging.info("on_action: action_id=%r raw_user_data_script=%r", action_id, user_data_script)
+
+    # Special test action: open a konsole window that *simulates* the
+    # zypper lock retry loop using the same timing config.
+    if action_id == "retry-lock-test":
+        _launch_fake_lock_retry_terminal()
+        try:
+            notification.close()
+        except Exception:
+            logging.error("on_action: failed to close notification after lock test")
+            logging.error(traceback.format_exc())
+        GLib.MainLoop().quit()
+        return
+
     try:
         # We try to find the v33 script, but fall back to a generic one
         # for this test.
@@ -358,8 +429,10 @@ def _show_lock_retry_notification():
     n.set_urgency(Notify.Urgency.NORMAL)
     n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-lock"))
 
-    # Primary action: Retry (re-launch the helper script with lock handling).
-    n.add_action("retry", "Retry", on_action, action_script)
+    # Primary action: Retry (Test Only) – this simulates a lock by
+    # opening a konsole window that prints the same retry messages
+    # the real helper uses, without needing a real zypper lock.
+    n.add_action("retry-lock-test", "Retry (Test Only)", on_action, None)
     # Secondary action: just close/dismiss the notification.
     n.add_action("dismiss", "Dismiss", on_action, None)
 
