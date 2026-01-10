@@ -328,6 +328,50 @@ def _show_config_warning_notification():
     time.sleep(2)
 
 
+def _show_lock_retry_notification():
+    """Simulate a zypper lock notification with a Retry action.
+
+    This models the UX where system management is locked by another
+    updater (YaST, zypper, PackageKit, etc.) and the user is invited
+    to close the other tool and click "Retry" to launch the helper
+    again.
+    """
+
+    title = "System management is locked (Test)"
+    message = (
+        "Another update tool is currently using zypper/zypp.\n\n"
+        "Close the other updater (or wait for it to finish), then click "
+        "'Retry' to open the Ready-to-Install helper again."
+    )
+
+    action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
+    logging.info(
+        "LOCK_RETRY: title=%r body_preview=%r icon=%r script=%r",
+        title,
+        message.replace("\n", " ")[:200],
+        "dialog-warning",
+        action_script,
+    )
+
+    n = Notify.Notification.new(title, message, "dialog-warning")
+    n.set_timeout(0)
+    n.set_urgency(Notify.Urgency.NORMAL)
+    n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-lock"))
+
+    # Primary action: Retry (re-launch the helper script with lock handling).
+    n.add_action("retry", "Retry", on_action, action_script)
+    # Secondary action: just close/dismiss the notification.
+    n.add_action("dismiss", "Dismiss", on_action, None)
+
+    loop = GLib.MainLoop()
+    n.connect("closed", lambda *args: loop.quit())
+
+    n.show()
+    logging.info("Lock-retry notification sent. Waiting for user interaction...")
+    loop.run()
+    logging.info("Lock-retry test notification finished")
+
+
 def main():
     run_id = time.strftime("%Y%m%d-%H%M%S")
     logging.info("================ RUN %s START ================", run_id)
@@ -349,6 +393,7 @@ def main():
         _show_solver_error_notification()
         _show_policykit_error_notification()
         _show_config_warning_notification()
+        _show_lock_retry_notification()
 
         logging.info("Test finished.")
         print("Test finished.")
