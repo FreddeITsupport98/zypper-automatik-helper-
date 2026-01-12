@@ -1343,22 +1343,9 @@ run_brew_install_only() {
         fi
     fi
 
-    # Ensure basic prerequisites for the installer (inline to avoid ordering issues)
-    if ! command -v curl >/dev/null 2>&1; then
-        log_info "curl is required for the Homebrew installer. Installing via zypper..."
-        if ! zypper -n install curl >> "${LOG_FILE}" 2>&1; then
-            log_error "Failed to install curl. Please install it manually and re-run with --brew."
-            return 1
-        fi
-    fi
-
-    if ! command -v git >/dev/null 2>&1; then
-        log_info "git is required for Homebrew operations. Installing via zypper..."
-        if ! zypper -n install git >> "${LOG_FILE}" 2>&1; then
-            log_error "Failed to install git. Please install it manually and re-run with --brew."
-            return 1
-        fi
-    fi
+    # Ensure basic prerequisites for the installer (use common dependency helper)
+    check_and_install curl curl "required to download the Homebrew installer script"
+    check_and_install git git "required for Homebrew operations (manages formula repositories)"
 
     BREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
