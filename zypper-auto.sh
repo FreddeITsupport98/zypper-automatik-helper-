@@ -3827,18 +3827,36 @@ def on_action(notification, action_id, user_data):
         try:
             # Prefer to launch via systemd-run so the process is clearly
             # associated with the user session and not tied to this script.
+            # Explicitly propagate key environment variables (DISPLAY, DBUS, etc.)
+            # so GUI terminals like konsole/gnome-terminal can start even when
+            # the user systemd manager has a minimal environment.
+            env = os.environ.copy()
             try:
-                log_debug(f"Launching install script via systemd-run: {action_script}")
-                subprocess.Popen([
+                cmd = [
                     "systemd-run",
                     "--user",
                     "--scope",
-                    action_script,
-                ])
+                ]
+                for key in (
+                    "DISPLAY",
+                    "WAYLAND_DISPLAY",
+                    "XDG_SESSION_TYPE",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "XAUTHORITY",
+                ):
+                    val = env.get(key)
+                    if val:
+                        cmd.append(f"--setenv={key}={val}")
+                cmd.append(action_script)
+                log_debug(
+                    "Launching install script via systemd-run: "
+                    + " ".join(shlex.quote(part) for part in cmd)
+                )
+                subprocess.Popen(cmd, env=env)
             except FileNotFoundError:
                 # Fallback: run the script directly if systemd-run is not available.
                 log_debug(f"Launching install script directly: {action_script}")
-                subprocess.Popen([action_script])
+                subprocess.Popen([action_script], env=env)
             log_info("Install script launched successfully")
         except Exception as e:
             log_error(f"Failed to launch action script: {e}")
