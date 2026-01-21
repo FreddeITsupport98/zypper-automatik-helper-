@@ -11,6 +11,27 @@
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
+# Fast-path: if invoked as the installed helper (zypper-auto-helper) with an
+# unknown option-like first argument (starts with '-'), reject it immediately
+# before doing any logging, sanity checks, or installation work. This avoids
+# accidental full installs when the user mistypes a flag like '--bre' or
+# '-reset'.
+if [[ $# -gt 0 ]]; then
+    case "${1:-}" in
+        install|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
+        --soar|--brew|--pip-package|--pipx|--uninstall-zypper-helper|--uninstall-zypper|\
+        --reset-config|--reset-downloads|--reset-state)
+            # Known commands/options; continue into main logic
+            :
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo "Run 'zypper-auto-helper --help' for usage."
+            exit 1
+            ;;
+    esac
+fi
+
 # --- Logging / Configuration Defaults ---
 LOG_DIR="/var/log/zypper-auto"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
