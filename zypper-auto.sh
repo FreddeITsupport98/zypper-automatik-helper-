@@ -1076,6 +1076,81 @@ run_reset_config_only() {
     echo "  sudo ./zypper-auto.sh install" | tee -a "${LOG_FILE}"
 }
 
+# --- Helper: Reset download/notifier state (CLI) ---
+run_reset_download_state_only() {
+    log_info ">>> Resetting zypper-auto-helper download/notifier state..."
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  zypper-auto-helper State Reset" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "This will clear cached download status and notifier state files" | tee -a "${LOG_FILE}"
+    echo "without removing any services, timers, or configuration." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    update_status "Resetting download/notifier state..."
+
+    # 1. Root-level downloader state under /var/log/zypper-auto
+    if [ -d "${LOG_DIR}" ]; then
+        log_debug "Clearing root download state files under ${LOG_DIR}..."
+        rm -f "${LOG_DIR}/download-status.txt" \
+              "${LOG_DIR}/download-last-check.txt" \
+              "${LOG_DIR}/download-start-time.txt" \
+              "${LOG_DIR}/dry-run-last.txt" >> "${LOG_FILE}" 2>&1 || true
+    else
+        log_debug "Log directory ${LOG_DIR} does not exist; nothing to reset at root level"
+    fi
+
+    # 2. User-level notifier logs and caches
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        USER_LOG_DIR="${SUDO_USER_HOME}/.local/share/zypper-notify"
+        USER_CACHE_DIR="${SUDO_USER_HOME}/.cache/zypper-notify"
+
+        log_debug "Clearing user notifier state under ${USER_LOG_DIR} and ${USER_CACHE_DIR}..."
+
+        mkdir -p "${USER_LOG_DIR}" "${USER_CACHE_DIR}" >> "${LOG_FILE}" 2>&1 || true
+
+        rm -f "${USER_LOG_DIR}/last-run-status.txt" \
+              "${USER_LOG_DIR}"/notifier*.log >> "${LOG_FILE}" 2>&1 || true
+
+        rm -f "${USER_CACHE_DIR}/last_notification.txt" \
+              "${USER_CACHE_DIR}/last_check.txt" \
+              "${USER_CACHE_DIR}/env_state.txt" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    # 3. Reload and restart core systemd units so they pick up fresh state
+    log_debug "Reloading and restarting systemd units after state reset..."
+    systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
+    systemctl reset-failed \
+        "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" \
+        "${VERIFY_SERVICE_NAME}.service" "${VERIFY_SERVICE_NAME}.timer" \
+        >> "${LOG_FILE}" 2>&1 || true
+    systemctl restart "${DL_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
+    systemctl restart "${VERIFY_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
+
+    if [ -n "${SUDO_USER:-}" ]; then
+        USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
+        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+            systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1 || true
+        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+            systemctl --user reset-failed \
+                "${NT_SERVICE_NAME}.service" "${NT_SERVICE_NAME}.timer" \
+                >> "${LOG_FILE}" 2>&1 || true
+        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+            systemctl --user restart "${NT_SERVICE_NAME}.timer" \
+            >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    log_success "Download/notifier state reset completed"
+    update_status "SUCCESS: Download/notifier state reset"
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "State reset summary:" | tee -a "${LOG_FILE}"
+    echo "  - Cleared /var/log/zypper-auto/download-*.txt and dry-run-last.txt" | tee -a "${LOG_FILE}"
+    echo "  - Cleared user notifier logs and cached notification state" | tee -a "${LOG_FILE}"
+    echo "  - Reloaded and restarted core timers/services" | tee -a "${LOG_FILE}"
+}
+
 # --- Helper: Soar-only installation mode (CLI) ---
 run_soar_install_only() {
     log_info ">>> Soar installation helper mode..."
@@ -1549,6 +1624,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "                       (alias: --uninstall-zypper)"
     echo "  --reset-config    Reset /etc/zypper-auto.conf to documented defaults (with backup)"
+    echo "  --reset-downloads Clear cached download/notifier state and restart timers (alias: --reset-state)"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
@@ -1577,7 +1653,7 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     exit 0
 fi
 
-# Optional modes: Soar, Homebrew, pipx, and uninstall helper-only
+# Optional modes: Soar, Homebrew, pipx, reset-state, and uninstall helper-only
 if [[ "${1:-}" == "--soar" ]]; then
     log_info "Soar helper-only mode requested"
     run_soar_install_only
@@ -1593,6 +1669,10 @@ elif [[ "${1:-}" == "--pip-package" || "${1:-}" == "--pipx" ]]; then
 elif [[ "${1:-}" == "--reset-config" ]]; then
     log_info "Config reset mode requested"
     run_reset_config_only
+    exit $?
+elif [[ "${1:-}" == "--reset-downloads" || "${1:-}" == "--reset-state" ]]; then
+    log_info "Download/notifier state reset mode requested"
+    run_reset_download_state_only
     exit $?
 elif [[ "${1:-}" == "--uninstall-zypper-helper" || "${1:-}" == "--uninstall-zypper" ]]; then
     shift
@@ -1651,6 +1731,17 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
     # Jump to verification section (we'll use a function)
     run_verification_only
     exit $?
+fi
+
+# If we reach this point, all supported option-like commands (e.g. --verify,
+# --reset-config, --reset-downloads, --uninstall-zypper-helper, etc.) have
+# already been handled and exited above. Reject any unknown option that starts
+# with '-' so a typo like '-reset' does NOT silently fall back to a full
+# installation.
+if [[ $# -gt 0 && "${1:-}" == -* ]]; then
+    log_error "Unknown option: $1"
+    echo "Run 'zypper-auto-helper --help' for usage." | tee -a "${LOG_FILE}"
+    exit 1
 fi
 
 # --- 2b. Dependency Checks ---
