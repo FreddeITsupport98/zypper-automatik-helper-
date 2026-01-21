@@ -187,15 +187,16 @@ The script is idempotent. You can run this on a fresh install *or* on a PC with 
 After installation (restart your shell or run `source ~/.bashrc`), you can use:
 
 ```bash
-zypper-auto-helper --help          # Show help
-zypper-auto-helper --verify        # Run health check and auto-repair
-zypper-auto-helper --repair        # Alias for --verify
-zypper-auto-helper --diagnose      # Alias for --verify
-zypper-auto-helper --check         # Syntax check only
-zypper-auto-helper install         # Reinstall/upgrade
-zypper-auto-helper --reset-config  # Reset /etc/zypper-auto.conf to documented defaults (with backup)
-zypper-auto-helper --soar          # Install/upgrade the optional Soar CLI helper
-zypper-auto-helper --brew          # Install/upgrade Homebrew (brew) for the system/user
+zypper-auto-helper --help           # Show help
+zypper-auto-helper --verify         # Run health check and auto-repair
+zypper-auto-helper --repair         # Alias for --verify
+zypper-auto-helper --diagnose       # Alias for --verify
+zypper-auto-helper --check          # Syntax check only
+zypper-auto-helper install          # Reinstall/upgrade
+zypper-auto-helper --reset-config   # Reset /etc/zypper-auto.conf to documented defaults (with backup)
+zypper-auto-helper --reset-downloads  # Clear cached download/notifier state and restart timers (alias: --reset-state)
+zypper-auto-helper --soar           # Install/upgrade the optional Soar CLI helper
+zypper-auto-helper --brew           # Install/upgrade Homebrew (brew) for the system/user
 zypper-auto-helper --pip-package    # Install/guide pipx and manage Python CLI tools (alias: --pipx)
 zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
@@ -318,13 +319,13 @@ and comments.
 
 1.  **Wait.** The services run in the background. By default, both the downloader and notifier run every minute. You can change their frequency via `/etc/zypper-auto.conf` (`DL_TIMER_INTERVAL_MINUTES` / `NT_TIMER_INTERVAL_MINUTES`) and re-run `sudo ./zypper-auto.sh install`.
 2.  **Get Notified.** You will get a notification *only* when new updates are pending.
-    > **Snapshot 20251110-0 Ready**
-    > 12 updates are pending. Click 'Install' to begin.
-3.  **Install.** Click the **"Install"** button in the notification. This will open a terminal and prompt you for authentication to run `zypper dup`.
+3.    > **Snapshot 20251110-0 Ready**
+4.    > 12 updates are pending. Click 'Install' to begin.
+5.  **Install.** Click the **"Install"** button in the notification. This will open a terminal and prompt you for authentication to run `zypper dup`.
 
-### Quick Status Check
+### Quick Status & Safe Reset
 
-You can check the current status at any time:
+You can check the current status and, if needed, safely clear stale state:
 
 ```bash
 # Run comprehensive health check and auto-repair
@@ -338,6 +339,9 @@ cat ~/.local/share/zypper-notify/last-run-status.txt
 
 # Check download progress
 cat /var/log/zypper-auto/download-status.txt
+
+# If notifications or status get "stuck", clear cached state and restart timers
+zypper-auto-helper --reset-downloads   # alias: --reset-state
 ```
 
 ### Debugging
@@ -696,6 +700,10 @@ systemctl status zypper-autodownload.service
 - The system is working as designed - updates only run on AC power and unmetered connections
 
 ### Version History
+
+- **v62** (2026-01-21): **State Reset Helper & Typo-Safe CLI**
+  - 🧼 **NEW: Download/notifier state reset helper** – `zypper-auto-helper --reset-downloads` (alias: `--reset-state`) now clears downloader state files (`download-status.txt`, `download-last-check.txt`, `download-start-time.txt`, `dry-run-last.txt`) and user notifier caches (`last-run-status.txt`, `last_notification.txt`, etc.), then reloads and restarts the core timers/services. This is a safe, "soft" reset for fixing stale "X updates pending" notifications without reinstalling.
+  - 🧯 **IMPROVED: CLI safety for typos** – unknown option-like arguments (such as `--bre` or `-reset`) are now rejected **before** any installation/sanity work runs, printing a short "Unknown option" message and a pointer to `--help` instead of silently falling back to a full install.
 
 - **v61** (2026-01-09): **pipx Integration, Reminder Controls & Smarter Download Completion**
   - 🐍 **NEW: pipx helper and automatic upgrades** – added a dedicated `zypper-auto-helper --pip-package` (alias: `--pipx`) mode that installs `python313-pipx` via zypper (on request), runs `pipx ensurepath`, and can optionally run `pipx upgrade-all` for the target user. This makes pipx the recommended/default way to manage Python command‑line tools like `yt-dlp`, `black`, `ansible`, and `httpie`.
