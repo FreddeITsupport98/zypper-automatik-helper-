@@ -1830,13 +1830,18 @@ trigger_notifier() {
 }
 
 # Write status: refreshing
-# downloader doesn't spam errors when the user is running zypper/Yast.
+# downloader doesn't spam errors when the user is running zypper/YaST. We
+# rely on zypper's official exit code 7 to detect a held ZYPP lock instead
+# of grepping error messages or inspecting /run/zypp.pid, which can be
+# racy and fragile.
 handle_lock_or_fail() {
-    local err_file="$1"
-    if grep -q "System management is locked" "$err_file" 2>/dev/null; then
+    local exit_code="$1" err_file="$2"
+    if [ "$exit_code" -eq 7 ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Zypper is locked by another process; skipping this downloader run (will retry on next timer)" >&2
         echo "idle" > "$STATUS_FILE"
-        rm -f "$err_file"
+        if [ -n "$err_file" ] && [ -f "$err_file" ]; then
+            rm -f "$err_file"
+        fi
         exit 0
     fi
 }
@@ -1847,11 +1852,13 @@ date +%s > "$START_TIME_FILE"
 
 # Refresh repos
 REFRESH_ERR=$(mktemp)
-if ! /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"; then
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"
+ZYP_EXIT=$?
+if [ "$ZYP_EXIT" -ne 0 ]; then
     # If another zypper instance holds the lock, handle_lock_or_fail will
     # mark the status as idle and exit 0 so we do not treat it as an
     # error here.
-    handle_lock_or_fail "$REFRESH_ERR"
+    handle_lock_or_fail "$ZYP_EXIT" "$REFRESH_ERR"
 
     # At this point we know the error was not a simple lock. Classify it
     # as a network/repository problem so the notifier can surface a clear
@@ -1874,10 +1881,12 @@ rm -f "$REFRESH_ERR"
 # Get update info
 DRY_OUTPUT=$(mktemp)
 DRY_ERR=$(mktemp)
-if ! /usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"; then
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"
+ZYP_EXIT=$?
+if [ "$ZYP_EXIT" -ne 0 ]; then
     # Handle lock first; if it is just a lock, this will mark status idle
     # and exit 0 so we do not need to set an additional error state.
-    handle_lock_or_fail "$DRY_ERR"
+    handle_lock_or_fail "$ZYP_EXIT" "$DRY_ERR"
 
     # Non-lock failure at the dry-run stage – mirror the refresh handling
     # so the notifier can display a meaningful error notification.
@@ -1903,6 +1912,15 @@ fi
 # Extract package count and size
 PKG_COUNT=$(grep -oP "\d+(?= packages to upgrade)" "$DRY_OUTPUT" | head -1)
 DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown")
+
+# Persist full dry-run output so the user-space notifier can parse it
+# without running zypper itself. Use an atomic rename so readers never
+# see a partially-written file.
+DRYRUN_OUTPUT_FILE="$LOG_DIR/dry-run-last.txt"
+DRYRUN_TMP=$(mktemp)
+cp "$DRY_OUTPUT" "$DRYRUN_TMP"
+chmod 644 "$DRYRUN_TMP"
+mv "$DRYRUN_TMP" "$DRYRUN_OUTPUT_FILE"
 
 # Detect case where everything is already cached so we don't show a fake
 # download progress bar. In that situation zypper's summary contains a
@@ -1966,10 +1984,10 @@ fi
 # lock error to avoid noisy logs when another zypper instance is running.
 set +e
 DL_ERR=$(mktemp)
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only $DUP_EXTRA_FLAGS >/dev/null 2>&1
+/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only $DUP_EXTRA_FLAGS >/dev/null 2>"$DL_ERR"
 ZYP_RET=$?
-if [ $ZYP_RET -ne 0 ]; then
-    handle_lock_or_fail "$DL_ERR"
+if [ "$ZYP_RET" -ne 0 ]; then
+    handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
 fi
 rm -f "$DL_ERR"
 set -e
@@ -2715,6 +2733,11 @@ HISTORY_FILE = LOG_DIR / "update-history.log"
 MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_HISTORY_SIZE = 1 * 1024 * 1024  # 1MB
 
+# Path where the root downloader stores the last zypper dup --dry-run
+# output for the notifier to consume (written atomically by the
+# zypper-download-with-progress helper).
+DRYRUN_OUTPUT_FILE = "/var/log/zypper-auto/dry-run-last.txt"
+
 # Cache directory
 CACHE_DIR = Path.home() / ".cache" / "zypper-notify"
 CACHE_FILE = CACHE_DIR / "last_check.txt"
@@ -3124,70 +3147,6 @@ def check_network_quality() -> tuple[bool, str]:
         return True, "Could not check network"
 
 
-def is_zypper_locked(stderr_text: str | None = None) -> bool:
-    """Best-effort detection of a zypper/libzypp lock.
-
-    Checks both stderr text for the canonical message and the zypp
-    lockfile (/run/zypp.pid or /var/run/zypp.pid) plus a few common
-    lock-owner processes (zypper, YaST/y2base, zypp-refresh, etc.).
-    """
-    KNOWN_LOCK_OWNERS = ("zypper", "yast", "y2base", "zypp", "packagekitd")
-    try:
-        # If zypper already told us "System management is locked", trust that.
-        if stderr_text and "System management is locked" in stderr_text:
-            return True
-
-        # Look at the canonical zypp lock files first; verify that the PID
-        # really belongs to a known zypper/YaST/zypp-style process.
-        for pid_file in ("/run/zypp.pid", "/var/run/zypp.pid"):
-            try:
-                with open(pid_file, "r", encoding="utf-8") as f:
-                    pid_str = f.read().strip()
-                if not pid_str:
-                    continue
-                pid = int(pid_str)
-            except (OSError, ValueError):
-                continue
-
-            try:
-                comm = subprocess.check_output(
-                    ["ps", "-p", str(pid), "-o", "comm="],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip().lower()
-            except subprocess.CalledProcessError:
-                comm = ""
-
-            try:
-                cmd = subprocess.check_output(
-                    ["ps", "-p", str(pid), "-o", "args="],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip().lower()
-            except subprocess.CalledProcessError:
-                cmd = ""
-
-            candidate = comm + " " + cmd
-            if candidate and any(tok in candidate for tok in KNOWN_LOCK_OWNERS):
-                return True
-
-        # Fallback: scan the process list for any obviously zypper/YaST/zypp
-        # style processes even if the lock file is missing or stale.
-        try:
-            ps_out = subprocess.check_output(
-                ["ps", "-eo", "comm="], text=True, stderr=subprocess.DEVNULL
-            ).lower()
-            if any(owner in ps_out for owner in KNOWN_LOCK_OWNERS):
-                return True
-        except Exception:
-            pass
-
-    except Exception as e:
-        log_debug(f"Lock detection failed: {e}")
-
-    return False
-
-
 # Rotate log at startup if needed
 rotate_log_if_needed()
 log_info("=" * 60)
@@ -3567,155 +3526,52 @@ def is_safe() -> bool:
 
 
 def get_updates():
-    """Run zypper and return the output.
+    """Return the last dry-run output generated by the root downloader.
+
+    The root systemd service (zypper-download-with-progress) runs
+    "zypper dup --dry-run" as root and writes the full output to
+    DRYRUN_OUTPUT_FILE. The notifier only needs to read and parse that
+    file; it should not invoke zypper or pkexec itself.
 
     Returns:
-        - stdout string from "zypper dup --dry-run" when environment is safe
-        - "" (empty string) if environment is not safe and we skip zypper
-        - None if zypper/PolicyKit fails
+        - stdout string from the last dry-run when environment is safe
+        - "" (empty string) if environment is not safe or no data is available
     """
-    log_info("Starting update check...")
-    try:
-        safe = is_safe()
+    log_info("Starting update check (no pkexec; using cached dry-run output)...")
 
-        if not safe:
-            # Environment not safe (battery or metered). We already showed
-            # an environment change notification, so just skip zypper.
-            log_info("Environment not safe for background updates; skipping zypper.")
+    # Respect environment safety (metered/battery) for *notifications*,
+    # even though we no longer run zypper here.
+    safe = is_safe()
+    if not safe:
+        log_info("Environment not safe for background updates; skipping notification.")
+        return ""
+
+    try:
+        if not os.path.exists(DRYRUN_OUTPUT_FILE):
+            log_info(f"Dry-run output file not found: {DRYRUN_OUTPUT_FILE}")
+            update_status("SKIPPED: No dry-run data from downloader yet")
             return ""
 
-        log_info("Safe to refresh. Running full check...")
-        update_status("Running zypper refresh...")
-        log_debug("Executing: pkexec zypper refresh")
-        
-        subprocess.run(
-            ["pkexec", "zypper", "--non-interactive", "--no-gpg-checks", "refresh"],
-            check=True,
-            capture_output=True,
-        )
-        log_info("Zypper refresh completed successfully")
-
-        update_status("Running zypper dup --dry-run...")
-        log_debug("Executing: pkexec zypper dup --dry-run")
-
-        dup_cmd = ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run", *DUP_EXTRA_FLAGS]
-        result = subprocess.run(
-            dup_cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        log_info("Zypper dry-run completed successfully")
-        return result.stdout
-
-    except subprocess.CalledProcessError as e:
-        """Handle zypper failures more intelligently.
-
-        - Distinguish between a normal zypper lock, PolicyKit errors,
-          and solver/interaction errors (e.g. vendor conflicts).
-        """
-        # Normalise stderr/stdout to strings
-        stderr_text = ""
-        stdout_text = ""
-        if e.stderr:
-            stderr_text = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)
-        if e.stdout:
-            stdout_text = e.stdout.decode() if isinstance(e.stdout, bytes) else str(e.stdout)
-
-        # 1) Zypper is locked by another process – this is expected sometimes.
-        if is_zypper_locked(stderr_text):
-            log_info("Zypper is currently locked by another process (likely the downloader or a manual zypper run). Skipping this check.")
-            update_status("SKIPPED: Zypper locked by another process")
-
-            # Show a gentle desktop notification so the user knows why
-            # the background check was skipped. This reminder runs on
-            # every notifier cycle while the lock is present, unless
-            # LOCK_REMINDER_ENABLED=false in /etc/zypper-auto.conf.
-            if LOCK_REMINDER_ENABLED:
-                try:
-                    lock_note = Notify.Notification.new(
-                        "Updates paused while zypper is running",
-                        "Background checks will retry automatically in about a minute.",
-                        "system-software-update",
-                    )
-                    lock_note.set_timeout(5000)
-                    lock_note.set_hint(
-                        "x-canonical-private-synchronous",
-                        GLib.Variant("s", "zypper-locked"),
-                    )
-                    lock_note.show()
-                except Exception as ne:
-                    log_debug(f"Could not show lock notification: {ne}")
-            else:
-                log_info("Lock reminder notifications are disabled via LOCK_REMINDER_ENABLED=false; skipping desktop popup.")
-
-            return ""  # Return empty string to skip further processing in this cycle
-
-        # 2) Check for PolicyKit / authentication style errors.
-        lower_stderr = stderr_text.lower()
-        polkit_markers = (
-            "polkit",
-            "authentication is required",
-            "authentication failed",
-            "not authorized",
-            "not authorised",
-        )
-        if any(marker in lower_stderr for marker in polkit_markers):
-            log_error("Policy Block Failure: PolicyKit/PAM refused command")
-            update_status("FAILED: PolicyKit/PAM authentication error")
-            if stderr_text:
-                log_error(f"Policy Error: {stderr_text.strip()}")
-            if stdout_text:
-                log_debug(f"Command stdout: {stdout_text}")
-            return None
-
-        # 3) Otherwise, treat as a normal zypper/solver error that needs manual action.
-        log_error("Zypper dry-run failed: manual intervention required")
-        if stderr_text:
-            log_debug(f"Zypper stderr: {stderr_text.strip()}")
-
-        # Try to extract the first 'Problem:' line to show a useful hint.
-        problem_line = ""
-        for line in stdout_text.splitlines():
-            if line.strip().startswith("Problem:"):
-                problem_line = line.strip()
-                break
-
-        if problem_line:
-            summary = problem_line
-        else:
-            summary = "Zypper dup --dry-run failed. See logs for detailed information."
-
-        update_status("FAILED: Zypper dry-run requires manual decision")
-        err_title = "Updates require manual decision"
-        err_message = (
-            summary
-            + "\n\n"
-            + "Open a terminal and run:\n"
-            + "  sudo zypper dup\n"
-            + "to resolve this interactively. After that, the notifier will resume normally."
-        )
-
-        n = Notify.Notification.new(err_title, err_message, "dialog-warning")
-        n.set_timeout(30000)  # 30 seconds
-        n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-error"))
-
-        # Add an action button to launch the interactive helper in a terminal
-        action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
-        n.add_action("install", "Open Helper", on_action, action_script)
-
-        log_info("Manual-intervention notification displayed (with Open Helper action)")
-
-        # Run a short GLib main loop so the user can click the action
-        loop = GLib.MainLoop()
-        n.connect("closed", lambda *args: loop.quit())
-        n.show()
         try:
-            loop.run()
-        except KeyboardInterrupt:
-            log_info("Manual-intervention main loop interrupted")
+            with open(DRYRUN_OUTPUT_FILE, "r", encoding="utf-8") as f:
+                output = f.read()
+        except Exception as e:
+            log_error(f"Failed to read dry-run output file {DRYRUN_OUTPUT_FILE}: {e}")
+            update_status("FAILED: Could not read dry-run data from downloader")
+            return ""
 
-        return None
+        if not output.strip():
+            log_info("Dry-run output file is empty; treating as no updates.")
+            update_status("SKIPPED: Empty dry-run data from downloader")
+            return ""
+
+        log_info("Loaded dry-run output from downloader successfully")
+        return output
+
+    except Exception as e:
+        log_error(f"Unexpected error while loading dry-run data: {e}")
+        update_status("FAILED: Unexpected error while loading dry-run data")
+        return ""
 
 def extract_package_preview(output: str, max_packages: int = 5) -> list:
     """Extract a preview of packages being updated.
