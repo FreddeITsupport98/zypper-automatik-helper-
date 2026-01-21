@@ -1906,16 +1906,6 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
 fi
 rm -f "$DRY_ERR"
 
-if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
-    echo "idle" > "$STATUS_FILE"
-    rm -f "$DRY_OUTPUT"
-    exit 0
-fi
-
-# Extract package count and size
-PKG_COUNT=$(grep -oP "\d+(?= packages to upgrade)" "$DRY_OUTPUT" | head -1)
-DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown")
-
 # Persist full dry-run output so the user-space notifier can parse it
 # without running zypper itself. Use an atomic rename so readers never
 # see a partially-written file.
@@ -1924,6 +1914,19 @@ DRYRUN_TMP=$(mktemp)
 cp "$DRY_OUTPUT" "$DRYRUN_TMP"
 chmod 644 "$DRYRUN_TMP"
 mv "$DRYRUN_TMP" "$DRYRUN_OUTPUT_FILE"
+
+if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
+    # No packages to upgrade; mark idle so the notifier shows a
+    # "no updates" state on the next run. DRYRUN_OUTPUT_FILE already
+    # contains the latest "Nothing to do" output for reference.
+    echo "idle" > "$STATUS_FILE"
+    rm -f "$DRY_OUTPUT"
+    exit 0
+fi
+
+# Extract package count and size
+PKG_COUNT=$(grep -oP "\d+(?= packages to upgrade)" "$DRY_OUTPUT" | head -1)
+DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown")
 
 # Detect case where everything is already cached so we don't show a fake
 # download progress bar. In that situation zypper's summary contains a
@@ -2347,6 +2350,20 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     
     if [[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]]; then
         if command -v snap >/dev/null 2>&1; then
+            # Best-effort: ensure snapd services/sockets are enabled so
+            # "snap refresh" can talk to the daemon. We keep failures
+            # non-fatal and fall back to the existing error message.
+            echo "Ensuring snapd services are enabled (snapd.apparmor, snapd.seeded, snapd, snapd.socket)..."
+            if systemctl list-unit-files snapd.service >/dev/null 2>&1; then
+                # Prefer sudo if available, otherwise fall back to pkexec.
+                if command -v sudo >/dev/null 2>&1; then
+                    sudo systemctl enable snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket >/dev/null 2>&1 || \
+                    pkexec systemctl enable snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket >/dev/null 2>&1 || true
+                else
+                    pkexec systemctl enable snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket >/dev/null 2>&1 || true
+                fi
+            fi
+
             if pkexec snap refresh; then
                 echo "✅ Snap updates completed."
             else
@@ -2355,7 +2372,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         else
             echo "⚠️  Snapd is not installed - skipping Snap updates."
             echo "   To install: sudo zypper install snapd"
-            echo "   Then enable: sudo systemctl enable --now snapd"
+            echo "   Then enable: sudo systemctl enable snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket"
         fi
     else
         echo "ℹ️  Snap updates are disabled in /etc/zypper-auto.conf (ENABLE_SNAP_UPDATES=false)."
