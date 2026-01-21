@@ -457,8 +457,11 @@ EOF
     log_debug "  LOCK_RETRY_MAX_ATTEMPTS=${LOCK_RETRY_MAX_ATTEMPTS}"
     log_debug "  LOCK_RETRY_INITIAL_DELAY_SECONDS=${LOCK_RETRY_INITIAL_DELAY_SECONDS}"
     log_debug "  VERIFY_NOTIFY_USER_ENABLED=${VERIFY_NOTIFY_USER_ENABLED}"
-    log_debug "  DOWNLOADER_DOWNLOAD_MODE=${DOWNLOADER_DOWNLOAD_MODE}"
-    log_debug "  DUP_EXTRA_FLAGS=${DUP_EXTRA_FLAGS}"
+    # Use parameter expansion defaults here so set -u does not trip on
+    # configs that do not yet define these keys; validation and
+    # missing-key handling below will still normalise them.
+    log_debug "  DOWNLOADER_DOWNLOAD_MODE=${DOWNLOADER_DOWNLOAD_MODE:-full}"
+    log_debug "  DUP_EXTRA_FLAGS=${DUP_EXTRA_FLAGS:-}"
 
     # DOWNLOADER_DOWNLOAD_MODE must be spelled exactly "full" or
     # "detect-only" (case-sensitive). Anything else is reported as
