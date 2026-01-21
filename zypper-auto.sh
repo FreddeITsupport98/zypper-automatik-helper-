@@ -1285,6 +1285,42 @@ run_uninstall_helper_only() {
     echo "  sudo sh zypper-auto.sh install" | tee -a "${LOG_FILE}"
 }
 
+# --- Helper function to check and install a dependency ---
+check_and_install() {
+    local cmd=$1
+    local package=$2
+    local purpose=$3
+
+    log_debug "Checking for command: $cmd (package: $package)"
+    
+    if ! command -v "$cmd" &> /dev/null; then
+        log_info "---"
+        log_info "⚠️  Dependency missing: '$cmd' ($purpose)."
+        log_info "   This is provided by the package '$package'."
+        read -p "   May I install it for you? (y/n) " -n 1 -r
+        echo
+        log_debug "User response: $REPLY"
+        
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Installing $package..."
+            update_status "Installing dependency: $package"
+            
+            if ! sudo zypper install -y "$package" >> "${LOG_FILE}" 2>&1; then
+                log_error "Failed to install $package. Please install it manually and re-run this script."
+                update_status "FAILED: Could not install $package"
+                exit 1
+            fi
+            log_success "Successfully installed $package"
+        else
+            log_error "Dependency '$package' is required. Please install it manually and re-run this script."
+            update_status "FAILED: Required dependency $package not installed"
+            exit 1
+        fi
+    else
+        log_success "Command '$cmd' found"
+    fi
+}
+
 # --- Helper: Homebrew-only installation mode (CLI) ---
 run_brew_install_only() {
     log_info ">>> Homebrew (brew) installation helper mode..."
@@ -1603,42 +1639,6 @@ if [[ "${1:-}" == "--verify" || "${1:-}" == "--repair" || "${1:-}" == "--diagnos
     VERIFICATION_ONLY_MODE=1
     # We'll jump to the verification section after defining all variables
 fi
-
-# --- Helper function to check and install ---
-check_and_install() {
-    local cmd=$1
-    local package=$2
-    local purpose=$3
-
-    log_debug "Checking for command: $cmd (package: $package)"
-    
-    if ! command -v $cmd &> /dev/null; then
-        log_info "---"
-        log_info "⚠️  Dependency missing: '$cmd' ($purpose)."
-        log_info "   This is provided by the package '$package'."
-        read -p "   May I install it for you? (y/n) " -n 1 -r
-        echo
-        log_debug "User response: $REPLY"
-        
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Installing $package..."
-            update_status "Installing dependency: $package"
-            
-            if ! sudo zypper install -y "$package" >> "${LOG_FILE}" 2>&1; then
-                log_error "Failed to install $package. Please install it manually and re-run this script."
-                update_status "FAILED: Could not install $package"
-                exit 1
-            fi
-            log_success "Successfully installed $package"
-        else
-            log_error "Dependency '$package' is required. Please install it manually and re-run this script."
-            update_status "FAILED: Required dependency $package not installed"
-            exit 1
-        fi
-    else
-        log_success "Command '$cmd' found"
-    fi
-}
 
 # Skip installation if we're only verifying
 if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
