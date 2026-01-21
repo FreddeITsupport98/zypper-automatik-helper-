@@ -4912,6 +4912,15 @@ RUN_UPDATE() {
 
     log "RUN_UPDATE: finished (UPDATE_SUCCESS=$UPDATE_SUCCESS)"
 
+    # After an interactive update, clear cached downloader state so the
+    # next background run recomputes everything from scratch. This avoids
+    # stale "Ready to install" notifications after you just installed updates.
+    log "RUN_UPDATE: clearing downloader cache files after interactive run"
+    set +e
+    pkexec rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt 2>>"$LOG_FILE" || \
+        rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt 2>>"$LOG_FILE" || true
+    set -e
+
     # Keep the terminal open so the user can read the output, even if stdin
     # is not a normal TTY or "read" would normally fail under set -e.
     echo "Press Enter to close this window..."
