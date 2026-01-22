@@ -11,6 +11,25 @@
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 
+# Distro guard: only allow running on openSUSE Tumbleweed or Slowroll
+if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+else
+    echo "Cannot detect Linux distribution (missing /etc/os-release). Aborting." >&2
+    exit 1
+fi
+
+case "${NAME:-}" in
+    "openSUSE Tumbleweed"|"openSUSE Slowroll")
+        # Supported distributions; continue
+        ;;
+    *)
+        echo "This installer only supports openSUSE Tumbleweed or Slowroll (detected: ${NAME:-unknown}). Aborting." >&2
+        exit 1
+        ;;
+esac
+
 # Fast-path: if invoked as the installed helper (zypper-auto-helper) with an
 # unknown option-like first argument (starts with '-'), reject it immediately
 # before doing any logging, sanity checks, or installation work. This avoids
