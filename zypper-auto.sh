@@ -628,10 +628,21 @@ log_success "Root privileges confirmed"
 # Load configuration now that we have root privileges (for /etc writes)
 load_config
 
+# Prefer SUDO_USER when present (normal case when run via sudo).
+# When invoked by systemd services (e.g. --verify from zypper-auto-verify
+# service), SUDO_USER may be empty; in that case, fall back to the
+# primary logged-in non-root user so verification can still run.
 if [ -z "${SUDO_USER:-}" ]; then
-    log_error "Could not detect the user. Please run with 'sudo', not as pure root."
-    update_status "FAILED: SUDO_USER not detected"
-    exit 1
+    # Try to detect a non-root user with an active login session.
+    PRIMARY_USER=$(loginctl list-users --no-legend 2>/dev/null | awk '$1 != 0 {print $2; exit}') || PRIMARY_USER=""
+    if [ -n "$PRIMARY_USER" ]; then
+        SUDO_USER="$PRIMARY_USER"
+        log_info "SUDO_USER not set; falling back to PRIMARY_USER=$SUDO_USER for verification/maintenance modes"
+    else
+        log_error "Could not detect the user. Please run with 'sudo', not as pure root."
+        update_status "FAILED: SUDO_USER not detected"
+        exit 1
+    fi
 fi
 log_success "Detected user: $SUDO_USER"
 
@@ -2718,30 +2729,8 @@ if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
 
 # Wrap zypper command
 function zypper --wraps zypper --description "Wrapper for zypper with post-update checks"
-    # Check if we already have sudo in the command (avoid double sudo)
-    set -l has_sudo 0
-    for arg in $argv
-        if test "$arg" = "sudo"
-            set has_sudo 1
-            break
-        end
-    end
-    
-    # Call the wrapper script (which handles sudo internally)
+    # Call the wrapper script (which handles sudo and locking internally)
     ~/.local/bin/zypper-with-ps $argv
-end
-
-# Wrap sudo command when used with zypper
-function sudo --wraps sudo --description "Wrapper for sudo to intercept zypper commands"
-    # Check if first argument is zypper
-    if test (count $argv) -gt 0; and test "$argv[1]" = "zypper"
-        # Remove 'zypper' from argv and call our zypper wrapper
-        set -l zypper_args $argv[2..-1]
-        ~/.local/bin/zypper-with-ps $zypper_args
-    else
-        # Not a zypper command, use real sudo
-        command sudo $argv
-    end
 end
 FISHEOF
     chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config/fish"
@@ -3966,6 +3955,14 @@ def main():
                                 download_size = parts[2] if len(parts) > 2 else "unknown size"
                                 pkg_downloaded = parts[3] if len(parts) > 3 else "0"
                                 percent = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+                                # Manual interactive zypper runs mark the size as "manual"
+                                # via the wrapper script. In that case we avoid showing an
+                                # extra desktop progress popup and let the terminal output
+                                # act as the primary indicator.
+                                if download_size == "manual":
+                                    log_info("Download status indicates manual zypper run; skipping download popup")
+                                    return
 
                                 log_info(
                                     f"Stage: Downloading {pkg_downloaded} of {pkg_total} packages ({download_size})"
