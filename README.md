@@ -135,7 +135,7 @@ In addition to the downloader, a small root service periodically runs the same
     * Default schedule is derived from `NT_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (same allowed values as above).
     * By changing `NT_TIMER_INTERVAL_MINUTES` (e.g. to 10 or 60) and re-running the installer, you can control how often the notifier checks and pops notifications.
 
-### 4. The "Brains": `~/.local/bin/zypper-notify-updater.py`
+### 5. The "Brains": `~/.local/bin/zypper-notify-updater.py`
 
 This Python script is the core of the system, run by the `zypper-notify-user.service` on the schedule defined by the user timer.
 
@@ -195,9 +195,24 @@ zypper-auto-helper --check          # Syntax check only
 zypper-auto-helper install          # Reinstall/upgrade
 zypper-auto-helper --reset-config   # Reset /etc/zypper-auto.conf to documented defaults (with backup)
 zypper-auto-helper --reset-downloads  # Clear cached download/notifier state and restart timers (alias: --reset-state)
+
+# Optional helpers
 zypper-auto-helper --soar           # Install/upgrade the optional Soar CLI helper
 zypper-auto-helper --brew           # Install/upgrade Homebrew (brew) for the system/user
 zypper-auto-helper --pip-package    # Install/guide pipx and manage Python CLI tools (alias: --pipx)
+
+# Diagnostics & debugging
+zypper-auto-helper debug            # Interactive debug/diagnostics tools menu
+zypper-auto-helper --logs           # Show tails of installer, service, and notifier logs
+zypper-auto-helper --live-logs      # Follow installer/service/notifier logs in real time
+zypper-auto-helper --diag-logs-on   # Enable background diagnostics follower (aggregated diag-YYYY-MM-DD.log)
+zypper-auto-helper --diag-logs-off  # Disable diagnostics follower
+zypper-auto-helper --snapshot-state # Capture one-shot diagnostics snapshot into today's diag log
+zypper-auto-helper --diag-bundle    # Create compressed diagnostics bundle tarball in your home
+zypper-auto-helper --show-logs      # Open diagnostics logs folder in a file manager (when available)
+zypper-auto-helper --test-notify    # Send a test desktop notification to verify GUI/DBus wiring
+
+# Scripted uninstaller
 zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
 
@@ -492,6 +507,76 @@ The integration script writes a concise, timestamped console log and is safe to
 run repeatedly on development systems.
 
 -----
+
+## 🧪 Advanced Diagnostics & CLI Tools
+
+The helper includes a small diagnostics toolkit built around aggregated log followers, one-shot snapshots, and compact bundles. These tools are especially useful when filing bug reports or debugging tricky issues.
+
+### Core Diagnostics Commands
+
+- `zypper-auto-helper --logs`
+  - Prints the last ~40 lines from:
+    - The most recent installer log under `/var/log/zypper-auto/install-*.log`
+    - All helper service logs under `/var/log/zypper-auto/service-logs/*.log`
+    - The notifier log `~/.local/share/zypper-notify/notifier-detailed.log` (when present)
+  - Safe to run repeatedly; does not follow logs, just shows current tails.
+
+- `zypper-auto-helper --live-logs`
+  - Follows logs in real time until you press `Ctrl+C`.
+  - If the diagnostics follower is running and today's aggregated file exists, it follows:
+    - `/var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log`
+  - Otherwise, it follows the same set of logs as `--logs` (installer + service + notifier logs) with `tail -F`.
+
+- `zypper-auto-helper --diag-logs-on` / `--diag-logs-off`
+  - `--diag-logs-on` starts a tiny background systemd unit (`zypper-auto-diag-logs.service`) that:
+    - Follows the latest installer log, all service logs, and the notifier log (when present).
+    - Tags each line with its source (`[SRC=INSTALL]`, `[SRC=DOWNLOADER]`, `[SRC=NOTIFIER]`, etc.).
+    - Writes everything into a daily diagnostics file:
+      - `/var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log`
+    - Keeps only ~10 days of diagnostics logs, pruning older files automatically.
+  - `--diag-logs-off` stops the background follower and marks diagnostics as disabled in `last-status.txt`.
+
+- `zypper-auto-helper --snapshot-state`
+  - Captures a one-shot snapshot of the helper and system state into today's diagnostics log, including:
+    - `systemctl status` for core system units (`zypper-autodownload.*`, `zypper-auto-verify.*`).
+    - `systemctl --user status` for the notifier units (for the primary user).
+    - The current `download-status.txt` contents and metadata (mtime, size).
+    - The user's `last-run-status.txt` from the notifier (when present).
+    - Root filesystem free space and basic NetworkManager connectivity summary.
+    - A truncated (`head -n 50`) `zypper dup --dry-run` preview.
+  - All of this is appended under a clearly delimited `SNAPSHOT STATE` block with the current `RUN=...` identifier.
+
+- `zypper-auto-helper --diag-bundle`
+  - Creates a single compressed tarball containing the most relevant diagnostics artifacts, written to your home directory:
+    - `~/zypper-auto-diag-YYYYMMDD-HHMMSS.tar.xz`
+  - Contents typically include:
+    - All diagnostics logs from `/var/log/zypper-auto/diagnostics/` (last ~10 days).
+    - The current `last-status.txt` summary.
+    - Up to the 3 most recent `install-*.log` files.
+    - The notifier's `notifier-detailed.log` and `last-run-status.txt` (when present).
+    - The current `/etc/zypper-auto.conf` and the installer script itself for version context.
+  - Ideal for attaching to GitHub issues (after redacting any personal data).
+
+- `zypper-auto-helper --show-logs`
+  - Ensures `/var/log/zypper-auto/diagnostics/` exists and is user-readable.
+  - When `xdg-open` is available, opens the diagnostics folder in your default file manager as the primary user, so you can browse logs graphically.
+
+- `zypper-auto-helper --test-notify`
+  - Runs a self-test of the desktop notification pipeline for the primary user.
+  - Uses the real notifier Python script (`zypper-notify-updater.py --test-notify`) to send a test notification via D-Bus.
+  - Useful to confirm GUI/notification wiring without waiting for real updates.
+
+- `zypper-auto-helper debug` (or `--debug-menu`)
+  - Launches an interactive TUI-style menu with options to:
+    - Toggle the diagnostics follower on/off.
+    - View live diagnostics logs (either the aggregated daily log or raw installer/service/notifier logs).
+    - Capture a diagnostics snapshot (`--snapshot-state`).
+    - Create a diagnostics bundle (`--diag-bundle`).
+    - Open the diagnostics logs directory in a file manager.
+    - Run the notification self-test (`--test-notify`).
+  - Designed for humans: it avoids killing the helper process when exiting log views and always returns cleanly to the menu.
+
+These tools do **not** modify your configuration or timers; they only read logs, inspect status, and, in the case of the follower, create additional diagnostics log files under `/var/log/zypper-auto/diagnostics/`.
 
 ## 📊 Logging & Monitoring (v47)
 

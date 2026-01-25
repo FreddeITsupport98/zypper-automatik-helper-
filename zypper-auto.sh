@@ -10,6 +10,9 @@
 
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
+# Default to a restrictive umask so newly created logs and helper files
+# are not world-readable unless we explicitly relax permissions.
+umask 077
 
 # Distro guard: only allow running on openSUSE Tumbleweed or Slowroll
 if [ -r /etc/os-release ]; then
@@ -37,9 +40,11 @@ esac
 # '-reset'.
 if [[ $# -gt 0 ]]; then
     case "${1:-}" in
-        install|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
+        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--uninstall-zypper-helper|--uninstall-zypper|\
-        --reset-config|--reset-downloads|--reset-state)
+        --reset-config|--reset-downloads|--reset-state|\
+        --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
+        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--test-notify)
             # Known commands/options; continue into main logic
             :
             ;;
@@ -84,7 +89,9 @@ SNOOZE_LONG_HOURS="24"   # used by the "1d" snooze button
 
 # Create log directory
 mkdir -p "${LOG_DIR}"
-chmod 755 "${LOG_DIR}"
+# Root log directory is readable by root and group only; individual
+# files may have their own tighter permissions (e.g. 600).
+chmod 750 "${LOG_DIR}"
 
 # Cleanup old log files (keep only the last MAX_LOG_FILES)
 cleanup_old_logs() {
@@ -125,22 +132,77 @@ echo "Log file: ${LOG_FILE}" | tee -a "${LOG_FILE}"
 echo "==============================================" | tee -a "${LOG_FILE}"
 echo "" | tee -a "${LOG_FILE}"
 
+# Logging / debug configuration
+# Global debug flag, can be enabled via --debug on the CLI or via
+# the ZYPPER_AUTO_DEBUG_LEVEL environment variable.
+DEBUG_MODE=${DEBUG_MODE:-0}
+
+# Optional structured debug level via environment. When ZYPPER_AUTO_DEBUG_LEVEL is
+# set to "debug" or "trace", we automatically enable DEBUG_MODE so that
+# log_debug output is recorded even without the --debug CLI flag.
+DEBUG_LEVEL="${ZYPPER_AUTO_DEBUG_LEVEL:-info}"
+case "${DEBUG_LEVEL}" in
+    debug|trace)
+        DEBUG_MODE=1
+        ;;
+    *)
+        :
+        ;;
+esac
+
+# Per-invocation run identifier used to correlate all log lines from this
+# helper invocation in diagnostics logs.
+RUN_ID="R$(date +%Y%m%dT%H%M%S)-$$"
+
 # Logging functions
 log_info() {
-    echo "[INFO] $(date '+%H:%M:%S') $*" | tee -a "${LOG_FILE}"
+    echo "[INFO] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
 }
 
 log_success() {
-    echo "[SUCCESS] $(date '+%H:%M:%S') $*" | tee -a "${LOG_FILE}"
+    echo "[SUCCESS] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
 }
 
 log_error() {
-    echo "[ERROR] $(date '+%H:%M:%S') $*" | tee -a "${LOG_FILE}" >&2
+    echo "[ERROR] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}" >&2
 }
 
 log_debug() {
-    echo "[DEBUG] $(date '+%H:%M:%S') $*" | tee -a "${LOG_FILE}"
+    # Always append debug messages to the log file
+    echo "[DEBUG] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" >> "${LOG_FILE}"
+    # When DEBUG_MODE is enabled, also mirror debug to stderr in real time
+    if [ "${DEBUG_MODE}" -eq 1 ] 2>/dev/null; then
+        echo "[DEBUG] $*" >&2
+    fi
 }
+
+# If the user passed --debug anywhere on the command line, enable shell
+# tracing and more verbose console logging while leaving the main
+# behaviour unchanged.
+if [ $# -gt 0 ]; then
+    for __arg in "$@"; do
+        if [ "${__arg}" = "--debug" ]; then
+            DEBUG_MODE=1
+            break
+        fi
+    done
+    if [ "${DEBUG_MODE}" -eq 1 ] 2>/dev/null; then
+        log_info "Debug mode enabled: activating shell trace"
+        # Strip --debug from the positional parameters so it does not
+        # confuse later option parsing.
+        __new_args=()
+        for __arg in "$@"; do
+            if [ "${__arg}" = "--debug" ]; then
+                continue
+            fi
+            __new_args+=("${__arg}")
+        done
+        set -- "${__new_args[@]}"
+        # Enable xtrace after we've initialised logging so traces are also
+        # captured in the install log via PS4 if desired.
+        set -x
+    fi
+fi
 
 log_command() {
     local cmd="$*"
@@ -976,6 +1038,25 @@ else
     log_info "ℹ Status file will be created on first run"
 fi
 
+# Auto-fix: detect and reset stale download status so the helper does not
+# appear to be "stuck" in a downloading state forever (for example after a
+# crash or abrupt reboot).
+if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
+    NOW_TS=$(date +%s)
+    STATUS_MTIME=$(stat -c %Y "/var/log/zypper-auto/download-status.txt" 2>/dev/null || echo "$NOW_TS")
+    STATUS_AGE=$((NOW_TS - STATUS_MTIME))
+    # Treat anything older than 1 hour in an in-progress state as stale.
+    if printf '%s\n' "$CURRENT_STATUS" | grep -qE '^(refreshing|downloading:)' && [ "$STATUS_AGE" -gt 3600 ]; then
+        log_error "⚠ Warning: Stale download status '$CURRENT_STATUS' detected (age ${STATUS_AGE}s)"
+        log_info "  → Auto-fixer: resetting download status and timing files so background downloads can resume cleanly"
+        echo "idle" > "/var/log/zypper-auto/download-status.txt" 2>>"${LOG_FILE}" || true
+        rm -f "/var/log/zypper-auto/download-last-check.txt" \
+              "/var/log/zypper-auto/download-start-time.txt" 2>>"${LOG_FILE}" || true
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        log_success "  ✓ Stale download status reset; helper will perform a fresh check on next run"
+    fi
+fi
+
 # Check 11: Stale zypp lock cleanup
 log_debug "[11/12] Checking for stale zypp lock file..."
 if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
@@ -1125,6 +1206,450 @@ run_reset_config_only() {
     echo "" | tee -a "${LOG_FILE}"
     echo "You can now re-run installation to apply the new settings:" | tee -a "${LOG_FILE}"
     echo "  sudo ./zypper-auto.sh install" | tee -a "${LOG_FILE}"
+}
+
+# --- Helper: Background diagnostic log follower (CLI) ---
+#
+# This mode starts (or restarts) a small background service that tails the
+# main helper logs into a compact per-day diagnostics file:
+#   /var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log
+#
+# At most 10 days of diagnostics logs are kept; older files are pruned based
+# on mtime to avoid unbounded disk usage.
+run_diag_logs_on_only() {
+    log_info ">>> Enabling background diagnostics log follower (zypper-auto-diag-logs.service)"
+    update_status "Enabling diagnostics log follower..."
+
+    local diag_dir diag_file today
+    diag_dir="${LOG_DIR}/diagnostics"
+    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+
+    # Prune diagnostics logs older than 10 days to keep disk usage bounded.
+    # This uses file mtime; a 10-day window is sufficient for troubleshooting.
+    find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete >> "${LOG_FILE}" 2>&1 || true
+
+    today="$(date +%Y-%m-%d)"
+    diag_file="${diag_dir}/diag-${today}.log"
+
+    log_info "Diagnostics log file for today: ${diag_file}"
+
+    # Append a compact environment/config snapshot to the diagnostics file so
+    # each day's log is self-contained for debugging.
+    {
+        echo "===== Zypper Auto-Helper Diagnostics Session Start: $(date '+%Y-%m-%d %H:%M:%S') ====="
+        echo "Host: $(hostname 2>/dev/null || echo 'unknown')"
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release 2>/dev/null || true
+            echo "OS: ${NAME:-unknown} ${VERSION:-} (ID=${ID:-?}, VARIANT_ID=${VARIANT_ID:--})"
+        fi
+        if command -v zypper >/dev/null 2>&1; then
+            echo "Zypper: $(zypper --version 2>/dev/null | head -1)"
+        fi
+        echo "Config snapshot (${CONFIG_FILE}):"
+        if [ -f "${CONFIG_FILE}" ]; then
+            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|CACHE_EXPIRY_MINUTES|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|VERIFY_NOTIFY_USER_ENABLED)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
+        else
+            echo "  (config file missing)"
+        fi
+        echo "======================================================================"
+    } >> "${diag_file}" 2>/dev/null || true
+
+    # Stop any existing diagnostic follower service so we don't start duplicates.
+    systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+
+    # Build the list of log files to follow. We largely mirror --live-logs but
+    # run via a transient systemd service so it can continue in the background.
+    local latest_install_log
+    latest_install_log=""
+    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
+        latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
+    fi
+
+    # Compose the tail command as a single shell-safe string for systemd-run.
+    local tail_cmd=""
+    if [ -n "${latest_install_log}" ]; then
+        tail_cmd+=" ${latest_install_log}"
+    fi
+
+    if [ -d "${LOG_DIR}/service-logs" ]; then
+        # shellcheck disable=SC2086
+        for f in "${LOG_DIR}/service-logs"/*.log; do
+            if [ -f "$f" ]; then
+                tail_cmd+=" $f"
+            fi
+        done
+    fi
+
+    if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
+        tail_cmd+=" ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+    fi
+
+    if [ -z "${tail_cmd}" ]; then
+        log_info "No existing logs found to follow; diagnostics follower will start once logs exist."
+        # Still create the diagnostics directory and empty file for consistency.
+        : > "${diag_file}" 2>/dev/null || true
+        return 0
+    fi
+
+    # Ensure source-tagging follower helper exists so each line in the
+    # diagnostics log is tagged with its origin (INSTALL, DOWNLOADER,
+    # NOTIFIER, etc.).
+    local diag_follower
+    diag_follower="/usr/local/bin/zypper-auto-diag-follow"
+    if [ ! -x "${diag_follower}" ]; then
+        cat << 'EOF' > "${diag_follower}"
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+    exit 0
+fi
+
+for path in "$@"; do
+    [ -e "$path" ] || continue
+    base="$(basename "$path")"
+    src="${base%.*}"
+    src="${src^^}"
+    # Tail each file and prefix lines with a source tag based on the basename.
+    tail -n 0 -F "$path" | sed -u "s/^/[SRC=${src}] /" &
+done
+
+wait || true
+EOF
+        chmod +x "${diag_follower}" || true
+    fi
+
+    # Build the full command. We call the helper with all log files as
+    # arguments and append its tagged output into the diagnostics file. We
+    # wrap everything in /usr/bin/sh -lc so that environment and quoting
+    # behave as expected under systemd.
+    local cmd
+    cmd="${diag_follower}${tail_cmd} >> $(printf '%q' "${diag_file}") 2>&1"
+
+    log_debug "Starting diagnostic follower via systemd-run: ${cmd}"
+    if systemd-run --unit zypper-auto-diag-logs --description "Zypper auto-helper diagnostics follower" \
+        /usr/bin/sh -lc "${cmd}" >> "${LOG_FILE}" 2>&1; then
+        log_success "Diagnostics follower started as systemd unit zypper-auto-diag-logs.service"
+        update_status "SUCCESS: Diagnostics log follower enabled"
+    else
+        log_error "Failed to start diagnostics follower (zypper-auto-diag-logs.service)"
+        update_status "FAILED: Could not enable diagnostics log follower"
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Helper: Snapshot current system/helper state into diagnostics log (CLI) ---
+run_snapshot_state_only() {
+    log_info ">>> Capturing one-shot diagnostics snapshot into today's diag log..."
+
+    local diag_dir today diag_file
+    diag_dir="${LOG_DIR}/diagnostics"
+    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    today="$(date +%Y-%m-%d)"
+    diag_file="${diag_dir}/diag-${today}.log"
+
+    {
+        echo "===== SNAPSHOT STATE at $(date '+%Y-%m-%d %H:%M:%S') [RUN=${RUN_ID}] ====="
+        echo "-- Core systemd units (system) --"
+        systemctl --no-pager status zypper-autodownload.service zypper-autodownload.timer 2>&1 || echo "(zypper-autodownload.* not found)"
+        systemctl --no-pager status zypper-auto-verify.service zypper-auto-verify.timer 2>&1 || echo "(zypper-auto-verify.* not found)"
+        echo
+        echo "-- User notifier units (for ${SUDO_USER:-root}) --"
+        if [ -n "${SUDO_USER:-}" ]; then
+            USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
+            sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                systemctl --user --no-pager status zypper-notify-user.service zypper-notify-user.timer 2>&1 || echo "(user notifier units not found)"
+        else
+            echo "(no SUDO_USER; skipping user notifier status)"
+        fi
+        echo
+        echo "-- Downloader status file --"
+        if [ -f "${LOG_DIR}/download-status.txt" ]; then
+            echo "Path: ${LOG_DIR}/download-status.txt"
+            echo "Contents:"
+            cat "${LOG_DIR}/download-status.txt" 2>/dev/null || echo "(unreadable)"
+            echo "Metadata:"
+            stat "${LOG_DIR}/download-status.txt" 2>/dev/null || echo "(no stat)"
+        else
+            echo "No download-status.txt present"
+        fi
+        echo
+        echo "-- Notifier last-run-status (user ${SUDO_USER:-root}) --"
+        if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/last-run-status.txt" ]; then
+            echo "Path: ${SUDO_USER_HOME}/.local/share/zypper-notify/last-run-status.txt"
+            cat "${SUDO_USER_HOME}/.local/share/zypper-notify/last-run-status.txt" 2>/dev/null || echo "(unreadable)"
+            stat "${SUDO_USER_HOME}/.local/share/zypper-notify/last-run-status.txt" 2>/dev/null || echo "(no stat)"
+        else
+            echo "No notifier last-run-status.txt present for user"
+        fi
+        echo
+        echo "-- Disk and network summary --"
+        df -h / 2>/dev/null || echo "(df failed)"
+        if command -v nmcli >/dev/null 2>&1; then
+            nmcli -t -f STATE g 2>/dev/null || echo "(nmcli general state failed)"
+        fi
+        echo
+        echo "-- One-shot zypper preview (may be empty if command fails quickly) --"
+        if command -v zypper >/dev/null 2>&1; then
+            zypper -q dup --dry-run 2>&1 | head -n 50 || echo "(zypper preview failed or produced no output)"
+        fi
+        echo "===== END SNAPSHOT STATE [RUN=${RUN_ID}] ====="
+    } >> "${diag_file}" 2>&1 || true
+
+    update_status "SUCCESS: Diagnostics snapshot captured into ${diag_file}"
+    log_success "Diagnostics snapshot captured into ${diag_file}"
+}
+
+# --- Helper: Create a compact diagnostics bundle tarball (CLI) ---
+run_diag_bundle_only() {
+    log_info ">>> Creating diagnostics bundle tarball..."
+
+    local diag_dir bundle_dir bundle_file ts
+    diag_dir="${LOG_DIR}/diagnostics"
+    bundle_dir="${SUDO_USER_HOME:-$HOME}"
+    ts="$(date +%Y%m%d-%H%M%S)"
+    bundle_file="${bundle_dir}/zypper-auto-diag-${ts}.tar.xz"
+
+    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+
+    # Build list of files to include (best-effort)
+    local include_files=()
+
+    # All diagnostics logs (already pruned to ~10 days)
+    if ls -1 "${diag_dir}"/diag-*.log >/dev/null 2>&1; then
+        include_files+=("-C" "${diag_dir}" $(ls -1 "${diag_dir}"/diag-*.log | xargs -n1 basename))
+    fi
+
+    # Last-status summary
+    if [ -f "${STATUS_FILE}" ]; then
+        include_files+=("-C" "${LOG_DIR}" "$(basename "${STATUS_FILE}")")
+    fi
+
+    # Most recent installer logs (up to 3)
+    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
+        local inst
+        inst=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -3)
+        if [ -n "${inst}" ]; then
+            include_files+=("-C" "${LOG_DIR}" $(printf '%s\\n' ${inst} | xargs -n1 basename))
+        fi
+    fi
+
+    # Notifier logs for user
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        local ulogdir
+        ulogdir="${SUDO_USER_HOME}/.local/share/zypper-notify"
+        if [ -d "${ulogdir}" ]; then
+            if [ -f "${ulogdir}/notifier-detailed.log" ]; then
+                include_files+=("-C" "${ulogdir}" "notifier-detailed.log")
+            fi
+            if [ -f "${ulogdir}/last-run-status.txt" ]; then
+                include_files+=("-C" "${ulogdir}" "last-run-status.txt")
+            fi
+        fi
+    fi
+
+    # Config and version header (include whole config + script header)
+    if [ -f "${CONFIG_FILE}" ]; then
+        include_files+=("-C" "/" "${CONFIG_FILE#/}")
+    fi
+    # Include the installer script itself for version context
+    if [ -f "$0" ]; then
+        include_files+=("-C" "/" "${0#/}")
+    fi
+
+    if [ "${#include_files[@]}" -eq 0 ]; then
+        log_error "No diagnostics-related files found to bundle."
+        return 1
+    fi
+
+    # Create tar.xz bundle
+    if tar -cJf "${bundle_file}" "${include_files[@]}" >> "${LOG_FILE}" 2>&1; then
+        log_success "Diagnostics bundle created at ${bundle_file}"
+        update_status "SUCCESS: Diagnostics bundle created at ${bundle_file}"
+        echo "Diagnostics bundle: ${bundle_file}"
+        return 0
+    else
+        log_error "Failed to create diagnostics bundle at ${bundle_file}"
+        update_status "FAILED: Could not create diagnostics bundle"
+        return 1
+    fi
+}
+
+# --- Helper: Interactive debug / diagnostics menu (CLI) ---
+run_debug_menu_only() {
+    log_info ">>> Interactive debug / diagnostics tools menu..."
+
+    while true; do
+        # Detect whether the diagnostics follower is currently active so we
+        # can show a dynamic, coloured toggle label for option 1.
+        local follower_active follower_label
+        if systemctl is-active --quiet zypper-auto-diag-logs.service 2>/dev/null; then
+            follower_active=1
+            # Red "Disable" label
+            follower_label="\033[31mDisable diagnostics follower\033[0m"
+        else
+            follower_active=0
+            # Green "Enable" label
+            follower_label="\033[32mEnable diagnostics follower\033[0m"
+        fi
+
+        echo ""
+        echo "=============================================="
+        echo "  Zypper Auto-Helper Debug / Diagnostics Menu"
+        echo "=============================================="
+        printf '  1) %b\n' "${follower_label}"
+        echo "  2) View live diagnostics logs"
+        echo "  3) Capture one-shot diagnostics snapshot"
+        echo "  4) Create diagnostics bundle tarball"
+        echo "  5) Open diagnostics logs folder"
+        echo "  6) Run notification self-test"
+        echo "  7) Exit menu (7 / E / Q)"
+        echo ""
+        read -p "Select an option [1-7, E, Q]: " -r choice
+
+        case "${choice}" in
+            1)
+                if [ "${follower_active}" -eq 1 ] 2>/dev/null; then
+                    # Currently active -> toggle OFF
+                    log_info "[debug-menu] Disabling diagnostics follower via toggle"
+                    systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+                    update_status "SUCCESS: Diagnostics log follower disabled via debug menu toggle"
+                    echo "Diagnostics follower disabled."
+                else
+                    # Currently inactive -> toggle ON (no tail here; option 2 handles live view)
+                    log_info "[debug-menu] Enabling diagnostics follower via toggle"
+                    run_diag_logs_on_only || true
+                    echo "Diagnostics follower enabled. Use option 2 to view live logs."
+                fi
+                ;;
+            2)
+                log_info "[debug-menu] Viewing live diagnostics logs"
+
+                # Prefer aggregated diagnostics log when follower is running.
+                local diag_dir today diag_file
+                diag_dir="${LOG_DIR}/diagnostics"
+                today="$(date +%Y-%m-%d)"
+                diag_file="${diag_dir}/diag-${today}.log"
+
+                if [ -f "${diag_file}" ] && systemctl is-active --quiet zypper-auto-diag-logs.service 2>/dev/null; then
+                    echo "- Diagnostics log (aggregated): ${diag_file}"
+                    echo "Press E or Enter to stop viewing logs and return to the menu."
+                    tail -n 50 -F "${diag_file}" &
+                    local tail_pid=$!
+                    # Wait for user to press a single key (E or Enter) instead
+                    # of using Ctrl+C, so we can return cleanly to the debug
+                    # menu without killing the whole helper.
+                    local key
+                    read -r -n1 key
+                    kill "${tail_pid}" 2>/dev/null || true
+                    wait "${tail_pid}" 2>/dev/null || true
+                    # After stopping the tail, re-render the menu.
+                    continue
+                fi
+
+                # Fallback: replicate --live-logs behaviour when no aggregated diag file.
+                local latest_install_log=""
+                if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
+                    latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
+                fi
+
+                # Build list of files to follow
+                local LOG_FILES_TO_FOLLOW=()
+                if [ -n "${latest_install_log}" ]; then
+                    echo "- Installer log: ${latest_install_log}"
+                    LOG_FILES_TO_FOLLOW+=("${latest_install_log}")
+                fi
+
+                if [ -d "${LOG_DIR}/service-logs" ]; then
+                    # shellcheck disable=SC2086
+                    for f in "${LOG_DIR}/service-logs"/*.log; do
+                        if [ -f "$f" ]; then
+                            echo "- Service log: $f"
+                            LOG_FILES_TO_FOLLOW+=("$f")
+                        fi
+                    done
+                fi
+
+                if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
+                    echo "- Notifier log: ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+                    LOG_FILES_TO_FOLLOW+=("${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
+                fi
+
+                if [ "${#LOG_FILES_TO_FOLLOW[@]}" -eq 0 ]; then
+                    echo "No log files found yet under ${LOG_DIR} or notifier directory."
+                    continue
+                fi
+
+                echo "Press E or Enter to stop viewing logs and return to the menu."
+                # Show a bit of history, then follow; -F keeps following across rotations.
+                # shellcheck disable=SC2068
+                tail -n 50 -F ${LOG_FILES_TO_FOLLOW[@]} &
+                local tail_pid=$!
+                local key
+                read -r -n1 key
+                kill "${tail_pid}" 2>/dev/null || true
+                wait "${tail_pid}" 2>/dev/null || true
+                continue
+                ;;
+            3)
+                log_info "[debug-menu] Capturing diagnostics snapshot"
+                run_snapshot_state_only || true
+                echo "Snapshot captured into today's diagnostics log."
+                ;;
+            4)
+                log_info "[debug-menu] Creating diagnostics bundle"
+                if run_diag_bundle_only; then
+                    echo "Diagnostics bundle created successfully."
+                else
+                    echo "Failed to create diagnostics bundle (see install log)."
+                fi
+                ;;
+            5)
+                log_info "[debug-menu] Opening diagnostics logs folder"
+                local diag_dir
+                diag_dir="${LOG_DIR}/diagnostics"
+                echo "Diagnostics logs directory: ${diag_dir}"
+                mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
+                if command -v xdg-open >/dev/null 2>&1; then
+                    if [ -n "${SUDO_USER:-}" ]; then
+                        USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
+                        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                    else
+                        xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                    fi
+                fi
+                ;;
+            6)
+                log_info "[debug-menu] Notification system self-test"
+                if [ -z "${SUDO_USER:-}" ]; then
+                    log_error "Cannot run notification self-test without SUDO_USER (run via sudo)."
+                    echo "This option must be run via sudo so we know which desktop user to notify."
+                else
+                    USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
+                    log_debug "Using user bus path for debug-menu test-notify: ${USER_BUS_PATH}"
+                    # Launch the notifier self-test in the background so the
+                    # debug menu remains responsive. The Python script itself
+                    # keeps the test notification visible until you dismiss it.
+                    sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                        /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify \
+                        >/dev/null 2>&1 &
+                    echo "Test notification launched. Close it from your desktop when you are done."
+                fi
+                ;;
+            7|q|Q|e|E)
+                log_info "[debug-menu] Exiting debug/diagnostics menu"
+                break
+                ;;
+            *)
+                echo "Invalid selection: '${choice}'. Please enter a number between 1 and 7."
+                ;;
+        esac
+    done
 }
 
 # --- Helper: Reset download/notifier state (CLI) ---
@@ -1663,20 +2188,28 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "   or: sudo $0 [COMMAND]  # when running the script directly without the shell alias"
     echo ""
     echo "Commands:"
-    echo "  install           Install or update the zypper auto-updater system (default)"
-    echo "  --verify          Run verification and auto-repair checks"
-    echo "  --repair          Same as --verify (alias)"
-    echo "  --diagnose        Same as --verify (alias)"
-    echo "  --check           Run syntax checks only"
-    echo "  --self-check      Same as --check (alias)"
-    echo "  --soar            Install/upgrade optional Soar CLI helper for the user"
-    echo "  --brew            Install/upgrade Homebrew (brew) for the user"
-    echo "  --pip-package     Install/upgrade pipx and show how to manage Python CLI tools with pipx"
-    echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts"
-    echo "                       (alias: --uninstall-zypper)"
-    echo "  --reset-config    Reset /etc/zypper-auto.conf to documented defaults (with backup)"
-    echo "  --reset-downloads Clear cached download/notifier state and restart timers (alias: --reset-state)"
-    echo "  --help            Show this help message"
+    echo "  install                 Install or update the zypper auto-updater system (default)"
+    echo "  debug                   Open interactive debug/diagnostics tools menu"
+    echo "  --verify                Run verification and auto-repair checks"
+    echo "  --repair                Same as --verify (alias)"
+    echo "  --diagnose              Same as --verify (alias)"
+    echo "  --check                 Run syntax checks only"
+    echo "  --self-check            Same as --check (alias)"
+    echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
+    echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
+    echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
+    echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
+    echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
+    echo "  --reset-state           Alias for --reset-downloads"
+    echo "  --logs                  Show tails of installer, service, and notifier logs"
+    echo "  --live-logs             Follow installer/service/notifier logs in real time (Ctrl+C to exit)"
+    echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
+    echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts (alias: --uninstall-zypper)"
+    echo "  --uninstall-zypper      Alias for --uninstall-zypper-helper"
+    echo "  --help                  Show this help message"
+    echo ""
+    echo "Global flags:"
+    echo "  --debug                 Enable verbose debug logging and shell tracing"
     echo ""
     echo "Examples:"
     echo "  zypper-auto-helper install         # Full installation (via shell alias, runs with sudo)"
@@ -1704,7 +2237,7 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     exit 0
 fi
 
-# Optional modes: Soar, Homebrew, pipx, reset-state, and uninstall helper-only
+# Optional modes: Soar, Homebrew, pipx, reset-state, diagnostics, and uninstall helper-only
 if [[ "${1:-}" == "--soar" ]]; then
     log_info "Soar helper-only mode requested"
     run_soar_install_only
@@ -1725,6 +2258,127 @@ elif [[ "${1:-}" == "--reset-downloads" || "${1:-}" == "--reset-state" ]]; then
     log_info "Download/notifier state reset mode requested"
     run_reset_download_state_only
     exit $?
+elif [[ "${1:-}" == "--logs" || "${1:-}" == "--log" ]]; then
+    log_info "Log viewer mode requested"
+    echo "=== System/Installer Log (last 40 lines) ==="
+    tail -n 40 "${LOG_DIR}"/install-*.log 2>/dev/null | tail -n 40 || true
+    echo ""
+    echo "=== Service Logs (last 40 lines) ==="
+    tail -n 40 "${LOG_DIR}"/service-logs/*.log 2>/dev/null || true
+    echo ""
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        echo "=== User Notifier Log (last 40 lines) ==="
+        tail -n 40 "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" 2>/dev/null || true
+    fi
+    exit 0
+elif [[ "${1:-}" == "--live-logs" ]]; then
+    log_info "Live log follow mode requested"
+    echo "Following zypper auto-helper logs. Press Ctrl+C to exit."
+
+    # If diagnostics follower is active and today's diagnostics file exists,
+    # prefer to follow that single aggregated log so both you and I can see
+    # the exact same combined view.
+    diag_dir="${LOG_DIR}/diagnostics"
+    today="$(date +%Y-%m-%d)"
+    diag_file="${diag_dir}/diag-${today}.log"
+    if [ -f "${diag_file}" ] && systemctl is-active --quiet zypper-auto-diag-logs.service 2>/dev/null; then
+        echo "- Diagnostics log (aggregated): ${diag_file}"
+        tail -n 50 -F "${diag_file}"
+        exit 0
+    fi
+
+    latest_install_log=""
+    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
+        latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
+    fi
+
+    # Build list of files to follow
+    LOG_FILES_TO_FOLLOW=()
+    if [ -n "${latest_install_log}" ]; then
+        echo "- Installer log: ${latest_install_log}"
+        LOG_FILES_TO_FOLLOW+=("${latest_install_log}")
+    fi
+
+    if [ -d "${LOG_DIR}/service-logs" ]; then
+        # shellcheck disable=SC2086
+        for f in "${LOG_DIR}/service-logs"/*.log; do
+            if [ -f "$f" ]; then
+                echo "- Service log: $f"
+                LOG_FILES_TO_FOLLOW+=("$f")
+            fi
+        done
+    fi
+
+    if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
+        echo "- Notifier log: ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+        LOG_FILES_TO_FOLLOW+=("${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
+    fi
+
+    if [ "${#LOG_FILES_TO_FOLLOW[@]}" -eq 0 ]; then
+        echo "No log files found yet under ${LOG_DIR} or notifier directory."
+        exit 0
+    fi
+
+    # Show a bit of history, then follow; -F keeps following across rotations.
+    # shellcheck disable=SC2068
+    tail -n 50 -F ${LOG_FILES_TO_FOLLOW[@]}
+    exit 0
+elif [[ "${1:-}" == "debug" || "${1:-}" == "--debug-menu" ]]; then
+    log_info "Interactive debug/diagnostics menu requested"
+    run_debug_menu_only
+    exit $?
+elif [[ "${1:-}" == "--diag-logs-on" ]]; then
+    log_info "Diagnostics log follower enable mode requested"
+    run_diag_logs_on_only
+    exit $?
+elif [[ "${1:-}" == "--diag-logs-off" ]]; then
+    log_info "Diagnostics log follower disable mode requested"
+    systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+    update_status "SUCCESS: Diagnostics log follower disabled"
+    exit 0
+elif [[ "${1:-}" == "--snapshot-state" ]]; then
+    log_info "Diagnostics snapshot mode requested"
+    run_snapshot_state_only
+    exit $?
+elif [[ "${1:-}" == "--diag-bundle" ]]; then
+    log_info "Diagnostics bundle mode requested"
+    run_diag_bundle_only
+    exit $?
+elif [[ "${1:-}" == "--show-logs" || "${1:-}" == "--show-loggs" ]]; then
+    log_info "Diagnostics logs browser requested"
+    local diag_dir
+    diag_dir="${LOG_DIR}/diagnostics"
+    echo "Diagnostics logs directory: ${diag_dir}"
+
+    # Ensure directory exists and is user-readable
+    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
+
+    # Try to open the diagnostics folder in the user's file manager when possible.
+    if command -v xdg-open >/dev/null 2>&1; then
+        if [ -n "${SUDO_USER:-}" ]; then
+            USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
+            log_debug "Opening diagnostics folder via xdg-open for SUDO_USER=${SUDO_USER}"
+            sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+        else
+            log_debug "Opening diagnostics folder via xdg-open as current user"
+            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+        fi
+    fi
+    exit 0
+elif [[ "${1:-}" == "--test-notify" ]]; then
+    log_info "Notification system self-test requested"
+    if [ -z "${SUDO_USER:-}" ]; then
+        log_error "Cannot run --test-notify without SUDO_USER (run via sudo)."
+        exit 1
+    fi
+    USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
+    log_debug "Using user bus path for test-notify: ${USER_BUS_PATH}"
+    sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+        /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify || true
+    exit 0
 elif [[ "${1:-}" == "--uninstall-zypper-helper" || "${1:-}" == "--uninstall-zypper" ]]; then
     shift
     # Parse optional flags for the uninstaller:
@@ -1779,9 +2433,18 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
     ZYPPER_WRAPPER_PATH="$USER_BIN_DIR/zypper-with-ps"
     USER_LOG_DIR="$SUDO_USER_HOME/.local/share/zypper-notify"
     USER_BUS_PATH="unix:path=/run/user/$(id -u "$SUDO_USER")/bus"
-    # Jump to verification section (we'll use a function)
+
+    # In verification-only mode we *expect* a non-zero exit code when
+    # problems are found, so disable the installer-wide ERR trap and
+    # temporarily turn off 'set -e' so that run_verification_only can
+    # complete and return its status cleanly instead of being treated as
+    # a fatal installer error.
+    trap - ERR
+    set +e
     run_verification_only
-    exit $?
+    rc=$?
+    set -e
+    exit $rc
 fi
 
 # If we reach this point, all supported option-like commands (e.g. --verify,
