@@ -159,6 +159,24 @@ log_info() {
     echo "[INFO] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
 }
 
+# Atomic file writer for here-doc content.
+# Usage:
+#   write_atomic "/path/to/file" <<'EOF'
+#   ...
+#   EOF
+write_atomic() {
+    local target="$1" tmp
+    tmp="${target}.tmp.$$"
+    if ! cat >"$tmp"; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv -f "$tmp" "$target"; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+}
+
 log_success() {
     echo "[SUCCESS] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
 }
@@ -432,16 +450,17 @@ EOF
     fi
 
     # Basic numeric validation with safe fallbacks so a broken config
-    # never crashes the installer.
+    # never crashes the installer. Uses indirect expansion + printf -v
+    # instead of eval for safety and clarity.
     validate_int() {
         local name="$1" default="$2" value
-        # shellcheck disable=SC2154
-        eval "value=\"\${$name:-}\""
+        # Use indirect expansion to read the current value (may be empty).
+        value="${!name-}"
         if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ]; then
             local msg="Invalid or missing $name='$value' in ${CONFIG_FILE}, using default $default"
             log_info "$msg"
             CONFIG_WARNINGS+=("$msg")
-            eval "$name=$default"
+            printf -v "$name" '%s' "$default"
         fi
     }
 
@@ -450,21 +469,21 @@ EOF
     # so older configs without newer flags do not spam the logs.
     validate_bool_flag() {
         local name="$1" default="$2" value lower
-        eval "value=\"\${$name:-}\""
+        value="${!name-}"
         if [ -z "$value" ]; then
-            eval "$name=$default"
+            printf -v "$name" '%s' "$default"
             return
         fi
         lower="${value,,}"
         case "$lower" in
             true|false)
-                eval "$name=$lower"
+                printf -v "$name" '%s' "$lower"
                 ;;
             *)
                 local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
                 log_info "$msg"
                 CONFIG_WARNINGS+=("$msg")
-                eval "$name=$default"
+                printf -v "$name" '%s' "$default"
                 ;;
         esac
     }
@@ -480,10 +499,10 @@ EOF
 
     # Validate enumerated string options with safe fallbacks so typos
     # in the config are reported clearly in the log and do not break
-    # the installer.
+    # the installer. Uses indirect expansion instead of eval.
     validate_mode() {
         local name="$1" default="$2" allowed_pattern="$3" value raw_value
-        eval "value=\"\${$name:-}\""
+        value="${!name-}"
         raw_value="$value"
         # Normalise by stripping CR, surrounding whitespace, and simple outer quotes
         value="$(printf '%s' "$value" | tr -d '\r' | sed -e 's/^\s*//' -e 's/\s*$//' -e 's/^"//' -e 's/"$//')"
@@ -493,7 +512,7 @@ EOF
             local msg="Missing $name in ${CONFIG_FILE}, using default '$default'"
             log_info "$msg"
             CONFIG_WARNINGS+=("$msg")
-            eval "$name=$default"
+            printf -v "$name" '%s' "$default"
             return
         fi
 
@@ -509,12 +528,12 @@ EOF
 
         if [ "$ok" -eq 1 ]; then
             # Valid value, store normalised form
-            eval "$name=$value"
+            printf -v "$name" '%s' "$value"
         else
             local msg="Invalid $name='$raw_value' in ${CONFIG_FILE} (allowed: $allowed_pattern); using default '$default'"
             log_info "$msg"
             CONFIG_WARNINGS+=("$msg")
-            eval "$name=$default"
+            printf -v "$name" '%s' "$default"
         fi
     }
 
@@ -523,12 +542,12 @@ EOF
     # expressions simple and predictable.
     validate_interval() {
         local name="$1" default="$2" value
-        eval "value=\"\${$name:-}\""
+        value="${!name-}"
         if ! [[ "$value" =~ ^[0-9]+$ ]]; then
             local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
             log_info "$msg"
             CONFIG_WARNINGS+=("$msg")
-            eval "$name=$default"
+            printf -v "$name" '%s' "$default"
             return
         fi
         case "$value" in
@@ -537,7 +556,7 @@ EOF
                 local msg="Unsupported $name='$value' in ${CONFIG_FILE} (allowed: 1,5,10,15,30,60); using default $default"
                 log_info "$msg"
                 CONFIG_WARNINGS+=("$msg")
-                eval "$name=$default"
+                printf -v "$name" '%s' "$default"
                 ;;
         esac
     }
@@ -669,11 +688,27 @@ VERIFY_SERVICE_NAME="zypper-auto-verify"
 VERIFY_SERVICE_FILE="/etc/systemd/system/${VERIFY_SERVICE_NAME}.service"
 VERIFY_TIMER_FILE="/etc/systemd/system/${VERIFY_SERVICE_NAME}.timer"
 
+# Diagnostics follower service (root)
+DIAG_SERVICE_NAME="zypper-auto-diag-logs"
+DIAG_SERVICE_FILE="/etc/systemd/system/${DIAG_SERVICE_NAME}.service"
+
 # --- User Service Config ---
 NT_SERVICE_NAME="zypper-notify-user"
 NT_SCRIPT_NAME="zypper-notify-updater.py"
 INSTALL_SCRIPT_NAME="zypper-run-install"
 VIEW_CHANGES_SCRIPT_NAME="zypper-view-changes"
+
+# Helper: compute a DBus user bus address for a given user (defaults to
+# SUDO_USER). Prints the address to stdout.
+get_user_bus() {
+    local user="${1:-${SUDO_USER:-}}"
+    if [ -z "$user" ]; then
+        return 1
+    fi
+    local uid
+    uid=$(id -u "$user" 2>/dev/null) || return 1
+    printf 'unix:path=/run/user/%s/bus' "$uid"
+}
 
 # --- 2. Sanity Checks & User Detection ---
 update_status "Running sanity checks..."
@@ -1105,14 +1140,17 @@ else
 fi
 
 # Calculate repair statistics
-PROBLEMS_FOUND=$REPAIR_ATTEMPTS
-PROBLEMS_FIXED=$((REPAIR_ATTEMPTS - VERIFICATION_FAILED))
+# We approximate "problems detected" as the combination of issues we
+# attempted to repair plus any remaining failures, so the numbers always
+# stay consistent and non-negative.
+PROBLEMS_FIXED=$REPAIR_ATTEMPTS
+PROBLEMS_DETECTED=$((REPAIR_ATTEMPTS + VERIFICATION_FAILED))
 
 echo "" | tee -a "${LOG_FILE}"
 echo "==============================================" | tee -a "${LOG_FILE}"
 echo "Verification Summary:" | tee -a "${LOG_FILE}"
 echo "  - Checks performed: 12" | tee -a "${LOG_FILE}"
-echo "  - Problems detected: $PROBLEMS_FOUND" | tee -a "${LOG_FILE}"
+echo "  - Problems detected: $PROBLEMS_DETECTED" | tee -a "${LOG_FILE}"
 echo "  - Problems auto-fixed: $PROBLEMS_FIXED" | tee -a "${LOG_FILE}"
 echo "  - Remaining issues: $VERIFICATION_FAILED" | tee -a "${LOG_FILE}"
 echo "==============================================" | tee -a "${LOG_FILE}"
@@ -1120,14 +1158,14 @@ echo "" | tee -a "${LOG_FILE}"
 
 if [ $VERIFICATION_FAILED -eq 0 ]; then
     log_success ">>> All verification checks passed! ✓"
-    if [ $PROBLEMS_FOUND -gt 0 ]; then
+    if [ $PROBLEMS_FIXED -gt 0 ]; then
         log_success "  ✓ Auto-repair fixed $PROBLEMS_FIXED issue(s)"
     fi
 else
     log_error ">>> $VERIFICATION_FAILED verification check(s) failed!"
     log_error "  → Auto-repair attempted but could not fix all issues"
     log_info "  → Review logs: ${LOG_FILE}"
-    if [ "${#CONFIG_WARNINGS[@]:-0}" -gt 0 ]; then
+    if [ "${#CONFIG_WARNINGS[@]}" -gt 0 ]; then
         log_info "  → Config warnings detected; consider: sudo zypper-auto-helper --reset-config"
     fi
     log_info "  → Common fixes:"
@@ -1210,22 +1248,94 @@ run_reset_config_only() {
 
 # --- Helper: Background diagnostic log follower (CLI) ---
 #
-# This mode starts (or restarts) a small background service that tails the
-# main helper logs into a compact per-day diagnostics file:
-#   /var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log
-#
-# At most 10 days of diagnostics logs are kept; older files are pruned based
-# on mtime to avoid unbounded disk usage.
+# This mode ensures a *persistent* systemd service
+# (zypper-auto-diag-logs.service) exists and is enabled so that diagnostics
+# logging survives reboots. The actual follower work is performed by the
+# internal runner mode (--diag-logs-runner).
 run_diag_logs_on_only() {
     log_info ">>> Enabling background diagnostics log follower (zypper-auto-diag-logs.service)"
     update_status "Enabling diagnostics log follower..."
 
-    local diag_dir diag_file today
+    local diag_dir
     diag_dir="${LOG_DIR}/diagnostics"
     mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
 
     # Prune diagnostics logs older than 10 days to keep disk usage bounded.
     # This uses file mtime; a 10-day window is sufficient for troubleshooting.
+    find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete >> "${LOG_FILE}" 2>&1 || true
+
+    # Ensure source-tagging follower helper exists so each line in the
+    # diagnostics log is tagged with its origin (INSTALL, DOWNLOADER,
+    # NOTIFIER, etc.).
+    local diag_follower
+    diag_follower="/usr/local/bin/zypper-auto-diag-follow"
+    if [ ! -x "${diag_follower}" ]; then
+write_atomic "${diag_follower}" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+    exit 0
+fi
+
+for path in "$@"; do
+    [ -e "$path" ] || continue
+    base="$(basename "$path")"
+    src="${base%.*}"
+    src="${src^^}"
+    # Tail each file and prefix lines with a source tag based on the basename.
+    tail -n 0 -F "$path" | sed -u "s/^/[SRC=${src}] /" &
+done
+
+wait || true
+EOF
+        chmod +x "${diag_follower}" || true
+    fi
+
+    # (Re)write a persistent systemd service that calls back into this script in
+    # runner mode so diagnostics logging survives reboots.
+    log_debug "Writing diagnostics follower service unit: ${DIAG_SERVICE_FILE}"
+    cat > "${DIAG_SERVICE_FILE}" <<EOF
+[Unit]
+Description=Zypper auto-helper diagnostics follower
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zypper-auto-helper --diag-logs-runner
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Reload systemd daemon and (re)start the diagnostics follower service.
+    if systemctl daemon-reload >> "${LOG_FILE}" 2>&1 && \
+       systemctl enable --now "${DIAG_SERVICE_NAME}.service" >> "${LOG_FILE}" 2>&1; then
+        log_success "Diagnostics follower enabled as persistent service (${DIAG_SERVICE_NAME}.service)"
+        update_status "SUCCESS: Diagnostics log follower enabled (persistent)"
+        return 0
+    else
+        log_error "Failed to enable diagnostics follower service (${DIAG_SERVICE_NAME}.service)"
+        update_status "FAILED: Could not enable diagnostics log follower"
+        return 1
+    fi
+}
+
+# Internal runner: started by zypper-auto-diag-logs.service to actually follow
+# logs and write into the per-day diagnostics file. This is not meant to be
+# invoked directly by users; they should use --diag-logs-on instead.
+run_diag_logs_runner_only() {
+    log_info ">>> Diagnostics follower runner starting..."
+
+    local diag_dir diag_file today
+    diag_dir="${LOG_DIR}/diagnostics"
+    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+
+    # Prune diagnostics logs older than 10 days here as well, in case the
+    # runner is restarted independently of the CLI helper.
     find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete >> "${LOG_FILE}" 2>&1 || true
 
     today="$(date +%Y-%m-%d)"
@@ -1254,19 +1364,13 @@ run_diag_logs_on_only() {
         echo "======================================================================"
     } >> "${diag_file}" 2>/dev/null || true
 
-    # Stop any existing diagnostic follower service so we don't start duplicates.
-    systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
-
-    # Build the list of log files to follow. We largely mirror --live-logs but
-    # run via a transient systemd service so it can continue in the background.
-    local latest_install_log
+    # Build the list of log files to follow, mirroring --live-logs.
+    local latest_install_log tail_cmd=""
     latest_install_log=""
     if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
         latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
     fi
 
-    # Compose the tail command as a single shell-safe string for systemd-run.
-    local tail_cmd=""
     if [ -n "${latest_install_log}" ]; then
         tail_cmd+=" ${latest_install_log}"
     fi
@@ -1285,38 +1389,16 @@ run_diag_logs_on_only() {
     fi
 
     if [ -z "${tail_cmd}" ]; then
-        log_info "No existing logs found to follow; diagnostics follower will start once logs exist."
-        # Still create the diagnostics directory and empty file for consistency.
+        log_info "No existing logs found to follow; diagnostics follower will idle until logs exist."
         : > "${diag_file}" 2>/dev/null || true
         return 0
     fi
 
-    # Ensure source-tagging follower helper exists so each line in the
-    # diagnostics log is tagged with its origin (INSTALL, DOWNLOADER,
-    # NOTIFIER, etc.).
     local diag_follower
     diag_follower="/usr/local/bin/zypper-auto-diag-follow"
     if [ ! -x "${diag_follower}" ]; then
-        cat << 'EOF' > "${diag_follower}"
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [ "$#" -eq 0 ]; then
-    exit 0
-fi
-
-for path in "$@"; do
-    [ -e "$path" ] || continue
-    base="$(basename "$path")"
-    src="${base%.*}"
-    src="${src^^}"
-    # Tail each file and prefix lines with a source tag based on the basename.
-    tail -n 0 -F "$path" | sed -u "s/^/[SRC=${src}] /" &
-done
-
-wait || true
-EOF
-        chmod +x "${diag_follower}" || true
+        log_error "Diagnostics follower helper ${diag_follower} is missing or not executable"
+        return 1
     fi
 
     # Build the full command. We call the helper with all log files as
@@ -1326,18 +1408,8 @@ EOF
     local cmd
     cmd="${diag_follower}${tail_cmd} >> $(printf '%q' "${diag_file}") 2>&1"
 
-    log_debug "Starting diagnostic follower via systemd-run: ${cmd}"
-    if systemd-run --unit zypper-auto-diag-logs --description "Zypper auto-helper diagnostics follower" \
-        /usr/bin/sh -lc "${cmd}" >> "${LOG_FILE}" 2>&1; then
-        log_success "Diagnostics follower started as systemd unit zypper-auto-diag-logs.service"
-        update_status "SUCCESS: Diagnostics log follower enabled"
-    else
-        log_error "Failed to start diagnostics follower (zypper-auto-diag-logs.service)"
-        update_status "FAILED: Could not enable diagnostics log follower"
-        return 1
-    fi
-
-    return 0
+    log_debug "Starting diagnostic follower runner: ${cmd}"
+    exec /usr/bin/sh -lc "${cmd}"
 }
 
 # --- Helper: Snapshot current system/helper state into diagnostics log (CLI) ---
@@ -1799,14 +1871,16 @@ run_uninstall_helper_only() {
         echo "  - System services/timers: zypper-autodownload.service, zypper-autodownload.timer" | tee -a "${LOG_FILE}"
         echo "    zypper-cache-cleanup.service, zypper-cache-cleanup.timer" | tee -a "${LOG_FILE}"
         echo "    zypper-auto-verify.service, zypper-auto-verify.timer" | tee -a "${LOG_FILE}"
+        echo "    zypper-auto-diag-logs.service (diagnostics follower)" | tee -a "${LOG_FILE}"
         echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
+        echo "    /usr/local/bin/zypper-auto-diag-follow (diagnostics follower helper)" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
         if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
-            echo "  - Logs under $LOG_DIR would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+            echo "  - Logs under $LOG_DIR (including diagnostics logs) would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
         else
-            echo "  - Logs under $LOG_DIR (other than the current log) and notifier caches" | tee -a "${LOG_FILE}"
+            echo "  - Logs under $LOG_DIR (other than the current log), diagnostics logs, and notifier caches" | tee -a "${LOG_FILE}"
         fi
         echo "" | tee -a "${LOG_FILE}"
         echo "Run again WITHOUT --dry-run to actually uninstall." | tee -a "${LOG_FILE}"
@@ -1836,13 +1910,16 @@ run_uninstall_helper_only() {
     systemctl stop zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
     systemctl stop zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
     systemctl stop zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
+    # Diagnostics follower service (may or may not be enabled)
+    systemctl disable --now zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
 
     # 2. Stop and disable user timer/service
     if [ -n "${SUDO_USER:-}" ]; then
         log_debug "Disabling user timer and service for $SUDO_USER..."
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+        USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             systemctl --user stop zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
     fi
 
@@ -1854,8 +1931,10 @@ run_uninstall_helper_only() {
     rm -f /etc/systemd/system/zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
     rm -f /etc/systemd/system/zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
     rm -f /etc/systemd/system/zypper-auto-verify.timer >> "${LOG_FILE}" 2>&1 || true
+    rm -f /etc/systemd/system/zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
     rm -f /usr/local/bin/zypper-download-with-progress >> "${LOG_FILE}" 2>&1 || true
     rm -f /usr/local/bin/zypper-auto-helper >> "${LOG_FILE}" 2>&1 || true
+    rm -f /usr/local/bin/zypper-auto-diag-follow >> "${LOG_FILE}" 2>&1 || true
 
     # 4. Remove user-level scripts and systemd units
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -1894,6 +1973,8 @@ run_uninstall_helper_only() {
             find "$LOG_DIR" -maxdepth 1 -type f ! -name "$(basename "$LOG_FILE")" -delete >> "${LOG_FILE}" 2>&1 || true
             # Remove any service sub-logs directory completely
             rm -rf "$LOG_DIR/service-logs" >> "${LOG_FILE}" 2>&1 || true
+            # Remove diagnostics logs directory completely
+            rm -rf "$LOG_DIR/diagnostics" >> "${LOG_FILE}" 2>&1 || true
         fi
     fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -1905,7 +1986,8 @@ run_uninstall_helper_only() {
     log_debug "Reloading systemd daemons after uninstall..."
     systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
     if [ -n "${SUDO_USER:-}" ]; then
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+        USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1 || true
     fi
 
@@ -1914,7 +1996,8 @@ run_uninstall_helper_only() {
     log_debug "Resetting failed state for removed systemd units (if any)..."
     systemctl reset-failed zypper-autodownload.service zypper-cache-cleanup.service zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
     if [ -n "${SUDO_USER:-}" ]; then
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+        USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             systemctl --user reset-failed zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
     fi
 
@@ -2204,8 +2287,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --logs                  Show tails of installer, service, and notifier logs"
     echo "  --live-logs             Follow installer/service/notifier logs in real time (Ctrl+C to exit)"
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
-    echo "  --uninstall-zypper-helper  Remove zypper-auto-helper services, timers, logs, and user scripts (alias: --uninstall-zypper)"
-    echo "  --uninstall-zypper      Alias for --uninstall-zypper-helper"
+    echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help                  Show this help message"
     echo ""
     echo "Global flags:"
@@ -2344,6 +2426,12 @@ elif [[ "${1:-}" == "--diag-bundle" ]]; then
     log_info "Diagnostics bundle mode requested"
     run_diag_bundle_only
     exit $?
+elif [[ "${1:-}" == "--diag-logs-runner" ]]; then
+    # Internal mode: invoked by the persistent zypper-auto-diag-logs.service
+    # unit to actually follow logs. Users should not call this directly.
+    log_info "Diagnostics follower runner mode requested (service)"
+    run_diag_logs_runner_only
+    exit $?
 elif [[ "${1:-}" == "--show-logs" || "${1:-}" == "--show-loggs" ]]; then
     log_info "Diagnostics logs browser requested"
     local diag_dir
@@ -2379,7 +2467,7 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
     sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
         /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify || true
     exit 0
-elif [[ "${1:-}" == "--uninstall-zypper-helper" || "${1:-}" == "--uninstall-zypper" ]]; then
+elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-helper" ]]; then
     shift
     # Parse optional flags for the uninstaller:
     #   --yes / -y / --non-interactive : skip confirmation prompt
@@ -2535,7 +2623,8 @@ log_info ">>> Cleaning up old user-space services..."
 update_status "Removing old user services..."
 SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 log_debug "Disabling user timer..."
-sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$SUDO_USER/bus" systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
+USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
+sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
 
 # Force kill any running Python notifier processes
 log_debug "Force-killing any running Python notifier processes..."
@@ -2578,7 +2667,7 @@ chmod 755 "${LOG_DIR}/service-logs"
 # First, create the downloader script with progress tracking
 DOWNLOADER_SCRIPT="/usr/local/bin/zypper-download-with-progress"
 log_debug "Creating downloader script with progress tracking: $DOWNLOADER_SCRIPT"
-cat << 'DLSCRIPT' > "$DOWNLOADER_SCRIPT"
+write_atomic "$DOWNLOADER_SCRIPT" << 'DLSCRIPT'
 #!/bin/bash
 # Zypper downloader with real-time progress tracking
 set -euo pipefail
@@ -2833,7 +2922,7 @@ chmod +x "$DOWNLOADER_SCRIPT"
 log_success "Downloader script created with progress tracking"
 
 # Now create the service file
-cat << EOF > ${DL_SERVICE_FILE}
+write_atomic "${DL_SERVICE_FILE}" << EOF
 [Unit]
 Description=Download Tumbleweed updates in background
 ConditionACPower=true
@@ -2862,7 +2951,7 @@ log_success "Downloader service file created"
 # --- 6. Create/Update DOWNLOADER (Root Timer) ---
 log_info ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
 log_debug "Writing timer file: ${DL_TIMER_FILE}"
-cat << EOF > ${DL_TIMER_FILE}
+write_atomic "${DL_TIMER_FILE}" << EOF
 [Unit]
 Description=Run ${DL_SERVICE_NAME} periodically to download updates
 
@@ -2894,7 +2983,7 @@ fi
 log_info ">>> Creating (root) cache cleanup service: ${CLEANUP_SERVICE_FILE}"
 update_status "Creating cache cleanup service..."
 log_debug "Writing service file: ${CLEANUP_SERVICE_FILE}"
-cat << EOF > ${CLEANUP_SERVICE_FILE}
+write_atomic "${CLEANUP_SERVICE_FILE}" << EOF
 [Unit]
 Description=Clean up old zypper cache packages
 
@@ -2909,7 +2998,7 @@ log_success "Cache cleanup service file created"
 
 log_info ">>> Creating (root) cache cleanup timer: ${CLEANUP_TIMER_FILE}"
 log_debug "Writing timer file: ${CLEANUP_TIMER_FILE}"
-cat << EOF > ${CLEANUP_TIMER_FILE}
+write_atomic "${CLEANUP_TIMER_FILE}" << EOF
 [Unit]
 Description=Run cache cleanup weekly
 
@@ -2947,7 +3036,7 @@ elif [ "${VERIFY_TIMER_INTERVAL_MINUTES}" -ne 1 ]; then
     VERIFY_ONCALENDAR="*:0/${VERIFY_TIMER_INTERVAL_MINUTES}"
 fi
 
-cat << EOF > ${VERIFY_SERVICE_FILE}
+write_atomic "${VERIFY_SERVICE_FILE}" << EOF
 [Unit]
 Description=Verify and auto-repair zypper-auto-helper installation
 Wants=network-online.target
@@ -2972,7 +3061,7 @@ log_success "Verification service file created"
 
 log_info ">>> Creating (root) verification timer: ${VERIFY_TIMER_FILE}"
 log_debug "Writing timer file: ${VERIFY_TIMER_FILE}"
-cat << EOF > ${VERIFY_TIMER_FILE}
+write_atomic "${VERIFY_TIMER_FILE}" << EOF
 [Unit]
 Description=Run ${VERIFY_SERVICE_NAME} periodically to verify and auto-repair helper
 
@@ -3018,7 +3107,7 @@ log_info ">>> Creating zypper wrapper script for manual updates..."
 update_status "Creating zypper wrapper..."
 ZYPPER_WRAPPER_PATH="$USER_BIN_DIR/zypper-with-ps"
 log_debug "Writing zypper wrapper to: $ZYPPER_WRAPPER_PATH"
-cat << 'EOF' > "$ZYPPER_WRAPPER_PATH"
+write_atomic "$ZYPPER_WRAPPER_PATH" << 'EOF'
 #!/usr/bin/env bash
 # Zypper wrapper that automatically runs 'zypper ps -s' after 'zypper dup'
 # This shows which services need restarting after updates
@@ -3466,7 +3555,7 @@ log_success "zypper-auto-helper command aliases configured for all shells."
 log_info ">>> Creating (user) notifier service: ${NT_SERVICE_FILE}"
 update_status "Creating user notifier service..."
 log_debug "Writing user service file: ${NT_SERVICE_FILE}"
-cat << EOF > ${NT_SERVICE_FILE}
+write_atomic "${NT_SERVICE_FILE}" << EOF
 [Unit]
 Description=Notify user of pending Tumbleweed updates
 Wants=network-online.target
@@ -3488,7 +3577,7 @@ log_success "User notifier service file created"
 # --- 9. Create/Update NOTIFIER (User Timer) ---
 log_info ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 log_debug "Writing user timer file: ${NT_TIMER_FILE}"
-cat << EOF > ${NT_TIMER_FILE}
+write_atomic "${NT_TIMER_FILE}" << EOF
 [Unit]
 Description=Run ${NT_SERVICE_NAME} every minute to check for updates
 
@@ -3509,7 +3598,7 @@ log_success "User notifier timer file created"
 log_info ">>> Creating (user) Python notification script: ${NOTIFY_SCRIPT_PATH}"
 update_status "Creating Python notifier script..."
 log_debug "Writing Python script to: ${NOTIFY_SCRIPT_PATH}"
-cat << 'EOF' > ${NOTIFY_SCRIPT_PATH}
+write_atomic "${NOTIFY_SCRIPT_PATH}" << 'EOF'
 #!/usr/bin/env python3
 #
 # zypper-notify-updater.py (v53 with snooze controls and safety preflight)
@@ -5243,7 +5332,8 @@ if [ "${#CONFIG_WARNINGS[@]}" -gt 0 ]; then
     # Try to send a desktop notification to the target user so they
     # notice the config issue and can fix or reset it.
     if command -v sudo >/dev/null 2>&1; then
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$SUDO_USER")/bus" \
+        USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             notify-send "Zypper Auto-Helper config warnings" \
             "Some settings in ${CONFIG_FILE} were invalid and reset to safe defaults.\n\nCheck the install log or run: zypper-auto-helper --reset-config" \
             >/dev/null 2>&1 || true
@@ -5254,7 +5344,7 @@ fi
 log_info ">>> Creating (user) install script: ${INSTALL_SCRIPT_PATH}"
 update_status "Creating install helper script..."
 log_debug "Writing install script to: ${INSTALL_SCRIPT_PATH}"
-cat << 'EOF' > "${INSTALL_SCRIPT_PATH}"
+write_atomic "${INSTALL_SCRIPT_PATH}" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -5785,7 +5875,7 @@ log_success "Install helper script created and made executable"
 log_info ">>> Creating (user) view changes script: ${VIEW_CHANGES_SCRIPT_PATH}"
 update_status "Creating view changes helper script..."
 log_debug "Writing view changes script to: ${VIEW_CHANGES_SCRIPT_PATH}"
-cat << 'EOF' > "${VIEW_CHANGES_SCRIPT_PATH}"
+write_atomic "${VIEW_CHANGES_SCRIPT_PATH}" << 'EOF'
 #!/usr/bin/env bash
 
 # Script to view detailed package changes
@@ -5893,7 +5983,7 @@ SOAR_INSTALL_HELPER_PATH="$USER_BIN_DIR/zypper-soar-install-helper"
 log_info ">>> Creating (user) Soar install helper: ${SOAR_INSTALL_HELPER_PATH}"
 update_status "Creating Soar install helper script..."
 log_debug "Writing Soar helper script to: ${SOAR_INSTALL_HELPER_PATH}"
-cat << 'EOF' > "${SOAR_INSTALL_HELPER_PATH}"
+write_atomic "${SOAR_INSTALL_HELPER_PATH}" << 'EOF'
 #!/usr/bin/env python3
 """
 Small helper that shows a notification with an "Install Soar" button.
