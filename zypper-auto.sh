@@ -41,7 +41,7 @@ esac
 if [[ $# -gt 0 ]]; then
     case "${1:-}" in
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
-        --soar|--brew|--pip-package|--pipx|--uninstall-zypper-helper|--uninstall-zypper|\
+        --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--test-notify)
@@ -2262,6 +2262,125 @@ run_pipx_helper_only() {
     return 0
 }
 
+# --- Helper: Snap & Flatpak setup mode (CLI) ---
+run_setup_sf_only() {
+    log_info ">>> Snapd / Flatpak setup helper mode..."
+    update_status "Running Snapd/Flatpak setup helper..."
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  Snapd and Flatpak Setup" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "This helper will:" | tee -a "${LOG_FILE}"
+    echo "  - Ensure snapd (snap) is installed" | tee -a "${LOG_FILE}"
+    echo "  - Ensure flatpak is installed" | tee -a "${LOG_FILE}"
+    echo "  - Add common Flatpak remotes (Flathub, Flathub Beta, AppCenter)" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    local rc=0
+    local snap_ok=0 flatpak_ok=0 flathub_ok=0 flathub_beta_ok=0 appcenter_ok=0
+
+    # 1) Ensure snapd (snap command) is installed
+    if command -v snap >/dev/null 2>&1; then
+        log_success "snap command already available (snapd installed)"
+        snap_ok=1
+    else
+        log_info "snap command not found; installing 'snapd' via zypper..."
+        update_status "Installing snapd..."
+        if zypper -n install snapd >> "${LOG_FILE}" 2>&1; then
+            log_success "snapd successfully installed"
+            snap_ok=1
+        else
+            log_error "Failed to install snapd via zypper. Check your repositories or install manually."
+            rc=1
+        fi
+    fi
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "After snapd installation completes, enable the core services with:" | tee -a "${LOG_FILE}"
+    echo "  sudo systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    # 2) Ensure Flatpak is installed
+    if command -v flatpak >/dev/null 2>&1; then
+        log_success "Flatpak already installed"
+        flatpak_ok=1
+    else
+        log_info "Flatpak not found; installing 'flatpak' via zypper..."
+        update_status "Installing flatpak..."
+        if zypper -n install flatpak >> "${LOG_FILE}" 2>&1; then
+            log_success "Flatpak successfully installed"
+            flatpak_ok=1
+        else
+            log_error "Failed to install flatpak via zypper. Check your repositories or install manually."
+            rc=1
+        fi
+    fi
+
+    # 3) Configure common Flatpak remotes
+    if command -v flatpak >/dev/null 2>&1; then
+        log_info "Configuring common Flatpak remotes (Flathub, Flathub Beta, AppCenter)..."
+        if flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >> "${LOG_FILE}" 2>&1; then
+            log_success "Flathub remote configured (or already present)"
+            flathub_ok=1
+        else
+            log_error "Failed to add Flathub remote (check network/connectivity)."
+            rc=1
+        fi
+
+        if flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo >> "${LOG_FILE}" 2>&1; then
+            log_success "Flathub Beta remote configured (or already present)"
+            flathub_beta_ok=1
+        else
+            log_error "Failed to add Flathub Beta remote (check network/connectivity)."
+            rc=1
+        fi
+
+        if flatpak remote-add --if-not-exists appcenter https://flatpak.elementary.io/repo.flatpakrepo >> "${LOG_FILE}" 2>&1; then
+            log_success "AppCenter remote configured (or already present)"
+            appcenter_ok=1
+        else
+            log_error "Failed to add AppCenter remote (check network/connectivity or remote URL)."
+            rc=1
+        fi
+    else
+        log_error "Flatpak is not installed; skipping remote configuration."
+        rc=1
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+        update_status "SUCCESS: Snapd/Flatpak setup helper completed"
+        log_success "Snapd & Flatpak setup completed successfully"
+    else
+        update_status "COMPLETED WITH WARNINGS: Snapd/Flatpak setup encountered some issues"
+        log_error "Snapd & Flatpak setup completed with one or more errors. See ${LOG_FILE} for details."
+
+        # Write a compact one-shot report so the user has a quick summary
+        # without digging through the full installer log.
+        local report
+        report="${LOG_DIR}/setup-sf-last-report.txt"
+        {
+            echo "Snapd / Flatpak Setup Report ($(date '+%Y-%m-%d %H:%M:%S'))"
+            echo "Log file     : ${LOG_FILE}"
+            echo "Exit status  : ${rc}"
+            echo ""
+            echo "Checks:"
+            echo "  - snapd installed        : $([ "$snap_ok" -eq 1 ] && echo OK || echo FAILED)"
+            echo "  - flatpak installed      : $([ "$flatpak_ok" -eq 1 ] && echo OK || echo FAILED)"
+            echo "  - Flathub remote         : $([ "$flathub_ok" -eq 1 ] && echo OK || echo FAILED)"
+            echo "  - Flathub Beta remote    : $([ "$flathub_beta_ok" -eq 1 ] && echo OK || echo FAILED)"
+            echo "  - AppCenter remote       : $([ "$appcenter_ok" -eq 1 ] && echo OK || echo FAILED)"
+            echo ""
+            echo "Next steps:"
+            echo "  - For any FAILED item, re-run 'zypper-auto-helper --setup-SF' after fixing network/remote issues."
+            echo "  - Full details: ${LOG_FILE}"
+        } >"${report}" 2>/dev/null || true
+        log_info "Snapd/Flatpak setup summary report written to ${report}"
+    fi
+
+    return "$rc"
+}
+
 # Show help if requested, or when invoked as the installed CLI with no arguments
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
    || ( $# -eq 0 && "$(basename "$0")" == "zypper-auto-helper" ) ]]; then
@@ -2281,6 +2400,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
+    echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
     echo "  --reset-state           Alias for --reset-downloads"
@@ -2332,6 +2452,19 @@ elif [[ "${1:-}" == "--pip-package" || "${1:-}" == "--pipx" ]]; then
     log_info "pipx helper-only mode requested"
     run_pipx_helper_only
     exit $?
+elif [[ "${1:-}" == "--setup-SF" ]]; then
+    log_info "Snapd/Flatpak setup helper-only mode requested"
+    # In helper-only mode we may intentionally return a non-zero status
+    # (e.g. when a Flatpak remote cannot be added) without wanting to
+    # trigger the global ERR trap or treat it as a fatal installer
+    # failure. Temporarily disable set -e and the ERR trap while running
+    # the helper and propagate its exit code directly.
+    trap - ERR
+    set +e
+    run_setup_sf_only
+    rc=$?
+    set -e
+    exit $rc
 elif [[ "${1:-}" == "--reset-config" ]]; then
     log_info "Config reset mode requested"
     run_reset_config_only
