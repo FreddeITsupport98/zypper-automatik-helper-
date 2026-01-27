@@ -2199,20 +2199,20 @@ run_pipx_helper_only() {
     else
         echo "pipx is not installed yet for user $SUDO_USER." | tee -a "${LOG_FILE}"
         echo "The recommended way on openSUSE is:" | tee -a "${LOG_FILE}"
-        echo "  sudo zypper install python313-pipx" | tee -a "${LOG_FILE}"
+        echo "  sudo zypper install python3-pipx" | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
 
-        read -p "May I install python313-pipx for you now via zypper? [y/N]: " -r REPLY
+        read -p "May I install python3-pipx for you now via zypper? [y/N]: " -r REPLY
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Installing python313-pipx via zypper..."
-            update_status "Installing dependency: python313-pipx"
-            if ! zypper -n install python313-pipx >> "${LOG_FILE}" 2>&1; then
-                log_error "Failed to install python313-pipx. Please install it manually and re-run with --pip-package."
-                update_status "FAILED: Could not install python313-pipx"
+            log_info "Installing python3-pipx via zypper..."
+            update_status "Installing dependency: python3-pipx"
+            if ! zypper -n install python3-pipx >> "${LOG_FILE}" 2>&1; then
+                log_error "Failed to install python3-pipx. Please install it manually and re-run with --pip-package."
+                update_status "FAILED: Could not install python3-pipx"
                 return 1
             fi
-            log_success "Successfully installed python313-pipx"
+            log_success "Successfully installed python3-pipx"
 
             # Best-effort: ensure pipx adds its binaries to the user's PATH
             if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
@@ -2810,6 +2810,14 @@ STATUS_FILE="$LOG_DIR/download-status.txt"
 START_TIME_FILE="$LOG_DIR/download-start-time.txt"
 CACHE_DIR="/var/cache/zypp/packages"
 
+# Atomic write helper for the shared status file so the user notifier
+# never sees partially-written lines.
+write_status() {
+    local value="$1" tmp
+    tmp="${STATUS_FILE}.tmp.$$"
+    printf '%s\n' "$value" >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS_FILE"
+}
+
 # Optional: read extra dup flags from /etc/zypper-auto.conf so users can
 # tweak solver behaviour (e.g. --allow-vendor-change) without editing
 # this script directly.
@@ -2868,7 +2876,7 @@ handle_lock_or_fail() {
     local exit_code="$1" err_file="$2"
     if [ "$exit_code" -eq 7 ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Zypper is locked by another process; skipping this downloader run (will retry on next timer)" >&2
-        echo "idle" > "$STATUS_FILE"
+        write_status "idle"
         if [ -n "$err_file" ] && [ -f "$err_file" ]; then
             rm -f "$err_file"
         fi
@@ -2877,7 +2885,7 @@ handle_lock_or_fail() {
 }
 
 # Write status: refreshing
-echo "refreshing" > "$STATUS_FILE"
+write_status "refreshing"
 date +%s > "$START_TIME_FILE"
 
 # Refresh repos
@@ -2893,11 +2901,11 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     # At this point we know the error was not a simple lock. Classify it
     # as a network/repository problem so the notifier can surface a clear
     # error message instead of silently doing nothing.
-    if grep -qi "could not resolve host" "$REFRESH_ERR" || \
+        if grep -qi "could not resolve host" "$REFRESH_ERR" || \
        grep -qi "Failed to retrieve new repository metadata" "$REFRESH_ERR"; then
-        echo "error:network" > "$STATUS_FILE"
+        write_status "error:network"
     else
-        echo "error:repo" > "$STATUS_FILE"
+        write_status "error:repo"
     fi
 
     cat "$REFRESH_ERR" >&2 || true
@@ -2922,9 +2930,9 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     # so the notifier can display a meaningful error notification.
     if grep -qi "could not resolve host" "$DRY_ERR" || \
        grep -qi "Failed to retrieve new repository metadata" "$DRY_ERR"; then
-        echo "error:network" > "$STATUS_FILE"
+        write_status "error:network"
     else
-        echo "error:repo" > "$STATUS_FILE"
+        write_status "error:repo"
     fi
 
     cat "$DRY_ERR" >&2 || true
@@ -2946,7 +2954,7 @@ if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
     # No packages to upgrade; mark idle so the notifier shows a
     # "no updates" state on the next run. DRYRUN_OUTPUT_FILE already
     # contains the latest "Nothing to do" output for reference.
-    echo "idle" > "$STATUS_FILE"
+    write_status "idle"
     rm -f "$DRY_OUTPUT"
     exit 0
 fi
@@ -2957,14 +2965,14 @@ DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT"
 
 # Detect case where everything is already cached so we don't show a fake
 # download progress bar. In that situation zypper's summary contains a
-# line similar to:
+    # line similar to:
 #   0 B  |  -   88.3 MiB  already in cache
 if grep -q "already in cache" "$DRY_OUTPUT" && \
    grep -qE "^[[:space:]]*0 B[[:space:]]*\\|" "$DRY_OUTPUT"; then
     # All data is already in the local cache; mark as a completed
     # download with 0 newly-downloaded packages and skip the
     # --download-only pass entirely.
-    echo "complete:0:0" > "$STATUS_FILE"
+    write_status "complete:0:0"
     trigger_notifier
     rm -f "$DRY_OUTPUT"
     exit 0
@@ -2976,7 +2984,7 @@ rm -f "$DRY_OUTPUT"
 BEFORE_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
 
 # Write initial downloading status so the tracker loop sees it immediately
-echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
+write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0"
 # Start background progress tracker
 (
     while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
@@ -2993,7 +3001,7 @@ echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" > "$STATUS_FILE"
             PERCENT=0
         fi
         
-        echo "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:$DOWNLOADED:$PERCENT" > "$STATUS_FILE"
+        write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:$DOWNLOADED:$PERCENT"
     done
 ) &
 TRACKER_PID=$!
@@ -3006,7 +3014,7 @@ if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
     # Mark as a completed detection-only cycle; no new packages were
     # downloaded by this helper, but the notifier will see that updates
     # exist from its own dry-run.
-    echo "complete:0:0" > "$STATUS_FILE"
+    write_status "complete:0:0"
     trigger_notifier
     exit 0
 fi
@@ -3044,10 +3052,10 @@ DURATION=$((END_TIME - START_TIME))
 #    so the notifier can tell the user that manual intervention is required
 #  - Otherwise, leave the previous status (e.g. idle or complete:0:0)
 if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
-    echo "complete:$DURATION:$ACTUAL_DOWNLOADED" > "$STATUS_FILE"
+    write_status "complete:$DURATION:$ACTUAL_DOWNLOADED"
     trigger_notifier
 elif [ $ZYP_RET -ne 0 ]; then
-    echo "error:solver:$ZYP_RET" > "$STATUS_FILE"
+    write_status "error:solver:$ZYP_RET"
 fi
 
 DLSCRIPT
@@ -6469,7 +6477,7 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
         elif [ "$pkg" = "pipx" ]; then
             echo "pipx:" | tee -a "${LOG_FILE}"
             echo "  Purpose: Manage standalone Python CLI tools (yt-dlp, black, ansible, httpie, etc.)" | tee -a "${LOG_FILE}"
-            echo "  Install: sudo zypper install python313-pipx" | tee -a "${LOG_FILE}"
+            echo "  Install: sudo zypper install python3-pipx" | tee -a "${LOG_FILE}"
             echo "  Helper:  zypper-auto-helper --pip-package  (run without sudo)" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
         fi
