@@ -313,7 +313,7 @@ whenever it runs:
   - Adds the warning to `CONFIG_WARNINGS` so it appears in
     `/var/log/zypper-auto/last-status.txt`.
   - Tries to send a desktop notification suggesting:
-    `sudo zypper-auto-helper --reset-config`.
+    `zypper-auto-helper --reset-config`.
   - Applies safe defaults for those keys at runtime so the installer and
     services continue to work.
 
@@ -321,7 +321,7 @@ If you see a warning that `/etc/zypper-auto.conf` is from an older version and
 lists missing keys, the **recommended fix** is:
 
 ```bash
-sudo zypper-auto-helper --reset-config
+zypper-auto-helper --reset-config
 sudo ./zypper-auto.sh install
 ```
 
@@ -807,7 +807,7 @@ systemctl status zypper-autodownload.service
 
 - **v58** (2025-12-31): **Scripted Uninstaller, External Config & Log Control**
   - 📝 **Short:** Safer uninstall, externalised config (including `DUP_EXTRA_FLAGS`), smarter config health warnings, and improved solver-conflict notifications that keep cached downloads and guide you to resolve conflicts.
-  - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `sudo zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
+  - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
   - ⚙️ **NEW: Advanced uninstall flags** – `--yes` / `-y` / `--non-interactive` skip the confirmation prompt for automated or non-interactive environments; `--dry-run` shows exactly what **would** be removed without making any changes; `--keep-logs` preserves `/var/log/zypper-auto` install/service logs for debugging while still clearing per-user notifier caches.
   - 🧹 **IMPROVED: Clean systemd state on uninstall** – system and user units are stopped, disabled, removed from disk, and their "failed" states cleared via `systemctl reset-failed`/`systemctl --user reset-failed` so `systemctl status` no longer reports stale failures after uninstall.
   - 🧾 **NEW: External configuration file** – `/etc/zypper-auto.conf` now holds documented settings for post-update helpers (Flatpak/Snap/Soar/Brew), log retention, notifier cache/snooze behaviour, timer intervals, and per-installation zypper behaviour, so users can tweak behaviour without editing the script.
@@ -817,7 +817,7 @@ systemctl status zypper-autodownload.service
 
 - **v57** (2025-12-28): **Soar Stable Updater, Homebrew Integration & Notification UX**
   - 🧭 **NEW: Smarter Soar stable updater** – the helper and wrapper now compare `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-run the official Soar installer when a newer stable version exists, then run `soar sync` and `soar update`.
-  - 🍺 **NEW: Homebrew `--brew` helper mode** – `sudo ./zypper-auto.sh --brew` (or `sudo zypper-auto-helper --brew`) now installs Homebrew on Linux for the target user if missing, or, when brew is already installed, runs `brew update` followed by `brew outdated --quiet` and `brew upgrade` only when there are outdated formulae, with clear log messages.
+  - 🍺 **NEW: Homebrew `--brew` helper mode** – `sudo ./zypper-auto.sh --brew` (or `zypper-auto-helper --brew`) now installs Homebrew on Linux for the target user if missing, or, when brew is already installed, runs `brew update` followed by `brew outdated --quiet` and `brew upgrade` only when there are outdated formulae, with clear log messages.
   - 🔗 **NEW: Homebrew wrapper integration** – the `zypper-with-ps` wrapper now treats `dup`, `dist-upgrade` and `update` as full updates and, after Flatpak/Snap/Soar steps, runs `brew update` and conditionally `brew upgrade`, with Soar-style status messages ("Homebrew is already up to date" vs "upgraded N formulae").
   - 🧩 **IMPROVED: Soar & Homebrew UX** – Soar’s GitHub API check no longer emits noisy `curl: (23)` errors and both Soar and Homebrew remain fully optional; if either tool is not installed, the scripts simply log a short hint instead of failing.
   - 📡 **IMPROVED: Downloader/Notifier coordination** – the downloader writes structured status (`refreshing`, `downloading:…`, `complete:…`, `idle`), handles zypper locks gracefully (marking itself idle and letting timers retry), and the notifier shows live progress, a cached-aware "✅ Downloads Complete!" notification, and a separate persistent "Snapshot XXXXXXXX Ready" notification for installation.
