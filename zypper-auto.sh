@@ -2684,7 +2684,6 @@ update_status "Checking dependencies..."
 log_info ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
 check_and_install "upower" "upower" "checking AC power"
-check_and_install "inxi" "inxi" "hardware and network detection"
 check_and_install "python3" "python3" "running the notifier script"
 check_and_install "pkexec" "polkit" "graphical authentication"
 
@@ -3347,9 +3346,18 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         exit 1
     fi
 
-    # Run the actual zypper command
+    # Run the actual zypper command. If it fails specifically due to the
+    # system management lock (exit code 7), we will show a clearer message
+    # afterwards instead of leaving only the raw zypper error.
     sudo /usr/bin/zypper "$@"
     EXIT_CODE=$?
+
+    if [ "$EXIT_CODE" -eq 7 ]; then
+        echo ""
+        echo "System management is locked by another update tool (zypper/YaST/PackageKit)."
+        echo "Close that other update tool (or wait for it to finish), then run this zypper command again."
+        echo ""
+    fi
 
     # Clear the manual downloading state so the notifier stops showing
     # a progress bar once the interactive session has finished.
@@ -4196,64 +4204,54 @@ except ImportError as e:
     update_status("FAILED: PyGObject not available")
     sys.exit(1)
 
-def has_battery_via_inxi() -> bool:
-    """Use inxi to detect if the system reports a real battery.
+def has_battery_via_sys() -> bool:
+    """Detect presence of a real battery via /sys/class/power_supply.
 
-    We look for a Battery section in `inxi -Bazy` output.
+    This avoids depending on external tools like inxi and works on
+    modern kernels across desktops and laptops.
     """
-    try:
-        out = subprocess.check_output(
-            ["inxi", "-Bazy"], text=True, stderr=subprocess.DEVNULL
-        )
-        log_debug("inxi battery check executed")
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        log_debug(f"inxi battery check failed: {e}")
+    power_supply = Path("/sys/class/power_supply")
+    if not power_supply.is_dir():
+        log_debug("/sys/class/power_supply not present; assuming no battery")
         return False
 
-    # Check if output contains both Battery: and ID- (can be on different lines)
-    if "Battery:" in out and "ID-" in out:
-        log_debug("Battery detected via inxi")
-        return True
-    log_debug("No battery detected via inxi")
-    return False
+    try:
+        for dev in power_supply.iterdir():
+            type_file = dev / "type"
+            if not type_file.is_file():
+                continue
+            try:
+                t = type_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+            except OSError as e:
+                log_debug(f"Failed to read {type_file}: {e}")
+                continue
+            if t == "battery":
+                log_debug(f"Battery detected via /sys on device {dev.name}")
+                return True
+    except Exception as e:
+        log_debug(f"Battery detection via /sys failed: {e}")
+        return False
 
+    log_debug("No battery detected via /sys")
+    return False
 
 def detect_form_factor():
     """Detect whether this machine is a laptop or a desktop.
 
-    Prefer inxi's Machine Type if available; fall back to upower/battery heuristics.
-    Returns "laptop", "desktop", or "unknown".
+    Prefer kernel-exposed /sys power information and fall back to
+    upower/battery heuristics. Returns "laptop", "desktop", or "unknown".
     """
     log_debug("Detecting form factor...")
-    # 0. If inxi reports a real battery, treat as laptop immediately.
+
+    # 0. If /sys reports a real battery, treat as laptop immediately.
     try:
-        if has_battery_via_inxi():
-            log_info("Form factor detected: laptop (via inxi battery)")
+        if has_battery_via_sys():
+            log_info("Form factor detected: laptop (via /sys battery)")
             return "laptop"
     except Exception as e:
-        log_debug(f"has_battery_via_inxi failed in detect_form_factor: {e}")
+        log_debug(f"has_battery_via_sys failed in detect_form_factor: {e}")
 
-    # 1. Prefer inxi's Machine Type (very reliable on most systems)
-    try:
-        out = subprocess.check_output(
-            ["inxi", "-Mazy"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-        for line in out.splitlines():
-            if "Type:" in line:
-                # Example: "  Type: Laptop System: HP ..."
-                val = line.split("Type:", 1)[1].strip().lower()
-                if val.startswith("laptop") or "notebook" in val:
-                    log_info(f"Form factor detected: laptop (via inxi Type: {val})")
-                    return "laptop"
-                if val.startswith("desktop") or "tower" in val or "server" in val:
-                    log_info(f"Form factor detected: desktop (via inxi Type: {val})")
-                    return "desktop"
-    except Exception as e:
-        log_debug(f"inxi -Mazy failed in detect_form_factor: {e}")
-
-    # 2. Fall back to the previous upower + battery-based heuristic
+    # 1. Fall back to the previous upower + battery-based heuristic
     try:
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
     except Exception as e:
@@ -4293,11 +4291,8 @@ def detect_form_factor():
         log_info("Form factor detected: laptop (via upower battery only)")
         return "laptop"
 
-    # No battery seen by upower; fall back to inxi battery information
+    # No battery seen by either /sys or upower; treat as desktop.
     if not has_battery:
-        if has_battery_via_inxi():
-            log_info("Form factor detected: laptop (fallback inxi check)")
-            return "laptop"
         log_info("Form factor detected: desktop (no battery found)")
         return "desktop"
 
