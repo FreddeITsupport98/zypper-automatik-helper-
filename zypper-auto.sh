@@ -3714,6 +3714,14 @@ cleanup_duplicate_rpms() {
 # installed versions we keep the newest and attempt to remove older ones
 # with 'rpm -e --noscripts'.
 cleanup_thirdparty_duplicates() {
+    # --- COLOUR SETUP (for interactive clarity) ---
+    local RED GREEN YELLOW BLUE RESET
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    RESET=$'\033[0m'
+
     # --- SAFETY CONFIGURATION ---
     # 1. Trusted Vendors (Regex)
     #    We match case-insensitively to catch variations like "Nvidia",
@@ -3731,7 +3739,7 @@ cleanup_thirdparty_duplicates() {
     #                     ownership metadata can break future upgrades.
     local CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil|filesystem"
 
-    echo "Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
+    printf '%b\n' "${BLUE}Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})...${RESET}"
 
     # 1. Find duplicate package *name+arch* pairs (multi-version within the
     #    same architecture). This avoids treating legitimate multi-arch
@@ -3750,9 +3758,34 @@ cleanup_thirdparty_duplicates() {
     local num_pairs
     num_pairs=$(echo "$DUPLICATE_PAIRS" | wc -l | awk '{print $1}')
     if [ "$num_pairs" -gt 10 ]; then
-        echo "   WARNING: Found $num_pairs duplicate (name+arch) pairs; safety limit is 10."
+        printf '%b\n' "${YELLOW}   WARNING: Found $num_pairs duplicate (name+arch) pairs; safety limit is 10.${RESET}"
         echo "            Aborting automatic third-party duplicate cleanup; please investigate manually."
+        log_duplicate_audit "[wrapper][thirdparty] Aborting: $num_pairs duplicate pairs exceed safety limit (10)"
         return 0
+    fi
+
+    # --- ULTIMATE SAFETY NET: Snapper snapshot before any destructive action ---
+    local SNAPSHOT_DONE=0
+    if command -v snapper >/dev/null 2>&1; then
+        # Avoid starting another snapper instance if one is already active.
+        if pgrep -x snapper >/dev/null 2>&1; then
+            printf '%b\n' "${YELLOW}   Snapper is already running; skipping pre-cleanup snapshot.${RESET}"
+            log_duplicate_audit "[wrapper][snapshot] Snapper busy; skipped pre-cleanup snapshot"
+        else
+            local SNAP_DESC="zypper-auto: duplicate RPM cleanup (thirdparty)"
+            log_duplicate_audit "[wrapper][snapshot] Creating snapper single snapshot: '$SNAP_DESC'"
+            if sudo snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1; then
+                SNAPSHOT_DONE=1
+                printf '%b\n' "${GREEN}   Created snapper snapshot before third-party duplicate cleanup.${RESET}"
+                log_duplicate_audit "[wrapper][snapshot] Snapshot created successfully"
+            else
+                printf '%b\n' "${YELLOW}   WARNING: Failed to create snapper snapshot; proceeding without snapshot.${RESET}"
+                log_duplicate_audit "[wrapper][snapshot] FAILED to create snapshot; proceeding without snapshot"
+            fi
+        fi
+    else
+        # Snapper not installed; just log for reference.
+        log_duplicate_audit "[wrapper][snapshot] snapper not installed; skipping snapshot creation"
     fi
 
     # 2. Analyse each duplicate (name + arch) and decide whether it's safe
@@ -3789,7 +3822,7 @@ cleanup_thirdparty_duplicates() {
 
         # KILL ZONE: duplicated (same name+arch) + not critical + not from
         # trusted vendor.
-        echo "   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
+        printf '%b\n' "${RED}   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)${RESET}"
         log_duplicate_audit "[wrapper][thirdparty] Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
 
         # Get all installed versions for this name+arch, newest first; keep
@@ -3804,20 +3837,20 @@ cleanup_thirdparty_duplicates() {
 
         for OLD_PKG in $REMOVE_LIST; do
             [ -z "$OLD_PKG" ] && continue
-            echo "      Removing old/broken version: $OLD_PKG"
+            printf '%b\n' "${RED}      Removing old/broken version: $OLD_PKG${RESET}"
             log_duplicate_audit "[wrapper][thirdparty] Removing old/broken version: $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
 
             # GUARD RAIL 3: Dependency pre-flight; only erase if --test passes.
             if sudo rpm -e --test --noscripts "$OLD_PKG" >/dev/null 2>&1; then
                 if sudo rpm -e --noscripts "$OLD_PKG"; then
-                    echo "         Cleaned successfully."
+                    printf '%b\n' "${GREEN}         Cleaned successfully.${RESET}"
                     log_duplicate_audit "[wrapper][thirdparty] Cleaned $OLD_PKG successfully"
                 else
-                    echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                    printf '%b\n' "${YELLOW}         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed).${RESET}"
                     log_duplicate_audit "[wrapper][thirdparty] FAILED to clean $OLD_PKG (rpm -e --noscripts error)"
                 fi
             else
-                echo "         Skipping $OLD_PKG: rpm -e --test reported dependency failures"
+                printf '%b\n' "${YELLOW}         Skipping $OLD_PKG: rpm -e --test reported dependency failures${RESET}"
                 log_duplicate_audit "[wrapper][thirdparty] Skipping $OLD_PKG: rpm -e --test reported dependency failures"
             fi
         done
