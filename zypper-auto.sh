@@ -42,7 +42,7 @@ if [[ $# -gt 0 ]]; then
     case "${1:-}" in
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
-        --reset-config|--reset-downloads|--reset-state|\
+        --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--test-notify|--status)
             # Known commands/options; continue into main logic
@@ -1862,6 +1862,117 @@ run_reset_download_state_only() {
     echo "" | tee -a "${LOG_FILE}"
 }
 
+# --- Helper: Duplicate RPM conflict cleanup (CLI) ---
+run_rm_conflict_only() {
+    log_info ">>> Running duplicate RPM conflict cleanup..."
+    update_status "Cleaning duplicate RPM conflicts..."
+
+    local mode
+    mode=${AUTO_DUPLICATE_RPM_MODE:-whitelist}
+
+    echo "Duplicate RPM cleanup mode: ${mode}"
+
+    # 1) Whitelist-driven cleanup (uses AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES)
+    if [ "$mode" = "whitelist" ] || [ "$mode" = "both" ]; then
+        local packages name
+        packages=${AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES:-insync}
+
+        for name in $packages; do
+            [ -z "$name" ] && continue
+            if ! rpm -q "$name" >/dev/null 2>&1; then
+                continue
+            fi
+
+            local count
+            count=$(rpm -q "$name" 2>/dev/null | wc -l || echo 0)
+            if [ "$count" -le 1 ]; then
+                continue
+            fi
+
+            echo ""
+            echo "[whitelist] Detected multiple installed versions of '$name'."
+            echo "  Attempting to remove older versions (keeping the newest) before upgrades..."
+
+            local lines newest
+            # List full NVRAs for this package and sort by version; keep the
+            # newest line and treat the rest as older duplicates.
+            lines=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "$name" 2>/dev/null | sort -V) || continue
+            newest=$(echo "$lines" | tail -n1)
+            if [ -z "$newest" ]; then
+                continue
+            fi
+
+            echo "  - Keeping newest: $newest"
+            echo "$lines" | head -n -1 | while read -r pkg; do
+                [ -z "$pkg" ] && continue
+                echo "  - Removing older duplicate: $pkg"
+                if rpm -e --noscripts "$pkg"; then
+                    echo "      ✓ Removed $pkg"
+                else
+                    echo "      ✗ Failed to remove $pkg"
+                fi
+            done
+        done
+    fi
+
+    # 2) Optional vendor-based third-party duplicate cleanup (same rules
+    # as the wrapper's cleanup_thirdparty_duplicates, but using rpm
+    # directly as root instead of sudo).
+    if [ "$mode" = "thirdparty" ] || [ "$mode" = "both" ]; then
+        local SAFE_VENDORS CRITICAL_PKGS
+        SAFE_VENDORS="openSUSE|SUSE|Packman|NVIDIA|Intel|http://packman|obs://build.opensuse.org"
+        CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil"
+
+        echo ""
+        echo "[thirdparty] Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
+
+        local DUPLICATE_NAMES
+        DUPLICATE_NAMES=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort | uniq -d)
+        if [ -z "$DUPLICATE_NAMES" ]; then
+            echo "   No duplicate third-party packages found."
+        else
+            local PKG VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
+            for PKG in $DUPLICATE_NAMES; do
+                if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
+                    echo "   Skipping CRITICAL package: $PKG (safety override)"
+                    continue
+                fi
+
+                VENDOR=$(rpm -q --qf '%{VENDOR}\n' "$PKG" 2>/dev/null | head -n 1)
+                VENDOR=${VENDOR:-UnknownVendor}
+
+                if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
+                    echo "   Skipping trusted-vendor package: $PKG (Vendor: $VENDOR)"
+                    continue
+                fi
+
+                echo "   Found third-party duplicate: $PKG (Vendor: $VENDOR)"
+
+                ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' --last "$PKG" 2>/dev/null)
+                REMOVE_LIST=$(echo "$ALL_VERSIONS" | tail -n +2 | awk '{print $1}')
+
+                if [ -z "$REMOVE_LIST" ]; then
+                    echo "      (Duplicate reported but no removable versions found; skipping.)"
+                    continue
+                fi
+
+                for OLD_PKG in $REMOVE_LIST; do
+                    [ -z "$OLD_PKG" ] && continue
+                    echo "      Removing old/broken version: $OLD_PKG"
+                    if rpm -e --noscripts "$OLD_PKG"; then
+                        echo "         Cleaned successfully."
+                    else
+                        echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                    fi
+                done
+            done
+        fi
+    fi
+
+    log_success "Duplicate RPM conflict cleanup completed"
+    update_status "SUCCESS: Duplicate RPM conflict cleanup completed"
+}
+
 # --- Helper: Status report (CLI) ---
 run_status_only() {
     log_info ">>> zypper-auto-helper status report..."
@@ -2542,6 +2653,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
+    echo "  --rm-conflict           Scan for duplicate RPMs and auto-clean safe conflicts before manual zypper dup"
     echo "  --reset-state           Alias for --reset-downloads"
     echo "  --logs                  Show tails of installer, service, and notifier logs"
     echo "  --live-logs             Follow installer/service/notifier logs in real time (Ctrl+C to exit)"
@@ -2611,6 +2723,10 @@ elif [[ "${1:-}" == "--reset-config" ]]; then
 elif [[ "${1:-}" == "--reset-downloads" || "${1:-}" == "--reset-state" ]]; then
     log_info "Download/notifier state reset mode requested"
     run_reset_download_state_only
+    exit $?
+elif [[ "${1:-}" == "--rm-conflict" ]]; then
+    log_info "Duplicate RPM conflict cleanup mode requested"
+    run_rm_conflict_only
     exit $?
 elif [[ "${1:-}" == "--logs" || "${1:-}" == "--log" ]]; then
     log_info "Log viewer mode requested"
@@ -3489,14 +3605,15 @@ cleanup_duplicate_rpms() {
             echo "Attempting to remove older versions (keeping the newest) before running zypper..."
 
             local lines newest
-            lines=$(rpm -q --qf '%{VERSION}-%{RELEASE} %{ARCH} ${name}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "$name" 2>/dev/null | sort -V) || continue
-            newest=$(echo "$lines" | tail -n1 | awk '{print $3}')
+            # List full NVRAs and sort by version; keep the newest, remove the rest.
+            lines=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "$name" 2>/dev/null | sort -V) || continue
+            newest=$(echo "$lines" | tail -n1)
             if [ -z "$newest" ]; then
                 continue
             fi
 
             echo "  - Keeping newest: $newest"
-            echo "$lines" | head -n -1 | awk '{print $3}' | while read -r pkg; do
+            echo "$lines" | head -n -1 | while read -r pkg; do
                 [ -z "$pkg" ] && continue
                 echo "  - Removing older duplicate: $pkg"
                 if ! sudo rpm -e --noscripts "$pkg"; then
@@ -3594,11 +3711,27 @@ cleanup_thirdparty_duplicates() {
     done
 }
 
+# One-shot conflict-cleanup mode: when invoked as
+#   zypper --rm-conflict [optional zypper-args...]
+# we run duplicate-RPM cleanup first, then (if additional
+# arguments are present) fall through to normal zypper
+# handling.
+if [[ "${1:-}" == "--rm-conflict" ]]; then
+    echo "Running duplicate RPM conflict cleanup (--rm-conflict)..."
+    # Drop the flag from the argument list before continuing
+    shift
+    cleanup_duplicate_rpms
+    # If no further args, exit after cleanup
+    if [ "$#" -eq 0 ]; then
+        exit 0
+    fi
+fi
+
 # Check if we're running 'dup', 'dist-upgrade' or 'update'
 STATUS_DIR="/var/log/zypper-auto"
 STATUS_FILE="$STATUS_DIR/download-status.txt"
 
-if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"update"* ]]; then
+if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"update"* ]] ; then
     # For interactive runs, publish a best-effort "downloading" status so the
     # desktop notifier can show a progress bar while the user is running
     # zypper manually. We don't know the package count in advance here, so we
