@@ -1926,29 +1926,34 @@ run_rm_conflict_only() {
         echo ""
         echo "[thirdparty] Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
 
-        local DUPLICATE_NAMES
-        DUPLICATE_NAMES=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort | uniq -d)
-        if [ -z "$DUPLICATE_NAMES" ]; then
+        # Find duplicate package *name+arch* pairs (multi-version within the
+        # same architecture) to avoid treating legitimate multi-arch installs
+        # (e.g. x86_64 + i686) as conflicts.
+        local DUPLICATE_PAIRS
+        DUPLICATE_PAIRS=$(rpm -qa --qf '%{NAME} %{ARCH}\\n' 2>/dev/null | sort | uniq -d)
+        if [ -z "$DUPLICATE_PAIRS" ]; then
             echo "   No duplicate third-party packages found."
         else
-            local PKG VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
-            for PKG in $DUPLICATE_NAMES; do
+            local PKG ARCH VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
+            echo "$DUPLICATE_PAIRS" | while read -r PKG ARCH; do
+                [ -z "$PKG" ] && continue
+
                 if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
-                    echo "   Skipping CRITICAL package: $PKG (safety override)"
+                    echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
                     continue
                 fi
 
-                VENDOR=$(rpm -q --qf '%{VENDOR}\n' "$PKG" 2>/dev/null | head -n 1)
+                VENDOR=$(rpm -q --qf '%{VENDOR}\\n' "${PKG}.${ARCH}" 2>/dev/null | head -n 1)
                 VENDOR=${VENDOR:-UnknownVendor}
 
                 if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
-                    echo "   Skipping trusted-vendor package: $PKG (Vendor: $VENDOR)"
+                    echo "   Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
                     continue
                 fi
 
-                echo "   Found third-party duplicate: $PKG (Vendor: $VENDOR)"
+                echo "   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
 
-                ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' --last "$PKG" 2>/dev/null)
+                ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' --last "${PKG}.${ARCH}" 2>/dev/null)
                 REMOVE_LIST=$(echo "$ALL_VERSIONS" | tail -n +2 | awk '{print $1}')
 
                 if [ -z "$REMOVE_LIST" ]; then
@@ -3655,41 +3660,47 @@ cleanup_thirdparty_duplicates() {
 
     echo "Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
 
-    # 1. Find duplicate package names (appear >1 time in RPM DB)
-    local DUPLICATE_NAMES
-    DUPLICATE_NAMES=$(rpm -qa --qf '%{NAME}\\n' 2>/dev/null | sort | uniq -d)
+    # 1. Find duplicate package *name+arch* pairs (multi-version within the
+    #    same architecture). This avoids treating legitimate multi-arch
+    #    installs (e.g. x86_64 + i686) as conflicts.
+    local DUPLICATE_PAIRS
+    DUPLICATE_PAIRS=$(rpm -qa --qf '%{NAME} %{ARCH}\\n' 2>/dev/null | sort | uniq -d)
 
-    if [ -z "$DUPLICATE_NAMES" ]; then
+    if [ -z "$DUPLICATE_PAIRS" ]; then
         echo "   No duplicate packages found."
         return 0
     fi
 
-    # 2. Analyse each duplicate and decide whether it's safe to clean
-    local PKG VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
-    for PKG in $DUPLICATE_NAMES; do
-        # GUARD RAIL 1: Critical Package Protection
+    # 2. Analyse each duplicate (name + arch) and decide whether it's safe
+    #    to clean. We only remove extra versions within the same arch.
+    local PKG ARCH VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
+    echo "$DUPLICATE_PAIRS" | while read -r PKG ARCH; do
+        [ -z "$PKG" ] && continue
+
+        # GUARD RAIL 1: Critical Package Protection (by name)
         if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
-            echo "   Skipping CRITICAL package: $PKG (safety override)"
+            echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
             continue
         fi
 
-        # Get Vendor; default to a non-empty placeholder so logic
-        # remains robust even for badly built RPMs with missing vendor.
-        VENDOR=$(rpm -q --qf '%{VENDOR}\\n' "$PKG" 2>/dev/null | head -n 1)
+        # Get Vendor for this name+arch; default to a non-empty placeholder so
+        # logic remains robust even for badly built RPMs with missing vendor.
+        VENDOR=$(rpm -q --qf '%{VENDOR}\\n' "${PKG}.${ARCH}" 2>/dev/null | head -n 1)
         VENDOR=${VENDOR:-UnknownVendor}
 
         # GUARD RAIL 2: Trusted Vendor Whitelist (case-insensitive)
         if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
-            echo "   Skipping trusted-vendor package: $PKG (Vendor: $VENDOR)"
+            echo "   Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
             continue
         fi
 
-        # KILL ZONE: duplicated + not critical + not from trusted vendor
-        echo "   Found third-party duplicate: $PKG (Vendor: $VENDOR)"
+        # KILL ZONE: duplicated (same name+arch) + not critical + not from
+        # trusted vendor.
+        echo "   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
 
-        # Get all installed versions, newest first; keep the top (newest)
-        # and mark the rest for removal.
-        ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' --last "$PKG" 2>/dev/null)
+        # Get all installed versions for this name+arch, newest first; keep
+        # the top (newest) and mark the rest for removal.
+        ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' --last "${PKG}.${ARCH}" 2>/dev/null)
         REMOVE_LIST=$(echo "$ALL_VERSIONS" | tail -n +2 | awk '{print $1}')
 
         if [ -z "$REMOVE_LIST" ]; then
