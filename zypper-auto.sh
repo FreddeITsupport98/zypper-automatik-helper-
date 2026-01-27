@@ -438,32 +438,45 @@ DOWNLOADER_DOWNLOAD_MODE=full
 #     command line, for example:
 #         DUP_EXTRA_FLAGS="--allow-vendor-change --no-allow-vendor-change"
 DUP_EXTRA_FLAGS=""
-+
-+# ---------------------------------------------------------------------
-+# Notifier form-factor override (advanced)
-+# ---------------------------------------------------------------------
-+#
-+# In most setups the notifier can automatically distinguish laptops from
-+# desktops by inspecting /sys/class/power_supply and upower devices. In
-+# rare or exotic configurations (e.g. desktops on a UPS that appears as a
-+# "Battery" device) this detection may misclassify the system and apply
-+# overly strict battery safety rules.
-+#
-+# You can force the notifier to treat the system as a specific form
-+# factor by setting FORCE_FORM_FACTOR to one of the following values:
-+#   laptop   - always treat as a laptop (requires AC + unmetered network
-+#              for background activity)
-+#   desktop  - always treat as a desktop (no AC restriction; only
-+#              metered detection applies)
-+#   unknown  - treat as "battery/unknown"; behaves like a laptop for
-+#              safety decisions but still logs as "unknown".
-+#
-+# Leave this unset (or commented) to use automatic detection.
-+#
-+# Example:
-+#   FORCE_FORM_FACTOR=laptop
-+#
-+#FORCE_FORM_FACTOR=
+
+# AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES
+# Space-separated list of package names that zypper-auto-helper is allowed
+# to clean up when multiple RPM versions are installed and they block
+# updates (for example, due to broken %preun/%postun scriptlets).
+#
+# For each package name in this list, the zypper wrapper will:
+#   - detect when more than one version is installed
+#   - keep the newest version
+#   - attempt to remove older versions with:
+#         rpm -e --noscripts <older-version>
+#
+# WARNING:
+#   - This should only be used for third-party / leaf packages you know
+#     are safe to remove this way (e.g. "insync").
+#   - Do NOT add core system packages (kernel, glibc, systemd, etc.).
+#
+# Default: only "insync" is enabled, because it is known to ship
+# problematic uninstall scripts on some systems. You can extend this list
+# with additional package names if you fully understand the risks, e.g.:
+#   AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES="insync some-other-app"
+AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES="insync"
+
+# AUTO_DUPLICATE_RPM_MODE
+# Controls how duplicate RPM cleanup behaves:
+#   whitelist  - only clean packages listed in AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES (default, safest)
+#   thirdparty - automatically clean duplicate packages whose Vendor is not SUSE/openSUSE
+#   both       - run whitelist cleanup first, then scan third-party duplicates
+#
+# NOTE: thirdparty/both modes are more aggressive and should only be
+# used if you understand the risks. They will never touch packages whose
+# Vendor contains "SUSE" or "openSUSE", but may still affect important
+# third-party drivers or libraries.
+AUTO_DUPLICATE_RPM_MODE="whitelist"
+
+# Example:
+#   FORCE_FORM_FACTOR=laptop
+#
+#FORCE_FORM_FACTOR=
 EOF
         # Ensure config file has safe permissions (root-writable only)
         chmod 644 "${CONFIG_FILE}" || true
@@ -609,11 +622,20 @@ EOF
     # missing-key handling below will still normalise them.
     log_debug "  DOWNLOADER_DOWNLOAD_MODE=${DOWNLOADER_DOWNLOAD_MODE:-full}"
     log_debug "  DUP_EXTRA_FLAGS=${DUP_EXTRA_FLAGS:-}"
+    log_debug "  AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES=${AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES:-insync}"
+    log_debug "  AUTO_DUPLICATE_RPM_MODE=${AUTO_DUPLICATE_RPM_MODE:-whitelist}"
 
     # DOWNLOADER_DOWNLOAD_MODE must be spelled exactly "full" or
     # "detect-only" (case-sensitive). Anything else is reported as
     # invalid and reset to the safe default "full".
     validate_mode DOWNLOADER_DOWNLOAD_MODE full "full|detect-only"
+
+    # AUTO_DUPLICATE_RPM_MODE controls how duplicate RPM cleanup behaves
+    # in the zypper wrapper. Valid values:
+    #   whitelist  - only clean packages listed in AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES
+    #   thirdparty - clean duplicate packages whose Vendor is not SUSE/openSUSE
+    #   both       - run whitelist cleanup, then thirdparty scan
+    validate_mode AUTO_DUPLICATE_RPM_MODE whitelist "whitelist|thirdparty|both"
 
     # Detect older/stale config files that are missing newer keys.
     # We do NOT overwrite the config automatically; instead we collect
@@ -638,6 +660,8 @@ EOF
     _mark_missing_key "LOCK_REMINDER_ENABLED"
     _mark_missing_key "NO_UPDATES_REMINDER_REPEAT_ENABLED"
     _mark_missing_key "UPDATES_READY_REMINDER_REPEAT_ENABLED"
+    _mark_missing_key "AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES"
+    _mark_missing_key "AUTO_DUPLICATE_RPM_MODE"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -654,6 +678,12 @@ EOF
             case "$key" in
                 DUP_EXTRA_FLAGS)
                     log_info "  - DUP_EXTRA_FLAGS: controls extra flags added to every 'zypper dup' run (background downloader and notifier), e.g. --allow-vendor-change."
+                    ;;
+                AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES)
+                    log_info "  - AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES: optional list of package names whose older duplicate RPMs may be auto-removed with 'rpm -e --noscripts' when they block updates."
+                    ;;
+                AUTO_DUPLICATE_RPM_MODE)
+                    log_info "  - AUTO_DUPLICATE_RPM_MODE: chooses between whitelist-only cleanup, third-party vendor-based cleanup, or both."
                     ;;
                 LOCK_RETRY_MAX_ATTEMPTS)
                     log_info "  - LOCK_RETRY_MAX_ATTEMPTS: how many times the Ready-to-Install helper retries when zypper is locked before giving up."
@@ -676,6 +706,12 @@ EOF
             case "$key" in
                 DUP_EXTRA_FLAGS)
                     DUP_EXTRA_FLAGS=""
+                    ;;
+                AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES)
+                    AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES="insync"
+                    ;;
+                AUTO_DUPLICATE_RPM_MODE)
+                    AUTO_DUPLICATE_RPM_MODE="whitelist"
                     ;;
                 LOCK_RETRY_MAX_ATTEMPTS)
                     LOCK_RETRY_MAX_ATTEMPTS=10
@@ -3413,6 +3449,120 @@ has_zypp_lock() {
     return 1
 }
 
+# Opportunistic clean-up for packages that are known to leave multiple
+# RPM versions installed with broken %preun/%postun scriptlets.
+# Behaviour is controlled via the following config keys:
+#   AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES - space-separated whitelist
+#   AUTO_DUPLICATE_RPM_MODE             - whitelist | thirdparty | both
+#
+# In whitelist / both modes we:
+#   - detect when more than one version of a whitelisted package is installed
+#   - keep the newest version
+#   - attempt to remove older versions with 'rpm -e --noscripts'
+#
+# In thirdparty / both modes we also scan for duplicate packages whose
+# Vendor is not SUSE/openSUSE and clean their older versions (see
+# cleanup_thirdparty_duplicates below).
+cleanup_duplicate_rpms() {
+    local mode
+    mode=${AUTO_DUPLICATE_RPM_MODE:-whitelist}
+
+    # 1) Whitelist-driven cleanup (safest and default)
+    if [ "$mode" = "whitelist" ] || [ "$mode" = "both" ]; then
+        local packages name
+        packages=${AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES:-insync}
+
+        for name in $packages; do
+            [ -z "$name" ] && continue
+            if ! rpm -q "$name" >/dev/null 2>&1; then
+                continue
+            fi
+
+            local count
+            count=$(rpm -q "$name" 2>/dev/null | wc -l || echo 0)
+            if [ "$count" -le 1 ]; then
+                continue
+            fi
+
+            echo ""
+            echo "Detected multiple installed versions of '$name'."
+            echo "Attempting to remove older versions (keeping the newest) before running zypper..."
+
+            local lines newest
+            lines=$(rpm -q --qf '%{VERSION}-%{RELEASE} %{ARCH} ${name}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "$name" 2>/dev/null | sort -V) || continue
+            newest=$(echo "$lines" | tail -n1 | awk '{print $3}')
+            if [ -z "$newest" ]; then
+                continue
+            fi
+
+            echo "  - Keeping newest: $newest"
+            echo "$lines" | head -n -1 | awk '{print $3}' | while read -r pkg; do
+                [ -z "$pkg" ] && continue
+                echo "  - Removing older duplicate: $pkg"
+                if ! sudo rpm -e --noscripts "$pkg"; then
+                    echo "    ! Failed to remove $pkg; you can remove it manually with:"
+                    echo "      sudo rpm -e --noscripts $pkg"
+                fi
+            done
+        done
+    fi
+
+    # 2) Optional vendor-based third-party duplicate cleanup
+    if [ "$mode" = "thirdparty" ] || [ "$mode" = "both" ]; then
+        cleanup_thirdparty_duplicates
+    fi
+}
+
+# Auto-detect and clean duplicate third-party packages. A "third-party"
+# package here is defined as one whose Vendor does NOT contain
+# "SUSE" or "openSUSE". For each such package with multiple installed
+# versions we keep the newest and attempt to remove older ones with
+# 'rpm -e --noscripts'.
+cleanup_thirdparty_duplicates() {
+    echo "Scanning for duplicate third-party packages..."
+
+    # 1. Get list of all package names that have duplicates
+    local DUPLICATE_NAMES
+    DUPLICATE_NAMES=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort | uniq -d)
+
+    if [ -z "$DUPLICATE_NAMES" ]; then
+        echo "No duplicate packages found."
+        return 0
+    fi
+
+    local PKG VENDOR OLD_VERSIONS OLD_PKG
+    for PKG in $DUPLICATE_NAMES; do
+        # Get Vendor for this package (check first instance only)
+        VENDOR=$(rpm -q --qf '%{VENDOR}\n' "$PKG" 2>/dev/null | head -n 1 || echo "")
+
+        # Skip anything that looks like an openSUSE/SUSE package
+        if [[ "$VENDOR" == *"SUSE"* || "$VENDOR" == *"openSUSE"* ]]; then
+            echo "Skipping duplicate $PKG (Vendor seems to be SUSE: ${VENDOR})"
+            continue
+        fi
+
+        echo "!! Found duplicate third-party package: $PKG (Vendor: ${VENDOR:-unknown})"
+
+        # 2. List all installed versions, newest first; drop the first
+        #    line so we only act on older versions.
+        OLD_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' --last "$PKG" 2>/dev/null | tail -n +2 | awk '{print $1}')
+        if [ -z "$OLD_VERSIONS" ]; then
+            continue
+        fi
+
+        for OLD_PKG in $OLD_VERSIONS; do
+            [ -z "$OLD_PKG" ] && continue
+            echo "   -> Removing old version broken by script: $OLD_PKG"
+            # Use sudo here because the wrapper itself runs as the user.
+            if sudo rpm -e --noscripts "$OLD_PKG"; then
+                echo "   ✅ Successfully cleaned $OLD_PKG"
+            else
+                echo "   ❌ Failed to remove $OLD_PKG"
+            fi
+        done
+    done
+}
+
 # Check if we're running 'dup', 'dist-upgrade' or 'update'
 STATUS_DIR="/var/log/zypper-auto"
 STATUS_FILE="$STATUS_DIR/download-status.txt"
@@ -3452,6 +3602,10 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         sudo bash -c "echo 'idle' > '$STATUS_FILE'" >/dev/null 2>&1 || true
         exit 1
     fi
+
+    # Clean up duplicate RPMs before running zypper, according to
+    # AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES / AUTO_DUPLICATE_RPM_MODE.
+    cleanup_duplicate_rpms
 
     # Run the actual zypper command. If it fails specifically due to the
     # system management lock (exit code 7), we will show a clearer message
