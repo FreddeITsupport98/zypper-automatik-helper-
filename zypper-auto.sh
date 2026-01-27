@@ -3513,51 +3513,82 @@ cleanup_duplicate_rpms() {
     fi
 }
 
-# Auto-detect and clean duplicate third-party packages. A "third-party"
-# package here is defined as one whose Vendor does NOT contain
-# "SUSE" or "openSUSE". For each such package with multiple installed
-# versions we keep the newest and attempt to remove older ones with
-# 'rpm -e --noscripts'.
+# Auto-detect and clean duplicate third-party packages in a more
+# conservative way. A "third-party" package here is one whose Vendor is
+# not in a trusted list (openSUSE/SUSE/Packman/NVIDIA/Intel, etc.), and
+# whose name does not match a list of critical packages (kernels, glibc,
+# systemd, bootloaders, drivers). For each such package with multiple
+# installed versions we keep the newest and attempt to remove older ones
+# with 'rpm -e --noscripts'.
 cleanup_thirdparty_duplicates() {
-    echo "Scanning for duplicate third-party packages..."
+    # --- SAFETY CONFIGURATION ---
+    # 1. Trusted Vendors (Regex)
+    #    We match case-insensitively to catch variations like "Nvidia",
+    #    "NVIDIA", "Suse", "SUSE". This covers official repos
+    #    (openSUSE/SUSE), multimedia (Packman), and common hardware
+    #    vendors (NVIDIA, Intel), plus known Packman/OBS URLs.
+    local SAFE_VENDORS="openSUSE|SUSE|Packman|NVIDIA|Intel|http://packman|obs://build.opensuse.org"
 
-    # 1. Get list of all package names that have duplicates
+    # 2. Critical Packages (Regex)
+    #    We NEVER touch these:
+    #      - kernel-* : multi-version by design
+    #      - glibc/systemd/grub/shim/mokutil : breaking them can brick the OS
+    #      - nvidia   : graphics drivers are too fragile to auto-clean
+    local CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil"
+
+    echo "Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
+
+    # 1. Find duplicate package names (appear >1 time in RPM DB)
     local DUPLICATE_NAMES
-    DUPLICATE_NAMES=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort | uniq -d)
+    DUPLICATE_NAMES=$(rpm -qa --qf '%{NAME}\\n' 2>/dev/null | sort | uniq -d)
 
     if [ -z "$DUPLICATE_NAMES" ]; then
-        echo "No duplicate packages found."
+        echo "   No duplicate packages found."
         return 0
     fi
 
-    local PKG VENDOR OLD_VERSIONS OLD_PKG
+    # 2. Analyse each duplicate and decide whether it's safe to clean
+    local PKG VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
     for PKG in $DUPLICATE_NAMES; do
-        # Get Vendor for this package (check first instance only)
-        VENDOR=$(rpm -q --qf '%{VENDOR}\n' "$PKG" 2>/dev/null | head -n 1 || echo "")
-
-        # Skip anything that looks like an openSUSE/SUSE package
-        if [[ "$VENDOR" == *"SUSE"* || "$VENDOR" == *"openSUSE"* ]]; then
-            echo "Skipping duplicate $PKG (Vendor seems to be SUSE: ${VENDOR})"
+        # GUARD RAIL 1: Critical Package Protection
+        if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
+            echo "   Skipping CRITICAL package: $PKG (safety override)"
             continue
         fi
 
-        echo "!! Found duplicate third-party package: $PKG (Vendor: ${VENDOR:-unknown})"
+        # Get Vendor; default to a non-empty placeholder so logic
+        # remains robust even for badly built RPMs with missing vendor.
+        VENDOR=$(rpm -q --qf '%{VENDOR}\\n' "$PKG" 2>/dev/null | head -n 1)
+        VENDOR=${VENDOR:-UnknownVendor}
 
-        # 2. List all installed versions, newest first; drop the first
-        #    line so we only act on older versions.
-        OLD_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' --last "$PKG" 2>/dev/null | tail -n +2 | awk '{print $1}')
-        if [ -z "$OLD_VERSIONS" ]; then
+        # GUARD RAIL 2: Trusted Vendor Whitelist (case-insensitive)
+        if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
+            echo "   Skipping trusted-vendor package: $PKG (Vendor: $VENDOR)"
             continue
         fi
 
-        for OLD_PKG in $OLD_VERSIONS; do
+        # KILL ZONE: duplicated + not critical + not from trusted vendor
+        echo "   Found third-party duplicate: $PKG (Vendor: $VENDOR)"
+
+        # Get all installed versions, newest first; keep the top (newest)
+        # and mark the rest for removal.
+        ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' --last "$PKG" 2>/dev/null)
+        REMOVE_LIST=$(echo "$ALL_VERSIONS" | tail -n +2 | awk '{print $1}')
+
+        if [ -z "$REMOVE_LIST" ]; then
+            echo "      (Duplicate reported but no removable versions found; skipping.)"
+            continue
+        fi
+
+        for OLD_PKG in $REMOVE_LIST; do
             [ -z "$OLD_PKG" ] && continue
-            echo "   -> Removing old version broken by script: $OLD_PKG"
-            # Use sudo here because the wrapper itself runs as the user.
+            echo "      Removing old/broken version: $OLD_PKG"
+
+            # GUARD RAIL 3: Broken %preun/%postun bypass via --noscripts.
             if sudo rpm -e --noscripts "$OLD_PKG"; then
-                echo "   ✅ Successfully cleaned $OLD_PKG"
+                echo "         Cleaned successfully."
             else
-                echo "   ❌ Failed to remove $OLD_PKG"
+                echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
             fi
         done
     done
