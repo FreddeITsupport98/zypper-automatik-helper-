@@ -1905,12 +1905,17 @@ run_rm_conflict_only() {
             echo "  - Keeping newest: $newest"
             echo "$lines" | head -n -1 | while read -r pkg; do
                 [ -z "$pkg" ] && continue
-                echo "  - Removing older duplicate: $pkg"
+            echo "  - Removing older duplicate: $pkg"
+            # Dependency pre-flight: simulate removal before actually erasing
+            if rpm -e --test --noscripts "$pkg" >/dev/null 2>&1; then
                 if rpm -e --noscripts "$pkg"; then
                     echo "      ✓ Removed $pkg"
                 else
                     echo "      ✗ Failed to remove $pkg"
                 fi
+            else
+                echo "      ⚠ Skipping $pkg: rpm -e --test reported dependency failures"
+            fi
             done
         done
     fi
@@ -1964,10 +1969,15 @@ run_rm_conflict_only() {
                 for OLD_PKG in $REMOVE_LIST; do
                     [ -z "$OLD_PKG" ] && continue
                     echo "      Removing old/broken version: $OLD_PKG"
-                    if rpm -e --noscripts "$OLD_PKG"; then
-                        echo "         Cleaned successfully."
+                    # Dependency pre-flight: simulate removal before actually erasing
+                    if sudo rpm -e --test --noscripts "$OLD_PKG" >/dev/null 2>&1; then
+                        if sudo rpm -e --noscripts "$OLD_PKG"; then
+                            echo "         Cleaned successfully."
+                        else
+                            echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                        fi
                     else
-                        echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                        echo "         Skipping $OLD_PKG: rpm -e --test reported dependency failures"
                     fi
                 done
             done
@@ -3621,9 +3631,14 @@ cleanup_duplicate_rpms() {
             echo "$lines" | head -n -1 | while read -r pkg; do
                 [ -z "$pkg" ] && continue
                 echo "  - Removing older duplicate: $pkg"
-                if ! sudo rpm -e --noscripts "$pkg"; then
-                    echo "    ! Failed to remove $pkg; you can remove it manually with:"
-                    echo "      sudo rpm -e --noscripts $pkg"
+                # Dependency pre-flight: simulate removal before actually erasing
+                if sudo rpm -e --test --noscripts "$pkg" >/dev/null 2>&1; then
+                    if ! sudo rpm -e --noscripts "$pkg"; then
+                        echo "    ! Failed to remove $pkg; you can remove it manually with:"
+                        echo "      sudo rpm -e --noscripts $pkg"
+                    fi
+                else
+                    echo "    ! Skipping $pkg: rpm -e --test reported dependency failures"
                 fi
             done
         done
