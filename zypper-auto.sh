@@ -1939,12 +1939,29 @@ run_rm_conflict_only() {
         if [ -z "$DUPLICATE_PAIRS" ]; then
             echo "   No duplicate third-party packages found."
         else
+            # Sanity limit: if there are *too many* duplicate name+arch pairs,
+            # assume something is wrong with the RPM DB and abort automatic
+            # third-party cleanup to avoid mass deletions.
+            local num_pairs
+            num_pairs=$(echo "$DUPLICATE_PAIRS" | wc -l | awk '{print $1}')
+            if [ "$num_pairs" -gt 10 ]; then
+                echo "   WARNING: Found $num_pairs duplicate (name+arch) pairs; safety limit is 10."
+                echo "            Aborting automatic third-party duplicate cleanup; please investigate manually."
+                return 0
+            fi
+
             local PKG ARCH VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
             echo "$DUPLICATE_PAIRS" | while read -r PKG ARCH; do
                 [ -z "$PKG" ] && continue
 
                 if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
                     echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
+                    continue
+                fi
+
+                # Extra safety: never touch GPG pubkey packages.
+                if echo "$PKG" | grep -qi '^gpg-pubkey'; then
+                    echo "   Skipping GPG key package: $PKG.$ARCH"
                     continue
                 fi
 
@@ -3686,6 +3703,17 @@ cleanup_thirdparty_duplicates() {
         return 0
     fi
 
+    # Sanity limit: if there are *too many* duplicate name+arch pairs, assume
+    # something is wrong with the RPM DB and abort automatic cleanup to avoid
+    # mass deletions.
+    local num_pairs
+    num_pairs=$(echo "$DUPLICATE_PAIRS" | wc -l | awk '{print $1}')
+    if [ "$num_pairs" -gt 10 ]; then
+        echo "   WARNING: Found $num_pairs duplicate (name+arch) pairs; safety limit is 10."
+        echo "            Aborting automatic third-party duplicate cleanup; please investigate manually."
+        return 0
+    fi
+
     # 2. Analyse each duplicate (name + arch) and decide whether it's safe
     #    to clean. We only remove extra versions within the same arch.
     local PKG ARCH VENDOR ALL_VERSIONS REMOVE_LIST OLD_PKG
@@ -3695,6 +3723,12 @@ cleanup_thirdparty_duplicates() {
         # GUARD RAIL 1: Critical Package Protection (by name)
         if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
             echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
+            continue
+        fi
+
+        # Extra safety: never touch GPG pubkey packages.
+        if echo "$PKG" | grep -qi '^gpg-pubkey'; then
+            echo "   Skipping GPG key package: $PKG.$ARCH"
             continue
         fi
 
@@ -3727,11 +3761,15 @@ cleanup_thirdparty_duplicates() {
             [ -z "$OLD_PKG" ] && continue
             echo "      Removing old/broken version: $OLD_PKG"
 
-            # GUARD RAIL 3: Broken %preun/%postun bypass via --noscripts.
-            if sudo rpm -e --noscripts "$OLD_PKG"; then
-                echo "         Cleaned successfully."
+            # GUARD RAIL 3: Dependency pre-flight; only erase if --test passes.
+            if sudo rpm -e --test --noscripts "$OLD_PKG" >/dev/null 2>&1; then
+                if sudo rpm -e --noscripts "$OLD_PKG"; then
+                    echo "         Cleaned successfully."
+                else
+                    echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                fi
             else
-                echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                echo "         Skipping $OLD_PKG: rpm -e --test reported dependency failures"
             fi
         done
     done
