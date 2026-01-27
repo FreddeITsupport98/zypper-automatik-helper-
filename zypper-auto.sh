@@ -44,7 +44,7 @@ if [[ $# -gt 0 ]]; then
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
-        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--test-notify)
+        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--test-notify|--status)
             # Known commands/options; continue into main logic
             :
             ;;
