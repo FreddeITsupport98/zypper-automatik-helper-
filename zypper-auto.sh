@@ -1871,6 +1871,7 @@ run_rm_conflict_only() {
     mode=${AUTO_DUPLICATE_RPM_MODE:-whitelist}
 
     echo "Duplicate RPM cleanup mode: ${mode}"
+    log_info "Duplicate RPM cleanup mode (run_rm_conflict_only): ${mode}"
 
     # 1) Whitelist-driven cleanup (uses AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES)
     if [ "$mode" = "whitelist" ] || [ "$mode" = "both" ]; then
@@ -1892,6 +1893,7 @@ run_rm_conflict_only() {
             echo ""
             echo "[whitelist] Detected multiple installed versions of '$name'."
             echo "  Attempting to remove older versions (keeping the newest) before upgrades..."
+            log_info "[rm-conflict][whitelist] Detected multiple versions for '$name'"
 
             local lines newest
             # List full NVRAs for this package and sort by version; keep the
@@ -1903,18 +1905,23 @@ run_rm_conflict_only() {
             fi
 
             echo "  - Keeping newest: $newest"
+            log_info "[rm-conflict][whitelist] Keeping newest for '$name': $newest"
             echo "$lines" | head -n -1 | while read -r pkg; do
                 [ -z "$pkg" ] && continue
             echo "  - Removing older duplicate: $pkg"
+            log_info "[rm-conflict][whitelist] Removing older duplicate: $pkg (keeping $newest)"
             # Dependency pre-flight: simulate removal before actually erasing
             if rpm -e --test --noscripts "$pkg" >/dev/null 2>&1; then
                 if rpm -e --noscripts "$pkg"; then
                     echo "      ✓ Removed $pkg"
+                    log_success "[rm-conflict][whitelist] Removed $pkg"
                 else
                     echo "      ✗ Failed to remove $pkg"
+                    log_error "[rm-conflict][whitelist] Failed to remove $pkg"
                 fi
             else
                 echo "      ⚠ Skipping $pkg: rpm -e --test reported dependency failures"
+                log_info "[rm-conflict][whitelist] Skipping $pkg: rpm -e --test reported dependency failures"
             fi
             done
         done
@@ -1926,7 +1933,9 @@ run_rm_conflict_only() {
     if [ "$mode" = "thirdparty" ] || [ "$mode" = "both" ]; then
         local SAFE_VENDORS CRITICAL_PKGS
         SAFE_VENDORS="openSUSE|SUSE|Packman|NVIDIA|Intel|http://packman|obs://build.opensuse.org"
-        CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil"
+        # NOTE: include 'filesystem' here – if rpm ever forgets ownership
+        # of /usr or /bin, future upgrades can break badly.
+        CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil|filesystem"
 
         echo ""
         echo "[thirdparty] Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
@@ -1956,12 +1965,14 @@ run_rm_conflict_only() {
 
                 if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
                     echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
+                    log_info "[rm-conflict][thirdparty] Skipping CRITICAL package: $PKG.$ARCH"
                     continue
                 fi
 
                 # Extra safety: never touch GPG pubkey packages.
                 if echo "$PKG" | grep -qi '^gpg-pubkey'; then
                     echo "   Skipping GPG key package: $PKG.$ARCH"
+                    log_info "[rm-conflict][thirdparty] Skipping GPG key package: $PKG.$ARCH"
                     continue
                 fi
 
@@ -1970,10 +1981,12 @@ run_rm_conflict_only() {
 
                 if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
                     echo "   Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
+                    log_info "[rm-conflict][thirdparty] Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
                     continue
                 fi
 
                 echo "   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
+                log_info "[rm-conflict][thirdparty] Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
 
                 ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' --last "${PKG}.${ARCH}" 2>/dev/null)
                 REMOVE_LIST=$(echo "$ALL_VERSIONS" | tail -n +2 | awk '{print $1}')
@@ -1986,15 +1999,19 @@ run_rm_conflict_only() {
                 for OLD_PKG in $REMOVE_LIST; do
                     [ -z "$OLD_PKG" ] && continue
                     echo "      Removing old/broken version: $OLD_PKG"
+                    log_info "[rm-conflict][thirdparty] Removing old/broken version: $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
                     # Dependency pre-flight: simulate removal before actually erasing
                     if sudo rpm -e --test --noscripts "$OLD_PKG" >/dev/null 2>&1; then
                         if sudo rpm -e --noscripts "$OLD_PKG"; then
                             echo "         Cleaned successfully."
+                            log_success "[rm-conflict][thirdparty] Cleaned $OLD_PKG successfully"
                         else
                             echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                            log_error "[rm-conflict][thirdparty] Failed to clean $OLD_PKG"
                         fi
                     else
                         echo "         Skipping $OLD_PKG: rpm -e --test reported dependency failures"
+                        log_info "[rm-conflict][thirdparty] Skipping $OLD_PKG: rpm -e --test reported dependency failures"
                     fi
                 done
             done
@@ -3611,6 +3628,21 @@ has_zypp_lock() {
 # In thirdparty / both modes we also scan for duplicate packages whose
 # Vendor is not SUSE/openSUSE and clean their older versions (see
 # cleanup_thirdparty_duplicates below).
+
+# Minimal audit logger for duplicate cleanup when running inside the
+# zypper-with-ps wrapper. This writes to a persistent log so you can
+# later see exactly which RPMs were removed or skipped.
+LOG_DIR="/var/log/zypper-auto"
+AUDIT_LOG="$LOG_DIR/duplicate-cleanup.log"
+
+log_duplicate_audit() {
+    local msg="$1" ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    # Ensure log directory exists and append a single line in a root-owned file.
+    sudo mkdir -p "$LOG_DIR" >/dev/null 2>&1 || true
+    printf '%s\n' "$ts [duplicate-cleanup] $msg" | sudo tee -a "$AUDIT_LOG" >/dev/null
+}
+
 cleanup_duplicate_rpms() {
     local mode
     mode=${AUTO_DUPLICATE_RPM_MODE:-whitelist}
@@ -3635,6 +3667,7 @@ cleanup_duplicate_rpms() {
             echo ""
             echo "Detected multiple installed versions of '$name'."
             echo "Attempting to remove older versions (keeping the newest) before running zypper..."
+            log_duplicate_audit "[wrapper][whitelist] Detected multiple versions for '$name'"
 
             local lines newest
             # List full NVRAs and sort by version; keep the newest, remove the rest.
@@ -3645,17 +3678,23 @@ cleanup_duplicate_rpms() {
             fi
 
             echo "  - Keeping newest: $newest"
+            log_duplicate_audit "[wrapper][whitelist] Keeping newest for '$name': $newest"
             echo "$lines" | head -n -1 | while read -r pkg; do
                 [ -z "$pkg" ] && continue
                 echo "  - Removing older duplicate: $pkg"
+                log_duplicate_audit "[wrapper][whitelist] Removing older duplicate: $pkg (keeping $newest)"
                 # Dependency pre-flight: simulate removal before actually erasing
                 if sudo rpm -e --test --noscripts "$pkg" >/dev/null 2>&1; then
                     if ! sudo rpm -e --noscripts "$pkg"; then
                         echo "    ! Failed to remove $pkg; you can remove it manually with:"
                         echo "      sudo rpm -e --noscripts $pkg"
+                        log_duplicate_audit "[wrapper][whitelist] FAILED to remove $pkg (rpm -e --noscripts error)"
+                    else
+                        log_duplicate_audit "[wrapper][whitelist] Removed $pkg successfully"
                     fi
                 else
                     echo "    ! Skipping $pkg: rpm -e --test reported dependency failures"
+                    log_duplicate_audit "[wrapper][whitelist] Skipping $pkg: rpm -e --test reported dependency failures"
                 fi
             done
         done
@@ -3685,10 +3724,12 @@ cleanup_thirdparty_duplicates() {
 
     # 2. Critical Packages (Regex)
     #    We NEVER touch these:
-    #      - kernel-* : multi-version by design
+    #      - kernel-*   : multi-version by design
     #      - glibc/systemd/grub/shim/mokutil : breaking them can brick the OS
-    #      - nvidia   : graphics drivers are too fragile to auto-clean
-    local CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil"
+    #      - nvidia     : graphics drivers are too fragile to auto-clean
+    #      - filesystem : owns core directories like /usr and /bin; losing
+    #                     ownership metadata can break future upgrades.
+    local CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil|filesystem"
 
     echo "Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
 
@@ -3723,12 +3764,14 @@ cleanup_thirdparty_duplicates() {
         # GUARD RAIL 1: Critical Package Protection (by name)
         if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
             echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
+            log_duplicate_audit "[wrapper][thirdparty] Skipping CRITICAL package: $PKG.$ARCH"
             continue
         fi
 
         # Extra safety: never touch GPG pubkey packages.
         if echo "$PKG" | grep -qi '^gpg-pubkey'; then
             echo "   Skipping GPG key package: $PKG.$ARCH"
+            log_duplicate_audit "[wrapper][thirdparty] Skipping GPG key package: $PKG.$ARCH"
             continue
         fi
 
@@ -3740,12 +3783,14 @@ cleanup_thirdparty_duplicates() {
         # GUARD RAIL 2: Trusted Vendor Whitelist (case-insensitive)
         if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
             echo "   Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
+            log_duplicate_audit "[wrapper][thirdparty] Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
             continue
         fi
 
         # KILL ZONE: duplicated (same name+arch) + not critical + not from
         # trusted vendor.
         echo "   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
+        log_duplicate_audit "[wrapper][thirdparty] Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
 
         # Get all installed versions for this name+arch, newest first; keep
         # the top (newest) and mark the rest for removal.
@@ -3760,16 +3805,20 @@ cleanup_thirdparty_duplicates() {
         for OLD_PKG in $REMOVE_LIST; do
             [ -z "$OLD_PKG" ] && continue
             echo "      Removing old/broken version: $OLD_PKG"
+            log_duplicate_audit "[wrapper][thirdparty] Removing old/broken version: $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
 
             # GUARD RAIL 3: Dependency pre-flight; only erase if --test passes.
             if sudo rpm -e --test --noscripts "$OLD_PKG" >/dev/null 2>&1; then
                 if sudo rpm -e --noscripts "$OLD_PKG"; then
                     echo "         Cleaned successfully."
+                    log_duplicate_audit "[wrapper][thirdparty] Cleaned $OLD_PKG successfully"
                 else
                     echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                    log_duplicate_audit "[wrapper][thirdparty] FAILED to clean $OLD_PKG (rpm -e --noscripts error)"
                 fi
             else
                 echo "         Skipping $OLD_PKG: rpm -e --test reported dependency failures"
+                log_duplicate_audit "[wrapper][thirdparty] Skipping $OLD_PKG: rpm -e --test reported dependency failures"
             fi
         done
     done
