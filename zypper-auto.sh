@@ -1867,11 +1867,52 @@ run_rm_conflict_only() {
     log_info ">>> Running duplicate RPM conflict cleanup..."
     update_status "Cleaning duplicate RPM conflicts..."
 
+    # Colour setup for interactive clarity
+    local RED GREEN YELLOW BLUE RESET
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    RESET=$'\033[0m'
+
+    # Unified audit log: record manual duplicate removals in the same
+    # duplicate-cleanup log used by the zypper-with-ps wrapper.
+    local AUDIT_LOG="/var/log/zypper-auto/duplicate-cleanup.log"
+    log_audit() {
+        local msg="$1" ts
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+        mkdir -p "/var/log/zypper-auto" 2>/dev/null || true
+        printf '%s\n' "[$ts] [rm-conflict] $msg" >> "$AUDIT_LOG"
+    }
+
     local mode
     mode=${AUTO_DUPLICATE_RPM_MODE:-whitelist}
 
     echo "Duplicate RPM cleanup mode: ${mode}"
     log_info "Duplicate RPM cleanup mode (run_rm_conflict_only): ${mode}"
+
+    # Ultimate safety net for manual mode: create a Snapper snapshot
+    # before attempting any duplicate cleanup, if available.
+    local SNAPSHOT_DONE=0
+    if command -v snapper >/dev/null 2>&1; then
+        if pgrep -x snapper >/dev/null 2>&1; then
+            printf '%b\n' "${YELLOW}   Snapper is already running; skipping pre-cleanup snapshot.${RESET}"
+            log_info "[rm-conflict][snapshot] Snapper busy; skipped pre-cleanup snapshot"
+        else
+            local SNAP_DESC="zypper-auto: duplicate RPM cleanup (--rm-conflict)"
+            log_info "[rm-conflict][snapshot] Creating snapper single snapshot: '$SNAP_DESC'"
+            if snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1; then
+                SNAPSHOT_DONE=1
+                printf '%b\n' "${GREEN}   Created snapper snapshot before manual duplicate cleanup.${RESET}"
+                log_success "[rm-conflict][snapshot] Snapshot created successfully"
+            else
+                printf '%b\n' "${YELLOW}   WARNING: Failed to create snapper snapshot; proceeding without snapshot.${RESET}"
+                log_error "[rm-conflict][snapshot] FAILED to create snapshot; proceeding without snapshot"
+            fi
+        fi
+    else
+        log_info "[rm-conflict][snapshot] snapper not installed; skipping snapshot creation"
+    fi
 
     # 1) Whitelist-driven cleanup (uses AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES)
     if [ "$mode" = "whitelist" ] || [ "$mode" = "both" ]; then
@@ -1911,17 +1952,20 @@ run_rm_conflict_only() {
             echo "  - Removing older duplicate: $pkg"
             log_info "[rm-conflict][whitelist] Removing older duplicate: $pkg (keeping $newest)"
             # Dependency pre-flight: simulate removal before actually erasing
-            if rpm -e --test --noscripts "$pkg" >/dev/null 2>&1; then
+                if rpm -e --test --noscripts "$pkg" >/dev/null 2>&1; then
                 if rpm -e --noscripts "$pkg"; then
                     echo "      ✓ Removed $pkg"
                     log_success "[rm-conflict][whitelist] Removed $pkg"
+                    log_audit "Removed whitelist duplicate: $pkg (keeping $newest)"
                 else
                     echo "      ✗ Failed to remove $pkg"
                     log_error "[rm-conflict][whitelist] Failed to remove $pkg"
+                    log_audit "FAILED to remove whitelist duplicate: $pkg (keeping $newest)"
                 fi
             else
                 echo "      ⚠ Skipping $pkg: rpm -e --test reported dependency failures"
                 log_info "[rm-conflict][whitelist] Skipping $pkg: rpm -e --test reported dependency failures"
+                log_audit "Skipped whitelist duplicate (dependency test failed): $pkg (keeping $newest)"
             fi
             done
         done
@@ -1938,7 +1982,7 @@ run_rm_conflict_only() {
         CRITICAL_PKGS="^kernel-|nvidia|glibc|systemd|grub|shim|mokutil|filesystem"
 
         echo ""
-        echo "[thirdparty] Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})..."
+        printf '%b\n' "${BLUE}[thirdparty] Scanning for duplicate third-party packages (safe vendors: ${SAFE_VENDORS}, critical patterns: ${CRITICAL_PKGS})...${RESET}"
 
         # Find duplicate package *name+arch* pairs (multi-version within the
         # same architecture) to avoid treating legitimate multi-arch installs
@@ -1964,14 +2008,14 @@ run_rm_conflict_only() {
                 [ -z "$PKG" ] && continue
 
                 if echo "$PKG" | grep -qE "$CRITICAL_PKGS"; then
-                    echo "   Skipping CRITICAL package: $PKG.$ARCH (safety override)"
+                    printf '%b\n' "${YELLOW}   Skipping CRITICAL package: $PKG.$ARCH (safety override)${RESET}"
                     log_info "[rm-conflict][thirdparty] Skipping CRITICAL package: $PKG.$ARCH"
                     continue
                 fi
 
                 # Extra safety: never touch GPG pubkey packages.
                 if echo "$PKG" | grep -qi '^gpg-pubkey'; then
-                    echo "   Skipping GPG key package: $PKG.$ARCH"
+                    printf '%b\n' "${YELLOW}   Skipping GPG key package: $PKG.$ARCH${RESET}"
                     log_info "[rm-conflict][thirdparty] Skipping GPG key package: $PKG.$ARCH"
                     continue
                 fi
@@ -1980,12 +2024,12 @@ run_rm_conflict_only() {
                 VENDOR=${VENDOR:-UnknownVendor}
 
                 if echo "$VENDOR" | grep -qiE "$SAFE_VENDORS"; then
-                    echo "   Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
+                    printf '%b\n' "${YELLOW}   Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)${RESET}"
                     log_info "[rm-conflict][thirdparty] Skipping trusted-vendor package: $PKG.$ARCH (Vendor: $VENDOR)"
                     continue
                 fi
 
-                echo "   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
+                printf '%b\n' "${RED}   Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)${RESET}"
                 log_info "[rm-conflict][thirdparty] Found third-party duplicate: $PKG.$ARCH (Vendor: $VENDOR)"
 
                 ALL_VERSIONS=$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' --last "${PKG}.${ARCH}" 2>/dev/null)
@@ -1998,20 +2042,23 @@ run_rm_conflict_only() {
 
                 for OLD_PKG in $REMOVE_LIST; do
                     [ -z "$OLD_PKG" ] && continue
-                    echo "      Removing old/broken version: $OLD_PKG"
+                    printf '%b\n' "${RED}      Removing old/broken version: $OLD_PKG${RESET}"
                     log_info "[rm-conflict][thirdparty] Removing old/broken version: $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
                     # Dependency pre-flight: simulate removal before actually erasing
                     if sudo rpm -e --test --noscripts "$OLD_PKG" >/dev/null 2>&1; then
                         if sudo rpm -e --noscripts "$OLD_PKG"; then
-                            echo "         Cleaned successfully."
+                            printf '%b\n' "${GREEN}         Cleaned successfully.${RESET}"
                             log_success "[rm-conflict][thirdparty] Cleaned $OLD_PKG successfully"
+                            log_audit "Removed third-party duplicate: $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
                         else
-                            echo "         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed)."
+                            printf '%b\n' "${YELLOW}         Failed to clean $OLD_PKG (possibly RPM lock or manual intervention needed).${RESET}"
                             log_error "[rm-conflict][thirdparty] Failed to clean $OLD_PKG"
+                            log_audit "FAILED to remove third-party duplicate: $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
                         fi
                     else
-                        echo "         Skipping $OLD_PKG: rpm -e --test reported dependency failures"
+                        printf '%b\n' "${YELLOW}         Skipping $OLD_PKG: rpm -e --test reported dependency failures${RESET}"
                         log_info "[rm-conflict][thirdparty] Skipping $OLD_PKG: rpm -e --test reported dependency failures"
+                        log_audit "Skipped third-party duplicate (dependency test failed): $OLD_PKG (from $PKG.$ARCH; vendor=$VENDOR)"
                     fi
                 done
             done
@@ -4161,6 +4208,24 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         echo "✅ No services require restart. You're all set!"
         echo ""
     fi
+
+    echo ""
+    echo "=========================================="
+    echo "  System Status Check"
+    echo "=========================================="
+    echo ""
+
+    # zypper needs-reboot returns exit code 1 if a reboot is required.
+    if zypper needs-reboot >/dev/null 2>&1; then
+        echo "🔴 SYSTEM REBOOT IS REQUIRED"
+        echo "   Core libraries or the kernel have been updated."
+        echo "   Please reboot as soon as possible."
+        if command -v notify-send >/dev/null 2>&1; then
+             notify-send -u critical -i system-reboot "Restart Required" "System updates require a reboot."
+        fi
+    else
+        echo "🟢 No system reboot required."
+    fi
     
     exit $EXIT_CODE
 else
@@ -4205,8 +4270,30 @@ function zypper --wraps zypper --description "Wrapper for zypper with post-updat
     ~/.local/bin/zypper-with-ps $argv
 end
 FISHEOF
+
+    # NEW: Install sudo wrapper for Fish to catch 'sudo zypper'
+    FISH_SUDO_FILE="$FISH_CONFIG_DIR/sudo-handler.fish"
+    log_debug "Creating sudo wrapper for Fish at $FISH_SUDO_FILE"
+    cat > "$FISH_SUDO_FILE" << 'FISHEOF'
+# Wrapper to catch 'sudo zypper' and redirect it to the safe helper
+function sudo --description "Wrapper to handle sudo aliases"
+    if test (count $argv) -ge 1
+        # If the user runs 'sudo zypper ...', run 'zypper ...' directly.
+        # This triggers the 'zypper' function defined in zypper-wrapper.fish,
+        # which runs zypper-with-ps (the safe helper).
+        if test "$argv[1]" = "zypper"
+            zypper $argv[2..-1]
+            return $status
+        end
+    end
+    # For everything else, run real sudo
+    command sudo $argv
+end
+FISHEOF
+
     chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config/fish"
     log_success "Added zypper wrapper functions to fish config"
+    log_success "Added sudo wrapper to fish config (catches 'sudo zypper')"
 fi
 
 # Zsh configuration
