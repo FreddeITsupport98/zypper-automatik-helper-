@@ -438,6 +438,32 @@ DOWNLOADER_DOWNLOAD_MODE=full
 #     command line, for example:
 #         DUP_EXTRA_FLAGS="--allow-vendor-change --no-allow-vendor-change"
 DUP_EXTRA_FLAGS=""
++
++# ---------------------------------------------------------------------
++# Notifier form-factor override (advanced)
++# ---------------------------------------------------------------------
++#
++# In most setups the notifier can automatically distinguish laptops from
++# desktops by inspecting /sys/class/power_supply and upower devices. In
++# rare or exotic configurations (e.g. desktops on a UPS that appears as a
++# "Battery" device) this detection may misclassify the system and apply
++# overly strict battery safety rules.
++#
++# You can force the notifier to treat the system as a specific form
++# factor by setting FORCE_FORM_FACTOR to one of the following values:
++#   laptop   - always treat as a laptop (requires AC + unmetered network
++#              for background activity)
++#   desktop  - always treat as a desktop (no AC restriction; only
++#              metered detection applies)
++#   unknown  - treat as "battery/unknown"; behaves like a laptop for
++#              safety decisions but still logs as "unknown".
++#
++# Leave this unset (or commented) to use automatic detection.
++#
++# Example:
++#   FORCE_FORM_FACTOR=laptop
++#
++#FORCE_FORM_FACTOR=
 EOF
         # Ensure config file has safe permissions (root-writable only)
         chmod 644 "${CONFIG_FILE}" || true
@@ -1797,11 +1823,88 @@ run_reset_download_state_only() {
     echo "  - Cleared /var/log/zypper-auto/download-*.txt and dry-run-last.txt" | tee -a "${LOG_FILE}"
     echo "  - Cleared user notifier logs and cached notification state" | tee -a "${LOG_FILE}"
     echo "  - Reloaded and restarted core timers/services" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+}
+
+# --- Helper: Status report (CLI) ---
+run_status_only() {
+    log_info ">>> zypper-auto-helper status report..."
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  zypper-auto-helper Status" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+
+    # 1. Core system timers/services
+    for unit in "${DL_SERVICE_NAME}.timer" "${VERIFY_SERVICE_NAME}.timer"; do
+        if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+            active=$(systemctl is-active "$unit" 2>/dev/null || echo "unknown")
+            enabled=$(systemctl is-enabled "$unit" 2>/dev/null || echo "unknown")
+            echo "- [system] $unit: active=$active, enabled=$enabled" | tee -a "${LOG_FILE}"
+        else
+            echo "- [system] $unit: not installed" | tee -a "${LOG_FILE}"
+        fi
+    done
+
+    # Diagnostics follower (root)
+    if systemctl list-unit-files "${DIAG_SERVICE_NAME}.service" >/dev/null 2>&1; then
+        d_active=$(systemctl is-active "${DIAG_SERVICE_NAME}.service" 2>/dev/null || echo "unknown")
+        d_enabled=$(systemctl is-enabled "${DIAG_SERVICE_NAME}.service" 2>/dev/null || echo "unknown")
+        echo "- [system] ${DIAG_SERVICE_NAME}.service: active=$d_active, enabled=$d_enabled" | tee -a "${LOG_FILE}"
+    else
+        echo "- [system] ${DIAG_SERVICE_NAME}.service: not installed" | tee -a "${LOG_FILE}"
+    fi
+
+    # 2. User notifier timer/service
+    if [ -n "${SUDO_USER:-}" ]; then
+        USER_BUS_PATH="$(get_user_bus "$SUDO_USER" || true)"
+        if [ -n "${USER_BUS_PATH}" ]; then
+            if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+                systemctl --user list-unit-files "${NT_SERVICE_NAME}.timer" >/dev/null 2>&1; then
+                nt_active=$(sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+                    systemctl --user is-active "${NT_SERVICE_NAME}.timer" 2>/dev/null || echo "unknown")
+                nt_enabled=$(sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+                    systemctl --user is-enabled "${NT_SERVICE_NAME}.timer" 2>/dev/null || echo "unknown")
+                echo "- [user:$SUDO_USER] ${NT_SERVICE_NAME}.timer: active=$nt_active, enabled=$nt_enabled" | tee -a "${LOG_FILE}"
+            else
+                echo "- [user:$SUDO_USER] ${NT_SERVICE_NAME}.timer: not installed" | tee -a "${LOG_FILE}"
+            fi
+        else
+            echo "- [user:$SUDO_USER] systemd user bus not available; cannot query notifier timer" | tee -a "${LOG_FILE}"
+        fi
+    fi
+
+    # 3. Downloader status file
+    if [ -f "${LOG_DIR}/download-status.txt" ]; then
+        ds_contents=$(cat "${LOG_DIR}/download-status.txt" 2>/dev/null || echo "(unreadable)")
+        echo "- download-status.txt: $ds_contents" | tee -a "${LOG_FILE}"
+    else
+        echo "- download-status.txt: not present (created on first downloader run)" | tee -a "${LOG_FILE}"
+    fi
+
+    # 4. Notifier last-run-status and environment state
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        USER_LOG_DIR="${SUDO_USER_HOME}/.local/share/zypper-notify"
+        USER_CACHE_DIR="${SUDO_USER_HOME}/.cache/zypper-notify"
+        if [ -f "${USER_LOG_DIR}/last-run-status.txt" ]; then
+            last_status=$(tail -n 1 "${USER_LOG_DIR}/last-run-status.txt" 2>/dev/null || echo "(unreadable)")
+            echo "- last-run-status.txt: $last_status" | tee -a "${LOG_FILE}"
+        else
+            echo "- last-run-status.txt: not present" | tee -a "${LOG_FILE}"
+        fi
+        if [ -f "${USER_CACHE_DIR}/env_state.txt" ]; then
+            env_state=$(cat "${USER_CACHE_DIR}/env_state.txt" 2>/dev/null || echo "(unreadable)")
+            echo "- env_state.txt: $env_state" | tee -a "${LOG_FILE}"
+        else
+            echo "- env_state.txt: not present (set after first notifier run)" | tee -a "${LOG_FILE}"
+        fi
+    fi
+
+    update_status "SUCCESS: Status report generated"
 }
 
 # --- Helper: Soar-only installation mode (CLI) ---
 run_soar_install_only() {
-    log_info ">>> Soar installation helper mode..."
     update_status "Running Soar installation helper..."
 
     SOAR_PRESENT=0
@@ -2600,6 +2703,10 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
     sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
         /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify || true
     exit 0
+elif [[ "${1:-}" == "--status" ]]; then
+    log_info "Status report mode requested"
+    run_status_only
+    exit $?
 elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-helper" ]]; then
     shift
     # Parse optional flags for the uninstaller:
@@ -4235,15 +4342,50 @@ def has_battery_via_sys() -> bool:
     log_debug("No battery detected via /sys")
     return False
 
+
+def _get_forced_form_factor() -> str | None:
+    """Return a forced form-factor override from CONFIG_FILE if set.
+
+    Looks for a FORCE_FORM_FACTOR= line in /etc/zypper-auto.conf and
+    accepts one of: laptop, desktop, unknown. Any other value is ignored.
+    """
+    try:
+        path = Path(CONFIG_FILE)
+        if not path.is_file():
+            return None
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not line.startswith("FORCE_FORM_FACTOR="):
+                continue
+            value = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+            if value in ("laptop", "desktop", "unknown"):
+                log_info(f"Config override: FORCE_FORM_FACTOR={value}; skipping automatic form-factor detection")
+                return value
+            if value:
+                log_debug(f"Ignoring invalid FORCE_FORM_FACTOR value '{value}' in {CONFIG_FILE}")
+            return None
+    except Exception as e:
+        log_debug(f"Failed to read FORCE_FORM_FACTOR from {CONFIG_FILE}: {e}")
+    return None
+
+
 def detect_form_factor():
     """Detect whether this machine is a laptop or a desktop.
 
     Prefer kernel-exposed /sys power information and fall back to
     upower/battery heuristics. Returns "laptop", "desktop", or "unknown".
     """
+    # 0. Honor explicit override from configuration, if any.
+    forced = _get_forced_form_factor()
+    if forced:
+        log_debug(f"Using forced form factor from config: {forced}")
+        return forced
+
     log_debug("Detecting form factor...")
 
-    # 0. If /sys reports a real battery, treat as laptop immediately.
+    # 1. If /sys reports a real battery, treat as laptop immediately.
     try:
         if has_battery_via_sys():
             log_info("Form factor detected: laptop (via /sys battery)")
@@ -4251,8 +4393,7 @@ def detect_form_factor():
     except Exception as e:
         log_debug(f"has_battery_via_sys failed in detect_form_factor: {e}")
 
-    # 1. Fall back to the previous upower + battery-based heuristic
-    try:
+    # 2. Fall back to the previous upower + battery-based heuristic
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
     except Exception as e:
         log_debug(f"upower -e failed in detect_form_factor: {e}")
@@ -4304,7 +4445,8 @@ def detect_form_factor():
 def on_ac_power(form_factor: str) -> bool:
     """Check if the system is on AC power.
 
-    On desktops (no battery), we assume AC is effectively always on.
+    On true desktops we treat AC as always on; on laptops and unknown
+    form factors we consult upower and err on the side of safety.
     """
     log_debug(f"Checking AC power status (form_factor: {form_factor})")
     if form_factor == "desktop":
@@ -4508,7 +4650,7 @@ def is_safe() -> bool:
     """Combined safety check.
 
     - desktops: don't block on AC; only check metered.
-    - laptops: require AC and not metered.
+    - laptops/unknown: require AC and not metered.
 
     Returns True if it's safe to run a full refresh, False otherwise.
     """
@@ -4519,13 +4661,13 @@ def is_safe() -> bool:
 
     # Pre-compute AC and metered status for clearer logging
     metered = is_metered()
-    if form_factor == "laptop":
-        on_ac = on_ac_power(form_factor)
+    if form_factor == "desktop":
+        on_ac = True  # desktops are treated as effectively always on AC
     else:
-        on_ac = True  # desktops/unknown are treated as effectively always on AC
+        on_ac = on_ac_power(form_factor)
 
     # Decide safety based on current conditions
-    safe = (not metered) and (form_factor != "laptop" or on_ac)
+    safe = (not metered) and (form_factor == "desktop" or on_ac)
 
     # Log environment and safety
     log_info(f"Environment: form_factor={form_factor}, on_ac={on_ac}, metered={metered}, safe={safe}")
