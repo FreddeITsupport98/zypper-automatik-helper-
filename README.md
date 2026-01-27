@@ -2,7 +2,15 @@
 
 ![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE-Tumbleweed-73ba25?style=for-the-badge&logo=opensuse)
 
-A robust `systemd` architecture that automates `zypper dup` downloads, provides persistent, battery-safe **user notifications**, and cleanly upgrades any previous version.
+Welcome to the **Zypper Auto-Helper** community project – a batteries‑included automation layer for openSUSE Tumbleweed that turns "`zypper dup` nights" into a quick, predictable routine.
+
+This repository provides a robust `systemd` architecture and CLI that:
+- Pre‑downloads Tumbleweed snapshots safely in the background.
+- Notifies you like a modern desktop app (with snooze, progress bars, and rich actions).
+- Wraps manual `zypper dup` runs with extra safety rails, service checks, and reboot advice.
+- Adds self‑healing and diagnostics so you can trust it on real, everyday systems.
+
+If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
 
 -----
 
@@ -19,6 +27,16 @@ On a rolling-release distribution like Tumbleweed, updates are frequent and can 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
 ## ✨ Key Features (v58 Architecture)
+
+* **Safe Duplicate RPM Cleanup (Wrapper + CLI):** Automatically and manually cleans up broken duplicate RPMs that block `zypper dup`, with:
+    * **Whitelist mode** for known-problematic third‑party apps (default: `insync`).
+    * Optional **third‑party mode** that only touches non‑SUSE vendors and never touches critical packages (`kernel-*`, `glibc`, `systemd`, `filesystem`, `gpg-pubkey*`, etc.).
+    * Architecture‑aware detection (`NAME + ARCH`) so legitimate multi‑arch installs (x86_64 + i686) are never flagged as conflicts.
+    * `rpm -e --test --noscripts` dependency pre‑flight before every erase.
+    * **Automatic Snapper snapshot** in the wrapper before third‑party cleanup, and optional snapshot in manual mode.
+    * Unified audit log at `/var/log/zypper-auto/duplicate-cleanup.log` for both automatic wrapper cleanup and `zypper-auto-helper --rm-conflict` runs.
+* **Modern Reboot Detection:** After `zypper dup`, the wrapper runs `zypper ps -s` to show services using old libraries **and** calls `zypper needs-reboot` to tell you explicitly whether a system reboot is required (with an optional `notify-send` desktop alert).
+* **Fish-Safe `sudo zypper`:** A small Fish `sudo` wrapper transparently redirects `sudo zypper ...` to the safe `zypper-with-ps` wrapper, so both `zypper dup` and `sudo zypper dup` always benefit from the same safety logic.
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
@@ -327,6 +345,104 @@ sudo ./zypper-auto.sh install
 
 This backs up your existing config and regenerates it with all current options
 and comments.
+
+-----
+
+## 🛡️ Safe Duplicate RPM Cleanup & Conflict Resolution
+
+Broken third‑party RPMs (especially those with buggy `%preun`/`%postun` scripts) can block `zypper dup` with errors like "failed to execute /usr/bin/fish" or "package specifies multiple versions". The helper includes a **two‑layer duplicate cleanup system** designed to fix these problems safely.
+
+### Modes and Configuration
+
+Controlled via `/etc/zypper-auto.conf`:
+
+- `AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES="insync ..."`
+  - Whitelist of package **names** that are allowed to be auto‑cleaned when multiple versions are installed.
+  - Intended for leaf, third‑party apps you know are safe to remove with `--noscripts` (e.g. `insync`).
+- `AUTO_DUPLICATE_RPM_MODE="whitelist|thirdparty|both"`
+  - `whitelist` (default, safest): only cleans packages in `AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES`.
+  - `thirdparty`: auto‑detects duplicate packages whose **Vendor** is *not* SUSE/openSUSE/Packman/NVIDIA/Intel/OBS and attempts to clean older versions.
+  - `both`: runs whitelist cleanup first, then third‑party cleanup.
+
+### Safety Rails (Apply to Both Wrapper & CLI)
+
+Regardless of mode, duplicate cleanup obeys the following guard rails:
+
+- **Arch-aware duplicates:** Duplicates are detected per `NAME + ARCH` so legitimate multi‑arch installs (e.g. `foo.x86_64` + `foo.i686`) are preserved.
+- **Critical package protection:** Names matching
+  `^kernel-`, `glibc`, `systemd`, `grub`, `shim`, `mokutil`, `nvidia`, `filesystem`
+  are never touched, even in third‑party mode.
+- **GPG key protection:** Packages starting with `gpg-pubkey` are always skipped.
+- **Trusted vendor whitelist:** Vendors containing `openSUSE`, `SUSE`, `Packman`, `NVIDIA`, `Intel`, `obs://build.opensuse.org`, etc. are considered trusted; their duplicates are **never** auto‑removed in third‑party mode.
+- **Dependency pre-flight:** Every candidate removal runs
+  `rpm -e --test --noscripts` (via sudo when needed). If the test reports
+  dependency failures, the package is skipped and logged.
+- **Sanity limit:** If more than 10 distinct duplicate `(NAME, ARCH)` pairs are
+  detected, the cleanup aborts with a warning instead of performing mass
+  deletions (this is treated as a sign of a possibly corrupted RPM database).
+
+### Automatic Cleanup (Wrapper: `zypper-with-ps`)
+
+When you run `zypper dup` (or, in Fish, even `sudo zypper dup`) the helper
+actually invokes the wrapper script `~/.local/bin/zypper-with-ps`, which:
+
+1. Publishes a short "downloading" status for the GUI notifier.
+2. Waits politely if another zypper/YaST instance holds the system management lock.
+3. Runs **whitelist and/or third‑party duplicate cleanup** according to
+   `AUTO_DUPLICATE_RPM_MODE` and the safety rails above.
+4. In `thirdparty`/`both` modes, takes a **Snapper single snapshot** (`-t single -p`)
+   before cleaning third‑party duplicates, when `snapper` is available and idle.
+5. Runs your requested `zypper` command (`dup`, `dist-upgrade`, or `update`).
+6. Executes the post‑update helper chain (Flatpak, Snap, Soar, Homebrew, pipx).
+7. Runs `zypper ps -s` and the modern reboot check (`zypper needs-reboot`) and
+   prints a clear summary of services to restart and whether a full reboot is
+   required.
+
+All automatic duplicate cleanups performed by the wrapper are written to a
+persistent audit log:
+
+- **Audit file:** `/var/log/zypper-auto/duplicate-cleanup.log`
+  - Includes timestamps, whether the cleanup came from the wrapper or manual
+    CLI, which packages were removed or skipped, vendor information, and
+    snapshot creation status.
+
+### Manual Cleanup (CLI: `zypper-auto-helper --rm-conflict`)
+
+Sometimes you want to **fix conflicts first**, then run updates normally. For
+that, use the dedicated CLI mode:
+
+```bash
+# Run as root or via the installed alias (which adds sudo automatically)
+zypper-auto-helper --rm-conflict
+```
+
+This command:
+
+1. Prints the current duplicate cleanup mode (`whitelist`, `thirdparty`, or `both`).
+2. Attempts to create a **Snapper single snapshot** with description
+   `zypper-auto: duplicate RPM cleanup (--rm-conflict)` before any changes
+   (if `snapper` is installed and not already running).
+3. Runs the same whitelist + optional third‑party cleanup logic as the wrapper
+   (including all safety rails: critical package/GPG/vendor protection,
+   arch‑aware duplicates, dependency pre‑flight, and sanity limits).
+4. Logs all actions both to the normal install log and to the unified audit log
+   at `/var/log/zypper-auto/duplicate-cleanup.log` with a `[rm-conflict]` tag.
+
+**Recommended workflow when you hit a stubborn RPM conflict:**
+
+```bash
+# 1. Clean up safe duplicates first
+zypper-auto-helper --rm-conflict
+
+# 2. Then run your normal upgrade
+zypper dup
+# or if you prefer explicit sudo (especially in Fish)
+sudo zypper dup
+```
+
+In Fish, the installed `sudo` wrapper ensures that `sudo zypper ...` still goes
+through the safe `zypper-with-ps` wrapper, so you get the same duplicate cleanup,
+post‑update helpers, and reboot guidance as with plain `zypper ...`.
 
 -----
 
