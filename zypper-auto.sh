@@ -4155,9 +4155,6 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
                 echo "⚠️  Flatpak update failed (continuing)."
             fi
         else
-        
-        
-        else
             echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
             echo "   To install: sudo zypper install flatpak"
         fi
