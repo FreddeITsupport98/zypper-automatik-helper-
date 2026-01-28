@@ -2638,6 +2638,44 @@ run_setup_sf_only() {
             snap_ok=1
         else
             log_error "Failed to install snapd via zypper. Check your repositories or install manually."
+
+            # On openSUSE systems where 'snapd' is not provided by the
+            # currently enabled zypper repositories, the recommended way
+            # to install it is often via the openSUSE Package Installer
+            # helper:
+            #   opi snapd
+            # Offer an optional fallback to run this automatically when
+            # 'opi' is available.
+            if command -v opi >/dev/null 2>&1; then
+                echo "" | tee -a "${LOG_FILE}"
+                echo "On openSUSE, 'snapd' may be provided via the openSUSE" | tee -a "${LOG_FILE}"
+                echo "Package Installer (opi) instead of the standard zypper" | tee -a "${LOG_FILE}"
+                echo "repositories. The usual manual command is:" | tee -a "${LOG_FILE}"
+                echo "  sudo opi snapd" | tee -a "${LOG_FILE}"
+                echo "" | tee -a "${LOG_FILE}"
+                read -p "Do you want me to run 'opi snapd' now to install snapd? [y/N]: " -r OPI_SNAPD
+                echo
+                if [[ $OPI_SNAPD =~ ^[Yy]$ ]]; then
+                    log_info "Attempting to install snapd via 'opi snapd'..."
+                    update_status "Installing snapd via opi..."
+                    if opi snapd >> "${LOG_FILE}" 2>&1; then
+                        log_success "snapd successfully installed via opi"
+                        snap_ok=1
+                        # Do not override rc here if later steps fail; we
+                        # only clear the snap-specific error.
+                    else
+                        log_error "'opi snapd' failed. Please run 'opi snapd' manually in a terminal and review its prompts/output."
+                    fi
+                else
+                    log_info "User declined automatic 'opi snapd' fallback; leaving snapd uninstalled."
+                fi
+            else
+                log_info "The 'opi' helper is not installed; cannot offer automatic 'opi snapd' fallback."
+            fi
+
+            # Keep rc marked as non-zero so the overall helper reports that
+            # at least one step encountered an issue. This will be overridden
+            # later only if all individual components succeeded.
             rc=1
         fi
     fi
@@ -7194,8 +7232,9 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
         elif [ "$pkg" = "snapd" ]; then
             echo "Snapd:" | tee -a "${LOG_FILE}"
             echo "  Purpose: Update Snap packages" | tee -a "${LOG_FILE}"
-            echo "  Install: sudo zypper install snapd" | tee -a "${LOG_FILE}"
-            echo "  Enable:  sudo systemctl enable --now snapd" | tee -a "${LOG_FILE}"
+            echo "  Install (zypper): sudo zypper install snapd" | tee -a "${LOG_FILE}"
+            echo "  Install (opi)   : sudo opi snapd" | tee -a "${LOG_FILE}"
+            echo "  Enable services : sudo systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
         elif [ "$pkg" = "soar" ]; then
             echo "Soar:" | tee -a "${LOG_FILE}"
