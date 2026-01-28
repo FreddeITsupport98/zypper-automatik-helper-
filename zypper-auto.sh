@@ -2783,10 +2783,13 @@ run_setup_sf_only() {
     # a) Snap Store (snap-store) via snap (edge channel)
     if [ "$snap_ok" -eq 1 ] && command -v snap >/dev/null 2>&1; then
         log_info "Ensuring Snap Store (snap-store) is installed via snap..."
+        echo "  → Installing Snap Store with: snap install snap-store --edge (this may take a few minutes)..." | tee -a "${LOG_FILE}"
         if snap list snap-store >/dev/null 2>&1; then
             log_success "Snap Store (snap-store) is already installed"
         else
-            if snap install snap-store --edge >> "${LOG_FILE}" 2>&1; then
+            # Stream snap's own progress/output both to the console and the log so
+            # the user can see that work is happening while the command runs.
+            if snap install snap-store --edge 2>&1 | tee -a "${LOG_FILE}"; then
                 log_success "Snap Store (snap-store) installed via snap (edge channel)"
             else
                 log_error "Failed to install Snap Store (snap-store) via snap. You can retry manually with: sudo snap install snap-store --edge"
@@ -2800,10 +2803,13 @@ run_setup_sf_only() {
     # b) Bazaar (io.github.kolunmi.Bazaar) from Flathub via Flatpak
     if [ "$flatpak_ok" -eq 1 ] && [ "$flathub_ok" -eq 1 ] && command -v flatpak >/dev/null 2>&1; then
         log_info "Ensuring Bazaar (io.github.kolunmi.Bazaar) is installed from Flathub..."
+        echo "  → Installing Bazaar with: flatpak install flathub io.github.kolunmi.Bazaar (this may take a few minutes)..." | tee -a "${LOG_FILE}"
         if flatpak list --app --columns=application 2>/dev/null | grep -qx 'io.github.kolunmi.Bazaar'; then
             log_success "Bazaar (io.github.kolunmi.Bazaar) is already installed"
         else
-            if flatpak install -y flathub io.github.kolunmi.Bazaar >> "${LOG_FILE}" 2>&1; then
+            # Stream Flatpak's own progress/output both to the console and the log
+            # so the user can see downloads and installation steps.
+            if flatpak install -y flathub io.github.kolunmi.Bazaar 2>&1 | tee -a "${LOG_FILE}"; then
                 log_success "Bazaar (io.github.kolunmi.Bazaar) installed from Flathub"
             else
                 log_error "Failed to install Bazaar (io.github.kolunmi.Bazaar) from Flathub. You can retry manually with: flatpak install flathub io.github.kolunmi.Bazaar"
