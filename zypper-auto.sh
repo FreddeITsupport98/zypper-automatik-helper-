@@ -2684,8 +2684,26 @@ run_setup_sf_only() {
         fi
     fi
 
+    # 1a) Ensure snapd core services are enabled and running so that
+    #     'snap install' and 'snap refresh' can talk to the daemon.
+    if [ "$snap_ok" -eq 1 ]; then
+        log_info "Ensuring snapd core services are enabled and running..."
+        if systemctl list-unit-files snapd.service >/dev/null 2>&1; then
+            if systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket >> "${LOG_FILE}" 2>&1; then
+                log_success "snapd core services enabled and started (snapd.apparmor, snapd.seeded, snapd, snapd.socket)"
+            else
+                log_error "Failed to enable/start snapd core services automatically. You may need to run the commands below manually."
+                # Keep rc marked as non-zero so the final status reports a warning.
+                rc=1
+            fi
+        else
+            log_debug "snapd.service unit not found in systemd; skipping automatic snapd enablement."
+        fi
+    fi
+
     echo "" | tee -a "${LOG_FILE}"
-    echo "After snapd installation completes, enable the core services with:" | tee -a "${LOG_FILE}"
+    echo "After snapd installation completes, the helper attempts to enable the core" | tee -a "${LOG_FILE}"
+    echo "snapd services automatically. If something still fails, you can run:" | tee -a "${LOG_FILE}"
     echo "  sudo systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket" | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
