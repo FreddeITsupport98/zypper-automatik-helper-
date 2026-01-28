@@ -2653,6 +2653,10 @@ run_setup_sf_only() {
                 echo "repositories. The usual manual command is:" | tee -a "${LOG_FILE}"
                 echo "  sudo opi snapd" | tee -a "${LOG_FILE}"
                 echo "" | tee -a "${LOG_FILE}"
+                echo "When opi asks what to install, choose the plain 'snapd'" | tee -a "${LOG_FILE}"
+                echo "package (usually option 1), then select the 'system:snappy'" | tee -a "${LOG_FILE}"
+                echo "repository entry (also typically option 1)." | tee -a "${LOG_FILE}"
+                echo "" | tee -a "${LOG_FILE}"
                 read -p "Do you want me to run 'opi snapd' now to install snapd? [y/N]: " -r OPI_SNAPD
                 echo
                 if [[ $OPI_SNAPD =~ ^[Yy]$ ]]; then
@@ -2772,6 +2776,42 @@ run_setup_sf_only() {
         fi
     else
         log_debug "discover6 is not installed; no conflicting KDE Discover instance detected"
+    fi
+
+    # 5) Install default app stores when base tooling is available
+    #
+    # a) Snap Store (snap-store) via snap (edge channel)
+    if [ "$snap_ok" -eq 1 ] && command -v snap >/dev/null 2>&1; then
+        log_info "Ensuring Snap Store (snap-store) is installed via snap..."
+        if snap list snap-store >/dev/null 2>&1; then
+            log_success "Snap Store (snap-store) is already installed"
+        else
+            if snap install snap-store --edge >> "${LOG_FILE}" 2>&1; then
+                log_success "Snap Store (snap-store) installed via snap (edge channel)"
+            else
+                log_error "Failed to install Snap Store (snap-store) via snap. You can retry manually with: sudo snap install snap-store --edge"
+                rc=1
+            fi
+        fi
+    else
+        log_debug "Skipping Snap Store installation; snapd/snap not fully available (snap_ok=${snap_ok})."
+    fi
+
+    # b) Bazaar (io.github.kolunmi.Bazaar) from Flathub via Flatpak
+    if [ "$flatpak_ok" -eq 1 ] && [ "$flathub_ok" -eq 1 ] && command -v flatpak >/dev/null 2>&1; then
+        log_info "Ensuring Bazaar (io.github.kolunmi.Bazaar) is installed from Flathub..."
+        if flatpak list --app --columns=application 2>/dev/null | grep -qx 'io.github.kolunmi.Bazaar'; then
+            log_success "Bazaar (io.github.kolunmi.Bazaar) is already installed"
+        else
+            if flatpak install -y flathub io.github.kolunmi.Bazaar >> "${LOG_FILE}" 2>&1; then
+                log_success "Bazaar (io.github.kolunmi.Bazaar) installed from Flathub"
+            else
+                log_error "Failed to install Bazaar (io.github.kolunmi.Bazaar) from Flathub. You can retry manually with: flatpak install flathub io.github.kolunmi.Bazaar"
+                rc=1
+            fi
+        fi
+    else
+        log_debug "Skipping Bazaar Flatpak installation; flatpak/flathub not fully available (flatpak_ok=${flatpak_ok}, flathub_ok=${flathub_ok})."
     fi
 
     if [ "$rc" -eq 0 ]; then
@@ -4075,6 +4115,9 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
                 echo "⚠️  Flatpak update failed (continuing)."
             fi
         else
+        
+        
+        else
             echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
             echo "   To install: sudo zypper install flatpak"
         fi
@@ -4111,15 +4154,13 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
             fi
         else
             echo "⚠️  Snapd is not installed - skipping Snap updates."
-            echo "   To install: sudo zypper install snapd"
-            echo "   Then enable: sudo systemctl enable snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket"
+            echo "   Install (zypper): sudo zypper install snapd"
+            echo "   Install (opi)   : sudo opi snapd" 
+            echo "   Then enable     : sudo systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket"
         fi
     else
         echo "ℹ️  Snap updates are disabled in /etc/zypper-auto.conf (ENABLE_SNAP_UPDATES=false)."
     fi
-
-    echo ""
-    echo "==========================================" 
     echo "  Soar (stable) Update & Sync (optional)"
     echo "=========================================="
     echo ""
