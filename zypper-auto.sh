@@ -3038,7 +3038,6 @@ fi
 update_status "Checking dependencies..."
 log_info ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
-check_and_install "upower" "upower" "checking AC power"
 check_and_install "python3" "python3" "running the notifier script"
 check_and_install "pkexec" "polkit" "graphical authentication"
 
