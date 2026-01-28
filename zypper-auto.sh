@@ -2814,6 +2814,22 @@ run_setup_sf_only() {
         log_debug "Skipping Bazaar Flatpak installation; flatpak/flathub not fully available (flatpak_ok=${flatpak_ok}, flathub_ok=${flathub_ok})."
     fi
 
+    # 6) Explain the overall update model for the user
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Update model after Snapd/Flatpak setup:" | tee -a "${LOG_FILE}"
+    echo "  - KDE Discover is removed (optional) to avoid a second GUI updater" | tee -a "${LOG_FILE}"
+    echo "    competing with zypper dup and Btrfs snapshots." | tee -a "${LOG_FILE}"
+    echo "  - System (RPM) updates are handled only by zypper dup and this helper." | tee -a "${LOG_FILE}"
+    echo "  - Flatpak apps use Bazaar as the graphical store, with 'flatpak update'" | tee -a "${LOG_FILE}"
+    echo "    run automatically after dup when ENABLE_FLATPAK_UPDATES=true." | tee -a "${LOG_FILE}"
+    echo "  - Snap apps use Snap Store as the graphical store, with 'snap refresh'" | tee -a "${LOG_FILE}"
+    echo "    run automatically after dup when ENABLE_SNAP_UPDATES=true." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    echo "In other words: one updater (zypper) for the system, and dedicated app" | tee -a "${LOG_FILE}"
+    echo "stores (Bazaar and Snap Store) for user applications, all kept in sync" | tee -a "${LOG_FILE}"
+    echo "by this helper so system + Flatpak + Snap apps are updated together." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
     if [ "$rc" -eq 0 ]; then
         update_status "SUCCESS: Snapd/Flatpak setup helper completed"
         log_success "Snapd & Flatpak setup completed successfully"
