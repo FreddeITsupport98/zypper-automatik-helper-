@@ -2694,6 +2694,48 @@ run_setup_sf_only() {
         rc=1
     fi
 
+    # 4) Optionally remove KDE Discover (discover6) to avoid conflicting
+    # update stacks on openSUSE when this helper is managing system
+    # upgrades and Flatpak/Snap integration.
+    if rpm -q discover6 >/dev/null 2>&1; then
+        echo "" | tee -a "${LOG_FILE}"
+        echo "KDE Discover (package: discover6) is currently installed." | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "On openSUSE Tumbleweed/Slowroll, Discover provides a graphical" | tee -a "${LOG_FILE}"
+        echo "software center and its own offline-update mechanism on top of" | tee -a "${LOG_FILE}"
+        echo "libzypp. Running Discover in parallel with this zypper auto-helper" | tee -a "${LOG_FILE}"
+        echo "means two independent tools can schedule and apply system updates." | tee -a "${LOG_FILE}"
+        echo "This can lead to:" | tee -a "${LOG_FILE}"
+        echo "  - duplicated or conflicting update notifications" | tee -a "${LOG_FILE}"
+        echo "  - partial or out-of-order upgrades when Discover performs" | tee -a "${LOG_FILE}"
+        echo "    offline updates while this helper expects zypper dup snapshots" | tee -a "${LOG_FILE}"
+        echo "  - confusing rollbacks when Btrfs snapshots are created from" | tee -a "${LOG_FILE}"
+        echo "    different update tools" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "To keep the update stack simple and aligned with how openSUSE" | tee -a "${LOG_FILE}"
+        echo "expects zypper-based upgrades to run, this helper recommends" | tee -a "${LOG_FILE}"
+        echo "removing Discover and relying on:" | tee -a "${LOG_FILE}"
+        echo "  - zypper dup (or this helper) for system upgrades" | tee -a "${LOG_FILE}"
+        echo "  - Flatpak/Snap tooling only for user-space apps when needed" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        read -p "Remove discover6 now so only zypper-based tools manage system updates? [y/N]: " -r RM_DISCOVER
+        echo
+        if [[ $RM_DISCOVER =~ ^[Yy]$ ]]; then
+            log_info "User accepted removal of discover6 to avoid conflicting update managers"
+            update_status "Removing discover6 (KDE Discover) to avoid conflicting update managers"
+            if zypper -n remove discover6 >> "${LOG_FILE}" 2>&1; then
+                log_success "discover6 removed successfully"
+            else
+                rc=1
+                log_error "Failed to remove discover6 automatically. Please review the log and, if needed, run 'sudo zypper remove discover6' manually."
+            fi
+        else
+            log_info "User chose to keep discover6 installed; multiple update tools will remain active."
+        fi
+    else
+        log_debug "discover6 is not installed; no conflicting KDE Discover instance detected"
+    fi
+
     if [ "$rc" -eq 0 ]; then
         update_status "SUCCESS: Snapd/Flatpak setup helper completed"
         log_success "Snapd & Flatpak setup completed successfully"
@@ -2746,7 +2788,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
-    echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes)"
+    echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
     echo "  --rm-conflict           Scan for duplicate RPMs and auto-clean safe conflicts before manual zypper dup"
