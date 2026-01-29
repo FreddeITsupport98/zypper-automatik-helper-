@@ -1616,10 +1616,12 @@ run_debug_menu_only() {
     log_info ">>> Interactive debug / diagnostics tools menu..."
 
     while true; do
-        # Detect whether the diagnostics follower is currently active so we
-        # can show a dynamic, coloured toggle label for option 1.
+        # Detect whether the diagnostics follower is currently enabled so we
+        # can show a dynamic, coloured toggle label for option 1. We use
+        # systemctl is-enabled here so the toggle controls the persistent
+        # service state, not just the current runtime status.
         local follower_active follower_label
-        if systemctl is-active --quiet zypper-auto-diag-logs.service 2>/dev/null; then
+        if systemctl is-enabled --quiet zypper-auto-diag-logs.service 2>/dev/null; then
             follower_active=1
             # Red "Disable" label
             follower_label="\033[31mDisable diagnostics follower\033[0m"
@@ -1646,13 +1648,14 @@ run_debug_menu_only() {
         case "${choice}" in
             1)
                 if [ "${follower_active}" -eq 1 ] 2>/dev/null; then
-                    # Currently active -> toggle OFF
+                    # Currently enabled -> toggle OFF (stop and disable persistent service)
                     log_info "[debug-menu] Disabling diagnostics follower via toggle"
                     systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+                    systemctl disable zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
                     update_status "SUCCESS: Diagnostics log follower disabled via debug menu toggle"
                     echo "Diagnostics follower disabled."
                 else
-                    # Currently inactive -> toggle ON (no tail here; option 2 handles live view)
+                    # Currently disabled -> toggle ON (no tail here; option 2 handles live view)
                     log_info "[debug-menu] Enabling diagnostics follower via toggle"
                     run_diag_logs_on_only || true
                     echo "Diagnostics follower enabled. Use option 2 to view live logs."
@@ -5101,7 +5104,9 @@ def detect_form_factor():
     except Exception as e:
         log_debug(f"has_battery_via_sys failed in detect_form_factor: {e}")
 
-    # 2. Fall back to the previous upower + battery-based heuristic
+    # 2. Fall back to the previous upower + battery-based heuristic.
+    devices: list[str] = []
+    try:
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
     except Exception as e:
         log_debug(f"upower -e failed in detect_form_factor: {e}")
@@ -5115,7 +5120,9 @@ def detect_form_factor():
             for dev in devices:
                 if not dev:
                     continue
-                info = subprocess.check_output(["upower", "-i", dev], text=True, errors="ignore").lower()
+                info = subprocess.check_output(
+                    ["upower", "-i", dev], text=True, errors="ignore"
+                ).lower()
 
                 if "line_power" in dev:
                     has_line_power = True
