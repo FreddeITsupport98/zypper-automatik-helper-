@@ -44,7 +44,7 @@ if [[ $# -gt 0 ]]; then
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
-        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--test-notify|--status)
+        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status)
             # Known commands/options; continue into main logic
             :
             ;;
@@ -1655,10 +1655,14 @@ run_debug_menu_only() {
                     update_status "SUCCESS: Diagnostics log follower disabled via debug menu toggle"
                     echo "Diagnostics follower disabled."
                 else
-                    # Currently disabled -> toggle ON (no tail here; option 2 handles live view)
+                    # Currently disabled -> toggle ON
                     log_info "[debug-menu] Enabling diagnostics follower via toggle"
                     run_diag_logs_on_only || true
-                    echo "Diagnostics follower enabled. Use option 2 to view live logs."
+                    # Immediately capture a one-shot diagnostics snapshot so that
+                    # the diagnostics folder contains at least today's diag-*.log
+                    # when the user opens it via option 5.
+                    run_snapshot_state_only || true
+                    echo "Diagnostics follower enabled and initial diagnostics snapshot captured. Use option 5 to open the folder or option 2 to view live logs."
                 fi
                 ;;
             2)
