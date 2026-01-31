@@ -1753,6 +1753,11 @@ run_debug_menu_only() {
                 diag_dir="${LOG_DIR}/diagnostics"
                 echo "Diagnostics logs directory: ${diag_dir}"
                 mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                # Allow the desktop user to traverse the parent log directory
+                # without making all logs world-readable. 751 = traverse but
+                # not list contents; diagnostics subdir is then responsible for
+                # exposing only the intended files.
+                chmod 751 "${LOG_DIR}" >> "${LOG_FILE}" 2>&1 || true
                 chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
                 find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
                 if command -v xdg-open >/dev/null 2>&1; then
