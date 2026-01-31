@@ -1761,13 +1761,20 @@ run_debug_menu_only() {
                 chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
                 find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
                 if command -v xdg-open >/dev/null 2>&1; then
+                    local _xdg_rc=0
                     if [ -n "${SUDO_USER:-}" ]; then
                         USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
                         sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
                     else
-                        xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                        xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
                     fi
+                    if [ "${_xdg_rc}" -ne 0 ] 2>/dev/null; then
+                        log_error "[debug-menu] xdg-open failed with exit code ${_xdg_rc} when opening ${diag_dir}"
+                        echo "Could not launch the file manager (xdg-open exit code ${_xdg_rc}). You can still access diagnostics logs at: ${diag_dir}" 
+                    fi
+                else
+                    echo "xdg-open is not installed. Open this folder manually: ${diag_dir}"
                 fi
                 ;;
             6)
