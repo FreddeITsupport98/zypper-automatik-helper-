@@ -5951,14 +5951,18 @@ def main():
                                 log_info("All packages were already cached; treating as completed download")
                                 changelog_msg = (
                                     "All update packages are already present in the local cache.\n\n"
-                                    "Packages are ready to install."
+                                    "No additional downloads were required."
                                 )
                             else:
                                 # Packages were actually downloaded, show notification
                                 log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
                                 
-                                # Base message
-                                changelog_msg = f"Downloaded {actual_downloaded} packages in {time_str}.\n\nPackages are ready to install."
+                                # Base message: focus on download completion; the separate
+                                # "Updates Ready" notification will tell the user when to install.
+                                changelog_msg = (
+                                    f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
+                                    "All packages are now in the local cache."
+                                )
                                 # If we have fresh dry-run output, attach a short preview
                                 if dry_output:
                                     try:
@@ -5967,7 +5971,7 @@ def main():
                                             preview_str = ", ".join(preview_packages)
                                             changelog_msg = (
                                                 f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
-                                                f"Including: {preview_str}\n\nReady to install."
+                                                f"Including: {preview_str}"
                                             )
                                             log_info(f"Added changelog preview: {preview_str}")
                                     except Exception as e:
