@@ -1780,15 +1780,21 @@ run_debug_menu_only() {
                     # terminal. If that fails, fall back to systemd-run scopes
                     # and finally to specific file managers.
                     if command -v xdg-open >/dev/null 2>&1; then
-                        local _disp _dbus
+                        local _disp _wayland _session _xauth _dbus
                         _disp="${DISPLAY:-}"
+                        _wayland="${WAYLAND_DISPLAY:-}"
+                        _session="${XDG_SESSION_TYPE:-}"
+                        _xauth="${XAUTHORITY:-}"
                         # Prefer a real user bus address if we could compute one;
                         # otherwise fall back to whatever DBUS_SESSION_BUS_ADDRESS
                         # we inherited from the current environment.
                         _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
+                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
                         if sudo -u "${SUDO_USER}" \
                             DISPLAY="${_disp}" \
+                            WAYLAND_DISPLAY="${_wayland}" \
+                            XDG_SESSION_TYPE="${_session}" \
+                            XAUTHORITY="${_xauth}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
                             xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
                             _open_rc=0
@@ -1804,12 +1810,18 @@ run_debug_menu_only() {
                     if [ "${_open_rc}" -ne 0 ] 2>/dev/null && \
                        command -v systemd-run >/dev/null 2>&1 && \
                        command -v xdg-open >/dev/null 2>&1; then
-                        local _disp _dbus
+                        local _disp _wayland _session _xauth _dbus
                         _disp="${DISPLAY:-}"
+                        _wayland="${WAYLAND_DISPLAY:-}"
+                        _session="${XDG_SESSION_TYPE:-}"
+                        _xauth="${XAUTHORITY:-}"
                         _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
+                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
                         if sudo -u "${SUDO_USER}" \
                             DISPLAY="${_disp}" \
+                            WAYLAND_DISPLAY="${_wayland}" \
+                            XDG_SESSION_TYPE="${_session}" \
+                            XAUTHORITY="${_xauth}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
                             systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
                             _open_rc=0
