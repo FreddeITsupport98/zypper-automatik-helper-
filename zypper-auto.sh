@@ -1527,7 +1527,10 @@ run_snapshot_state_only() {
         echo
         echo "-- One-shot zypper preview (may be empty if command fails quickly) --"
         if command -v zypper >/dev/null 2>&1; then
-            zypper -q dup --dry-run 2>&1 | head -n 50 || echo "(zypper preview failed or produced no output)"
+            # Use non-interactive mode so diagnostics snapshots never block on
+            # zypper prompts (e.g. license/vendor questions). This keeps the
+            # debug menu responsive when option 1 triggers an immediate snapshot.
+            zypper --non-interactive -q dup --dry-run 2>&1 | head -n 50 || echo "(zypper preview failed or produced no output)"
         fi
         echo "===== END SNAPSHOT STATE [RUN=${RUN_ID}] ====="
     } >> "${diag_file}" 2>&1 || true
@@ -1763,15 +1766,32 @@ run_debug_menu_only() {
                 if command -v xdg-open >/dev/null 2>&1; then
                     local _xdg_rc=0
                     if [ -n "${SUDO_USER:-}" ]; then
-                        USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
-                        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
+                        local _uid
+                        _uid="$(id -u "${SUDO_USER}")"
+                        USER_BUS_PATH="unix:path=/run/user/${_uid}/bus"
+                        # Prefer systemd-run so the command executes in the user's
+                        # own systemd session with the right environment.
+                        if command -v systemd-run >/dev/null 2>&1; then
+                            sudo -u "${SUDO_USER}" \
+                                DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                                XDG_RUNTIME_DIR="/run/user/${_uid}" \
+                                systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
+                        else
+                            # Fallback: invoke xdg-open directly as the user with a
+                            # best-effort desktop environment.
+                            sudo -u "${SUDO_USER}" \
+                                DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                                XDG_RUNTIME_DIR="/run/user/${_uid}" \
+                                DISPLAY="${DISPLAY:-:0}" \
+                                xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
+                        fi
                     else
                         xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
                     fi
                     if [ "${_xdg_rc}" -ne 0 ] 2>/dev/null; then
                         log_error "[debug-menu] xdg-open failed with exit code ${_xdg_rc} when opening ${diag_dir}"
-                        echo "Could not launch the file manager (xdg-open exit code ${_xdg_rc}). You can still access diagnostics logs at: ${diag_dir}" 
+                        echo "Could not launch the file manager (xdg-open exit code ${_xdg_rc}). You can still access diagnostics logs at: ${diag_dir}"
+                        echo "Tip: run 'xdg-open ${diag_dir}' as your normal user (without sudo) if the menu cannot open it."
                     fi
                 else
                     echo "xdg-open is not installed. Open this folder manually: ${diag_dir}"
