@@ -1,3 +1,5 @@
+![Zypper Auto-Helper screenshot](icon/Screenshot_20260205_091408.png)
+
 # Zypper Auto-Downloader for Tumbleweed
 
 ![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE-Tumbleweed-73ba25?style=for-the-badge&logo=opensuse)
