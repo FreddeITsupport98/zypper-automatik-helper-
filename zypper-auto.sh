@@ -1763,38 +1763,65 @@ run_debug_menu_only() {
                 chmod 751 "${LOG_DIR}" >> "${LOG_FILE}" 2>&1 || true
                 chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
                 find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
-                if command -v xdg-open >/dev/null 2>&1; then
-                    local _xdg_rc=0
-                    if [ -n "${SUDO_USER:-}" ]; then
-                        local _uid
-                        _uid="$(id -u "${SUDO_USER}")"
-                        USER_BUS_PATH="unix:path=/run/user/${_uid}/bus"
-                        # Prefer systemd-run so the command executes in the user's
-                        # own systemd session with the right environment.
-                        if command -v systemd-run >/dev/null 2>&1; then
-                            sudo -u "${SUDO_USER}" \
-                                DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-                                XDG_RUNTIME_DIR="/run/user/${_uid}" \
-                                systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
-                        else
-                            # Fallback: invoke xdg-open directly as the user with a
-                            # best-effort desktop environment.
-                            sudo -u "${SUDO_USER}" \
-                                DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-                                XDG_RUNTIME_DIR="/run/user/${_uid}" \
-                                DISPLAY="${DISPLAY:-:0}" \
-                                xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
-                        fi
-                    else
-                        xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _xdg_rc=$?
+
+                # Try to open the diagnostics folder in the user's desktop session.
+                # We prefer `systemd-run --user --scope xdg-open <dir>` because that
+                # matches the manual command that is known to work, but we also
+                # support specific file managers (Dolphin, Nautilus, Nemo, Thunar,
+                # PCManFM, Caja, Konqueror) so this behaves well across DEs.
+                local _open_rc=1
+                if [ -n "${SUDO_USER:-}" ]; then
+                    local _uid
+                    _uid="$(id -u "${SUDO_USER}")"
+
+                    # 1) Try xdg-open via systemd-run if available
+                    if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+                        sudo -u "${SUDO_USER}" \
+                            systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _open_rc=$?
+                    elif command -v xdg-open >/dev/null 2>&1; then
+                        # Fallback: run xdg-open directly as the user
+                        sudo -u "${SUDO_USER}" \
+                            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+                            XDG_RUNTIME_DIR="/run/user/${_uid}" \
+                            DISPLAY="${DISPLAY:-:0}" \
+                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _open_rc=$?
                     fi
-                    if [ "${_xdg_rc}" -ne 0 ] 2>/dev/null; then
-                        log_error "[debug-menu] xdg-open failed with exit code ${_xdg_rc} when opening ${diag_dir}"
-                        echo "Could not launch the file manager (xdg-open exit code ${_xdg_rc}). You can still access diagnostics logs at: ${diag_dir}"
-                        echo "Tip: run 'xdg-open ${diag_dir}' as your normal user (without sudo) if the menu cannot open it."
+
+                    # 2) If xdg-open failed or is unavailable, try common file managers
+                    if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
+                        local _fm
+                        for _fm in dolphin nautilus nemo thunar pcmanfm caja konqueror; do
+                            if sudo -u "${SUDO_USER}" command -v "${_fm}" >/dev/null 2>&1; then
+                                log_info "[debug-menu] xdg-open unavailable or failed; trying ${_fm} to open ${diag_dir} for user ${SUDO_USER}"
+                                if command -v systemd-run >/dev/null 2>&1; then
+                                    sudo -u "${SUDO_USER}" \
+                                        systemd-run --user --scope "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1 && { _open_rc=0; break; }
+                                else
+                                    sudo -u "${SUDO_USER}" \
+                                        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+                                        XDG_RUNTIME_DIR="/run/user/${_uid}" \
+                                        DISPLAY="${DISPLAY:-:0}" \
+                                        "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1 && { _open_rc=0; break; }
+                                fi
+                            fi
+                        done
                     fi
                 else
-                    echo "xdg-open is not installed. Open this folder manually: ${diag_dir}"
+                    # No SUDO_USER detected (should be rare in debug mode); last-resort
+                    # attempt as the current user.
+                    if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+                        systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _open_rc=$?
+                    elif command -v xdg-open >/dev/null 2>&1; then
+                        xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || _open_rc=$?
+                    else
+                        _open_rc=1
+                    fi
+                fi
+
+                if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
+                    log_error "[debug-menu] Could not open diagnostics folder automatically (exit code ${_open_rc})"
+                    echo "Could not launch the file manager automatically. You can still access diagnostics logs at: ${diag_dir}"
+                    echo "Tip: run 'systemd-run --user --scope xdg-open ${diag_dir}' or open it with your preferred file manager as your normal user."
                 fi
                 ;;
             6)
