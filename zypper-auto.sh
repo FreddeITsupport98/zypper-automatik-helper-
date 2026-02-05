@@ -159,6 +159,14 @@ log_info() {
     echo "[INFO] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
 }
 
+# Record the full CLI invocation once at startup so diagnostics follower and
+# bundles can see exactly how the helper was called. We log this after
+# RUN_ID/LOG_FILE are initialised but before any mode-specific branching.
+if [ "${_ZYP_AUT_HELPER_CLI_LOGGED:-0}" -eq 0 ] 2>/dev/null; then
+    _ZYP_AUT_HELPER_CLI_LOGGED=1
+    log_info "[cli] Invoked as: $0 ${*:-<no-args>} (EUID=${EUID}, SUDO_USER=${SUDO_USER:-<unset>}, PWD=$(pwd))"
+fi
+
 # Atomic file writer for here-doc content.
 # Usage:
 #   write_atomic "/path/to/file" <<'EOF'
@@ -1629,6 +1637,15 @@ run_diag_bundle_only() {
 run_debug_menu_only() {
     log_info ">>> Interactive debug / diagnostics tools menu..."
 
+    # Capture a compact snapshot of the diagnostics environment at menu entry so
+    # the follower / bundle logs show what state we started from.
+    local _dbg_diag_dir _dbg_follower_active _dbg_follower_enabled
+    _dbg_diag_dir="${LOG_DIR}/diagnostics"
+    _dbg_follower_active=$(systemctl is-active --quiet "${DIAG_SERVICE_NAME}.service" 2>/dev/null && echo "active" || echo "inactive-or-missing")
+    _dbg_follower_enabled=$(systemctl is-enabled --quiet "${DIAG_SERVICE_NAME}.service" 2>/dev/null && echo "enabled" || echo "disabled-or-missing")
+    log_info "[debug-menu] Session start for RUN=${RUN_ID}; SUDO_USER=${SUDO_USER:-?}; LOG_DIR=${LOG_DIR}; DIAG_DIR=${_dbg_diag_dir}"
+    log_info "[debug-menu] Diagnostics follower at menu entry: active=${_dbg_follower_active}, enabled=${_dbg_follower_enabled}"
+
     while true; do
         # Detect whether the diagnostics follower is currently enabled so we
         # can show a dynamic, coloured toggle label for option 1. We use
@@ -1658,6 +1675,7 @@ run_debug_menu_only() {
         echo "  7) Exit menu (7 / E / Q)"
         echo ""
         read -p "Select an option [1-7, E, Q]: " -r choice
+        log_info "[debug-menu] User selected menu option: ${choice}"
 
         case "${choice}" in
             1)
@@ -1691,6 +1709,7 @@ run_debug_menu_only() {
                 if [ -f "${diag_file}" ] && systemctl is-active --quiet zypper-auto-diag-logs.service 2>/dev/null; then
                     echo "- Diagnostics log (aggregated): ${diag_file}"
                     echo "Press E or Enter to stop viewing logs and return to the menu."
+                    log_info "[debug-menu] Live diagnostics viewer started (aggregated file: ${diag_file})"
                     tail -n 50 -F "${diag_file}" &
                     local tail_pid=$!
                     # Wait for user to press a single key (E or Enter) instead
@@ -1700,6 +1719,7 @@ run_debug_menu_only() {
                     read -r -n1 key
                     kill "${tail_pid}" 2>/dev/null || true
                     wait "${tail_pid}" 2>/dev/null || true
+                    log_info "[debug-menu] Live diagnostics viewer stopped by user (aggregated file: ${diag_file})"
                     # After stopping the tail, re-render the menu.
                     continue
                 fi
@@ -1737,7 +1757,14 @@ run_debug_menu_only() {
                     continue
                 fi
 
+                # Record exactly which files we are about to follow so the
+                # diagnostics bundle shows the same view the user saw.
+                for _dbg_log in "${LOG_FILES_TO_FOLLOW[@]}"; do
+                    log_info "[debug-menu] Raw live-log target: ${_dbg_log}"
+                done
+
                 echo "Press E or Enter to stop viewing logs and return to the menu."
+                log_info "[debug-menu] Live diagnostics viewer started (raw logs)"
                 # Show a bit of history, then follow; -F keeps following across rotations.
                 # shellcheck disable=SC2068
                 tail -n 50 -F ${LOG_FILES_TO_FOLLOW[@]} &
@@ -1746,6 +1773,7 @@ run_debug_menu_only() {
                 read -r -n1 key
                 kill "${tail_pid}" 2>/dev/null || true
                 wait "${tail_pid}" 2>/dev/null || true
+                log_info "[debug-menu] Live diagnostics viewer stopped by user (raw logs)"
                 continue
                 ;;
             3)
@@ -1920,9 +1948,19 @@ run_debug_menu_only() {
 
                 if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
                     log_error "[debug-menu] Could not open diagnostics folder automatically (exit code ${_open_rc})"
+                    log_error "[debug-menu][SUMMARY] option=5 action=open-folder outcome=FAIL rc=${_open_rc} diag_dir=${diag_dir} user=${SUDO_USER:-<unset>}"
                     echo "Could not launch the file manager automatically. You can still access diagnostics logs at: ${diag_dir}"
                     echo "Clickable URL (many terminals/terminals-in-IDE will detect this): file://${diag_dir}"
                     echo "Tip: run 'systemd-run --user --scope xdg-open ${diag_dir}' or open it with your preferred file manager as your normal user."
+                    # Automatically capture a one-shot diagnostics snapshot so that
+                    # the aggregated diagnostics log contains detailed state
+                    # around this failure (systemd unit status, status files,
+                    # disk/network summary, and a short zypper preview).
+                    if ! run_snapshot_state_only; then
+                        log_error "[debug-menu] Auto diagnostics snapshot after option 5 failure failed"
+                    else
+                        log_info "[debug-menu] Auto diagnostics snapshot captured after option 5 failure"
+                    fi
                 fi
                 ;;
             6)
@@ -3211,6 +3249,12 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
         echo "No log files found yet under ${LOG_DIR} or notifier directory."
         exit 0
     fi
+
+    # Record exactly which files we are about to follow so the diagnostics
+    # follower and bundles can reconstruct the same view the user saw.
+    for _dbg_log in "${LOG_FILES_TO_FOLLOW[@]}"; do
+        log_info "[cli][live-logs] target=${_dbg_log}"
+    done
 
     # Show a bit of history, then follow; -F keeps following across rotations.
     # shellcheck disable=SC2068
