@@ -1672,9 +1672,11 @@ run_debug_menu_only() {
         echo "  4) Create diagnostics bundle tarball"
         echo "  5) Open diagnostics logs folder"
         echo "  6) Run notification self-test"
-        echo "  7) Exit menu (7 / E / Q)"
+        echo "  7) Run helper self-check (syntax / config)"
+        echo "  8) Folder opener self-test (xdg-open / file managers)"
+        echo "  9) Exit menu (9 / E / Q)"
         echo ""
-        read -p "Select an option [1-7, E, Q]: " -r choice
+        read -p "Select an option [1-9, E, Q]: " -r choice
         log_info "[debug-menu] User selected menu option: ${choice}"
 
         case "${choice}" in
@@ -1980,7 +1982,82 @@ run_debug_menu_only() {
                     echo "Test notification launched. Close it from your desktop when you are done."
                 fi
                 ;;
-            7|q|Q|e|E)
+            7)
+                log_info "[debug-menu] Running helper self-check (syntax / config)"
+                echo "Running installer/notifier self-check... (see latest install log for full details)."
+                if ( run_self_check ); then
+                    log_success "[debug-menu] Helper self-check completed successfully"
+                    echo "Self-check completed successfully."
+                else
+                    rc=$?
+                    log_error "[debug-menu] Helper self-check exited with rc=${rc} (see install log and last-status.txt)"
+                    echo "Self-check reported problems (rc=${rc}). See the latest install log and last-status.txt for details."
+                fi
+                ;;
+            8)
+                log_info "[debug-menu] Folder opener self-test starting"
+                local target_user target_uid run_dir bus candidates tool
+                target_user="${SUDO_USER:-${USER:-}}"
+                target_uid=$(id -u "${target_user}" 2>/dev/null || echo "")
+                run_dir="/run/user/${target_uid}"
+                bus="unix:path=${run_dir}/bus"
+
+                echo "Folder opener self-test for user: ${target_user}"
+                echo "  XDG_RUNTIME_DIR=${run_dir}"
+                echo "  DBUS_SESSION_BUS_ADDRESS=${bus}"
+
+                candidates=""
+                if [ -n "${LOG_FOLDER_OPENER:-}" ]; then
+                    candidates="${LOG_FOLDER_OPENER}"
+                fi
+                candidates="${candidates} dolphin nautilus nemo thunar pcmanfm caja konqueror xdg-open"
+
+                for tool in ${candidates}; do
+                    # Skip duplicates in the candidates list
+                    [ -z "${tool}" ] && continue
+                    if echo " ${seen_tools:-} " | grep -q " ${tool} "; then
+                        continue
+                    fi
+                    seen_tools="${seen_tools:-} ${tool}"
+
+                    if [ -n "${SUDO_USER:-}" ]; then
+                        if ! sudo -u "${target_user}" command -v "${tool}" >/dev/null 2>&1; then
+                            echo "  - ${tool}: not in PATH for ${target_user}"
+                            log_debug "[debug-menu][opener-test] ${tool} not in PATH for ${target_user}"
+                            continue
+                        fi
+                        echo "  - ${tool}: FOUND in PATH for ${target_user}"
+                        log_info "[debug-menu][opener-test] ${tool} found in PATH for ${target_user}"
+                        if sudo -u "${target_user}" DBUS_SESSION_BUS_ADDRESS="${bus}" "${tool}" --version >/dev/null 2>&1; then
+                            echo "      basic '--version' invocation: OK"
+                            log_debug "[debug-menu][opener-test] ${tool} --version OK"
+                        else
+                            rc=$?
+                            echo "      basic '--version' invocation: FAILED (rc=${rc})"
+                            log_error "[debug-menu][opener-test] ${tool} --version failed (rc=${rc})"
+                        fi
+                    else
+                        if ! command -v "${tool}" >/dev/null 2>&1; then
+                            echo "  - ${tool}: not in PATH (no SUDO_USER)"
+                            log_debug "[debug-menu][opener-test] ${tool} not in PATH (no SUDO_USER)"
+                            continue
+                        fi
+                        echo "  - ${tool}: FOUND in PATH (no SUDO_USER)"
+                        log_info "[debug-menu][opener-test] ${tool} found in PATH (no SUDO_USER)"
+                        if DBUS_SESSION_BUS_ADDRESS="${bus}" "${tool}" --version >/dev/null 2>&1; then
+                            echo "      basic '--version' invocation: OK"
+                            log_debug "[debug-menu][opener-test] ${tool} --version OK (no SUDO_USER)"
+                        else
+                            rc=$?
+                            echo "      basic '--version' invocation: FAILED (rc=${rc})"
+                            log_error "[debug-menu][opener-test] ${tool} --version failed (rc=${rc}) (no SUDO_USER)"
+                        fi
+                    fi
+                done
+
+                echo "Folder opener self-test completed. Review any FAILED lines above and corresponding log entries for details."
+                ;;
+            9|q|Q|e|E)
                 log_info "[debug-menu] Exiting debug/diagnostics menu"
                 break
                 ;;
