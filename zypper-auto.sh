@@ -1752,7 +1752,12 @@ run_debug_menu_only() {
                 ;;
             5)
                 log_info "[debug-menu] Opening diagnostics logs folder"
-                local diag_dir
+                local diag_dir USER_BUS_PATH
+                # Try to derive the desktop user's DBus session bus explicitly so
+                # we do not depend on whatever DBUS_SESSION_BUS_ADDRESS happens to
+                # be preserved by sudo. This mirrors how other helper modes
+                # compute USER_BUS_PATH.
+                USER_BUS_PATH="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
                 diag_dir="${LOG_DIR}/diagnostics"
                 echo "Diagnostics logs directory: ${diag_dir}"
                 mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
@@ -1765,42 +1770,57 @@ run_debug_menu_only() {
                 find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
 
                 # Try to open the diagnostics folder in the user's desktop session.
-                # We mimic exactly what you would run yourself:
-                #   systemd-run --user --scope xdg-open <dir>
-                # and fall back to specific file managers if that fails.
+                # We avoid letting set -e abort the whole debug menu by
+                # wrapping all launch attempts in conditional tests.
                 local _open_rc=1
+
                 if [ -n "${SUDO_USER:-}" ]; then
-                    # 1) xdg-open via systemd-run as the desktop user. We forward
-                    # the current DISPLAY/DBUS env so the transient scope runs in
-                    # the real graphical session (same behaviour as when you run
-                    # systemd-run directly in your user shell).
-                    if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+                    # Prefer running xdg-open directly as the desktop user first,
+                    # which most closely matches what you'd do in your own
+                    # terminal. If that fails, fall back to systemd-run scopes
+                    # and finally to specific file managers.
+                    if command -v xdg-open >/dev/null 2>&1; then
                         local _disp _dbus
                         _disp="${DISPLAY:-}"
-                        _dbus="${DBUS_SESSION_BUS_ADDRESS:-}"
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
-                        sudo -u "${SUDO_USER}" \
+                        # Prefer a real user bus address if we could compute one;
+                        # otherwise fall back to whatever DBUS_SESSION_BUS_ADDRESS
+                        # we inherited from the current environment.
+                        _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
+                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
+                        if sudo -u "${SUDO_USER}" \
                             DISPLAY="${_disp}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
-                            systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1
-                        _open_rc=$?
-                        if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
-                            log_error "[debug-menu] systemd-run xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER}"
-                        fi
-                    elif command -v xdg-open >/dev/null 2>&1; then
-                        # Fallback: run xdg-open directly as the user (no systemd-run)
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} xdg-open ${diag_dir}"
-                        sudo -u "${SUDO_USER}" \
-                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1
-                        _open_rc=$?
-                        if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
+                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                            _open_rc=0
+                        else
+                            _open_rc=$?
                             log_error "[debug-menu] direct xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER}"
                         fi
-                    else
-                        log_error "[debug-menu] xdg-open not found in PATH; falling back to specific file managers"
                     fi
 
-                    # 2) If xdg-open failed or is unavailable, try common file managers
+                    # If direct xdg-open failed, try via systemd-run so the
+                    # helper can still work when invoked from non-GUI/root
+                    # contexts.
+                    if [ "${_open_rc}" -ne 0 ] 2>/dev/null && \
+                       command -v systemd-run >/dev/null 2>&1 && \
+                       command -v xdg-open >/dev/null 2>&1; then
+                        local _disp _dbus
+                        _disp="${DISPLAY:-}"
+                        _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
+                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
+                        if sudo -u "${SUDO_USER}" \
+                            DISPLAY="${_disp}" \
+                            DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
+                            systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                            _open_rc=0
+                        else
+                            _open_rc=$?
+                            log_error "[debug-menu] systemd-run xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER}"
+                        fi
+                    fi
+
+                    # 3) If both xdg-open paths failed or are unavailable, try
+                    # common graphical file managers.
                     if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
                         local _fm
                         for _fm in dolphin nautilus nemo thunar pcmanfm caja konqueror; do
@@ -1808,22 +1828,22 @@ run_debug_menu_only() {
                                 log_info "[debug-menu] xdg-open unavailable or failed; trying ${_fm} to open ${diag_dir} for user ${SUDO_USER}"
                                 if command -v systemd-run >/dev/null 2>&1; then
                                     log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} systemd-run --user --scope ${_fm} ${diag_dir}"
-                                    sudo -u "${SUDO_USER}" \
-                                        systemd-run --user --scope "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1
-                                    _open_rc=$?
-                                    if [ "${_open_rc}" -eq 0 ] 2>/dev/null; then
+                                    if sudo -u "${SUDO_USER}" \
+                                        systemd-run --user --scope "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                                        _open_rc=0
                                         break
                                     else
+                                        _open_rc=$?
                                         log_error "[debug-menu] systemd-run ${_fm} failed with exit code ${_open_rc} for user ${SUDO_USER}"
                                     fi
                                 else
                                     log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} ${_fm} ${diag_dir}"
-                                    sudo -u "${SUDO_USER}" \
-                                        "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1
-                                    _open_rc=$?
-                                    if [ "${_open_rc}" -eq 0 ] 2>/dev/null; then
+                                    if sudo -u "${SUDO_USER}" \
+                                        "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                                        _open_rc=0
                                         break
                                     else
+                                        _open_rc=$?
                                         log_error "[debug-menu] direct ${_fm} failed with exit code ${_open_rc} for user ${SUDO_USER}"
                                     fi
                                 fi
@@ -1831,21 +1851,24 @@ run_debug_menu_only() {
                         done
                     fi
                 else
-                    # No SUDO_USER detected (should be rare in debug mode); last-resort
-                    # attempt as the current user.
-                    if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
-                        log_debug "[debug-menu] attempting (no SUDO_USER): systemd-run --user --scope xdg-open ${diag_dir}"
-                        systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1
-                        _open_rc=$?
-                        if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
-                            log_error "[debug-menu] systemd-run xdg-open failed with exit code ${_open_rc} (no SUDO_USER)"
-                        fi
-                    elif command -v xdg-open >/dev/null 2>&1; then
+                    # No SUDO_USER detected (should be rare in debug mode);
+                    # try as the current user so the menu remains usable even
+                    # when invoked without sudo.
+                    if command -v xdg-open >/dev/null 2>&1; then
                         log_debug "[debug-menu] attempting (no SUDO_USER): xdg-open ${diag_dir}"
-                        xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1
-                        _open_rc=$?
-                        if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
+                        if xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                            _open_rc=0
+                        else
+                            _open_rc=$?
                             log_error "[debug-menu] direct xdg-open failed with exit code ${_open_rc} (no SUDO_USER)"
+                        fi
+                    elif command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+                        log_debug "[debug-menu] attempting (no SUDO_USER): systemd-run --user --scope xdg-open ${diag_dir}"
+                        if systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                            _open_rc=0
+                        else
+                            _open_rc=$?
+                            log_error "[debug-menu] systemd-run xdg-open failed with exit code ${_open_rc} (no SUDO_USER)"
                         fi
                     else
                         _open_rc=1
