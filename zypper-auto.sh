@@ -44,7 +44,8 @@ if [[ $# -gt 0 ]]; then
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
-        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status)
+        --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
+        --analyze|--health)
             # Known commands/options; continue into main logic
             :
             ;;
@@ -92,6 +93,17 @@ mkdir -p "${LOG_DIR}"
 # Root log directory is readable by root and group only; individual
 # files may have their own tighter permissions (e.g. 600).
 chmod 750 "${LOG_DIR}"
+
+# Dedicated trace log used for high-volume shell tracing and very
+# fine-grained events. This is appended to across runs so the
+# diagnostics follower and bundles can reconstruct longer histories.
+TRACE_LOG="${LOG_DIR}/trace.log"
+# Best-effort creation with safe permissions; failures are non-fatal
+# and will only disable trace-specific features.
+if [ ! -e "${TRACE_LOG}" ]; then
+    touch "${TRACE_LOG}" 2>/dev/null || true
+    chmod 640 "${TRACE_LOG}" 2>/dev/null || true
+fi
 
 # Cleanup old log files (keep only the last MAX_LOG_FILES)
 cleanup_old_logs() {
@@ -154,9 +166,63 @@ esac
 # helper invocation in diagnostics logs.
 RUN_ID="R$(date +%Y%m%dT%H%M%S)-$$"
 
-# Logging functions
+# Millisecond timestamp helper for structured log lines.
+_log_ts() {
+    date '+%Y-%m-%d %H:%M:%S.%3N'
+}
+
+# Core formatter: write a single structured log line to the main installer
+# log. Errors are also mirrored to stderr for visibility.
+_log_write() {
+    local level="$1"; shift
+    local ts
+    ts="$(_log_ts)"
+    local trace_tag=""
+    # If ZYPPER_TRACE_ID is set (for example by the GUI notifier when the
+    # user clicks "Install"), include it so we can correlate frontend
+    # actions to backend work across all logs.
+    if [ -n "${ZYPPER_TRACE_ID:-}" ]; then
+        trace_tag=" [TID=${ZYPPER_TRACE_ID}]"
+    fi
+    local line
+    line="[${level}] ${ts} [RUN=${RUN_ID}]${trace_tag} $*"
+    echo "${line}" >> "${LOG_FILE}"
+    if [ "${level}" = "ERROR" ]; then
+        echo "${line}" >&2
+    fi
+}
+
 log_info() {
-    echo "[INFO] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
+    _log_write "INFO" "$@"
+}
+
+log_success() {
+    _log_write "SUCCESS" "$@"
+}
+
+log_error() {
+    _log_write "ERROR" "$@"
+}
+
+log_debug() {
+    _log_write "DEBUG" "$@"
+    # When DEBUG_MODE is enabled, also mirror debug to stderr in real time
+    if [ "${DEBUG_MODE}" -eq 1 ] 2>/dev/null; then
+        echo "[DEBUG] $*" >&2
+    fi
+}
+
+# Extremely verbose trace channel for high-frequency events. This writes
+# into TRACE_LOG and is separate from shell xtrace (which also targets
+# TRACE_LOG when --debug is enabled).
+log_trace() {
+    local ts
+    ts="$(_log_ts)"
+    local trace_tag=""
+    if [ -n "${ZYPPER_TRACE_ID:-}" ]; then
+        trace_tag=" [TID=${ZYPPER_TRACE_ID}]"
+    fi
+    echo "[TRACE] ${ts} [RUN=${RUN_ID}]${trace_tag} $*" >> "${TRACE_LOG}" 2>/dev/null || true
 }
 
 # Record the full CLI invocation once at startup so diagnostics follower and
@@ -185,23 +251,6 @@ write_atomic() {
     fi
 }
 
-log_success() {
-    echo "[SUCCESS] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}"
-}
-
-log_error() {
-    echo "[ERROR] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" | tee -a "${LOG_FILE}" >&2
-}
-
-log_debug() {
-    # Always append debug messages to the log file
-    echo "[DEBUG] $(date '+%H:%M:%S') [RUN=${RUN_ID}] $*" >> "${LOG_FILE}"
-    # When DEBUG_MODE is enabled, also mirror debug to stderr in real time
-    if [ "${DEBUG_MODE}" -eq 1 ] 2>/dev/null; then
-        echo "[DEBUG] $*" >&2
-    fi
-}
-
 # If the user passed --debug anywhere on the command line, enable shell
 # tracing and more verbose console logging while leaving the main
 # behaviour unchanged.
@@ -224,8 +273,17 @@ if [ $# -gt 0 ]; then
             __new_args+=("${__arg}")
         done
         set -- "${__new_args[@]}"
+        # Route xtrace output into TRACE_LOG with a rich prefix when
+        # available. Failures here are non-fatal; tracing will simply go
+        # to stderr instead.
+        if exec 9>>"${TRACE_LOG}" 2>/dev/null; then
+            BASH_XTRACEFD=9
+            PS4='+ [XTRACE] $(date "+%Y-%m-%d %H:%M:%S.%3N") [RUN=${RUN_ID}] ${BASH_SOURCE##*/}:${LINENO}: '
+        else
+            log_error "Failed to open ${TRACE_LOG} for shell tracing; xtrace will go to stderr"
+        fi
         # Enable xtrace after we've initialised logging so traces are also
-        # captured in the install log via PS4 if desired.
+        # captured in TRACE_LOG via PS4 when possible.
         set -x
     fi
 fi
@@ -1469,6 +1527,13 @@ run_diag_logs_runner_only() {
         tail_cmd+=" ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
     fi
 
+    # Include the high-volume TRACE_LOG when present so diagnostics
+    # bundles see shell traces and log_trace events alongside other
+    # sources. This will appear with a SRC=TRACE tag in diagnostics.
+    if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
+        tail_cmd+=" ${TRACE_LOG}"
+    fi
+
     if [ -z "${tail_cmd}" ]; then
         log_info "No existing logs found to follow; diagnostics follower will idle until logs exist."
         : > "${diag_file}" 2>/dev/null || true
@@ -1592,6 +1657,20 @@ run_diag_bundle_only() {
         fi
     fi
 
+    # High-volume TRACE_LOG (if present)
+    if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
+        include_files+=("-C" "${LOG_DIR}" "$(basename "${TRACE_LOG}")")
+    fi
+
+    # Any pre-install environment snapshots captured during installation
+    if ls -1 "${LOG_DIR}"/pre-install-env-*.txt >/dev/null 2>&1; then
+        local envsnap
+        envsnap=$(ls -1t "${LOG_DIR}"/pre-install-env-*.txt 2>/dev/null || true)
+        if [ -n "${envsnap}" ]; then
+            include_files+=("-C" "${LOG_DIR}" $(printf '%s\\n' ${envsnap} | xargs -n1 basename))
+        fi
+    fi
+
     # Notifier logs for user
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         local ulogdir
@@ -1674,9 +1753,11 @@ run_debug_menu_only() {
         echo "  6) Run notification self-test"
         echo "  7) Run helper self-check (syntax / config)"
         echo "  8) Folder opener self-test (xdg-open / file managers)"
-        echo "  9) Exit menu (9 / E / Q)"
+        echo "  9) Run log health report (recent history)"
+        echo " 10) Analyze last GUI-triggered run (by Trace ID)"
+        echo " 11) Exit menu (11 / E / Q)"
         echo ""
-        read -p "Select an option [1-9, E, Q]: " -r choice
+        read -p "Select an option [1-11, E, Q]: " -r choice
         log_info "[debug-menu] User selected menu option: ${choice}"
 
         case "${choice}" in
@@ -1726,56 +1807,87 @@ run_debug_menu_only() {
                     continue
                 fi
 
-                # Fallback: replicate --live-logs behaviour when no aggregated diag file.
+                # Fallback: tagged multi-source view mirroring --live-logs when
+                # no aggregated diagnostics file is available.
                 local latest_install_log=""
                 if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
                     latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
                 fi
 
-                # Build list of files to follow
-                local LOG_FILES_TO_FOLLOW=()
+                # Build list of tagged sources to follow (INS, SYS, USR, TRC)
+                local LIVE_SOURCES=()
                 if [ -n "${latest_install_log}" ]; then
-                    echo "- Installer log: ${latest_install_log}"
-                    LOG_FILES_TO_FOLLOW+=("${latest_install_log}")
+                    echo "- [INS] Installer log: ${latest_install_log}"
+                    LIVE_SOURCES+=("INS:${latest_install_log}")
                 fi
 
                 if [ -d "${LOG_DIR}/service-logs" ]; then
                     # shellcheck disable=SC2086
                     for f in "${LOG_DIR}/service-logs"/*.log; do
                         if [ -f "$f" ]; then
-                            echo "- Service log: $f"
-                            LOG_FILES_TO_FOLLOW+=("$f")
+                            echo "- [SYS] Service log: $f"
+                            LIVE_SOURCES+=("SYS:${f}")
                         fi
                     done
                 fi
 
                 if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
-                    echo "- Notifier log: ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
-                    LOG_FILES_TO_FOLLOW+=("${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
+                    echo "- [USR] Notifier log: ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+                    LIVE_SOURCES+=("USR:${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
                 fi
 
-                if [ "${#LOG_FILES_TO_FOLLOW[@]}" -eq 0 ]; then
+                if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
+                    echo "- [TRC] Trace log: ${TRACE_LOG}"
+                    LIVE_SOURCES+=("TRC:${TRACE_LOG}")
+                fi
+
+                if [ "${#LIVE_SOURCES[@]}" -eq 0 ]; then
                     echo "No log files found yet under ${LOG_DIR} or notifier directory."
                     continue
                 fi
 
                 # Record exactly which files we are about to follow so the
                 # diagnostics bundle shows the same view the user saw.
-                for _dbg_log in "${LOG_FILES_TO_FOLLOW[@]}"; do
-                    log_info "[debug-menu] Raw live-log target: ${_dbg_log}"
+                local _dbg_entry _dbg_tag _dbg_path
+                for _dbg_entry in "${LIVE_SOURCES[@]}"; do
+                    _dbg_tag="${_dbg_entry%%:*}"
+                    _dbg_path="${_dbg_entry#*:}"
+                    log_info "[debug-menu] Raw live-log target: TAG=${_dbg_tag} path=${_dbg_path}"
                 done
 
                 echo "Press E or Enter to stop viewing logs and return to the menu."
-                log_info "[debug-menu] Live diagnostics viewer started (raw logs)"
-                # Show a bit of history, then follow; -F keeps following across rotations.
-                # shellcheck disable=SC2068
-                tail -n 50 -F ${LOG_FILES_TO_FOLLOW[@]} &
-                local tail_pid=$!
+                log_info "[debug-menu] Live diagnostics viewer started (raw tagged logs)"
+
+                # Launch one tail per source, prefixing each line with its tag,
+                # and keep track of PIDs so we can cleanly stop on keypress.
+                local live_pids=()
+                local entry tag path
+                for entry in "${LIVE_SOURCES[@]}"; do
+                    tag="${entry%%:*}"
+                    path="${entry#*:}"
+                    if [ ! -f "${path}" ]; then
+                        continue
+                    fi
+                    (
+                        tail -n 50 -F "${path}" 2>/dev/null | sed -u "s/^/[${tag}] /"
+                    ) &
+                    live_pids+=("$!")
+                done
+
+                if [ "${#live_pids[@]}" -eq 0 ]; then
+                    echo "No readable log files available to follow."
+                    continue
+                fi
+
                 local key
                 read -r -n1 key
-                kill "${tail_pid}" 2>/dev/null || true
-                wait "${tail_pid}" 2>/dev/null || true
-                log_info "[debug-menu] Live diagnostics viewer stopped by user (raw logs)"
+                for pid in "${live_pids[@]}"; do
+                    kill "${pid}" 2>/dev/null || true
+                done
+                for pid in "${live_pids[@]}"; do
+                    wait "${pid}" 2>/dev/null || true
+                done
+                log_info "[debug-menu] Live diagnostics viewer stopped by user (raw tagged logs)"
                 continue
                 ;;
             3)
@@ -2057,12 +2169,71 @@ run_debug_menu_only() {
 
                 echo "Folder opener self-test completed. Review any FAILED lines above and corresponding log entries for details."
                 ;;
-            9|q|Q|e|E)
+            9)
+                log_info "[debug-menu] Running log health report (recent history)"
+                echo "Running health analysis across recent installer logs... (see latest install log for full details)."
+                if run_analyze_logs_only; then
+                    echo "Health analysis completed successfully."
+                else
+                    rc=$?
+                    log_error "[debug-menu] Health analysis exited with rc=${rc} (see install log and last-status.txt)"
+                    echo "Health analysis reported problems (rc=${rc}). See the latest install log and last-status.txt for details."
+                fi
+                ;;
+            10)
+                log_info "[debug-menu] Running TID-scoped health report for last GUI trace"
+                if [ -z "${SUDO_USER_HOME:-}" ]; then
+                    echo "Cannot locate user notifier logs (SUDO_USER_HOME is not set)."
+                    log_error "[debug-menu] Cannot run TID-scoped health report: SUDO_USER_HOME unset"
+                    # Return to menu without exiting the whole helper.
+                    continue
+                fi
+
+                local _user_log _last_tid
+                _user_log="${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+                if [ ! -f "${_user_log}" ]; then
+                    echo "User notifier log not found at ${_user_log}. Falling back to generic health report."
+                    log_error "[debug-menu] User notifier log missing at ${_user_log}; falling back to generic health report"
+                    if run_analyze_logs_only; then
+                        echo "Generic health analysis completed successfully."
+                    else
+                        rc=$?
+                        log_error "[debug-menu] Generic health analysis exited with rc=${rc}"
+                        echo "Health analysis reported problems (rc=${rc}). See the latest install log and last-status.txt for details."
+                    fi
+                    continue
+                fi
+
+                _last_tid=$(grep "Generated Trace ID for install action" "${_user_log}" 2>/dev/null | tail -n 1 | sed -E 's/.*Trace ID for install action: ([A-Za-z0-9_-]+).*/\1/' || true)
+                if [ -z "${_last_tid}" ]; then
+                    echo "No recent GUI Trace ID found in ${_user_log}. Falling back to generic health report."
+                    log_error "[debug-menu] No Trace ID found in notifier logs; falling back to generic health report"
+                    if run_analyze_logs_only; then
+                        echo "Generic health analysis completed successfully."
+                    else
+                        rc=$?
+                        log_error "[debug-menu] Generic health analysis exited with rc=${rc}"
+                        echo "Health analysis reported problems (rc=${rc}). See the latest install log and last-status.txt for details."
+                    fi
+                    continue
+                fi
+
+                echo "Using Trace ID: ${_last_tid}"
+                log_info "[debug-menu] Running TID-scoped health analysis for TID=${_last_tid}"
+                if run_analyze_logs_only "TID=${_last_tid}"; then
+                    echo "TID-scoped health analysis completed successfully."
+                else
+                    rc=$?
+                    log_error "[debug-menu] TID-scoped health analysis exited with rc=${rc} (TID=${_last_tid})"
+                    echo "Health analysis for TID=${_last_tid} reported problems (rc=${rc}). See the latest install log and last-status.txt for details."
+                fi
+                ;;
+            11|q|Q|e|E)
                 log_info "[debug-menu] Exiting debug/diagnostics menu"
                 break
                 ;;
             *)
-                echo "Invalid selection: '${choice}'. Please enter a number between 1 and 7."
+                echo "Invalid selection: '${choice}'. Please enter a number between 1 and 11, or E/Q to exit."
                 ;;
         esac
     done
@@ -2103,45 +2274,155 @@ run_reset_download_state_only() {
         mkdir -p "${USER_LOG_DIR}" "${USER_CACHE_DIR}" >> "${LOG_FILE}" 2>&1 || true
 
         rm -f "${USER_LOG_DIR}/last-run-status.txt" \
-              "${USER_LOG_DIR}"/notifier*.log >> "${LOG_FILE}" 2>&1 || true
-
-        rm -f "${USER_CACHE_DIR}/last_notification.txt" \
-              "${USER_CACHE_DIR}/last_check.txt" \
-              "${USER_CACHE_DIR}/env_state.txt" >> "${LOG_FILE}" 2>&1 || true
-    fi
-
-    # 3. Reload and restart core systemd units so they pick up fresh state
-    log_debug "Reloading and restarting systemd units after state reset..."
-    systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
-    systemctl reset-failed \
-        "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" \
-        "${VERIFY_SERVICE_NAME}.service" "${VERIFY_SERVICE_NAME}.timer" \
-        >> "${LOG_FILE}" 2>&1 || true
-    systemctl restart "${DL_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
-    systemctl restart "${VERIFY_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
-
-    if [ -n "${SUDO_USER:-}" ]; then
-        USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
-        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-            systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1 || true
-        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-            systemctl --user reset-failed \
-                "${NT_SERVICE_NAME}.service" "${NT_SERVICE_NAME}.timer" \
-                >> "${LOG_FILE}" 2>&1 || true
-        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-            systemctl --user restart "${NT_SERVICE_NAME}.timer" \
-            >> "${LOG_FILE}" 2>&1 || true
+              "${USER_LOG_DIR}/last-notified-snapshot.txt" \
+              "${USER_CACHE_DIR}/last-output.txt" >> "${LOG_FILE}" 2>&1 || true
     fi
 
     log_success "Download/notifier state reset completed"
-    update_status "SUCCESS: Download/notifier state reset"
+    update_status "SUCCESS: zypper-auto-helper download/notifier state reset"
+}
+
+# --- Helper: Analyze logs and print a health report (CLI) ---
+run_analyze_logs_only() {
+    log_info ">>> Running log health analysis..."
+
+    # Optional: allow a TID filter via arguments, e.g. TID=GUI-xxxx or --tid=GUI-xxxx.
+    local TID_FILTER=""
+    for arg in "$@"; do
+        case "${arg}" in
+            TID=*)
+                TID_FILTER="${arg#TID=}"
+                ;;
+            --tid=*)
+                TID_FILTER="${arg#--tid=}"
+                ;;
+        esac
+    done
 
     echo "" | tee -a "${LOG_FILE}"
-    echo "State reset summary:" | tee -a "${LOG_FILE}"
-    echo "  - Cleared /var/log/zypper-auto/download-*.txt and dry-run-last.txt" | tee -a "${LOG_FILE}"
-    echo "  - Cleared user notifier logs and cached notification state" | tee -a "${LOG_FILE}"
-    echo "  - Reloaded and restarted core timers/services" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  Zypper Auto-Helper Health Report"               | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+
+    if [ -n "${TID_FILTER}" ]; then
+        echo "Trace ID filter: ${TID_FILTER} (only lines with TID=${TID_FILTER})" | tee -a "${LOG_FILE}"
+    fi
+
+    # Collect up to the 10 most recent installer logs.
+    local log_files=()
+    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
+        while IFS= read -r f; do
+            [ -n "${f}" ] && log_files+=("${f}")
+        done < <(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -10)
+    fi
+
+    if [ "${#log_files[@]}" -eq 0 ]; then
+        echo "No installer logs found under ${LOG_DIR}." | tee -a "${LOG_FILE}"
+        update_status "FAILED: Health analysis could not find any installer logs"
+        return 1
+    fi
+
+    echo "Installer logs scanned (up to 10): ${#log_files[@]}" | tee -a "${LOG_FILE}"
+    echo "  - Latest: ${log_files[0]}" | tee -a "${LOG_FILE}"
+
+    # 1. Calculate Success/Failure markers across logs (optionally filtered by TID)
+    local total_runs=0 errors=0 successes=0
+    local lf
+    for lf in "${log_files[@]}"; do
+        local tr e s
+        if [ -n "${TID_FILTER}" ]; then
+            tr=$(grep "TID=${TID_FILTER}" "${lf}" 2>/dev/null | grep -c "Invoked as" || echo 0)
+            e=$(grep "TID=${TID_FILTER}" "${lf}" 2>/dev/null | grep -c "\[ERROR\]" || echo 0)
+            s=$(grep "TID=${TID_FILTER}" "${lf}" 2>/dev/null | grep -c "\[SUCCESS\]" || echo 0)
+        else
+            tr=$(grep -c "Invoked as" "${lf}" 2>/dev/null || echo 0)
+            e=$(grep -c "\[ERROR\]" "${lf}" 2>/dev/null || echo 0)
+            s=$(grep -c "\[SUCCESS\]" "${lf}" 2>/dev/null || echo 0)
+        fi
+        total_runs=$((total_runs + tr))
+        errors=$((errors + e))
+        successes=$((successes + s))
+    done
+
     echo "" | tee -a "${LOG_FILE}"
+    echo "History (aggregated across recent installer logs):" | tee -a "${LOG_FILE}"
+    echo "  - Total Invocations: ${total_runs}"               | tee -a "${LOG_FILE}"
+    echo "  - Errors Detected:   ${errors}"                   | tee -a "${LOG_FILE}"
+    echo "  - Success Markers:   ${successes}"                | tee -a "${LOG_FILE}"
+
+    # 2. Find Most Frequent Errors
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Top 3 Recurring Errors (recent logs):" | tee -a "${LOG_FILE}"
+    if [ "${errors}" -gt 0 ]; then
+        if [ -n "${TID_FILTER}" ]; then
+            grep "TID=${TID_FILTER}" "${log_files[@]}" 2>/dev/null \
+                | grep "\[ERROR\]" \
+                | cut -d']' -f4- | sed 's/^ *//' \
+                | sort | uniq -c | sort -nr | head -3 \
+                | awk '{print "  " $0}' | tee -a "${LOG_FILE}"
+        else
+            grep "\[ERROR\]" "${log_files[@]}" 2>/dev/null \
+                | cut -d']' -f4- | sed 's/^ *//' \
+                | sort | uniq -c | sort -nr | head -3 \
+                | awk '{print "  " $0}' | tee -a "${LOG_FILE}"
+        fi
+    else
+        echo "  (No errors found in recent installer logs)" | tee -a "${LOG_FILE}"
+    fi
+
+    # 3. Analyze Lock Contention (how often zypper was locked)
+    local locks_raw
+    if [ -n "${TID_FILTER}" ]; then
+        locks_raw=$(grep "TID=${TID_FILTER}" "${log_files[@]}" 2>/dev/null \
+            | grep -E "Zypper is locked by another process|System management is locked" \
+            | wc -l | tr -d ' ')
+    else
+        locks_raw=$(grep -E "Zypper is locked by another process|System management is locked" \
+            "${log_files[@]}" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    local locks="${locks_raw:-0}"
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Concurrency Check:"                       | tee -a "${LOG_FILE}"
+    echo "  - Zypper Lock Contentions: ${locks}"    | tee -a "${LOG_FILE}"
+
+    # 4. Download Performance from downloader service logs
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Download Performance (last 5 entries):" | tee -a "${LOG_FILE}"
+    if [ -f "${LOG_DIR}/service-logs/downloader.log" ]; then
+        grep "Downloaded" "${LOG_DIR}/service-logs/downloader.log" 2>/dev/null \
+            | tail -n 5 | sed 's/^/  - /' | tee -a "${LOG_FILE}" || true
+    else
+        echo "  (No downloader logs found at ${LOG_DIR}/service-logs/downloader.log)" \
+            | tee -a "${LOG_FILE}"
+    fi
+
+    # 5. Notifier Health (user side)
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Notifier Health:" | tee -a "${LOG_FILE}"
+    local user_log
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        user_log="${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+    else
+        user_log=""
+    fi
+
+    if [ -n "${user_log}" ] && [ -f "${user_log}" ]; then
+        local last_seen crashes
+        last_seen=$(tail -n 1 "${user_log}" 2>/dev/null | cut -d']' -f1 | tr -d '[' || echo "unknown")
+        echo "  - Last User Notification Activity: ${last_seen}" | tee -a "${LOG_FILE}"
+        crashes=$(grep -c "Traceback" "${user_log}" 2>/dev/null || echo 0)
+        if [ "${crashes}" -gt 0 ]; then
+            echo -e "  - \033[31mCRITICAL: ${crashes} Python crashes detected in user logs\033[0m" \
+                | tee -a "${LOG_FILE}"
+        else
+            echo "  - No Python crashes detected." | tee -a "${LOG_FILE}"
+        fi
+    else
+        echo "  (User notifier logs not accessible or missing)" | tee -a "${LOG_FILE}"
+    fi
+
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    update_status "SUCCESS: Health analysis completed"
 }
 
 # --- Helper: Duplicate RPM conflict cleanup (CLI) ---
@@ -3195,6 +3476,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --reset-state           Alias for --reset-downloads"
     echo "  --logs                  Show tails of installer, service, and notifier logs"
     echo "  --live-logs             Follow installer/service/notifier logs in real time (Ctrl+C to exit)"
+    echo "  --analyze, --health     Analyze recent logs and print a health report (errors, locks, notifier crashes)"
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help                  Show this help message"
@@ -3262,6 +3544,11 @@ elif [[ "${1:-}" == "--reset-downloads" || "${1:-}" == "--reset-state" ]]; then
     log_info "Download/notifier state reset mode requested"
     run_reset_download_state_only
     exit $?
+elif [[ "${1:-}" == "--analyze" || "${1:-}" == "--health" ]]; then
+    log_info "Log health analysis mode requested"
+    # Pass any additional arguments (e.g. TID=GUI-xxxx) through to the analyzer.
+    run_analyze_logs_only "${@:2}"
+    exit $?
 elif [[ "${1:-}" == "--rm-conflict" ]]; then
     log_info "Duplicate RPM conflict cleanup mode requested"
     run_rm_conflict_only
@@ -3300,42 +3587,80 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
         latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
     fi
 
-    # Build list of files to follow
-    LOG_FILES_TO_FOLLOW=()
+    # Build list of tagged sources to follow. Each entry is TAG:path where
+    # TAG is one of INS (installer), SYS (services), USR (notifier), TRC
+    # (trace log).
+    LIVE_SOURCES=()
     if [ -n "${latest_install_log}" ]; then
-        echo "- Installer log: ${latest_install_log}"
-        LOG_FILES_TO_FOLLOW+=("${latest_install_log}")
+        echo "- [INS] Installer log: ${latest_install_log}"
+        LIVE_SOURCES+=("INS:${latest_install_log}")
     fi
 
     if [ -d "${LOG_DIR}/service-logs" ]; then
         # shellcheck disable=SC2086
         for f in "${LOG_DIR}/service-logs"/*.log; do
             if [ -f "$f" ]; then
-                echo "- Service log: $f"
-                LOG_FILES_TO_FOLLOW+=("$f")
+                echo "- [SYS] Service log: $f"
+                LIVE_SOURCES+=("SYS:${f}")
             fi
         done
     fi
 
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
-        echo "- Notifier log: ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
-        LOG_FILES_TO_FOLLOW+=("${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
+        echo "- [USR] Notifier log: ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+        LIVE_SOURCES+=("USR:${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
     fi
 
-    if [ "${#LOG_FILES_TO_FOLLOW[@]}" -eq 0 ]; then
+    if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
+        echo "- [TRC] Trace log: ${TRACE_LOG}"
+        LIVE_SOURCES+=("TRC:${TRACE_LOG}")
+    fi
+
+    if [ "${#LIVE_SOURCES[@]}" -eq 0 ]; then
         echo "No log files found yet under ${LOG_DIR} or notifier directory."
         exit 0
     fi
 
     # Record exactly which files we are about to follow so the diagnostics
     # follower and bundles can reconstruct the same view the user saw.
-    for _dbg_log in "${LOG_FILES_TO_FOLLOW[@]}"; do
-        log_info "[cli][live-logs] target=${_dbg_log}"
+    for entry in "${LIVE_SOURCES[@]}"; do
+        _tag="${entry%%:*}"
+        _path="${entry#*:}"
+        log_info "[cli][live-logs] source=${_tag} path=${_path}"
     done
 
-    # Show a bit of history, then follow; -F keeps following across rotations.
-    # shellcheck disable=SC2068
-    tail -n 50 -F ${LOG_FILES_TO_FOLLOW[@]}
+    # Launch one tail per source, prefixing each line with its tag. We keep
+    # track of PIDs and ensure they are cleaned up on Ctrl+C.
+    live_pids=()
+    for entry in "${LIVE_SOURCES[@]}"; do
+        _tag="${entry%%:*}"
+        _path="${entry#*:}"
+        if [ ! -f "${_path}" ]; then
+            continue
+        fi
+        (
+            tail -n 50 -F "${_path}" 2>/dev/null | sed -u "s/^/[${_tag}] /"
+        ) &
+        live_pids+=("$!")
+    done
+
+    if [ "${#live_pids[@]}" -eq 0 ]; then
+        echo "No readable log files available to follow."
+        exit 0
+    fi
+
+    cleanup_live_logs() {
+        for pid in "${live_pids[@]}"; do
+            kill "${pid}" 2>/dev/null || true
+        done
+    }
+
+    trap 'cleanup_live_logs; exit 0' INT TERM
+
+    # Wait for all tails; ignore non-zero status so set -e does not abort
+    # the helper when the user presses Ctrl+C.
+    wait || true
+    trap - INT TERM
     exit 0
 elif [[ "${1:-}" == "debug" || "${1:-}" == "--debug-menu" ]]; then
     log_info "Interactive debug/diagnostics menu requested"
@@ -3480,6 +3805,38 @@ if [[ $# -gt 0 && "${1:-}" == -* ]]; then
     log_error "Unknown option: $1"
     echo "Run 'zypper-auto-helper --help' for usage." | tee -a "${LOG_FILE}"
     exit 1
+fi
+
+# --- 2a. Pre-install environment snapshot ---
+# Capture a detailed snapshot of the system and zypper environment at the
+# start of installation so debug bundles can correlate failures even when
+# they happen early in the flow.
+if command -v uname >/dev/null 2>&1; then
+    pre_env_ts="$(date +%Y%m%d-%H%M%S)"
+    pre_env_file="${LOG_DIR}/pre-install-env-${pre_env_ts}.txt"
+    {
+        echo "===== Pre-install environment snapshot: $(date '+%Y-%m-%d %H:%M:%S') ====="
+        echo "Host: $(hostname 2>/dev/null || echo 'unknown')"
+        echo "Kernel: $(uname -srmo 2>/dev/null || echo 'unknown')"
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release 2>/dev/null || true
+            echo "OS: ${NAME:-unknown} ${VERSION:-} (ID=${ID:-?}, VARIANT_ID=${VARIANT_ID:--})"
+        fi
+        if command -v zypper >/dev/null 2>&1; then
+            echo "--- zypper --version ---"
+            zypper --version 2>&1 || echo "(zypper --version failed)"
+            echo "--- zypper lr -d ---"
+            zypper lr -d 2>&1 || echo "(zypper lr -d failed)"
+        fi
+        echo "--- Root filesystem usage (df -h /) ---"
+        df -h / 2>&1 || echo "(df -h / failed)"
+        if command -v systemctl >/dev/null 2>&1; then
+            echo "--- systemctl --version ---"
+            systemctl --version 2>&1 || echo "(systemctl --version failed)"
+        fi
+        echo "===== End pre-install environment snapshot ====="
+    } >> "${pre_env_file}" 2>&1 || true
+    log_success "Pre-install environment snapshot captured at ${pre_env_file}"
 fi
 
 # --- 2b. Dependency Checks ---
@@ -5857,6 +6214,15 @@ def on_action(notification, action_id, user_data):
             # so GUI terminals like konsole/gnome-terminal can start even when
             # the user systemd manager has a minimal environment.
             env = os.environ.copy()
+
+            # Generate a short trace identifier so we can correlate this GUI
+            # click with backend installer logs. This is exported via
+            # ZYPPER_TRACE_ID and picked up by the bash helper.
+            import uuid
+            trace_id = f"GUI-{uuid.uuid4().hex[:8]}"
+            env["ZYPPER_TRACE_ID"] = trace_id
+            log_info(f"Generated Trace ID for install action: {trace_id}")
+
             try:
                 cmd = [
                     "systemd-run",
@@ -5869,6 +6235,7 @@ def on_action(notification, action_id, user_data):
                     "XDG_SESSION_TYPE",
                     "DBUS_SESSION_BUS_ADDRESS",
                     "XAUTHORITY",
+                    "ZYPPER_TRACE_ID",
                 ):
                     val = env.get(key)
                     if val:
