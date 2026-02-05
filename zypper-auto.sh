@@ -105,35 +105,50 @@ if [ ! -e "${TRACE_LOG}" ]; then
     chmod 640 "${TRACE_LOG}" 2>/dev/null || true
 fi
 
-# Cleanup old log files (keep only the last MAX_LOG_FILES)
+# Cleanup old log files with compression and rotation
 cleanup_old_logs() {
     log_debug "Cleaning up old log files in ${LOG_DIR}..."
-    
-    # Count install log files
-    local log_count=$(find "${LOG_DIR}" -name "install-*.log" 2>/dev/null | wc -l)
-    
-    if [ "$log_count" -gt "$MAX_LOG_FILES" ]; then
-        log_info "Found $log_count log files, removing oldest to keep only $MAX_LOG_FILES"
-        find "${LOG_DIR}" -name "install-*.log" -type f -printf '%T+ %p\n' | \
-            sort | head -n -"$MAX_LOG_FILES" | cut -d' ' -f2- | \
+
+    # 1. Compress installer logs older than 1 day (keep very recent logs raw
+    # for easy tailing). Skip files already compressed.
+    find "${LOG_DIR}" -name "install-*.log" -type f -mtime +1 ! -name "*.gz" \
+        -exec gzip {} \; 2>/dev/null || true
+
+    # 2. Delete compressed installer logs older than 30 days to bound disk use
+    # while still keeping extended history.
+    find "${LOG_DIR}" -name "install-*.log.gz" -type f -mtime +30 -delete 2>/dev/null || true
+
+    # 3. Keep only the last MAX_LOG_FILES *uncompressed* install logs so that
+    # the most recent sessions remain easy to browse without decompressing.
+    local log_count
+    log_count=$(find "${LOG_DIR}" -maxdepth 1 -name "install-*.log" -type f 2>/dev/null | wc -l || echo 0)
+    if [ "${log_count}" -gt "${MAX_LOG_FILES}" ] 2>/dev/null; then
+        log_info "Found ${log_count} uncompressed install logs; trimming to last ${MAX_LOG_FILES}"
+        find "${LOG_DIR}" -maxdepth 1 -name "install-*.log" -type f -printf '%T+ %p\n' | \
+            sort | head -n -"${MAX_LOG_FILES}" | cut -d' ' -f2- | \
             while read -r old_log; do
-                log_debug "Removing old log: $old_log"
-                rm -f "$old_log"
+                log_debug "Removing old uncompressed log: ${old_log}"
+                rm -f "${old_log}" 2>/dev/null || true
             done
-        log_success "Old logs cleaned up"
     else
-        log_debug "Log count ($log_count) is within limit ($MAX_LOG_FILES)"
+        log_debug "Uncompressed install log count (${log_count}) is within limit (${MAX_LOG_FILES})"
     fi
-    
-    # Also cleanup service logs that are too large
+
+    # 4. Rotate large service logs: rename with timestamp, gzip immediately,
+    # and create a fresh empty log file.
     if [ -d "${LOG_DIR}/service-logs" ]; then
         find "${LOG_DIR}/service-logs" -name "*.log" -type f -size +"${MAX_LOG_SIZE_MB}M" | \
             while read -r large_log; do
-                log_info "Rotating large log file: $large_log"
-                mv "$large_log" "${large_log}.old"
-                touch "$large_log"
+                log_info "Rotating large log file: ${large_log}"
+                local rotated
+                rotated="${large_log}.$(date +%Y%m%d-%H%M%S)"
+                mv "${large_log}" "${rotated}" 2>/dev/null || continue
+                gzip "${rotated}" 2>/dev/null || true
+                touch "${large_log}" 2>/dev/null || true
             done
     fi
+
+    log_success "Log rotation and compression completed"
 }
 
 # Initialize log file
@@ -810,8 +825,35 @@ update_status() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $status" | tee "${STATUS_FILE}" | tee -a "${LOG_FILE}"
 }
 
-# Trap errors and log them
-trap 'log_error "Script failed at line $LINENO with exit code $?"; update_status "FAILED: Installation encountered an error at line $LINENO"; exit 1' ERR
+# --- Advanced Crash Forensics ---
+failure_handler() {
+    local exit_code=$?
+    local line_no=$1
+    local bash_command="${BASH_COMMAND}"
+
+    log_error "CRITICAL: Script crashed with exit code ${exit_code}."
+    log_error "  → Failed command: ${bash_command}"
+    log_error "  → Location: Line ${line_no}"
+
+    # Print the full function call stack (Backtrace)
+    log_error "  → Call Stack:"
+    local i=0
+    while caller "$i" >/dev/null 2>&1; do
+        local frame_data frame_line frame_func frame_file
+        frame_data=$(caller "$i")
+        frame_line=$(echo "${frame_data}" | awk '{print $1}')
+        frame_func=$(echo "${frame_data}" | awk '{print $2}')
+        frame_file=$(echo "${frame_data}" | awk '{print $3}')
+        log_error "    [${i}] ${frame_func} at ${frame_file}:${frame_line}"
+        i=$((i + 1))
+    done
+
+    update_status "FAILED: Crash at line ${line_no} (rc=${exit_code})"
+    exit "${exit_code}"
+}
+
+# Trap ERR and send to our forensics handler
+trap 'failure_handler ${LINENO}' ERR
 
 # --- Root/System Service Config ---
 DL_SERVICE_NAME="zypper-autodownload"
@@ -1671,7 +1713,7 @@ run_diag_bundle_only() {
         fi
     fi
 
-    # Notifier logs for user
+    # Notifier logs for user (including any per-run delta summaries)
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         local ulogdir
         ulogdir="${SUDO_USER_HOME}/.local/share/zypper-notify"
@@ -1682,7 +1724,35 @@ run_diag_bundle_only() {
             if [ -f "${ulogdir}/last-run-status.txt" ]; then
                 include_files+=("-C" "${ulogdir}" "last-run-status.txt")
             fi
+            # Include recent package delta logs produced by the Ready-to-Install helper.
+            if ls -1 "${ulogdir}"/pkg-deltas/update-delta-*.log >/dev/null 2>&1; then
+                local udelta
+                for udelta in $(ls -1t "${ulogdir}"/pkg-deltas/update-delta-*.log 2>/dev/null | head -5); do
+                    include_files+=("-C" "${ulogdir}/pkg-deltas" "$(basename "${udelta}")")
+                done
+            fi
         fi
+    fi
+
+    # System journal slices for deeper diagnostics (OOM, crashes, unit logs)
+    local journal_dir
+    journal_dir="${LOG_DIR}/journal-snapshots"
+    mkdir -p "${journal_dir}" >> "${LOG_FILE}" 2>&1 || true
+    if command -v journalctl >/dev/null 2>&1; then
+        log_debug "Dumping system journals into ${journal_dir} for diagnostics bundle"
+        # Root downloader/verify units over the last 2 days
+        journalctl -u "${DL_SERVICE_NAME}" --no-pager --since "2 days ago" \
+            > "${journal_dir}/downloader-journal.log" 2>&1 || true
+        journalctl -u "${VERIFY_SERVICE_NAME}" --no-pager --since "2 days ago" \
+            > "${journal_dir}/verifier-journal.log" 2>&1 || true
+        # Kernel-level OOM / kill events
+        dmesg 2>/dev/null | grep -i "killed process" \
+            > "${journal_dir}/dmesg_kills.txt" 2>&1 || true
+        journalctl -k --grep="Out of memory" --since "2 days ago" --no-pager \
+            > "${journal_dir}/oom_kills.txt" 2>&1 || true
+    fi
+    if ls -1 "${journal_dir}"/* >/dev/null 2>&1; then
+        include_files+=("-C" "${journal_dir}" $(ls -1 "${journal_dir}"/* | xargs -n1 basename))
     fi
 
     # Config and version header (include whole config + script header)
@@ -1755,9 +1825,10 @@ run_debug_menu_only() {
         echo "  8) Folder opener self-test (xdg-open / file managers)"
         echo "  9) Run log health report (recent history)"
         echo " 10) Analyze last GUI-triggered run (by Trace ID)"
-        echo " 11) Exit menu (11 / E / Q)"
+        echo " 11) Show last diagnostics snapshot path + tail"
+        echo " 12) Exit menu (12 / E / Q)"
         echo ""
-        read -p "Select an option [1-11, E, Q]: " -r choice
+        read -p "Select an option [1-12, E, Q]: " -r choice
         log_info "[debug-menu] User selected menu option: ${choice}"
 
         case "${choice}" in
@@ -2228,12 +2299,33 @@ run_debug_menu_only() {
                     echo "Health analysis for TID=${_last_tid} reported problems (rc=${rc}). See the latest install log and last-status.txt for details."
                 fi
                 ;;
-            11|q|Q|e|E)
+            11)
+                log_info "[debug-menu] Showing last diagnostics snapshot info (path + tail)"
+                local _snap_dir _latest_snap
+                _snap_dir="${LOG_DIR}/diagnostics"
+                if ls -1 "${_snap_dir}"/diag-*.log >/dev/null 2>&1; then
+                    _latest_snap=$(ls -1t "${_snap_dir}"/diag-*.log 2>/dev/null | head -1 || true)
+                else
+                    _latest_snap=""
+                fi
+                if [ -z "${_latest_snap}" ] || [ ! -f "${_latest_snap}" ]; then
+                    echo "No diagnostics snapshot files found under ${_snap_dir}."
+                    log_error "[debug-menu] No diagnostics snapshot files found under ${_snap_dir} when option 11 selected"
+                else
+                    echo "Latest diagnostics snapshot file: ${_latest_snap}"
+                    log_info "[debug-menu] Latest diagnostics snapshot file: ${_latest_snap}"
+                    echo ""
+                    echo "---- Last 40 lines of snapshot ----"
+                    tail -n 40 "${_latest_snap}" 2>/dev/null || echo "(unreadable or empty)"
+                    echo "-----------------------------------"
+                fi
+                ;;
+            12|q|Q|e|E)
                 log_info "[debug-menu] Exiting debug/diagnostics menu"
                 break
                 ;;
             *)
-                echo "Invalid selection: '${choice}'. Please enter a number between 1 and 11, or E/Q to exit."
+                echo "Invalid selection: '${choice}'. Please enter a number between 1 and 12, or E/Q to exit."
                 ;;
         esac
     done
@@ -2419,6 +2511,23 @@ run_analyze_logs_only() {
         fi
     else
         echo "  (User notifier logs not accessible or missing)" | tee -a "${LOG_FILE}"
+    fi
+
+    # 6. Deep Zypper System Log Analysis
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Deep Zypper System Log Analysis (/var/log/zypper.log):" | tee -a "${LOG_FILE}"
+    if [ -f "/var/log/zypper.log" ]; then
+        local solver_fails sig_kills
+        solver_fails=$(tail -n 1000 /var/log/zypper.log 2>/dev/null | grep -c "solver test detected problem" || echo 0)
+        sig_kills=$(tail -n 1000 /var/log/zypper.log 2>/dev/null | grep -c "received signal" || echo 0)
+        echo "  - Recent Solver Problems: ${solver_fails}" | tee -a "${LOG_FILE}"
+        if [ "${sig_kills}" -gt 0 ] 2>/dev/null; then
+            echo -e "  - \033[31mCRITICAL: Zypper process was killed ${sig_kills} times (OOM or user signal)\033[0m" | tee -a "${LOG_FILE}"
+        else
+            echo "  - No signal kills detected (clean exits)." | tee -a "${LOG_FILE}"
+        fi
+    else
+        echo "  (System zypper.log not accessible)" | tee -a "${LOG_FILE}"
     fi
 
     echo "==============================================" | tee -a "${LOG_FILE}"
@@ -7143,6 +7252,20 @@ RUN_UPDATE() {
         return 0
     fi
 
+    # Capture package state before running the update so we can compute a
+    # precise delta of what changed when the run succeeds.
+    local PKG_DELTA_DIR PKG_PRE_FILE PKG_POST_FILE DELTA_FILE
+    PKG_DELTA_DIR="$HOME/.local/share/zypper-notify/pkg-deltas"
+    mkdir -p "$PKG_DELTA_DIR" 2>/dev/null || true
+    PKG_PRE_FILE="${PKG_DELTA_DIR}/pkg-pre-$$.txt"
+    PKG_POST_FILE="${PKG_DELTA_DIR}/pkg-post-$$.txt"
+    DELTA_FILE="${PKG_DELTA_DIR}/update-delta-$(date +%Y%m%d-%H%M%S).log"
+
+    log "RUN_UPDATE: Capturing pre-update package state into ${PKG_PRE_FILE}..."
+    if ! rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 2>>"$LOG_FILE" | sort >"${PKG_PRE_FILE}" 2>>"$LOG_FILE"; then
+        log "RUN_UPDATE: WARNING: failed to capture pre-update package snapshot (see log)"
+    fi
+
     log "RUN_UPDATE: starting pkexec zypper dup..."
     # Run the update, capturing stderr so we can detect a lock even if it
     # appears after our pre-check.
@@ -7152,10 +7275,45 @@ RUN_UPDATE() {
     rc=$?
     set -e
 
+    # Auto-snapshot system state on any non-zero exit so diagnostics have
+    # rich context without requiring the user to manually open the debug menu.
+    if [ "$rc" -ne 0 ]; then
+        log "RUN_UPDATE: Failure detected (rc=$rc). Triggering auto-snapshot via helper..."
+        echo ""
+        echo "⚠️  Update failed. Capturing system state for diagnostics..."
+        set +e
+        sudo /usr/local/bin/zypper-auto-helper --snapshot-state >/dev/null 2>&1 &
+        set -e
+        log "RUN_UPDATE: Auto-snapshot helper invoked in background."
+    fi
+
     if [ "$rc" -ne 0 ] && grep -q "System management is locked" "$ZYPPER_ERR_FILE" 2>/dev/null; then
         LOCKED_DURING_UPDATE=1
     fi
     rm -f "$ZYPPER_ERR_FILE"
+
+    # When the update completes successfully, capture a post-update snapshot
+    # and compute a delta file describing exactly which packages changed.
+    if [ "$rc" -eq 0 ]; then
+        log "RUN_UPDATE: Capturing post-update package state into ${PKG_POST_FILE}..."
+        if rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 2>>"$LOG_FILE" | sort >"${PKG_POST_FILE}" 2>>"$LOG_FILE"; then
+            log "RUN_UPDATE: Computing package delta into ${DELTA_FILE}..."
+            {
+                echo "=== Package Changes (post - pre) ==="
+                if [ -s "${PKG_PRE_FILE}" ] && [ -s "${PKG_POST_FILE}" ]; then
+                    comm -13 "${PKG_PRE_FILE}" "${PKG_POST_FILE}" || true
+                else
+                    echo "(one or both snapshot files were empty; delta may be incomplete)"
+                fi
+            } >"${DELTA_FILE}" 2>>"$LOG_FILE" || true
+            local change_count
+            change_count=$(wc -l <"${DELTA_FILE}" 2>/dev/null || echo 0)
+            log "RUN_UPDATE: Delta calculation complete; ${change_count} lines written to ${DELTA_FILE}"
+        else
+            log "RUN_UPDATE: WARNING: failed to capture post-update package snapshot (see log); skipping delta"
+        fi
+        rm -f "${PKG_PRE_FILE}" "${PKG_POST_FILE}" 2>/dev/null || true
+    fi
 
     if [ "$rc" -eq 0 ]; then
         UPDATE_SUCCESS=true
