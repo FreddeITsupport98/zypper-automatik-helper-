@@ -473,6 +473,13 @@ AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES="insync"
 # third-party drivers or libraries.
 AUTO_DUPLICATE_RPM_MODE="whitelist"
 
+# LOG_FOLDER_OPENER
+# Optional command used by the debug menu (option 5) to open the
+# diagnostics folder. When set and found in the desktop user's PATH,
+# it is tried before xdg-open. Example values: "dolphin", "nautilus".
+# Leave empty to let the helper auto-detect.
+LOG_FOLDER_OPENER=""
+
 # Example:
 #   FORCE_FORM_FACTOR=laptop
 #
@@ -662,6 +669,7 @@ EOF
     _mark_missing_key "UPDATES_READY_REMINDER_REPEAT_ENABLED"
     _mark_missing_key "AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES"
     _mark_missing_key "AUTO_DUPLICATE_RPM_MODE"
+    _mark_missing_key "LOG_FOLDER_OPENER"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -721,6 +729,9 @@ EOF
                     ;;
                 DOWNLOADER_DOWNLOAD_MODE)
                     DOWNLOADER_DOWNLOAD_MODE="full"
+                    ;;
+                LOG_FOLDER_OPENER)
+                    LOG_FOLDER_OPENER=""
                     ;;
             esac
         done
@@ -1779,28 +1790,43 @@ run_debug_menu_only() {
                     # which most closely matches what you'd do in your own
                     # terminal. If that fails, fall back to systemd-run scopes
                     # and finally to specific file managers.
-                    if command -v xdg-open >/dev/null 2>&1; then
-                        local _disp _wayland _session _xauth _dbus
+
+                    # Calculate the correct runtime directory for the user so that
+                    # Wayland/DBus/Pulse sockets under /run/user/<uid> are visible
+                    # to the helper when launched from a root session.
+                    local target_uid run_dir
+                    target_uid=$(id -u "${SUDO_USER}") || target_uid=""
+                    run_dir="/run/user/${target_uid}"
+
+                        if command -v xdg-open >/dev/null 2>&1; then
+                            local _disp _wayland _session _xauth _dbus _desktop _session_name
                         _disp="${DISPLAY:-}"
                         _wayland="${WAYLAND_DISPLAY:-}"
                         _session="${XDG_SESSION_TYPE:-}"
                         _xauth="${XAUTHORITY:-}"
+                        _desktop="${XDG_CURRENT_DESKTOP:-}"
+                        _session_name="${DESKTOP_SESSION:-}"
                         # Prefer a real user bus address if we could compute one;
                         # otherwise fall back to whatever DBUS_SESSION_BUS_ADDRESS
                         # we inherited from the current environment.
                         _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
+
+                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} XDG_CURRENT_DESKTOP=${_desktop:-<empty>} DESKTOP_SESSION=${_session_name:-<empty>} XDG_RUNTIME_DIR=${run_dir:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
+
                         if sudo -u "${SUDO_USER}" \
                             DISPLAY="${_disp}" \
                             WAYLAND_DISPLAY="${_wayland}" \
                             XDG_SESSION_TYPE="${_session}" \
                             XAUTHORITY="${_xauth}" \
+                            XDG_CURRENT_DESKTOP="${_desktop}" \
+                            DESKTOP_SESSION="${_session_name}" \
+                            XDG_RUNTIME_DIR="${run_dir}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
                             xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
                             _open_rc=0
                         else
                             _open_rc=$?
-                            log_error "[debug-menu] direct xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER}"
+                            log_error "[debug-menu] direct xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER} (XDG_RUNTIME_DIR=${run_dir})"
                         fi
                     fi
 
@@ -1810,18 +1836,22 @@ run_debug_menu_only() {
                     if [ "${_open_rc}" -ne 0 ] 2>/dev/null && \
                        command -v systemd-run >/dev/null 2>&1 && \
                        command -v xdg-open >/dev/null 2>&1; then
-                        local _disp _wayland _session _xauth _dbus
+                        local _disp _wayland _session _xauth _dbus _desktop _session_name
                         _disp="${DISPLAY:-}"
                         _wayland="${WAYLAND_DISPLAY:-}"
                         _session="${XDG_SESSION_TYPE:-}"
                         _xauth="${XAUTHORITY:-}"
+                        _desktop="${XDG_CURRENT_DESKTOP:-}"
+                        _session_name="${DESKTOP_SESSION:-}"
                         _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
+                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} XDG_CURRENT_DESKTOP=${_desktop:-<empty>} DESKTOP_SESSION=${_session_name:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
                         if sudo -u "${SUDO_USER}" \
                             DISPLAY="${_disp}" \
                             WAYLAND_DISPLAY="${_wayland}" \
                             XDG_SESSION_TYPE="${_session}" \
                             XAUTHORITY="${_xauth}" \
+                            XDG_CURRENT_DESKTOP="${_desktop}" \
+                            DESKTOP_SESSION="${_session_name}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
                             systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
                             _open_rc=0
@@ -1891,6 +1921,7 @@ run_debug_menu_only() {
                 if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
                     log_error "[debug-menu] Could not open diagnostics folder automatically (exit code ${_open_rc})"
                     echo "Could not launch the file manager automatically. You can still access diagnostics logs at: ${diag_dir}"
+                    echo "Clickable URL (many terminals/terminals-in-IDE will detect this): file://${diag_dir}"
                     echo "Tip: run 'systemd-run --user --scope xdg-open ${diag_dir}' or open it with your preferred file manager as your normal user."
                 fi
                 ;;
