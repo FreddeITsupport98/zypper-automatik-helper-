@@ -1618,7 +1618,7 @@ run_verification_only() {
     VERIFICATION_FAILED=0
     REPAIR_ATTEMPTS=0
     MAX_REPAIR_ATTEMPTS=3
-    local TOTAL_CHECKS=22
+    local TOTAL_CHECKS=28
     
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
@@ -2184,6 +2184,159 @@ if [ -z "${cron_hits:-}" ]; then
 else
     log_warn "⚠ Found cron entries that appear to run zypper (may conflict with systemd timers):"
     printf '%s\n' "$cron_hits" | tee -a "${LOG_FILE}"
+fi
+
+# Check 23: World-writable files in critical locations (best-effort)
+log_debug "[23/${TOTAL_CHECKS}] Scanning for world-writable files in /etc and /usr/local/bin..."
+ww_hits=$(find /etc /usr/local/bin -xdev -type f -perm -0002 -print 2>/dev/null | head -n 10 || true)
+if [ -z "${ww_hits:-}" ]; then
+    log_success "✓ No world-writable critical files found"
+else
+    log_warn "⚠ Found world-writable files in /etc or /usr/local/bin (security risk)"
+    printf '%s\n' "$ww_hits" | sed 's/^/  /' | tee -a "${LOG_FILE}"
+fi
+
+# Check 24: SSH configuration hardening (best-effort; only if sshd is active)
+log_debug "[24/${TOTAL_CHECKS}] Checking SSH hardening (PermitRootLogin / PermitEmptyPasswords)..."
+if systemctl is-active sshd.service >/dev/null 2>&1 || systemctl is-active sshd >/dev/null 2>&1; then
+    ssh_warned=0
+
+    # Prefer effective config via 'sshd -T' when available.
+    if command -v sshd >/dev/null 2>&1; then
+        sshd_eff=$(sshd -T 2>/dev/null || true)
+        if printf '%s\n' "$sshd_eff" | grep -qiE '^permitrootlogin[[:space:]]+yes$'; then
+            log_warn "⚠ SSH allows root login (PermitRootLogin yes)"
+            ssh_warned=1
+        fi
+        if printf '%s\n' "$sshd_eff" | grep -qiE '^permitemptypasswords[[:space:]]+yes$'; then
+            log_warn "⚠ SSH allows empty passwords (PermitEmptyPasswords yes)"
+            ssh_warned=1
+        fi
+    fi
+
+    # Fallback: scan common config locations (may miss Match blocks; best-effort only).
+    if [ "$ssh_warned" -eq 0 ] 2>/dev/null; then
+        ssh_cfg_hits=$(grep -R -n -E '^[[:space:]]*(PermitRootLogin[[:space:]]+yes|PermitEmptyPasswords[[:space:]]+yes)\b' /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null | head -n 10 || true)
+        if [ -n "${ssh_cfg_hits:-}" ]; then
+            log_warn "⚠ SSH hardening findings in sshd config (review recommended):"
+            printf '%s\n' "$ssh_cfg_hits" | sed 's/^/  /' | tee -a "${LOG_FILE}"
+            ssh_warned=1
+        fi
+    fi
+
+    if [ "$ssh_warned" -eq 0 ] 2>/dev/null; then
+        log_success "✓ SSH hardening looks OK (no obvious root-login/empty-password settings found)"
+    fi
+else
+    log_info "ℹ SSH daemon not active; skipping SSH hardening check"
+fi
+
+# Check 25: Time synchronization (NTP)
+log_debug "[25/${TOTAL_CHECKS}] Verifying system clock synchronization (NTP)..."
+if command -v timedatectl >/dev/null 2>&1; then
+    ntp_sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "")
+    if printf '%s' "$ntp_sync" | grep -qi '^yes$'; then
+        log_success "✓ System clock is synchronized"
+    else
+        log_warn "⚠ System clock is NOT synchronized (may cause GPG/signature errors)"
+        log_info "  → Attempting to fix: restarting time sync services (chronyd/chrony/systemd-timesyncd)..."
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        execute_guarded "Restart chronyd" systemctl restart chronyd.service >/dev/null 2>&1 || true
+        execute_guarded "Restart chrony" systemctl restart chrony.service >/dev/null 2>&1 || true
+        execute_guarded "Restart systemd-timesyncd" systemctl restart systemd-timesyncd.service >/dev/null 2>&1 || true
+
+        ntp_sync2=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "")
+        if printf '%s' "$ntp_sync2" | grep -qi '^yes$'; then
+            log_success "  ✓ NTP synchronization recovered"
+        else
+            log_warn "  ⚠ NTP still not synchronized after restart (check chrony/timesyncd configuration)"
+        fi
+    fi
+else
+    log_info "ℹ timedatectl not available; skipping NTP synchronization check"
+fi
+
+# Check 26: Orphaned packages (best-effort)
+log_debug "[26/${TOTAL_CHECKS}] Checking for orphaned packages (no repository)..."
+if command -v zypper >/dev/null 2>&1; then
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        orphans_out=$(timeout 20 zypper --no-refresh --non-interactive packages --orphaned 2>&1)
+        orphans_rc=$?
+    else
+        orphans_out=$(zypper --no-refresh --non-interactive packages --orphaned 2>&1)
+        orphans_rc=$?
+    fi
+    set -e
+
+    if [ "$orphans_rc" -eq 0 ]; then
+        orphans_count=$(printf '%s\n' "$orphans_out" | awk -F'|' '$1 ~ /i/ {c++} END {print c+0}')
+        if [ "${orphans_count:-0}" -gt 0 ] 2>/dev/null; then
+            log_info "ℹ Found ${orphans_count} orphaned package(s) (installed but not provided by any configured repo)"
+            log_info "  → Review with: sudo zypper packages --orphaned"
+        else
+            log_success "✓ No orphaned packages detected"
+        fi
+    else
+        log_warn "⚠ Orphaned package check failed (rc=${orphans_rc}); skipping"
+        printf '%s\n' "$orphans_out" | head -n 20 | tee -a "${LOG_FILE}"
+    fi
+else
+    log_info "ℹ zypper not available; skipping orphaned package check"
+fi
+
+# Check 27: Physical disk health (SMART) (best-effort)
+log_debug "[27/${TOTAL_CHECKS}] Checking SMART health (if smartctl is available)..."
+if command -v smartctl >/dev/null 2>&1; then
+    smart_failed=0
+    smart_devices=$(smartctl --scan-open 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+
+    if [ -z "${smart_devices:-}" ]; then
+        log_info "ℹ smartctl found but no devices detected via --scan-open; skipping SMART health check"
+    else
+        while IFS= read -r dev; do
+            [ -z "${dev:-}" ] && continue
+            set +e
+            if command -v timeout >/dev/null 2>&1; then
+                smart_out=$(timeout 15 smartctl -H "$dev" 2>&1)
+                smart_rc=$?
+            else
+                smart_out=$(smartctl -H "$dev" 2>&1)
+                smart_rc=$?
+            fi
+            set -e
+
+            # smartctl uses a bitmask rc; parse output for explicit FAIL.
+            if printf '%s\n' "$smart_out" | grep -qE 'SMART overall-health self-assessment test result:.*FAIL|SMART Health Status:.*FAIL|FAILED!|\bFAILED\b'; then
+                log_error "✗ CRITICAL: SMART health check reports failure for ${dev}"
+                printf '%s\n' "$smart_out" | head -n 25 | sed 's/^/  /' | tee -a "${LOG_FILE}"
+                smart_failed=1
+            elif [ "$smart_rc" -ne 0 ] 2>/dev/null && printf '%s\n' "$smart_out" | grep -qi 'Unavailable\|Unknown USB bridge\|Permission denied'; then
+                log_warn "⚠ SMART health check could not assess ${dev} (unsupported/permission/bridge issue)"
+            fi
+        done <<< "$smart_devices"
+
+        if [ "$smart_failed" -eq 0 ] 2>/dev/null; then
+            log_success "✓ SMART health check passed on detected drives"
+        else
+            VERIFICATION_FAILED=1
+        fi
+    fi
+else
+    log_info "ℹ smartctl not installed; skipping SMART health check"
+fi
+
+# Check 28: Kernel taint state (best-effort)
+log_debug "[28/${TOTAL_CHECKS}] Checking kernel taint state..."
+if [ -r /proc/sys/kernel/tainted ]; then
+    taint=$(cat /proc/sys/kernel/tainted 2>/dev/null || echo "")
+    if [[ "${taint:-}" =~ ^[0-9]+$ ]] && [ "$taint" -ne 0 ] 2>/dev/null; then
+        log_warn "⚠ Kernel is tainted (value: $taint). Check 'dmesg' or 'journalctl -k'."
+    else
+        log_success "✓ Kernel is not tainted"
+    fi
+else
+    log_info "ℹ /proc/sys/kernel/tainted not available; skipping kernel taint check"
 fi
 
 # Calculate repair statistics
