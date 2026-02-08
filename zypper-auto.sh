@@ -3434,6 +3434,8 @@ run_soar_install_only() {
 run_uninstall_helper_only() {
     log_info ">>> Uninstalling zypper-auto-helper core components..."
 
+    local hooks_dir="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+
     echo "" | tee -a "${LOG_FILE}"
     echo "==============================================" | tee -a "${LOG_FILE}"
     echo "  zypper-auto-helper Uninstall" | tee -a "${LOG_FILE}"
@@ -3459,11 +3461,24 @@ run_uninstall_helper_only() {
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
-        if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
-            echo "  - Logs under $LOG_DIR (including diagnostics logs) would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+
+        if [ "${UNINSTALL_KEEP_HOOKS:-0}" -eq 1 ]; then
+            echo "  - Hooks under ${hooks_dir} would be LEFT IN PLACE (--keep-hooks)" | tee -a "${LOG_FILE}"
         else
-            echo "  - Logs under $LOG_DIR (other than the current log), diagnostics logs, and notifier caches" | tee -a "${LOG_FILE}"
+            echo "  - Hooks under ${hooks_dir} would be REMOVED (use --keep-hooks to preserve)" | tee -a "${LOG_FILE}"
         fi
+
+        if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
+            echo "  - Logs under $LOG_DIR (including service logs, diagnostics logs, and status.html dashboard) would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+        else
+            echo "  - Logs under $LOG_DIR (other than the current log), service logs, diagnostics logs, and status.html dashboard" | tee -a "${LOG_FILE}"
+        fi
+
+        if [ -n "${SUDO_USER_HOME:-}" ]; then
+            echo "  - User notifier logs/caches under $SUDO_USER_HOME/.local/share/zypper-notify and $SUDO_USER_HOME/.cache/zypper-notify" | tee -a "${LOG_FILE}"
+            echo "    (this also removes the user dashboard copy: $SUDO_USER_HOME/.local/share/zypper-notify/status.html)" | tee -a "${LOG_FILE}"
+        fi
+
         echo "" | tee -a "${LOG_FILE}"
         echo "Run again WITHOUT --dry-run to actually uninstall." | tee -a "${LOG_FILE}"
         update_status "DRY-RUN: zypper-auto-helper uninstall (no changes made)"
@@ -3548,7 +3563,20 @@ run_uninstall_helper_only() {
         " || true
     fi
 
-    # 5. Remove logs and caches
+    # 5. Remove custom hook scripts (enterprise extension)
+    if [ "${UNINSTALL_KEEP_HOOKS:-0}" -eq 1 ]; then
+        log_info "Leaving hook scripts directory intact (--keep-hooks requested): ${hooks_dir}"
+    else
+        # Safety guard: never rm -rf an empty or suspicious path.
+        if [ -z "${hooks_dir:-}" ] || [ "${hooks_dir}" = "/" ] || [ "${hooks_dir}" = "/etc" ]; then
+            log_error "Refusing to remove hooks directory due to suspicious path: '${hooks_dir}'"
+        elif [ -d "${hooks_dir}" ]; then
+            log_debug "Removing hook scripts directory: ${hooks_dir}"
+            execute_guarded "Remove hooks directory (${hooks_dir})" rm -rf "${hooks_dir}" || true
+        fi
+    fi
+
+    # 6. Remove logs and caches
     if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
         log_info "Leaving all logs under $LOG_DIR intact (--keep-logs requested)."
     else
@@ -3571,7 +3599,7 @@ run_uninstall_helper_only() {
         execute_guarded "Remove notifier caches" rm -rf "$SUDO_USER_HOME/.cache/zypper-notify" || true
     fi
 
-    # 6. Reload systemd daemons
+    # 7. Reload systemd daemons
     log_debug "Reloading systemd daemons after uninstall..."
     execute_guarded "systemd daemon-reload (post-uninstall)" systemctl daemon-reload || true
     if [ -n "${SUDO_USER:-}" ]; then
@@ -3581,7 +3609,7 @@ run_uninstall_helper_only() {
             systemctl --user daemon-reload || true
     fi
 
-    # 7. Clear any failed state in systemd for the removed units so
+    # 8. Clear any failed state in systemd for the removed units so
     #    `systemctl --user status` looks clean after uninstall.
     log_debug "Resetting failed state for removed systemd units (if any)..."
     execute_guarded "Reset failed state for removed system units" \
@@ -3600,7 +3628,12 @@ run_uninstall_helper_only() {
     echo "Uninstall summary:" | tee -a "${LOG_FILE}"
     echo "  - System services and timers removed: zypper-autodownload, zypper-cache-cleanup, zypper-auto-verify" | tee -a "${LOG_FILE}"
     echo "  - User notifier units and helper scripts removed for user $SUDO_USER" | tee -a "${LOG_FILE}"
-    echo "  - No changes made to snapd, Flatpak, Soar, Homebrew or /etc/zypp/zypper.conf" | tee -a "${LOG_FILE}"
+    if [ "${UNINSTALL_KEEP_HOOKS:-0}" -eq 1 ]; then
+        echo "  - Hook scripts left in place at ${hooks_dir} (--keep-hooks)" | tee -a "${LOG_FILE}"
+    else
+        echo "  - Hook scripts removed from ${hooks_dir}" | tee -a "${LOG_FILE}"
+    fi
+    echo "  - No changes made to /etc/zypper-auto.conf, snapd, Flatpak, Soar, Homebrew or /etc/zypp/zypper.conf" | tee -a "${LOG_FILE}"
     if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
         echo "  - Logs under $LOG_DIR left in place (--keep-logs)" | tee -a "${LOG_FILE}"
     else
@@ -4434,9 +4467,11 @@ elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-help
     #   --yes / -y / --non-interactive : skip confirmation prompt
     #   --dry-run                      : show what would be removed, no changes
     #   --keep-logs                    : do not delete any log files under $LOG_DIR
+    #   --keep-hooks                   : do not delete /etc/zypper-auto/hooks (custom scripts)
     UNINSTALL_ASSUME_YES=0
     UNINSTALL_DRY_RUN=0
     UNINSTALL_KEEP_LOGS=0
+    UNINSTALL_KEEP_HOOKS=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|-y|--non-interactive)
@@ -4447,6 +4482,9 @@ elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-help
                 ;;
             --keep-logs)
                 UNINSTALL_KEEP_LOGS=1
+                ;;
+            --keep-hooks)
+                UNINSTALL_KEEP_HOOKS=1
                 ;;
             *)
                 log_error "Unknown option for --uninstall-zypper-helper: $1"

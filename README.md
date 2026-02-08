@@ -90,10 +90,11 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
 * **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v58) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
-* **Safe Scripted Uninstaller (v58):** New `--uninstall-zypper-helper` mode (alias: `--uninstall-zypper`) in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
+* **Safe Scripted Uninstaller (v58+):** New `--uninstall-zypper-helper` mode (alias: `--uninstall-zypper`) in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
 *  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
 *  * `--dry-run` – show exactly what would be removed without making any changes
-*  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact while still clearing caches
+*  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact (including the `status.html` dashboard) while still clearing caches
+*  * `--keep-hooks` – leave custom hook scripts under `/etc/zypper-auto/hooks` intact
 *  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
 
 -----
@@ -1097,7 +1098,8 @@ By default this will:
 - Stop and disable the user notifier timer/service for your user
 - Remove all helper systemd unit files and helper binaries
 - Remove user helper scripts, shell aliases, and Fish config snippets
-- Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto`
+- Remove custom hook scripts under `/etc/zypper-auto/hooks` (if present)
+- Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto` (this includes the generated `status.html` dashboard)
 - Reload both system and user systemd daemons and clear any "failed" states
 
 #### Advanced Uninstall Flags
@@ -1113,11 +1115,14 @@ sudo ./zypper-auto.sh --uninstall-zypper-helper --non-interactive
 # Show what WOULD be removed, but make no changes
 sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run
 
-# Keep logs under /var/log/zypper-auto for debugging
+# Keep logs under /var/log/zypper-auto for debugging (including status.html dashboard)
 sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-logs
 
+# Keep hook scripts under /etc/zypper-auto/hooks
+sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-hooks
+
 # Flags can be combined as needed
-sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run --keep-logs
+sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run --keep-logs --keep-hooks
 ```
 
 ### Manual Uninstall (Advanced / Legacy)
