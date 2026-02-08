@@ -880,6 +880,46 @@ journalctl -t zypper-auto-helper -n 200 --no-pager
 journalctl --user -u zypper-notify-user.service -n 200 --no-pager
 ```
 
+#### Remote monitoring (webhooks)
+
+You can optionally configure a webhook endpoint to receive success/failure notifications.
+
+1) Edit `/etc/zypper-auto.conf` and set:
+- `WEBHOOK_URL="..."`
+
+Supported formats are auto-detected:
+- Discord webhooks
+- Slack incoming webhooks
+- ntfy.sh topics
+
+Test it (one-shot):
+
+```bash
+sudo WEBHOOK_TITLE="Test" WEBHOOK_MESSAGE="Hello from zypper-auto-helper" zypper-auto-helper --send-webhook
+```
+
+Security note: treat `WEBHOOK_URL` like a secret token.
+
+#### Extensibility (pre/post hook scripts)
+
+Drop executable hook scripts into:
+- `/etc/zypper-auto/hooks/pre.d/`  (runs before interactive updates)
+- `/etc/zypper-auto/hooks/post.d/` (runs after successful interactive updates)
+
+Hook failures are **non-fatal** and will be logged.
+
+#### HTML status dashboard
+
+A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
+- Root copy: `/var/log/zypper-auto/status.html`
+- User copy: `~/.local/share/zypper-notify/status.html`
+
+You can regenerate it anytime:
+
+```bash
+sudo zypper-auto-helper --dashboard
+```
+
 #### Console output (interactive)
 
 When you run the helper manually in a terminal, it also prints a readable, color-coded console stream, while keeping the on-disk logs plain text.

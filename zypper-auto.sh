@@ -43,6 +43,7 @@ if [[ $# -gt 0 ]]; then
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
+        --send-webhook|--webhook|--generate-dashboard|--dashboard|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --analyze|--health)
@@ -81,6 +82,12 @@ ENABLE_SNAP_UPDATES="true"
 ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
 ENABLE_PIPX_UPDATES="true"  # new: pipx-based Python CLI updates
+
+# Extensibility / remote monitoring (may be overridden by CONFIG_FILE)
+WEBHOOK_URL=""            # Remote monitoring endpoint (Discord/Slack/ntfy/etc.)
+HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
+DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
+HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
 CACHE_EXPIRY_MINUTES="10"
@@ -514,6 +521,48 @@ ENABLE_BREW_UPDATES=true
 ENABLE_PIPX_UPDATES=true
 
 # ---------------------------------------------------------------------
+# Remote monitoring (webhooks)
+# ---------------------------------------------------------------------
+
+# WEBHOOK_URL
+# Optional: when set, the helper can send a short status message to a webhook
+# endpoint so you can monitor your machine remotely (Discord/Slack/ntfy, etc.).
+#
+# Security note: treat this URL like a secret token.
+#
+# Examples:
+#   Discord: https://discord.com/api/webhooks/....
+#   Slack  : https://hooks.slack.com/services/....
+#   ntfy   : https://ntfy.sh/<topic>
+WEBHOOK_URL=""
+
+# ---------------------------------------------------------------------
+# Extensibility (hooks)
+# ---------------------------------------------------------------------
+
+# HOOKS_ENABLED
+# When true, pre/post hook scripts under /etc/zypper-auto/hooks will be run
+# around interactive updates.
+HOOKS_ENABLED=true
+
+# HOOKS_BASE_DIR
+# Base directory for hook stages. Two directories are used:
+#   - /etc/zypper-auto/hooks/pre.d
+#   - /etc/zypper-auto/hooks/post.d
+HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
+
+# ---------------------------------------------------------------------
+# Visual status dashboard (static HTML)
+# ---------------------------------------------------------------------
+
+# DASHBOARD_ENABLED
+# When true, the helper writes a simple HTML status page you can open in a
+# browser:
+#   - /var/log/zypper-auto/status.html (root-owned)
+#   - ~/.local/share/zypper-notify/status.html (user copy when available)
+DASHBOARD_ENABLED=true
+
+# ---------------------------------------------------------------------
 # Timer intervals for downloader / notifier / verification
 # ---------------------------------------------------------------------
 
@@ -837,6 +886,8 @@ EOF
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
     validate_interval VERIFY_TIMER_INTERVAL_MINUTES 60
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
+    validate_bool_flag HOOKS_ENABLED true
+    validate_bool_flag DASHBOARD_ENABLED true
 
     # Log effective configuration summary for easier diagnostics
     log_debug "Effective configuration after validation:"
@@ -857,6 +908,14 @@ EOF
     log_debug "  DUP_EXTRA_FLAGS=${DUP_EXTRA_FLAGS:-}"
     log_debug "  AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES=${AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES:-insync}"
     log_debug "  AUTO_DUPLICATE_RPM_MODE=${AUTO_DUPLICATE_RPM_MODE:-whitelist}"
+    log_debug "  HOOKS_ENABLED=${HOOKS_ENABLED:-true}"
+    log_debug "  DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-true}"
+    log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    if [ -n "${WEBHOOK_URL:-}" ]; then
+        log_debug "  WEBHOOK_URL=<configured>"
+    else
+        log_debug "  WEBHOOK_URL=<empty>"
+    fi
 
     # DOWNLOADER_DOWNLOAD_MODE must be spelled exactly "full" or
     # "detect-only" (case-sensitive). Anything else is reported as
@@ -896,6 +955,10 @@ EOF
     _mark_missing_key "AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES"
     _mark_missing_key "AUTO_DUPLICATE_RPM_MODE"
     _mark_missing_key "LOG_FOLDER_OPENER"
+    _mark_missing_key "WEBHOOK_URL"
+    _mark_missing_key "HOOKS_ENABLED"
+    _mark_missing_key "HOOKS_BASE_DIR"
+    _mark_missing_key "DASHBOARD_ENABLED"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -928,6 +991,18 @@ EOF
                 DOWNLOADER_DOWNLOAD_MODE)
                     log_info "  - DOWNLOADER_DOWNLOAD_MODE: controls whether the background helper only detects updates (detect-only) or also pre-downloads them (full)."
                     ;;
+                WEBHOOK_URL)
+                    log_info "  - WEBHOOK_URL: optional remote webhook endpoint for success/failure notifications (Discord/Slack/ntfy/etc.)."
+                    ;;
+                HOOKS_ENABLED)
+                    log_info "  - HOOKS_ENABLED: enables /etc/zypper-auto/hooks/{pre,post}.d scripts around interactive updates."
+                    ;;
+                HOOKS_BASE_DIR)
+                    log_info "  - HOOKS_BASE_DIR: base directory for hook stages (default: /etc/zypper-auto/hooks)."
+                    ;;
+                DASHBOARD_ENABLED)
+                    log_info "  - DASHBOARD_ENABLED: enables generation of a static HTML status page."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -959,6 +1034,18 @@ EOF
                 LOG_FOLDER_OPENER)
                     LOG_FOLDER_OPENER=""
                     ;;
+                WEBHOOK_URL)
+                    WEBHOOK_URL=""
+                    ;;
+                HOOKS_ENABLED)
+                    HOOKS_ENABLED="true"
+                    ;;
+                HOOKS_BASE_DIR)
+                    HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
+                    ;;
+                DASHBOARD_ENABLED)
+                    DASHBOARD_ENABLED="true"
+                    ;;
             esac
         done
     fi
@@ -968,6 +1055,244 @@ EOF
 update_status() {
     local status="$1"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $status" | tee "${STATUS_FILE}" | tee -a "${LOG_FILE}"
+}
+
+# --- Remote monitoring: Webhooks (best-effort) ---
+_json_escape() {
+    # Minimal JSON escaping for safe webhook payloads.
+    # Escapes: backslash, double quote, newlines, CR, tabs.
+    local s="$*"
+    s=${s//\\/\\\\}
+    s=${s//"/\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '%s' "$s"
+}
+
+_redact_url() {
+    # Redact secret paths/tokens while keeping enough info for diagnostics.
+    # Example: https://example.com/secret -> https://example.com/...
+    local url="$1"
+    printf '%s' "$url" | sed -E 's#^(https?://[^/]+).*$#\1/...#'
+}
+
+send_webhook() {
+    # Usage: send_webhook "Title" "Message" "ColorInt(optional)"
+    # Color is a Discord-style integer (e.g., 65280 green, 16711680 red).
+    local title="$1"
+    local message="$2"
+    local color="${3:-}"
+
+    # Only run if URL is configured
+    [ -z "${WEBHOOK_URL:-}" ] && return 0
+
+    # Never fail the main script because remote monitoring is unavailable.
+    if ! command -v curl >/dev/null 2>&1; then
+        log_debug "Webhook configured but curl not found; skipping webhook send"
+        return 0
+    fi
+
+    local url
+    url="${WEBHOOK_URL}"
+
+    # Append correlation IDs for traceability
+    local trace_tag=""
+    [ -n "${ZYPPER_TRACE_ID:-}" ] && trace_tag=" TID=${ZYPPER_TRACE_ID}"
+    message="${message}\n\nRUN=${RUN_ID}${trace_tag}"
+
+    local title_esc msg_esc
+    title_esc="$(_json_escape "$title")"
+    msg_esc="$(_json_escape "$message")"
+
+    # Keep URL out of logs; only show a redacted host.
+    log_debug "Sending webhook: title='${title}' url=$(_redact_url "$url")"
+
+    # Provider auto-detection based on URL patterns.
+    if [[ "$url" == *"discord.com/api/webhooks"* ]] || [[ "$url" == *"discordapp.com/api/webhooks"* ]]; then
+        # Discord embed
+        local c
+        c="${color:-65280}"
+        curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Content-Type: application/json" \
+            -d "{\"embeds\":[{\"title\":\"${title_esc}\",\"description\":\"${msg_esc}\",\"color\":${c}}]}" \
+            "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [[ "$url" == *"hooks.slack.com/services"* ]]; then
+        # Slack incoming webhook (simple text)
+        curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"${title_esc}: ${msg_esc}\"}" \
+            "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [[ "$url" == *"ntfy.sh/"* ]]; then
+        # ntfy.sh: post text with headers
+        curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Title: ${title}" \
+            -H "Tags: zypper-auto" \
+            -d "${message}" \
+            "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Generic fallback: POST as plain text
+    curl -fsS --connect-timeout 5 --max-time 10 \
+        -H "Content-Type: text/plain" \
+        -d "${title}: ${message}" \
+        "$url" >/dev/null 2>&1 || true
+    return 0
+}
+
+# --- Extensibility: Hook system ---
+ensure_hook_dirs() {
+    local base
+    base="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    execute_guarded "Ensure hook base directory exists (${base})" mkdir -p "${base}" || true
+    execute_guarded "Ensure pre-hook directory exists" mkdir -p "${base}/pre.d" || true
+    execute_guarded "Ensure post-hook directory exists" mkdir -p "${base}/post.d" || true
+    execute_guarded "Set hook directory permissions" chmod 755 "${base}" "${base}/pre.d" "${base}/post.d" || true
+}
+
+run_hooks() {
+    local stage="$1"
+
+    if [[ "${HOOKS_ENABLED,,}" != "true" ]]; then
+        log_debug "Hooks disabled (HOOKS_ENABLED=${HOOKS_ENABLED}); skipping ${stage} hooks"
+        return 0
+    fi
+
+    local base hook_dir
+    base="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    hook_dir="${base}/${stage}.d"
+
+    if [ ! -d "${hook_dir}" ]; then
+        log_debug "Hook directory not present: ${hook_dir} (skipping)"
+        return 0
+    fi
+
+    log_info "Running ${stage}-update hooks from ${hook_dir}..."
+
+    local hook ran_any=0
+    for hook in "${hook_dir}"/*; do
+        [ -e "${hook}" ] || continue
+        if [ -f "${hook}" ] && [ -x "${hook}" ]; then
+            ran_any=1
+            log_info "  -> Executing hook: $(basename "${hook}")"
+            if ! execute_guarded "Hook (${stage}): $(basename "${hook}")" "${hook}"; then
+                log_warn "Hook $(basename "${hook}") failed (non-fatal)"
+            fi
+        fi
+    done
+
+    if [ "${ran_any}" -eq 0 ] 2>/dev/null; then
+        log_debug "No executable hooks found in ${hook_dir}"
+    fi
+
+    return 0
+}
+
+# --- Visual reporting: Static HTML dashboard ---
+_html_escape() {
+    local s="$*"
+    s=${s//&/\&amp;}
+    s=${s//</\&lt;}
+    s=${s//>/\&gt;}
+    printf '%s' "$s"
+}
+
+generate_dashboard() {
+    if [[ "${DASHBOARD_ENABLED,,}" != "true" ]]; then
+        log_debug "Dashboard disabled (DASHBOARD_ENABLED=${DASHBOARD_ENABLED}); skipping dashboard generation"
+        return 0
+    fi
+
+    local out_root out_user
+    out_root="${LOG_DIR}/status.html"
+
+    out_user=""
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        out_user="${SUDO_USER_HOME}/.local/share/zypper-notify/status.html"
+    fi
+
+    local last_status last_install_log last_install_tail now
+    now="$(date '+%Y-%m-%d %H:%M:%S')"
+    last_status=$(cat "${STATUS_FILE}" 2>/dev/null || echo "Unknown")
+
+    last_install_log=""
+    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
+        last_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
+    fi
+
+    last_install_tail=""
+    if [ -n "${last_install_log}" ] && [ -f "${last_install_log}" ]; then
+        last_install_tail=$(tail -n 40 "${last_install_log}" 2>/dev/null || true)
+    fi
+
+    local dl_timer nt_timer verify_timer
+    dl_timer=$(systemctl is-active "${DL_SERVICE_NAME}.timer" 2>/dev/null || echo "unknown")
+    verify_timer=$(systemctl is-active "${VERIFY_SERVICE_NAME}.timer" 2>/dev/null || echo "unknown")
+    nt_timer="unknown"
+    if [ -n "${SUDO_USER:-}" ]; then
+        local bus
+        bus="unix:path=/run/user/$(id -u "${SUDO_USER}" 2>/dev/null || echo "")/bus"
+        nt_timer=$(sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="$bus" systemctl --user is-active "${NT_SERVICE_NAME}.timer" 2>/dev/null || echo "unknown")
+    fi
+
+    local last_status_esc last_tail_esc
+    last_status_esc="$(_html_escape "$last_status")"
+    last_tail_esc="$(_html_escape "$last_install_tail")"
+
+    mkdir -p "$(dirname "${out_root}")" 2>/dev/null || true
+
+    cat >"${out_root}" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zypper Auto Status</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
+    .card { background: white; padding: 16px 18px; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.10); max-width: 980px; }
+    .row { margin: 10px 0; }
+    .label { color: #555; display: inline-block; min-width: 160px; }
+    pre { background: #111; color: #eee; padding: 12px; border-radius: 8px; overflow: auto; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Zypper Auto Status</h1>
+    <div class="row"><span class="label">Generated:</span> ${now}</div>
+    <div class="row"><span class="label">Current state:</span> <strong>${last_status_esc}</strong></div>
+    <div class="row"><span class="label">Helper RUN:</span> <code>${RUN_ID}</code></div>
+    <div class="row"><span class="label">Downloader timer:</span> <code>${dl_timer}</code></div>
+    <div class="row"><span class="label">Verify timer:</span> <code>${verify_timer}</code></div>
+    <div class="row"><span class="label">Notifier timer:</span> <code>${nt_timer}</code></div>
+    <hr />
+    <h3>Recent install log tail</h3>
+    <div class="muted">${last_install_log}</div>
+    <pre>${last_tail_esc}</pre>
+  </div>
+</body>
+</html>
+EOF
+
+    chmod 644 "${out_root}" 2>/dev/null || true
+
+    if [ -n "${out_user}" ]; then
+        mkdir -p "$(dirname "${out_user}")" 2>/dev/null || true
+        cp -f "${out_root}" "${out_user}" 2>/dev/null || true
+        chown "${SUDO_USER}:${SUDO_USER}" "${out_user}" 2>/dev/null || true
+        chmod 644 "${out_user}" 2>/dev/null || true
+    fi
+
+    log_success "Dashboard generated: ${out_root}${out_user:+ (user copy: ${out_user})}"
+    return 0
 }
 
 # --- Advanced Crash Forensics ---
@@ -1020,6 +1345,11 @@ failure_handler() {
         echo "Last 20 trace entries:" >&2
         tail -n 20 "${TRACE_LOG}" 2>/dev/null | sed 's/^/  >> /' >&2
     fi
+
+    # Remote monitoring: send a critical webhook if configured.
+    send_webhook "zypper-auto-helper: CRITICAL FAILURE" \
+        "Crash at line ${line_no} (rc=${exit_code}).\nCommand: ${bash_command}\nCode: ${code_snippet:-<unavailable>}\nLog: ${LOG_FILE}" \
+        "16711680" || true
 
     update_status "FAILED: Crash at line ${line_no} (rc=${exit_code})"
     exit "${exit_code}"
@@ -1610,6 +1940,39 @@ run_reset_config_only() {
     echo "" | tee -a "${LOG_FILE}"
     echo "You can now re-run installation to apply the new settings:" | tee -a "${LOG_FILE}"
     echo "  sudo ./zypper-auto.sh install" | tee -a "${LOG_FILE}"
+}
+
+# --- Helper: Send a webhook notification (CLI) ---
+# Usage:
+#   sudo zypper-auto-helper --send-webhook "Title" "Message" [color]
+# Or pass via environment:
+#   sudo WEBHOOK_TITLE=... WEBHOOK_MESSAGE=... WEBHOOK_COLOR=... zypper-auto-helper --send-webhook
+run_send_webhook_only() {
+    local title message color
+    title="${1:-${WEBHOOK_TITLE:-}}"
+    message="${2:-${WEBHOOK_MESSAGE:-}}"
+    color="${3:-${WEBHOOK_COLOR:-}}"
+
+    if [ -z "${title}" ] || [ -z "${message}" ]; then
+        log_error "--send-webhook requires a title and message (either as args or WEBHOOK_TITLE/WEBHOOK_MESSAGE env vars)"
+        return 1
+    fi
+
+    send_webhook "${title}" "${message}" "${color:-}"
+    log_success "Webhook send attempted (best-effort)"
+    update_status "SUCCESS: Webhook send attempted"
+    return 0
+}
+
+# --- Helper: Generate status dashboard (CLI) ---
+run_generate_dashboard_only() {
+    generate_dashboard
+    update_status "SUCCESS: Dashboard generated"
+    echo "Dashboard generated (root): ${LOG_DIR}/status.html"
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        echo "Dashboard generated (user): ${SUDO_USER_HOME}/.local/share/zypper-notify/status.html"
+    fi
+    return 0
 }
 
 # --- Helper: Background diagnostic log follower (CLI) ---
@@ -3798,6 +4161,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --live-logs             Follow installer/service/notifier logs in real time (Ctrl+C to exit)"
     echo "  --analyze, --health     Analyze recent logs and print a health report (errors, locks, notifier crashes)"
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
+    echo "  --dashboard             Generate/update a static HTML status page"
+    echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help                  Show this help message"
     echo ""
@@ -4050,6 +4415,15 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
         ZNH_RUN_ID="${RUN_ID}" \
         /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify || true
     exit 0
+elif [[ "${1:-}" == "--dashboard" || "${1:-}" == "--generate-dashboard" ]]; then
+    log_info "Dashboard generation requested"
+    run_generate_dashboard_only
+    exit $?
+elif [[ "${1:-}" == "--send-webhook" || "${1:-}" == "--webhook" ]]; then
+    log_info "Webhook send requested"
+    shift || true
+    run_send_webhook_only "$@"
+    exit $?
 elif [[ "${1:-}" == "--status" ]]; then
     log_info "Status report mode requested"
     run_status_only
@@ -4119,6 +4493,17 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
     run_verification_only
     rc=$?
     set -e
+
+    # Best-effort: refresh dashboard after verification/repairs.
+    generate_dashboard || true
+
+    # Remote monitoring: only notify on verification failure by default.
+    if [ "$rc" -ne 0 ] 2>/dev/null; then
+        send_webhook "zypper-auto-helper: Verification FAILED" \
+            "One or more verification checks failed (rc=${rc}).\nLog: ${LOG_FILE}" \
+            "16711680" || true
+    fi
+
     exit $rc
 fi
 
@@ -4213,6 +4598,9 @@ else
 fi
 log_success "All dependencies passed"
 update_status "All dependencies verified"
+
+# Ensure hook directories exist (enterprise extensibility).
+ensure_hook_dirs || true
 
 # --- 3. Clean Up Old Logs First ---
 log_info ">>> Cleaning up old log files..."
@@ -4827,6 +5215,168 @@ if [ -r "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 
+# Enterprise extensions (optional)
+HOOKS_ENABLED="${HOOKS_ENABLED:-true}"
+HOOKS_BASE_DIR="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+WEBHOOK_URL="${WEBHOOK_URL:-}"
+DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-true}"
+RUN_ID="WRAP-$(date +%Y%m%dT%H%M%S)-$$"
+
+HELPER_STATUS_FILE="/var/log/zypper-auto/last-status.txt"
+
+_json_escape() {
+    local s="$*"
+    s=${s//\\/\\\\}
+    s=${s//"/\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '%s' "$s"
+}
+
+_redact_url() {
+    local url="$1"
+    printf '%s' "$url" | sed -E 's#^(https?://[^/]+).*$#\1/...#'
+}
+
+send_webhook() {
+    local title="$1" message="$2" color="${3:-}"
+    [ -z "${WEBHOOK_URL:-}" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    local url
+    url="${WEBHOOK_URL}"
+
+    message="${message}\n\nRUN=${RUN_ID}"
+    local title_esc msg_esc
+    title_esc="$(_json_escape "$title")"
+    msg_esc="$(_json_escape "$message")"
+
+    # Keep URL out of stdout; only log redacted to the audit log if needed.
+    if [[ "$url" == *"discord.com/api/webhooks"* ]] || [[ "$url" == *"discordapp.com/api/webhooks"* ]]; then
+        local c
+        c="${color:-65280}"
+        curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Content-Type: application/json" \
+            -d "{\"embeds\":[{\"title\":\"${title_esc}\",\"description\":\"${msg_esc}\",\"color\":${c}}]}" \
+            "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [[ "$url" == *"hooks.slack.com/services"* ]]; then
+        curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"${title_esc}: ${msg_esc}\"}" \
+            "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [[ "$url" == *"ntfy.sh/"* ]]; then
+        curl -fsS --connect-timeout 5 --max-time 10 \
+            -H "Title: ${title}" \
+            -H "Tags: zypper-auto" \
+            -d "${message}" \
+            "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    curl -fsS --connect-timeout 5 --max-time 10 \
+        -H "Content-Type: text/plain" \
+        -d "${title}: ${message}" \
+        "$url" >/dev/null 2>&1 || true
+    return 0
+}
+
+run_hooks() {
+    local stage="$1" base hook_dir hook
+
+    if [[ "${HOOKS_ENABLED,,}" != "true" ]]; then
+        return 0
+    fi
+
+    base="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    hook_dir="${base}/${stage}.d"
+
+    if [ ! -d "$hook_dir" ]; then
+        return 0
+    fi
+
+    echo "Running ${stage}-update hooks from $hook_dir..."
+    for hook in "$hook_dir"/*; do
+        [ -e "$hook" ] || continue
+        if [ -f "$hook" ] && [ -x "$hook" ]; then
+            echo "  -> Hook: $(basename "$hook")"
+            # Hook failures are non-fatal for the wrapper.
+            "$hook" || echo "  !! Hook $(basename "$hook") failed (continuing)"
+        fi
+    done
+
+    return 0
+}
+
+_html_escape() {
+    local s="$*"
+    s=${s//&/\&amp;}
+    s=${s//</\&lt;}
+    s=${s//>/\&gt;}
+    printf '%s' "$s"
+}
+
+generate_dashboard() {
+    if [[ "${DASHBOARD_ENABLED,,}" != "true" ]]; then
+        return 0
+    fi
+
+    local out_root out_user now last_status last_tail
+    out_root="/var/log/zypper-auto/status.html"
+    out_user=""
+    if [ -n "${SUDO_USER:-}" ]; then
+        user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6)
+        if [ -n "${user_home:-}" ]; then
+            out_user="${user_home}/.local/share/zypper-notify/status.html"
+        fi
+    fi
+
+    now="$(date '+%Y-%m-%d %H:%M:%S')"
+    last_status=$(cat "$HELPER_STATUS_FILE" 2>/dev/null || echo "Unknown")
+
+    last_tail=""
+    if ls -1 /var/log/zypper-auto/install-*.log >/dev/null 2>&1; then
+        last_log=$(ls -1t /var/log/zypper-auto/install-*.log 2>/dev/null | head -1 || true)
+        if [ -n "$last_log" ]; then
+            last_tail=$(tail -n 20 "$last_log" 2>/dev/null || true)
+        fi
+    fi
+
+    last_status_esc="$(_html_escape "$last_status")"
+    last_tail_esc="$(_html_escape "$last_tail")"
+
+    sudo mkdir -p /var/log/zypper-auto >/dev/null 2>&1 || true
+    cat >"$out_root" <<DASHBOARD_EOF
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Zypper Auto Status</title>
+<style>body{font-family:sans-serif;padding:20px;background:#f4f4f9}.card{background:#fff;padding:16px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1);max-width:980px}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}</style>
+</head><body><div class="card">
+<h1>Zypper Auto Status</h1>
+<p><strong>Generated:</strong> ${now}</p>
+<p><strong>Current state:</strong> ${last_status_esc}</p>
+<p><strong>Wrapper RUN:</strong> <code>${RUN_ID}</code></p>
+<h3>Recent install log tail</h3>
+<pre>${last_tail_esc}</pre>
+</div></body></html>
+DASHBOARD_EOF
+    sudo chmod 644 "$out_root" >/dev/null 2>&1 || true
+
+    if [ -n "$out_user" ]; then
+        sudo -u "${SUDO_USER}" mkdir -p "$(dirname "$out_user")" >/dev/null 2>&1 || true
+        sudo cp -f "$out_root" "$out_user" >/dev/null 2>&1 || true
+        sudo chown "${SUDO_USER}:${SUDO_USER}" "$out_user" >/dev/null 2>&1 || true
+        sudo chmod 644 "$out_user" >/dev/null 2>&1 || true
+    fi
+
+    return 0
+}
+
 # Helper to detect whether system management is currently locked by
 # zypp/zypper (e.g. YaST, another zypper, systemd-zypp-refresh, etc.).
 ZYPP_LOCK_FILE="/run/zypp.pid"
@@ -5165,6 +5715,9 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         exit 1
     fi
 
+    # Pre-update hooks (best-effort)
+    run_hooks "pre" || true
+
     # Clean up duplicate RPMs before running zypper, according to
     # AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES / AUTO_DUPLICATE_RPM_MODE.
     cleanup_duplicate_rpms
@@ -5174,6 +5727,10 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # afterwards instead of leaving only the raw zypper error.
     sudo /usr/bin/zypper "$@"
     EXIT_CODE=$?
+
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        run_hooks "post" || true
+    fi
 
     if [ "$EXIT_CODE" -eq 7 ]; then
         echo ""
@@ -5185,6 +5742,18 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # Clear the manual downloading state so the notifier stops showing
     # a progress bar once the interactive session has finished.
     sudo bash -c "echo 'idle' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+
+    # Update helper status + remote monitoring (best-effort)
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        echo "[$ts] SUCCESS: Manual zypper update completed (wrapper)" | sudo tee "$HELPER_STATUS_FILE" >/dev/null 2>&1 || true
+        send_webhook "Zypper update successful" "Manual update (wrapper) completed successfully." "65280"
+    else
+        echo "[$ts] FAILED: Manual zypper update failed (wrapper rc=$EXIT_CODE)" | sudo tee "$HELPER_STATUS_FILE" >/dev/null 2>&1 || true
+        send_webhook "Zypper update FAILED" "Manual update (wrapper) failed (rc=$EXIT_CODE)." "16711680"
+    fi
+
+    generate_dashboard || true
 
     # Always run Flatpak and Snap updates after dup, even if dup had no updates or failed
     echo ""
@@ -7506,10 +8075,77 @@ ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
 ENABLE_PIPX_UPDATES="true"
 
+# Enterprise extensions (can be overridden by CONFIG_FILE)
+HOOKS_ENABLED="true"
+HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
+
 if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
 fi
+
+run_hooks() {
+    local stage="$1"
+    local base hook_dir hook
+
+    if [[ "${HOOKS_ENABLED,,}" != "true" ]]; then
+        log "Hooks disabled (HOOKS_ENABLED=${HOOKS_ENABLED}); skipping ${stage} hooks"
+        return 0
+    fi
+
+    base="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    hook_dir="${base}/${stage}.d"
+
+    if [ ! -d "$hook_dir" ]; then
+        log "Hook directory not present: $hook_dir (skipping)"
+        return 0
+    fi
+
+    log "Running ${stage}-update hooks from $hook_dir..."
+
+    for hook in "$hook_dir"/*; do
+        [ -e "$hook" ] || continue
+        if [ -f "$hook" ] && [ -x "$hook" ]; then
+            log "  -> Hook: $(basename "$hook")"
+            set +e
+            execute_guarded "Hook (${stage}): $(basename "$hook")" \
+                pkexec env \
+                ZNH_RUN_ID="$ZNH_RUN_ID" \
+                ZYPPER_TRACE_ID="${ZYPPER_TRACE_ID:-}" \
+                HOOK_STAGE="$stage" \
+                "$hook" || true
+            set -e
+        fi
+    done
+
+    return 0
+}
+
+helper_send_webhook() {
+    local title="$1" message="$2" color="$3"
+    if [ -x /usr/local/bin/zypper-auto-helper ]; then
+        set +e
+        pkexec env \
+            ZNH_RUN_ID="$ZNH_RUN_ID" \
+            ZYPPER_TRACE_ID="${ZYPPER_TRACE_ID:-}" \
+            WEBHOOK_TITLE="$title" \
+            WEBHOOK_MESSAGE="$message" \
+            WEBHOOK_COLOR="$color" \
+            /usr/local/bin/zypper-auto-helper --send-webhook >/dev/null 2>&1 || true
+        set -e
+    fi
+}
+
+helper_generate_dashboard() {
+    if [ -x /usr/local/bin/zypper-auto-helper ]; then
+        set +e
+        pkexec env \
+            ZNH_RUN_ID="$ZNH_RUN_ID" \
+            ZYPPER_TRACE_ID="${ZYPPER_TRACE_ID:-}" \
+            /usr/local/bin/zypper-auto-helper --generate-dashboard >/dev/null 2>&1 || true
+        set -e
+    fi
+}
 
 # Enhanced install script with post-update service check
 TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
@@ -7624,6 +8260,9 @@ RUN_UPDATE() {
         return 0
     fi
 
+    # Pre-update hooks (best-effort)
+    run_hooks "pre" || true
+
     # Capture package state before running the update so we can compute a
     # precise delta of what changed when the run succeeds.
     local PKG_DELTA_DIR PKG_PRE_FILE PKG_POST_FILE DELTA_FILE
@@ -7646,6 +8285,11 @@ RUN_UPDATE() {
     pkexec zypper dup 2> >(tee "$ZYPPER_ERR_FILE" | sed -E '/System management is locked/d;/Close this application before trying again/d' >&2)
     rc=$?
     set -e
+
+    if [ "$rc" -eq 0 ]; then
+        # Post-update hooks (best-effort)
+        run_hooks "post" || true
+    fi
 
     # Auto-snapshot system state on any non-zero exit so diagnostics have
     # rich context without requiring the user to manually open the debug menu.
@@ -7692,14 +8336,20 @@ RUN_UPDATE() {
     if [ "$rc" -eq 0 ]; then
         UPDATE_SUCCESS=true
         log "RUN_UPDATE: pkexec zypper dup completed successfully (rc=$rc)"
+        helper_send_webhook "Zypper update successful" "Interactive update completed successfully." "65280"
     else
         UPDATE_SUCCESS=false
         if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
             log "RUN_UPDATE: pkexec zypper dup failed due to existing zypper lock (rc=$rc)"
+            helper_send_webhook "Zypper update blocked (lock)" "Interactive update could not run because system management was locked (rc=$rc)." "16760576"
         else
             log "RUN_UPDATE: pkexec zypper dup FAILED (rc=$rc)"
+            helper_send_webhook "Zypper update FAILED" "Interactive update failed (rc=$rc). See run-install.log for details." "16711680"
         fi
     fi
+
+    # Refresh dashboard after the attempt (best-effort)
+    helper_generate_dashboard
     
     echo ""
     echo "=========================================="
@@ -8544,6 +9194,14 @@ fi
 # --- 15. Final Summary ---
 log_success ">>> Installation completed successfully!"
 update_status "SUCCESS: Installation completed"
+
+# Update the static HTML dashboard (best-effort)
+generate_dashboard || true
+
+# Remote monitoring: notify success (best-effort)
+send_webhook "zypper-auto-helper: Installation successful" \
+    "Installation completed successfully.\nInstall log: ${LOG_FILE}" \
+    "65280" || true
 
 echo "" | tee -a "${LOG_FILE}"
 echo "==============================================" | tee -a "${LOG_FILE}"
