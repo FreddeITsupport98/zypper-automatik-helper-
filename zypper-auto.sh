@@ -1519,11 +1519,11 @@ if [ "$PROBLEMS_FIXED" -gt 0 ] && [[ "${VERIFY_NOTIFY_USER_ENABLED,,}" == "true"
         fi
 
         if [ -n "${SUDO_USER:-}" ] && [ -n "${USER_BUS_PATH:-}" ]; then
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            execute_guarded "Send repair notification to user" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
                 notify-send -u normal -t 15000 \
                 -i "dialog-information" \
-                "${summary}" "${details}" \
-                >> "${LOG_FILE}" 2>&1 || true
+                "${summary}" "${details}" || true
         fi
     fi
 fi
@@ -1588,11 +1588,12 @@ run_diag_logs_on_only() {
 
     local diag_dir
     diag_dir="${LOG_DIR}/diagnostics"
-    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
 
     # Prune diagnostics logs older than 10 days to keep disk usage bounded.
     # This uses file mtime; a 10-day window is sufficient for troubleshooting.
-    find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Prune old diagnostics logs (>9 days)" \
+        find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete || true
 
     # Ensure source-tagging follower helper exists so each line in the
     # diagnostics log is tagged with its origin (INSTALL, DOWNLOADER,
@@ -1662,11 +1663,12 @@ run_diag_logs_runner_only() {
 
     local diag_dir diag_file today
     diag_dir="${LOG_DIR}/diagnostics"
-    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
 
     # Prune diagnostics logs older than 10 days here as well, in case the
     # runner is restarted independently of the CLI helper.
-    find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Prune old diagnostics logs (>9 days)" \
+        find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete || true
 
     # We still append an initial header to today's file, but the follower output
     # itself is written via an auto-rotating writer so it switches to a new
@@ -1830,7 +1832,7 @@ run_diag_bundle_only() {
     ts="$(date +%Y%m%d-%H%M%S)"
     bundle_file="${bundle_dir}/zypper-auto-diag-${ts}.tar.xz"
 
-    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
 
     # Build list of files to include (best-effort)
     local include_files=()
@@ -1892,7 +1894,7 @@ run_diag_bundle_only() {
     # System journal slices for deeper diagnostics (OOM, crashes, unit logs)
     local journal_dir
     journal_dir="${LOG_DIR}/journal-snapshots"
-    mkdir -p "${journal_dir}" >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Ensure journal snapshots directory exists (${journal_dir})" mkdir -p "${journal_dir}" || true
     if command -v journalctl >/dev/null 2>&1; then
         log_debug "Dumping system journals into ${journal_dir} for diagnostics bundle"
         # Root downloader/verify units over the last 2 days
@@ -3101,39 +3103,43 @@ run_uninstall_helper_only() {
 
     # 3. Remove systemd unit files and root binaries
     log_debug "Removing root systemd units and binaries..."
-    rm -f /etc/systemd/system/zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
-    rm -f /etc/systemd/system/zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
-    rm -f /etc/systemd/system/zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
-    rm -f /etc/systemd/system/zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
-    rm -f /etc/systemd/system/zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
-    rm -f /etc/systemd/system/zypper-auto-verify.timer >> "${LOG_FILE}" 2>&1 || true
-    rm -f /etc/systemd/system/zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
-    rm -f /usr/local/bin/zypper-download-with-progress >> "${LOG_FILE}" 2>&1 || true
-    rm -f /usr/local/bin/zypper-auto-helper >> "${LOG_FILE}" 2>&1 || true
-    rm -f /usr/local/bin/zypper-auto-diag-follow >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Remove root unit files and binaries" rm -f \
+        /etc/systemd/system/zypper-autodownload.service \
+        /etc/systemd/system/zypper-autodownload.timer \
+        /etc/systemd/system/zypper-cache-cleanup.service \
+        /etc/systemd/system/zypper-cache-cleanup.timer \
+        /etc/systemd/system/zypper-auto-verify.service \
+        /etc/systemd/system/zypper-auto-verify.timer \
+        /etc/systemd/system/zypper-auto-diag-logs.service \
+        /usr/local/bin/zypper-download-with-progress \
+        /usr/local/bin/zypper-auto-helper \
+        /usr/local/bin/zypper-auto-diag-follow || true
 
     # 4. Remove user-level scripts and systemd units
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         log_debug "Removing user scripts and units under $SUDO_USER_HOME..."
-        rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.timer" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.local/bin/zypper-with-ps" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.local/bin/zypper-view-changes" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" >> "${LOG_FILE}" 2>&1 || true
-        rm -f "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Remove user scripts and unit files" rm -f \
+            "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service" \
+            "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.timer" \
+            "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" \
+            "$SUDO_USER_HOME/.local/bin/zypper-run-install" \
+            "$SUDO_USER_HOME/.local/bin/zypper-with-ps" \
+            "$SUDO_USER_HOME/.local/bin/zypper-view-changes" \
+            "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" \
+            "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" \
+            "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" || true
 
         # Remove bash/zsh aliases we added (non-fatal if missing)
-        sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
-        sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
-        sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
-        sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
-        sed -i '/# zypper-auto-helper command alias/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
-        sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.bashrc" 2>>"${LOG_FILE}" || true
-        sed -i '/# zypper-auto-helper command alias/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
-        sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.zshrc" 2>>"${LOG_FILE}" || true
+        execute_guarded "Remove bash/zsh aliases added by helper" bash -lc "\
+            sed -i '/# Zypper wrapper for auto service check/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
+            sed -i '/alias zypper=/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
+            sed -i '/# Zypper wrapper for auto service check/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true;\
+            sed -i '/alias zypper=/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true;\
+            sed -i '/# zypper-auto-helper command alias/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
+            sed -i '/alias zypper-auto-helper=/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
+            sed -i '/# zypper-auto-helper command alias/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true;\
+            sed -i '/alias zypper-auto-helper=/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true\
+        " || true
     fi
 
     # 5. Remove logs and caches
@@ -3146,16 +3152,17 @@ run_uninstall_helper_only() {
         log_debug "Removing logs and caches (preserving this uninstall log)..."
         if [ -d "$LOG_DIR" ]; then
             # Delete all files in $LOG_DIR except the current LOG_FILE
-            find "$LOG_DIR" -maxdepth 1 -type f ! -name "$(basename "$LOG_FILE")" -delete >> "${LOG_FILE}" 2>&1 || true
+            execute_guarded "Remove old log files (preserving current log)" \
+                find "$LOG_DIR" -maxdepth 1 -type f ! -name "$(basename "$LOG_FILE")" -delete || true
             # Remove any service sub-logs directory completely
-            rm -rf "$LOG_DIR/service-logs" >> "${LOG_FILE}" 2>&1 || true
+            execute_guarded "Remove service logs directory" rm -rf "$LOG_DIR/service-logs" || true
             # Remove diagnostics logs directory completely
-            rm -rf "$LOG_DIR/diagnostics" >> "${LOG_FILE}" 2>&1 || true
+            execute_guarded "Remove diagnostics logs directory" rm -rf "$LOG_DIR/diagnostics" || true
         fi
     fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
-        rm -rf "$SUDO_USER_HOME/.local/share/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
-        rm -rf "$SUDO_USER_HOME/.cache/zypper-notify" >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Remove notifier logs" rm -rf "$SUDO_USER_HOME/.local/share/zypper-notify" || true
+        execute_guarded "Remove notifier caches" rm -rf "$SUDO_USER_HOME/.cache/zypper-notify" || true
     fi
 
     # 6. Reload systemd daemons
@@ -3269,7 +3276,7 @@ run_brew_install_only() {
         fi
 
         echo "Checking for Homebrew updates from GitHub (brew update) for user $SUDO_USER" | tee -a "${LOG_FILE}"
-        if ! "${BREW_CMD[@]}" update >> "${LOG_FILE}" 2>&1; then
+        if ! execute_guarded "Homebrew: brew update" "${BREW_CMD[@]}" update; then
             local rc=$?
             log_error "Homebrew 'brew update' failed for user $SUDO_USER (exit code $rc)"
             return $rc
@@ -3285,7 +3292,7 @@ run_brew_install_only() {
         fi
 
         echo "Homebrew has ${OUTDATED_COUNT} outdated formulae for user $SUDO_USER; running 'brew upgrade'..." | tee -a "${LOG_FILE}"
-        if "${BREW_CMD[@]}" upgrade >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Homebrew: brew upgrade" "${BREW_CMD[@]}" upgrade; then
             log_success "Homebrew upgrade completed for user $SUDO_USER (upgraded ${OUTDATED_COUNT} formulae)"
             return 0
         else
@@ -3386,7 +3393,7 @@ run_pipx_helper_only() {
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             log_info "Installing python3-pipx via zypper..."
             update_status "Installing dependency: python3-pipx"
-            if ! zypper -n install python3-pipx >> "${LOG_FILE}" 2>&1; then
+            if ! execute_guarded "Install python3-pipx via zypper" zypper -n install python3-pipx; then
                 log_error "Failed to install python3-pipx. Please install it manually and re-run with --pip-package."
                 update_status "FAILED: Could not install python3-pipx"
                 return 1
@@ -3395,7 +3402,7 @@ run_pipx_helper_only() {
 
             # Best-effort: ensure pipx adds its binaries to the user's PATH
             if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
-                sudo -u "$SUDO_USER" pipx ensurepath >> "${LOG_FILE}" 2>&1 || true
+                execute_guarded "pipx ensurepath" sudo -u "$SUDO_USER" pipx ensurepath || true
             fi
         else
             log_info "User declined automatic pipx installation"
@@ -3419,7 +3426,7 @@ run_pipx_helper_only() {
         if [[ $UPGRADE =~ ^[Yy]$ ]]; then
             log_info "Running 'pipx upgrade-all' for user $SUDO_USER..."
             update_status "Running pipx upgrade-all for $SUDO_USER"
-            if sudo -u "$SUDO_USER" pipx upgrade-all >> "${LOG_FILE}" 2>&1; then
+            if execute_guarded "pipx upgrade-all" sudo -u "$SUDO_USER" pipx upgrade-all; then
                 log_success "pipx upgrade-all completed for user $SUDO_USER"
             else
                 local rc=$?
@@ -3559,7 +3566,7 @@ run_setup_sf_only() {
     # 3) Configure common Flatpak remotes
     if command -v flatpak >/dev/null 2>&1; then
         log_info "Configuring common Flatpak remotes (Flathub, Flathub Beta, AppCenter)..."
-        if flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Add Flatpak remote: flathub" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo; then
             log_success "Flathub remote configured (or already present)"
             flathub_ok=1
         else
@@ -3567,7 +3574,7 @@ run_setup_sf_only() {
             rc=1
         fi
 
-        if flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Add Flatpak remote: flathub-beta" flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo; then
             log_success "Flathub Beta remote configured (or already present)"
             flathub_beta_ok=1
         else
@@ -3575,7 +3582,7 @@ run_setup_sf_only() {
             rc=1
         fi
 
-        if flatpak remote-add --if-not-exists appcenter https://flatpak.elementary.io/repo.flatpakrepo >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Add Flatpak remote: appcenter" flatpak remote-add --if-not-exists appcenter https://flatpak.elementary.io/repo.flatpakrepo; then
             log_success "AppCenter remote configured (or already present)"
             appcenter_ok=1
         else
@@ -3616,7 +3623,7 @@ run_setup_sf_only() {
         if [[ $RM_DISCOVER =~ ^[Yy]$ ]]; then
             log_info "User accepted removal of discover6 to avoid conflicting update managers"
             update_status "Removing discover6 (KDE Discover) to avoid conflicting update managers"
-            if zypper -n remove discover6 >> "${LOG_FILE}" 2>&1; then
+            if execute_guarded "Remove discover6 via zypper" zypper -n remove discover6; then
                 log_success "discover6 removed successfully"
             else
                 rc=1
@@ -3967,20 +3974,22 @@ elif [[ "${1:-}" == "--show-logs" || "${1:-}" == "--show-loggs" ]]; then
     echo "Diagnostics logs directory: ${diag_dir}"
 
     # Ensure directory exists and is user-readable
-    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
-    chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
-    find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
+    execute_guarded "Ensure diagnostics directory is traversable" chmod 755 "${diag_dir}" || true
+    execute_guarded "Ensure diagnostics logs are user-readable" \
+        find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; || true
 
     # Try to open the diagnostics folder in the user's file manager when possible.
     if command -v xdg-open >/dev/null 2>&1; then
         if [ -n "${SUDO_USER:-}" ]; then
             USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
             log_debug "Opening diagnostics folder via xdg-open for SUDO_USER=${SUDO_USER}"
-            sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-                xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+            execute_guarded "Open diagnostics folder via xdg-open (user)" \
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                xdg-open "${diag_dir}" || true
         else
             log_debug "Opening diagnostics folder via xdg-open as current user"
-            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+            execute_guarded "Open diagnostics folder via xdg-open" xdg-open "${diag_dir}" || true
         fi
     fi
     exit 0
