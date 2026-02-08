@@ -181,17 +181,51 @@ esac
 # helper invocation in diagnostics logs.
 RUN_ID="R$(date +%Y%m%dT%H%M%S)-$$"
 
+# --- Console formatting & journal integration (plain log files) ---
+# We keep LOG_FILE / TRACE_LOG free of ANSI escape codes, but optionally print
+# colored output to the console when running interactively.
+LOG_TO_CONSOLE=0
+if [ -t 1 ] || [ -t 2 ]; then
+    LOG_TO_CONSOLE=1
+fi
+# Allow forcing console logs even when not attached to a TTY
+if [ -n "${ZYPPER_AUTO_CONSOLE_LOG:-}" ]; then
+    LOG_TO_CONSOLE="${ZYPPER_AUTO_CONSOLE_LOG}"
+fi
+
+# ANSI Colors (console only)
+C_RESET='\033[0m'
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[0;33m'
+C_BLUE='\033[0;34m'
+C_CYAN='\033[0;36m'
+
+USE_COLOR=0
+if [ "${LOG_TO_CONSOLE}" -eq 1 ] 2>/dev/null && [ -z "${NO_COLOR:-}" ]; then
+    USE_COLOR=1
+fi
+
+# Enable best-effort journald/syslog logging via `logger`.
+# Set ZYPPER_AUTO_JOURNAL_LOGGING=0 to disable.
+JOURNAL_LOGGING_ENABLED=1
+if [ "${ZYPPER_AUTO_JOURNAL_LOGGING:-1}" = "0" ]; then
+    JOURNAL_LOGGING_ENABLED=0
+fi
+
 # Millisecond timestamp helper for structured log lines.
 _log_ts() {
     date '+%Y-%m-%d %H:%M:%S.%3N'
 }
 
-# Core formatter: write a single structured log line to the main installer
-# log. Errors are also mirrored to stderr for visibility.
+# Core formatter: write a single structured log line to LOG_FILE.
+# Optionally mirror to TRACE_LOG, the system journal (logger), and the console.
 _log_write() {
     local level="$1"; shift
-    local ts
+    local ts msg
     ts="$(_log_ts)"
+    msg="$*"
+
     local trace_tag=""
     # If ZYPPER_TRACE_ID is set (for example by the GUI notifier when the
     # user clicks "Install"), include it so we can correlate frontend
@@ -199,21 +233,66 @@ _log_write() {
     if [ -n "${ZYPPER_TRACE_ID:-}" ]; then
         trace_tag=" [TID=${ZYPPER_TRACE_ID}]"
     fi
+
     local line
-    line="[${level}] ${ts} [RUN=${RUN_ID}]${trace_tag} $*"
+    line="[${level}] ${ts} [RUN=${RUN_ID}]${trace_tag} ${msg}"
+
+    # 1) Always write clean text to LOG_FILE
     echo "${line}" >> "${LOG_FILE}"
 
-    # Also mirror all structured log lines into TRACE_LOG so the background
-    # diagnostics follower can capture install/verify activity into the
-    # aggregated per-day diagnostics log, even though each install uses a new
-    # install-*.log filename.
-    # Best-effort only: never fail the helper because TRACE_LOG is not writable.
+    # 2) Mirror structured lines into TRACE_LOG (best-effort)
     if [ -n "${TRACE_LOG:-}" ]; then
         echo "${line}" >> "${TRACE_LOG}" 2>/dev/null || true
     fi
 
-    if [ "${level}" = "ERROR" ]; then
-        echo "${line}" >&2
+    # 3) Also emit to the system journal (best-effort).
+    # This provides: journalctl -t zypper-auto-helper
+    if [ "${JOURNAL_LOGGING_ENABLED:-0}" -eq 1 ] 2>/dev/null && command -v logger >/dev/null 2>&1; then
+        case "${level}" in
+            ERROR)
+                logger -t "zypper-auto-helper" -p user.err -- "${line}" 2>/dev/null || true
+                ;;
+            DEBUG)
+                if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null; then
+                    logger -t "zypper-auto-helper" -p user.debug -- "${line}" 2>/dev/null || true
+                fi
+                ;;
+            *)
+                logger -t "zypper-auto-helper" -p user.info -- "${line}" 2>/dev/null || true
+                ;;
+        esac
+    fi
+
+    # 4) Console output (interactive only by default)
+    if [ "${LOG_TO_CONSOLE:-0}" -eq 1 ] 2>/dev/null; then
+        if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+            case "${level}" in
+                INFO)    printf "%b %s\n" "${C_BLUE}[INFO]${C_RESET}" "${msg}" ;;
+                SUCCESS) printf "%b %s\n" "${C_GREEN}[OK]${C_RESET}  " "${msg}" ;;
+                WARN)    printf "%b %s\n" "${C_YELLOW}[WARN]${C_RESET}" "${msg}" ;;
+                ERROR)   printf "%b %s\n" "${C_RED}[ERR]${C_RESET} " "${msg}" >&2 ;;
+                DEBUG)
+                    if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null; then
+                        printf "%b %s\n" "${C_CYAN}[DBG]${C_RESET} " "${msg}" >&2
+                    fi
+                    ;;
+            esac
+        else
+            case "${level}" in
+                ERROR) printf "[ERR] %s\n" "${msg}" >&2 ;;
+                DEBUG)
+                    if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null; then
+                        printf "[DBG] %s\n" "${msg}" >&2
+                    fi
+                    ;;
+                *) printf "[%s] %s\n" "${level}" "${msg}" ;;
+            esac
+        fi
+    else
+        # Non-interactive: keep prior behaviour of surfacing ERRORs on stderr
+        if [ "${level}" = "ERROR" ]; then
+            echo "${line}" >&2
+        fi
     fi
 }
 
@@ -229,12 +308,12 @@ log_error() {
     _log_write "ERROR" "$@"
 }
 
+log_warn() {
+    _log_write "WARN" "$@"
+}
+
 log_debug() {
     _log_write "DEBUG" "$@"
-    # When DEBUG_MODE is enabled, also mirror debug to stderr in real time
-    if [ "${DEBUG_MODE}" -eq 1 ] 2>/dev/null; then
-        echo "[DEBUG] $*" >&2
-    fi
 }
 
 # Extremely verbose trace channel for high-frequency events. This writes
@@ -313,17 +392,44 @@ if [ $# -gt 0 ]; then
     fi
 fi
 
-log_command() {
-    local cmd="$*"
-    log_debug "Executing: $cmd"
-    if eval "$cmd" >> "${LOG_FILE}" 2>&1; then
-        log_success "Command succeeded: $cmd"
+# Execute a command with full capturing.
+# Usage: execute_guarded "Description of task" command arg1 arg2 ...
+execute_guarded() {
+    local desc="$1"
+    shift
+
+    local tmp_out cmd_str
+    tmp_out="$(mktemp)"
+    cmd_str="$*"
+
+    log_debug "EXEC: [${desc}] -> ${cmd_str}"
+
+    # Run command, capture all output to temp file
+    if "$@" >"$tmp_out" 2>&1; then
+        log_success "${desc}"
+        # Optional: Log command output to file only if DEBUG_MODE is on
+        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null; then
+            sed 's/^/  [CMD_OUT] /' "$tmp_out" >> "${LOG_FILE}" 2>/dev/null || true
+        fi
+        rm -f "$tmp_out" 2>/dev/null || true
         return 0
     else
-        local exit_code=$?
-        log_error "Command failed (exit code $exit_code): $cmd"
-        return $exit_code
+        local rc=$?
+        log_error "FAILED: ${desc} (Exit Code: ${rc})"
+        log_error "Command was: ${cmd_str}"
+        log_error "⬇⬇⬇ COMMAND OUTPUT ⬇⬇⬇"
+        cat "$tmp_out" | tee -a "${LOG_FILE}" >&2
+        log_error "⬆⬆⬆ END COMMAND OUTPUT ⬆⬆⬆"
+        rm -f "$tmp_out" 2>/dev/null || true
+        return $rc
     fi
+}
+
+# Backward-compatible wrapper for older call sites.
+# NOTE: Prefer execute_guarded with real argv whenever possible.
+log_command() {
+    local cmd="$*"
+    execute_guarded "$cmd" bash -lc "$cmd"
 }
 
 # Load external configuration if present, otherwise create a default template.
@@ -837,26 +943,46 @@ update_status() {
 
 # --- Advanced Crash Forensics ---
 failure_handler() {
+    # Avoid recursion / secondary failures inside the crash handler
+    trap - ERR
+    set +e
+
     local exit_code=$?
     local line_no=$1
     local bash_command="${BASH_COMMAND}"
 
-    log_error "CRITICAL: Script crashed with exit code ${exit_code}."
-    log_error "  → Failed command: ${bash_command}"
-    log_error "  → Location: Line ${line_no}"
+    # Get the actual line of code from the script itself (best-effort)
+    local code_snippet
+    code_snippet=$(sed -n "${line_no}p" "$0" 2>/dev/null | sed 's/^\s*//' 2>/dev/null)
+
+    echo "" >&2
+    log_error "╔══════════════════════════════════════════════════════════════╗"
+    log_error "║ CRITICAL FAILURE DETECTED                                    ║"
+    log_error "╠══════════════════════════════════════════════════════════════╣"
+    log_error "║ Exit Code : ${exit_code}"
+    log_error "║ Line No   : ${line_no}"
+    log_error "║ Command   : ${bash_command}"
+    log_error "║ Code      : ${code_snippet:-<unavailable>}"
+    log_error "╚══════════════════════════════════════════════════════════════╝"
 
     # Print the full function call stack (Backtrace)
-    log_error "  → Call Stack:"
+    log_error "Call Stack:"
     local i=0
     while caller "$i" >/dev/null 2>&1; do
         local frame_data frame_line frame_func frame_file
-        frame_data=$(caller "$i")
+        frame_data=$(caller "$i" 2>/dev/null)
         frame_line=$(echo "${frame_data}" | awk '{print $1}')
         frame_func=$(echo "${frame_data}" | awk '{print $2}')
         frame_file=$(echo "${frame_data}" | awk '{print $3}')
-        log_error "    [${i}] ${frame_func} at ${frame_file}:${frame_line}"
+        log_error "  [${i}] ${frame_func} at ${frame_file}:${frame_line}"
         i=$((i + 1))
     done
+
+    # Dump the last 10 lines of the log to stderr for immediate visibility
+    if [ -f "${LOG_FILE}" ]; then
+        echo "Last 10 log entries:" >&2
+        tail -n 10 "${LOG_FILE}" 2>/dev/null | sed 's/^/  >> /' >&2
+    fi
 
     update_status "FAILED: Crash at line ${line_no} (rc=${exit_code})"
     exit "${exit_code}"
@@ -2182,6 +2308,7 @@ run_debug_menu_only() {
                     # debug menu remains responsive. The Python script itself
                     # keeps the test notification visible until you dismiss it.
                     sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+                        ZNH_RUN_ID="${RUN_ID}" \
                         /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify \
                         >/dev/null 2>&1 &
                     echo "Test notification launched. Close it from your desktop when you are done."
@@ -3079,7 +3206,7 @@ check_and_install() {
             log_info "Installing $package..."
             update_status "Installing dependency: $package"
             
-            if ! sudo zypper install -y "$package" >> "${LOG_FILE}" 2>&1; then
+            if ! execute_guarded "Install dependency package '$package' (provides '$cmd')" sudo zypper install -y "$package"; then
                 log_error "Failed to install $package. Please install it manually and re-run this script."
                 update_status "FAILED: Could not install $package"
                 exit 1
@@ -5390,6 +5517,16 @@ from pathlib import Path
 
 DEBUG = os.getenv("ZNH_DEBUG", "").lower() in ("1", "true", "yes", "debug")
 
+# Correlation ID:
+# - When invoked from the bash helper/debug menu we pass ZNH_RUN_ID so Python
+#   logs can be linked back to install/verify runs.
+# - Under systemd, INVOCATION_ID provides a unique ID per service start.
+RUN_ID = (
+    os.getenv("ZNH_RUN_ID")
+    or os.getenv("INVOCATION_ID")
+    or f"PY-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+)
+
 # Logging setup
 LOG_DIR = Path.home() / ".local" / "share" / "zypper-notify"
 LOG_FILE = LOG_DIR / "notifier-detailed.log"
@@ -5449,7 +5586,7 @@ def log_to_file(level: str, msg: str) -> None:
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] [{level}] {msg}\n")
+            f.write(f"[{timestamp}] [{level}] [RUN={RUN_ID}] {msg}\n")
     except Exception as e:
         print(f"Failed to write log: {e}", file=sys.stderr)
 

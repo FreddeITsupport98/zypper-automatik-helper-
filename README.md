@@ -825,22 +825,53 @@ No manual maintenance required!
 
 ### Understanding Log Entries
 
-Each log entry has a timestamp and severity level:
+#### Helper (Installer / Verify / Repair) Log Format
 
-```
-[2025-11-19 18:30:45] [INFO] Starting update check...
-[2025-11-19 18:30:46] [DEBUG] Checking AC power status (form_factor: laptop)
-[2025-11-19 18:30:46] [INFO] AC power detected: plugged in
-[2025-11-19 18:30:47] [INFO] Environment is safe for updates
-[2025-11-19 18:30:50] [INFO] Found 12 packages to upgrade (snapshot: 20251119)
-[2025-11-19 18:30:51] [ERROR] Failed to show notification: [error details]
+The bash helper writes structured log lines like:
+
+```text
+[INFO] 2026-02-08 20:29:27 [RUN=R20260208T202927-12345] Starting installation...
+[WARN] 2026-02-08 20:29:30 [RUN=R20260208T202927-12345] Config key missing: DUP_EXTRA_FLAGS (using safe default)
+[ERROR] 2026-02-08 20:29:34 [RUN=R20260208T202927-12345] zypper dup failed: lock held by YaST
 ```
 
-**Severity Levels:**
+Notes:
+- `RUN=...` is a per-invocation correlation ID. It lets you grep *all* related lines across install logs, the aggregated daily diagnostics log, and the journal.
+- When a GUI action triggers a root operation, some lines may also include `TID=...` (Trace ID) so you can correlate the click/action with the backend work.
+
+#### Notifier (Python) Log Format
+
+The notifier’s detailed log now includes a run tag too:
+
+```text
+[2026-02-08 20:29:35] [INFO] [RUN=...] Starting notifier check
+```
+
+- If the notifier is started by systemd, it will automatically use systemd’s `INVOCATION_ID` as its RUN ID.
+- If the helper triggers a notifier action directly (e.g. `--test-notify`), it passes `ZNH_RUN_ID` so the Python log lines share the same `RUN=...` value as the helper.
+
+#### Severity Levels
 - `INFO` - Normal operation, status updates
-- `DEBUG` - Detailed information for troubleshooting (only visible with `ZNH_DEBUG=1`)
+- `WARN` - Non-fatal issues and degraded states (safe fallbacks)
+- `DEBUG` - Detailed troubleshooting output (only emitted when debug mode is enabled)
 - `ERROR` - Something went wrong, includes details
-- `SUCCESS` - Operation completed successfully (installation logs only)
+- `SUCCESS` - Operation completed successfully
+
+#### Journald / syslog integration (best-effort)
+
+The helper also emits structured lines to the system journal (without changing the existing file logs). Useful commands:
+
+```bash
+# Root/system journal (structured helper lines)
+journalctl -t zypper-auto-helper -n 200 --no-pager
+
+# User notifier unit journal
+journalctl --user -u zypper-notify-user.service -n 200 --no-pager
+```
+
+#### Console output (interactive)
+
+When you run the helper manually in a terminal, it also prints a readable, color-coded console stream, while keeping the on-disk logs plain text.
 
 -----
 
