@@ -7879,6 +7879,16 @@ RUN_UPDATE() {
     set -e
 }
 
+# Self-test mode: validate that correlation IDs and logging work end-to-end
+# without actually running any updates.
+if [[ "${1:-}" == "--selftest" ]]; then
+    log "Selftest mode (--selftest) invoked; not performing updates"
+    log "Selftest: ZNH_RUN_ID=${ZNH_RUN_ID}"
+    log "Selftest: ZYPPER_TRACE_ID=${ZYPPER_TRACE_ID:-}"
+    echo "zypper-run-install selftest OK (RUN=${ZNH_RUN_ID}${ZYPPER_TRACE_ID:+, TID=${ZYPPER_TRACE_ID}})"
+    exit 0
+fi
+
 # If invoked with --inner, run the update directly in this process instead of
 # spawning another terminal. This avoids relying on exported shell functions
 # inside a separate konsole/gnome-terminal bash.

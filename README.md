@@ -939,6 +939,12 @@ systemctl status zypper-autodownload.service
 - Check last run status: `cat ~/.local/share/zypper-notify/last-run-status.txt`
 - Verify PyGObject is installed: `python3 -c "import gi"`
 
+**Problem: "Install Now" action does nothing / closes immediately**
+- Check the Ready-to-Install helper log: `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+- Safe smoke test (does NOT run updates):
+  - `ZYPPER_TRACE_ID=TEST-123 ZNH_RUN_ID=TEST-123 ~/.local/bin/zypper-run-install --selftest`
+  - Or, to mimic the notifier launch style: `systemd-run --user --scope --setenv=ZYPPER_TRACE_ID=TEST-123 --setenv=ZNH_RUN_ID=TEST-123 ~/.local/bin/zypper-run-install --selftest`
+
 **Problem: Updates skipped on laptop**
 - Check if on battery: `cat ~/.local/share/zypper-notify/notifier-detailed.log | grep "AC power"`
 - Check for metered connection: `grep "metered" ~/.local/share/zypper-notify/notifier-detailed.log`
