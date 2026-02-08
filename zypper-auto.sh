@@ -392,27 +392,48 @@ if [ $# -gt 0 ]; then
     fi
 fi
 
+# Format a command (argv) into a shell-escaped string for logs.
+# This is best-effort: it's meant for humans and diagnostics.
+_format_cmd() {
+    local out="" arg
+    for arg in "$@"; do
+        out+="$(printf '%q ' "$arg")"
+    done
+    # Trim trailing space
+    printf '%s' "${out% }"
+}
+
 # Execute a command with full capturing.
 # Usage: execute_guarded "Description of task" command arg1 arg2 ...
+#
+# Behaviour:
+# - Always captures stdout/stderr.
+# - On success: logs a SUCCESS line. Command output is only persisted when
+#   DEBUG_MODE=1 or ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1.
+# - On failure: dumps full captured output to stderr and the install log.
 execute_guarded() {
     local desc="$1"
     shift
 
     local tmp_out cmd_str
     tmp_out="$(mktemp)"
-    cmd_str="$*"
+    cmd_str="$(_format_cmd "$@")"
 
     log_debug "EXEC: [${desc}] -> ${cmd_str}"
 
-    # Run command, capture all output to temp file
     if "$@" >"$tmp_out" 2>&1; then
         log_success "${desc}"
-        # Always append command output to the on-disk log (best-effort). This
-        # keeps behaviour similar to the older '>> ${LOG_FILE} 2>&1' approach
-        # while still allowing us to surface output on failure.
-        if [ -s "$tmp_out" ] 2>/dev/null; then
-            cat "$tmp_out" >> "${LOG_FILE}" 2>/dev/null || true
+
+        # Persist successful command output only when explicitly requested.
+        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null || [ "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-0}" -eq 1 ] 2>/dev/null; then
+            if [ -s "$tmp_out" ] 2>/dev/null; then
+                sed 's/^/  [CMD_OUT] /' "$tmp_out" >>"${LOG_FILE}" 2>/dev/null || true
+                if [ -n "${TRACE_LOG:-}" ]; then
+                    sed 's/^/[CMD_OUT] /' "$tmp_out" >>"${TRACE_LOG}" 2>/dev/null || true
+                fi
+            fi
         fi
+
         rm -f "$tmp_out" 2>/dev/null || true
         return 0
     else
@@ -420,7 +441,13 @@ execute_guarded() {
         log_error "FAILED: ${desc} (Exit Code: ${rc})"
         log_error "Command was: ${cmd_str}"
         log_error "⬇⬇⬇ COMMAND OUTPUT ⬇⬇⬇"
-        cat "$tmp_out" | tee -a "${LOG_FILE}" >&2
+
+        # Prefix output lines so they're easy to grep in large install logs.
+        sed 's/^/  [CMD_OUT] /' "$tmp_out" | tee -a "${LOG_FILE}" >&2
+        if [ -n "${TRACE_LOG:-}" ]; then
+            sed 's/^/[CMD_OUT] /' "$tmp_out" >>"${TRACE_LOG}" 2>/dev/null || true
+        fi
+
         log_error "⬆⬆⬆ END COMMAND OUTPUT ⬆⬆⬆"
         rm -f "$tmp_out" 2>/dev/null || true
         return $rc
@@ -984,6 +1011,14 @@ failure_handler() {
     if [ -f "${LOG_FILE}" ]; then
         echo "Last 10 log entries:" >&2
         tail -n 10 "${LOG_FILE}" 2>/dev/null | sed 's/^/  >> /' >&2
+    fi
+
+    # TRACE_LOG often contains xtrace output (when debug mode is enabled) and
+    # other mirrored diagnostics. Including a short tail here helps correlate
+    # crashes even when LOG_FILE is very large.
+    if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
+        echo "Last 20 trace entries:" >&2
+        tail -n 20 "${TRACE_LOG}" 2>/dev/null | sed 's/^/  >> /' >&2
     fi
 
     update_status "FAILED: Crash at line ${line_no} (rc=${exit_code})"
@@ -4009,7 +4044,10 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
     fi
     USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
     log_debug "Using user bus path for test-notify: ${USER_BUS_PATH}"
+    # Propagate our RUN_ID into the Python notifier so notifier-detailed.log
+    # can be correlated back to this helper invocation.
     sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
+        ZNH_RUN_ID="${RUN_ID}" \
         /usr/bin/python3 "${NOTIFY_SCRIPT_PATH}" --test-notify || true
     exit 0
 elif [[ "${1:-}" == "--status" ]]; then
@@ -4259,6 +4297,35 @@ STATUS_FILE="$LOG_DIR/download-status.txt"
 START_TIME_FILE="$LOG_DIR/download-start-time.txt"
 CACHE_DIR="/var/cache/zypp/packages"
 
+# Per-run correlation ID for the downloader (separate from the install helper
+# RUN_ID). This helps correlate downloader activity inside journalctl.
+RUN_ID="DL-$(date +%Y%m%dT%H%M%S)-$$"
+
+# Best-effort journald/syslog integration for key events.
+# Disabled when ZYPPER_AUTO_JOURNAL_LOGGING=0 is set in the environment.
+JOURNAL_LOGGING_ENABLED="${ZYPPER_AUTO_JOURNAL_LOGGING:-1}"
+
+dlog() {
+    # Always include a stable tag and a per-run RUN id.
+    local msg="$*"
+    if [ "${JOURNAL_LOGGING_ENABLED}" = "0" ]; then
+        return 0
+    fi
+    command -v logger >/dev/null 2>&1 || return 0
+    logger -t "zypper-auto-helper" -p user.info -- "[DOWNLOADER] [RUN=${RUN_ID}] ${msg}" 2>/dev/null || true
+}
+
+derr() {
+    local msg="$*"
+    if [ "${JOURNAL_LOGGING_ENABLED}" = "0" ]; then
+        return 0
+    fi
+    command -v logger >/dev/null 2>&1 || return 0
+    logger -t "zypper-auto-helper" -p user.err -- "[DOWNLOADER] [RUN=${RUN_ID}] ${msg}" 2>/dev/null || true
+}
+
+dlog "Downloader run started"
+
 # Atomic write helper for the shared status file so the user notifier
 # never sees partially-written lines.
 write_status() {
@@ -4308,6 +4375,7 @@ is_metered() {
 
 if is_metered; then
     echo "Metered connection detected via nmcli; skipping downloader run." >&2
+    dlog "Metered connection detected; skipping downloader run"
     # Reset status to idle so the user notifier doesn't get stuck showing stale stages.
     write_status "idle"
     exit 0
@@ -4359,6 +4427,7 @@ handle_lock_or_fail() {
     local exit_code="$1" err_file="$2"
     if [ "$exit_code" -eq 7 ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Zypper is locked by another process; skipping this downloader run (will retry on next timer)" >&2
+        dlog "Zypper lock detected (exit 7); skipping this run"
         write_status "idle"
         if [ -n "$err_file" ] && [ -f "$err_file" ]; then
             rm -f "$err_file"
@@ -4392,6 +4461,8 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     fi
 
     cat "$REFRESH_ERR" >&2 || true
+    STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
+    derr "Refresh failed (rc=${ZYP_EXIT}); status=${STATUS_NOW}"
     rm -f "$REFRESH_ERR"
     # Exit 0 so systemd does not mark the service failed; the notifier
     # will pick up the error:* status on the next run.
@@ -4419,6 +4490,8 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     fi
 
     cat "$DRY_ERR" >&2 || true
+    STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
+    derr "Dry-run failed (rc=${ZYP_EXIT}); status=${STATUS_NOW}"
     rm -f "$DRY_ERR" "$DRY_OUTPUT"
     exit 0
 fi
@@ -4438,6 +4511,7 @@ if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
     # "no updates" state on the next run. DRYRUN_OUTPUT_FILE already
     # contains the latest "Nothing to do" output for reference.
     write_status "idle"
+    dlog "No packages to upgrade (idle)"
     rm -f "$DRY_OUTPUT"
     exit 0
 fi
@@ -4498,6 +4572,7 @@ if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
     # downloaded by this helper, but the notifier will see that updates
     # exist from its own dry-run.
     write_status "complete:0:0"
+    dlog "Detection-only mode; skipping download-only pass"
     trigger_notifier
     exit 0
 fi
@@ -4536,9 +4611,11 @@ DURATION=$((END_TIME - START_TIME))
 #  - Otherwise, leave the previous status (e.g. idle or complete:0:0)
 if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
     write_status "complete:$DURATION:$ACTUAL_DOWNLOADED"
+    dlog "Download complete: downloaded=${ACTUAL_DOWNLOADED} duration=${DURATION}s"
     trigger_notifier
 elif [ $ZYP_RET -ne 0 ]; then
     write_status "error:solver:$ZYP_RET"
+    derr "Download-only returned rc=${ZYP_RET} (solver/manual intervention may be required)"
 fi
 
 DLSCRIPT
@@ -5545,6 +5622,7 @@ import os
 import re
 import time
 import shlex
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -5615,11 +5693,49 @@ def rotate_log_if_needed():
         print(f"Failed to rotate log: {e}", file=sys.stderr)
 
 def log_to_file(level: str, msg: str) -> None:
-    """Write log message to file with timestamp."""
+    """Write log message to file with timestamp.
+
+    Also emits ERROR-level lines to the system journal (best-effort) so you can
+    correlate notifier crashes via:
+        journalctl -t zypper-auto-helper
+
+    Journal logging defaults to errors-only to avoid spamming the journal.
+    Controls:
+      - ZNH_JOURNAL_LOGGING=0 disables all journal emission
+      - ZNH_JOURNAL_ERRORS_ONLY=0 emits INFO/DEBUG as well
+    """
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] [{level}] [RUN={RUN_ID}] {msg}"
+
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] [{level}] [RUN={RUN_ID}] {msg}\n")
+            f.write(line + "\n")
+
+        # Best-effort journald/syslog integration (errors-only by default)
+        try:
+            journal_enabled = os.getenv("ZNH_JOURNAL_LOGGING", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+                "enabled",
+            )
+            errors_only = os.getenv("ZNH_JOURNAL_ERRORS_ONLY", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+                "enabled",
+            )
+            if journal_enabled and (not errors_only or level == "ERROR") and shutil.which("logger"):
+                prio = "user.err" if level == "ERROR" else "user.info"
+                subprocess.run(
+                    ["logger", "-t", "zypper-auto-helper", "-p", prio, "--", line],
+                    check=False,
+                )
+        except Exception:
+            pass
+
     except Exception as e:
         print(f"Failed to write log: {e}", file=sys.stderr)
 

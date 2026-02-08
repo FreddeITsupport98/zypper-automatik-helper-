@@ -859,17 +859,24 @@ The notifier’s detailed log now includes a run tag too:
 
 #### Guarded command execution (installer / verify)
 
-Most critical operations (systemctl enable/restart, zypper maintenance commands, etc.) are executed via a guarded wrapper that captures stdout/stderr into the install log. If a command fails, its full captured output is also surfaced immediately on stderr so you don’t need to hunt through log files to see *why* it failed.
+Most critical operations (systemctl enable/restart, zypper maintenance commands, etc.) are executed via a guarded wrapper that captures stdout/stderr. By default it logs a clean SUCCESS/ERROR summary line; if a command fails, its full captured output is immediately dumped to both the install log and stderr so you can see *why* it failed without tailing.
+
+Notes:
+- To also persist successful command output (very verbose), run with `--debug` or set `ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1`.
 
 #### Journald / syslog integration (best-effort)
 
-The helper also emits structured lines to the system journal (without changing the existing file logs). Useful commands:
+The helper emits structured lines to the system journal (without changing the existing file logs), tagged as `zypper-auto-helper`. In addition:
+- The root downloader emits key lifecycle/error summaries as `[DOWNLOADER] ...` lines.
+- The Python notifier emits **ERROR** lines to the journal by default (errors-only), so crashes are visible in `journalctl`.
+
+Useful commands:
 
 ```bash
-# Root/system journal (structured helper lines)
+# Root/system journal (structured helper + downloader summaries + notifier errors)
 journalctl -t zypper-auto-helper -n 200 --no-pager
 
-# User notifier unit journal
+# User notifier unit journal (stdout/stderr from the user service)
 journalctl --user -u zypper-notify-user.service -n 200 --no-pager
 ```
 
