@@ -6472,6 +6472,11 @@ def main():
         if check_snoozed():
             log_info("Updates are currently snoozed, skipping all notifications")
             return
+
+        # If the background downloader just finished, we'll attach a short
+        # "downloads complete" note to the main "Updates Ready" notification.
+        # This avoids showing two notifications back-to-back.
+        completion_note = ""
         
         # Check if downloader is actively downloading updates
         download_status_file = "/var/log/zypper-auto/download-status.txt"
@@ -6495,18 +6500,25 @@ def main():
                     else:
                         # Handle stage-based status for fresh operations
                         if status == "refreshing":
+                            # IMPORTANT: when the downloader is actively refreshing, do not fall
+                            # through into the normal dry-run parsing logic. Otherwise, if showing
+                            # the progress notification fails for any reason, we may incorrectly
+                            # emit an "Updates Ready" notification while refresh is still running.
                             log_info("Stage: Refreshing repositories")
-                            n = Notify.Notification.new(
-                                "Checking for updates...",
-                                "Refreshing repositories...",
-                                "emblem-synchronizing"
-                            )
-                            n.set_timeout(5000)  # 5 seconds
-                            # Set hint to replace previous download status notifications
-                            n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
-                            n.show()
-                            time.sleep(0.1)
-                            return  # Exit, will check again in 5 seconds
+                            try:
+                                n = Notify.Notification.new(
+                                    "Checking for updates...",
+                                    "Refreshing repositories...",
+                                    "emblem-synchronizing"
+                                )
+                                n.set_timeout(5000)  # 5 seconds
+                                # Set hint to replace previous download status notifications
+                                n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-status"))
+                                n.show()
+                                time.sleep(0.1)
+                            except Exception as e:
+                                log_debug(f"Failed to show 'refreshing' notification: {e}")
+                            return  # Exit: refresh in progress; check again on next timer tick
 
                         elif status.startswith("downloading:"):
                             # Extract from "downloading:TOTAL:SIZE:DOWNLOADED:PERCENT" format
@@ -6744,56 +6756,37 @@ def main():
                             # Skip the downloads-complete popup; normal update check below
                             # will show the usual 'system up to date' message instead.
                         else:
-                            # Build a completion message for both cases:
-                            #  - actual_downloaded == 0  => everything was already in cache
-                            #  - actual_downloaded > 0   => we just downloaded new packages
+                            # There are still updates pending. We'll show the main
+                            # "Updates Ready" notification below.
+                            #
+                            # IMPORTANT: do NOT show a separate "✅ Downloads Complete!"
+                            # popup here, because it often results in two back-to-back
+                            # notifications (Downloads Complete + Updates Ready), which
+                            # feels like duplicates.
                             if actual_downloaded == 0:
-                                log_info("All packages were already cached; treating as completed download")
-                                changelog_msg = (
-                                    "All update packages are already present in the local cache.\n\n"
-                                    "No additional downloads were required."
-                                )
+                                log_info("All packages were already cached; marking downloads complete (no separate popup)")
+                                completion_note = "✅ Downloads complete (all packages already in cache)."
                             else:
-                                # Packages were actually downloaded, show notification
                                 log_info(f"Downloaded {actual_downloaded} packages in {time_str}")
-                                
-                                # Base message: focus on download completion; the separate
-                                # "Updates Ready" notification will tell the user when to install.
-                                changelog_msg = (
-                                    f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
-                                    "All packages are now in the local cache."
-                                )
+                                completion_note = f"✅ Downloads complete: downloaded {actual_downloaded} package(s) in {time_str}."
+
                                 # If we have fresh dry-run output, attach a short preview
                                 if dry_output:
                                     try:
                                         preview_packages = extract_package_preview(dry_output, max_packages=5)
                                         if preview_packages:
                                             preview_str = ", ".join(preview_packages)
-                                            changelog_msg = (
-                                                f"Downloaded {actual_downloaded} packages in {time_str}.\n\n"
-                                                f"Including: {preview_str}"
-                                            )
-                                            log_info(f"Added changelog preview: {preview_str}")
+                                            completion_note += f" Including: {preview_str}"
+                                            log_info(f"Added download completion preview: {preview_str}")
                                     except Exception as e:
-                                        log_debug(f"Could not build changelog preview: {e}")
-                            
-                            if pending_count is None or pending_count > 0:
-                                n = Notify.Notification.new(
-                                    "✅ Downloads Complete!",
-                                    changelog_msg,
-                                    "emblem-default"
-                                )
-                                n.set_timeout(0)  # 0 = persist until user interaction
-                                n.set_urgency(Notify.Urgency.NORMAL)  # Normal urgency
-                                n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-download-complete"))
-                                n.show()
-                                time.sleep(0.1)  # Wait a bit before continuing
-                                # Clear the complete status so it doesn't show again
-                                try:
-                                    with open("/var/log/zypper-auto/download-status.txt", "w") as f:
-                                        f.write("idle")
-                                except Exception:
-                                    pass
+                                        log_debug(f"Could not build download completion preview: {e}")
+
+                            # Clear the complete status so it doesn't show again
+                            try:
+                                with open(download_status_file, "w") as f:
+                                    f.write("idle")
+                            except Exception as e2:
+                                log_debug(f"Failed to reset download status after completion: {e2}")
                         # Continue to show install notification below
                     except Exception:
                         log_debug("Could not process completion status")
@@ -7043,6 +7036,11 @@ def main():
         
         # Write cache for future checks
         write_cache(package_count, snapshot)
+
+        # If downloads just completed, attach that info to the updates-ready message
+        # so the user sees only one notification.
+        if completion_note:
+            message = completion_note + "\n\n" + message
 
         log_info("Updates are pending. Sending 'updates ready' reminder.")
         update_status(f"Updates available: {title}")

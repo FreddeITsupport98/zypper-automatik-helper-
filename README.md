@@ -75,7 +75,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Stage-Based Download Progress (v50–v61):** Real-time notifications showing download stages:
     * **"Checking for updates..."** - Refreshing repositories
     * **"Downloading updates... (X of Y packages)"** - Active download with real-time progress
-    * **"✅ Downloads Complete!"** - Download finished with duration and package preview
+    * **(Download complete)** - Completion info is attached to the main **"Updates Ready"** notification to avoid duplicate popups
     * **"Updates Ready to Install"** - Ready to apply with snapshot info
 * **Smart Download Detection (v49–v61):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications. In v61 the notifier additionally re-checks `zypper dup --dry-run` when the downloader reports `complete:` and suppresses the "✅ Downloads Complete!" popup if there are no remaining updates, avoiding stale completion notifications after you have already installed everything manually.
 * **Safe Downloads (Root):** The downloader service is a simple, root-only worker that always runs at low priority and logs to `/var/log/zypper-auto`; network/AC safety decisions are enforced in the user-space notifier.
