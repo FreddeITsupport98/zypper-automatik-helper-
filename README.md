@@ -44,7 +44,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
     * Shell aliases automatically configured for Bash, Zsh, and Fish
     * Commands: `--verify`, `--repair`, `--diagnose`, `--check`, `--help`
-* **Advanced Verification & Auto-Repair (v51):** Comprehensive 12-point health check system:
+* **Advanced Verification & Auto-Repair (v51):** Comprehensive 22-point health check system:
     * Verifies services, scripts, permissions, processes, and cache
     * Multi-stage auto-repair with retry logic (up to 3 attempts per issue)
     * Deep health checks: active + enabled + triggers scheduled
@@ -131,7 +131,7 @@ This service's only job is to download packages when it's safe, and report progr
 ### 3. Periodic Verification / Auto-Repair Service
 
 In addition to the downloader, a small root service periodically runs the same
-12-point verification and auto-repair logic as `zypper-auto-helper --verify`:
+22-point verification and auto-repair logic as `zypper-auto-helper --verify`:
 
 * **Service:** `/etc/systemd/system/zypper-auto-verify.service`
 * Runs `zypper-auto-helper --verify` as a oneshot root service.
@@ -912,7 +912,15 @@ sudo zypper-auto-helper --dash-install
 Open dashboard only:
 
 ```bash
-sudo zypper-auto-helper --dash-open
+zypper-auto-helper --dash-open
+```
+
+Force a specific browser (optional):
+
+```bash
+zypper-auto-helper --dash-open firefox
+# or
+ZYPPER_AUTO_DASHBOARD_BROWSER=google-chrome zypper-auto-helper --dash-open
 ```
 
 Drop executable hook scripts into:
@@ -950,7 +958,15 @@ sudo zypper-auto-helper --dash-install
 Open dashboard only:
 
 ```bash
-sudo zypper-auto-helper --dash-open
+zypper-auto-helper --dash-open
+```
+
+Force a specific browser (optional):
+
+```bash
+zypper-auto-helper --dash-open firefox
+# or
+ZYPPER_AUTO_DASHBOARD_BROWSER=google-chrome zypper-auto-helper --dash-open
 ```
 
 Open it in your browser:

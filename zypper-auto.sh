@@ -66,14 +66,30 @@ fi
 # Allow opening the dashboard WITHOUT sudo.
 # This improves UX because browser launching is tied to the user's desktop
 # session, and running via sudo often loses the GUI environment.
+#
+# Optional browser override (best-effort):
+#   zypper-auto-helper --dash-open firefox
+#   ZYPPER_AUTO_DASHBOARD_BROWSER=firefox zypper-auto-helper --dash-open
 if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_path="$HOME/.local/share/zypper-notify/status.html"
+    dash_browser="${2:-${ZYPPER_AUTO_DASHBOARD_BROWSER:-${DASHBOARD_BROWSER:-}}}"
+
     if [ -f "${dash_path}" ]; then
         echo "Dashboard path: ${dash_path}"
+
+        if [ -n "${dash_browser:-}" ]; then
+            echo "Browser override: ${dash_browser}"
+        fi
         echo "Open in browser: xdg-open ${dash_path}"
-        if command -v xdg-open >/dev/null 2>&1; then
+
+        # Best-effort open.
+        # Prefer explicit browser when requested; fall back to xdg-open.
+        if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
+            "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+        elif command -v xdg-open >/dev/null 2>&1; then
             xdg-open "${dash_path}" >/dev/null 2>&1 || true
         fi
+
         echo ""
         echo "To refresh/regenerate first (requires sudo):"
         echo "  sudo zypper-auto-helper --dashboard"
@@ -114,6 +130,7 @@ ENABLE_PIPX_UPDATES="true"  # new: pipx-based Python CLI updates
 WEBHOOK_URL=""            # Remote monitoring endpoint (Discord/Slack/ntfy/etc.)
 HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
 DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
+DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. firefox)
 HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
@@ -589,6 +606,12 @@ HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 #   - ~/.local/share/zypper-notify/status.html (user copy when available)
 DASHBOARD_ENABLED=true
 
+# DASHBOARD_BROWSER
+# Optional: override the browser used by --dash-open / --dash-install.
+# Leave empty to use the system default (xdg-open).
+# Examples: "firefox", "google-chrome", "chromium"
+DASHBOARD_BROWSER=""
+
 # ---------------------------------------------------------------------
 # Timer intervals for downloader / notifier / verification
 # ---------------------------------------------------------------------
@@ -915,6 +938,8 @@ EOF
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
+    # DASHBOARD_BROWSER is an optional command name; keep empty by default.
+    DASHBOARD_BROWSER="${DASHBOARD_BROWSER:-}"
 
     # Log effective configuration summary for easier diagnostics
     log_debug "Effective configuration after validation:"
@@ -937,6 +962,7 @@ EOF
     log_debug "  AUTO_DUPLICATE_RPM_MODE=${AUTO_DUPLICATE_RPM_MODE:-whitelist}"
     log_debug "  HOOKS_ENABLED=${HOOKS_ENABLED:-true}"
     log_debug "  DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-true}"
+    log_debug "  DASHBOARD_BROWSER=${DASHBOARD_BROWSER:-<default>}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
     if [ -n "${WEBHOOK_URL:-}" ]; then
         log_debug "  WEBHOOK_URL=<configured>"
@@ -986,6 +1012,7 @@ EOF
     _mark_missing_key "HOOKS_ENABLED"
     _mark_missing_key "HOOKS_BASE_DIR"
     _mark_missing_key "DASHBOARD_ENABLED"
+    _mark_missing_key "DASHBOARD_BROWSER"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -1030,6 +1057,9 @@ EOF
                 DASHBOARD_ENABLED)
                     log_info "  - DASHBOARD_ENABLED: enables generation of a static HTML status page."
                     ;;
+                DASHBOARD_BROWSER)
+                    log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -1072,6 +1102,9 @@ EOF
                     ;;
                 DASHBOARD_ENABLED)
                     DASHBOARD_ENABLED="true"
+                    ;;
+                DASHBOARD_BROWSER)
+                    DASHBOARD_BROWSER=""
                     ;;
             esac
         done
@@ -1585,6 +1618,7 @@ run_verification_only() {
     VERIFICATION_FAILED=0
     REPAIR_ATTEMPTS=0
     MAX_REPAIR_ATTEMPTS=3
+    local TOTAL_CHECKS=22
     
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
@@ -1624,7 +1658,7 @@ attempt_repair() {
 }
 
 # Check 1: System service is active and healthy
-log_debug "[1/12] Checking system downloader service..."
+log_debug "[1/${TOTAL_CHECKS}] Checking system downloader service..."
 if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
     # Additional health check: verify it's enabled
     if systemctl is-enabled "${DL_SERVICE_NAME}.timer" &>/dev/null; then
@@ -1667,7 +1701,7 @@ else
 fi
 
 # Check 2: User service is active and healthy
-log_debug "[2/12] Checking user notifier service..."
+log_debug "[2/${TOTAL_CHECKS}] Checking user notifier service..."
 if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-active "${NT_SERVICE_NAME}.timer" &>/dev/null; then
     # Check if enabled
     if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-enabled "${NT_SERVICE_NAME}.timer" &>/dev/null; then
@@ -1889,7 +1923,7 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
 fi
 
 # Check 11: Stale zypp lock cleanup
-log_debug "[11/12] Checking for stale zypp lock file..."
+log_debug "[11/${TOTAL_CHECKS}] Checking for stale zypp lock file..."
 if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
     ZYPP_LOCK_FILE="/run/zypp.pid"
     [ -f "/var/run/zypp.pid" ] && ZYPP_LOCK_FILE="/var/run/zypp.pid"
@@ -1913,7 +1947,7 @@ else
 fi
 
 # Check 12: Root filesystem free space and cleanup
-log_debug "[12/12] Checking root filesystem free space..."
+log_debug "[12/${TOTAL_CHECKS}] Checking root filesystem free space..."
 ROOT_FREE_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
     log_error "⚠ Warning: Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
@@ -1935,6 +1969,211 @@ else
     log_success "✓ Root filesystem has sufficient free space (${ROOT_FREE_MB:-unknown}MB)"
 fi
 
+# Check 13: RPM database integrity (best-effort)
+log_debug "[13/${TOTAL_CHECKS}] Checking RPM database integrity..."
+RPM_DB_PATH=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
+if [ -z "${RPM_DB_PATH:-}" ]; then
+    RPM_DB_PATH="/usr/lib/sysimage/rpm"
+fi
+
+RPM_DB_FILE=""
+if [ -f "${RPM_DB_PATH}/Packages" ]; then
+    RPM_DB_FILE="${RPM_DB_PATH}/Packages"
+elif [ -f "${RPM_DB_PATH}/rpmdb.sqlite" ]; then
+    RPM_DB_FILE="${RPM_DB_PATH}/rpmdb.sqlite"
+fi
+
+RPMDB_VERIFY_BIN=""
+if command -v rpmdb_verify >/dev/null 2>&1; then
+    RPMDB_VERIFY_BIN="$(command -v rpmdb_verify)"
+elif [ -x /usr/lib/rpm/rpmdb_verify ]; then
+    RPMDB_VERIFY_BIN="/usr/lib/rpm/rpmdb_verify"
+fi
+
+if [ -n "${RPMDB_VERIFY_BIN}" ] && [ -n "${RPM_DB_FILE}" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" timeout 15 "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
+            log_success "✓ RPM database structural check passed"
+        else
+            log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
+            log_error "  → Manual recovery (risky): sudo rpm --rebuilddb"
+            VERIFICATION_FAILED=1
+        fi
+    else
+        if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
+            log_success "✓ RPM database structural check passed"
+        else
+            log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
+            log_error "  → Manual recovery (risky): sudo rpm --rebuilddb"
+            VERIFICATION_FAILED=1
+        fi
+    fi
+else
+    log_info "ℹ RPM DB structural check skipped (rpmdb_verify not found or db file not detected at ${RPM_DB_PATH})"
+fi
+
+# Check 14: Targeted RPM package verification (critical packages)
+log_debug "[14/${TOTAL_CHECKS}] Verifying critical system packages (rpm -V)..."
+(
+    set +e
+    critical_pkgs=(glibc systemd zypper libzypp rpm)
+    rpm_verify_out=$(rpm -V --nomtime --nosize "${critical_pkgs[@]}" 2>&1)
+    rpm_verify_rc=$?
+    set -e
+
+    if [ "$rpm_verify_rc" -eq 0 ] && [ -z "${rpm_verify_out:-}" ]; then
+        log_success "✓ rpm -V reports no verification differences for critical packages"
+    elif [ "$rpm_verify_rc" -eq 1 ]; then
+        log_warn "⚠ rpm -V reported verification differences (this may be expected on some systems)"
+        echo "rpm -V output (first 50 lines):" | tee -a "${LOG_FILE}"
+        printf '%s\n' "${rpm_verify_out}" | head -n 50 | tee -a "${LOG_FILE}"
+    else
+        log_error "✗ rpm -V failed unexpectedly (rc=${rpm_verify_rc})"
+        echo "rpm -V output (first 50 lines):" | tee -a "${LOG_FILE}"
+        printf '%s\n' "${rpm_verify_out}" | head -n 50 | tee -a "${LOG_FILE}"
+        VERIFICATION_FAILED=1
+    fi
+)
+
+# Check 15: Global systemd failed units
+log_debug "[15/${TOTAL_CHECKS}] Checking for failed systemd units (global)..."
+FAILED_UNITS=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+if [ -z "${FAILED_UNITS:-}" ]; then
+    log_success "✓ No failed systemd units detected"
+else
+    log_warn "⚠ Failed systemd units detected (may impact updates/networking):"
+    echo "${FAILED_UNITS}" | head -n 20 | sed 's/^/  - /' | tee -a "${LOG_FILE}"
+fi
+
+# Check 16: Systemd flapping/stale service hint (restart counters)
+log_debug "[16/${TOTAL_CHECKS}] Checking systemd restart counters (flapping hint)..."
+flap_warned=0
+for unit in "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" "${VERIFY_SERVICE_NAME}.service" "${CLEANUP_SERVICE_NAME}.service"; do
+    nr=$(systemctl show "$unit" -p NRestarts --value 2>/dev/null || echo "")
+    if [[ "${nr:-}" =~ ^[0-9]+$ ]] && [ "$nr" -gt 3 ] 2>/dev/null; then
+        log_warn "⚠ Unit $unit has NRestarts=$nr (possible flapping)"
+        flap_warned=1
+    fi
+done
+if [ -n "${SUDO_USER:-}" ] && [ -n "${USER_BUS_PATH:-}" ]; then
+    nr_u=$(sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user show "${NT_SERVICE_NAME}.service" -p NRestarts --value 2>/dev/null || echo "")
+    if [[ "${nr_u:-}" =~ ^[0-9]+$ ]] && [ "$nr_u" -gt 3 ] 2>/dev/null; then
+        log_warn "⚠ User unit ${NT_SERVICE_NAME}.service has NRestarts=$nr_u (possible flapping)"
+        flap_warned=1
+    fi
+fi
+if [ "${flap_warned}" -eq 0 ] 2>/dev/null; then
+    log_success "✓ No high restart counters detected on core units"
+fi
+
+# Check 17: DNS resolution for primary repo domain (best-effort)
+log_debug "[17/${TOTAL_CHECKS}] Checking DNS resolution for download.opensuse.org..."
+if getent hosts download.opensuse.org >/dev/null 2>&1; then
+    log_success "✓ DNS resolution OK for download.opensuse.org"
+else
+    log_warn "⚠ DNS resolution FAILED for download.opensuse.org (repo refresh may fail)"
+fi
+
+# Check 18: Repository accessibility (best-effort; network may be offline)
+log_debug "[18/${TOTAL_CHECKS}] Checking zypper repository configuration/readability..."
+if zypper --non-interactive --quiet lr >/dev/null 2>&1; then
+    log_success "✓ zypper repositories are readable (lr)"
+else
+    log_error "✗ Unable to list repositories (zypper lr failed)"
+    VERIFICATION_FAILED=1
+fi
+
+log_debug "[18/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; timeout)..."
+if command -v timeout >/dev/null 2>&1; then
+    if timeout 25 zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
+        log_success "✓ zypper refresh succeeded (repos reachable)"
+    else
+        log_warn "⚠ zypper refresh failed or timed out (network/repo issue?)"
+    fi
+else
+    if zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
+        log_success "✓ zypper refresh succeeded (repos reachable)"
+    else
+        log_warn "⚠ zypper refresh failed (network/repo issue?)"
+    fi
+fi
+
+# Check 19: Sudoers permissions hardening
+log_debug "[19/${TOTAL_CHECKS}] Checking sudoers permissions..."
+bad_sudoers=0
+if [ -f /etc/sudoers ]; then
+    sudoers_mode=$(stat -c %a /etc/sudoers 2>/dev/null || echo "")
+    if [ -n "${sudoers_mode:-}" ] && [ "${sudoers_mode}" != "440" ]; then
+        log_error "✗ /etc/sudoers permissions are ${sudoers_mode} (expected 440)"
+        bad_sudoers=1
+    fi
+fi
+if [ -d /etc/sudoers.d ]; then
+    while IFS= read -r -d '' f; do
+        m=$(stat -c %a "$f" 2>/dev/null || echo "")
+        if [ -n "${m:-}" ] && [ "$m" != "440" ]; then
+            log_error "✗ $f permissions are $m (expected 440)"
+            bad_sudoers=1
+        fi
+    done < <(find /etc/sudoers.d -maxdepth 1 -type f -print0 2>/dev/null)
+fi
+if [ "${bad_sudoers}" -eq 0 ] 2>/dev/null; then
+    log_success "✓ sudoers permissions look correct"
+else
+    log_warn "⚠ sudoers permissions issues detected; review /etc/sudoers and /etc/sudoers.d"
+fi
+
+# Check 20: Btrfs filesystem health (device error stats)
+log_debug "[20/${TOTAL_CHECKS}] Checking Btrfs device stats for / (if applicable)..."
+root_fstype=""
+if command -v findmnt >/dev/null 2>&1; then
+    root_fstype=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+fi
+if [ "${root_fstype:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
+    btrfs_out=$(btrfs device stats / 2>/dev/null || true)
+    btrfs_bad=$(printf '%s\n' "$btrfs_out" | awk '$NF != 0 {print}' | sed '/^$/d' || true)
+    if [ -z "${btrfs_bad:-}" ]; then
+        log_success "✓ Btrfs device stats report no errors"
+    else
+        log_error "✗ Btrfs device stats report errors (non-zero counters):"
+        printf '%s\n' "$btrfs_bad" | head -n 50 | sed 's/^/  /' | tee -a "${LOG_FILE}"
+        VERIFICATION_FAILED=1
+    fi
+else
+    log_info "ℹ Btrfs device stats check skipped (fstype=${root_fstype:-unknown})"
+fi
+
+# Check 21: Snapper root config validation (best-effort)
+log_debug "[21/${TOTAL_CHECKS}] Checking Snapper root config (if available)..."
+if command -v snapper >/dev/null 2>&1; then
+    set +e
+    snapper_out=$(snapper -c root list --last 1 2>&1)
+    snapper_rc=$?
+    set -e
+    if [ "$snapper_rc" -eq 0 ]; then
+        if printf '%s\n' "$snapper_out" | grep -qiE '^[[:space:]]*$|no snapshots'; then
+            log_warn "⚠ Snapper root config exists but no snapshots were listed"
+        else
+            log_success "✓ Snapper root config appears functional (snapshots listed)"
+        fi
+    else
+        log_warn "⚠ Snapper root config check failed (rc=${snapper_rc}); Snapper may be missing/unconfigured"
+        printf '%s\n' "$snapper_out" | head -n 30 | tee -a "${LOG_FILE}"
+    fi
+else
+    log_info "ℹ Snapper not installed; skipping root snapshot validation"
+fi
+
+# Check 22: Cron conflicts (best-effort)
+log_debug "[22/${TOTAL_CHECKS}] Checking for cron jobs that run zypper (conflicts)..."
+cron_hits=$(grep -R -n -E '\bzypper\b' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null | head -n 20 || true)
+if [ -z "${cron_hits:-}" ]; then
+    log_success "✓ No zypper cron jobs detected"
+else
+    log_warn "⚠ Found cron entries referencing zypper (may conflict with systemd timers):"
+    printf '%s\n' "$cron_hits" | tee -a "${LOG_FILE}"
+fi
+
 # Calculate repair statistics
 # We approximate "problems detected" as the combination of issues we
 # attempted to repair plus any remaining failures, so the numbers always
@@ -1945,7 +2184,7 @@ PROBLEMS_DETECTED=$((REPAIR_ATTEMPTS + VERIFICATION_FAILED))
 echo "" | tee -a "${LOG_FILE}"
 echo "==============================================" | tee -a "${LOG_FILE}"
 echo "Verification Summary:" | tee -a "${LOG_FILE}"
-echo "  - Checks performed: 12" | tee -a "${LOG_FILE}"
+echo "  - Checks performed: ${TOTAL_CHECKS}" | tee -a "${LOG_FILE}"
 echo "  - Problems detected: $PROBLEMS_DETECTED" | tee -a "${LOG_FILE}"
 echo "  - Problems auto-fixed: $PROBLEMS_FIXED" | tee -a "${LOG_FILE}"
 echo "  - Remaining issues: $VERIFICATION_FAILED" | tee -a "${LOG_FILE}"
@@ -2153,15 +2392,28 @@ EOF
     generate_dashboard || true
 
     # Best-effort: open user dashboard in browser.
-    local dash_path
+    local dash_path dash_browser
     dash_path="${SUDO_USER_HOME:-}/.local/share/zypper-notify/status.html"
+    dash_browser="${ZYPPER_AUTO_DASHBOARD_BROWSER:-${DASHBOARD_BROWSER:-}}"
+
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${dash_path}" ]; then
         log_info "Dashboard path: ${dash_path}"
+        if [ -n "${dash_browser:-}" ]; then
+            log_info "Dashboard browser override: ${dash_browser}"
+        fi
 
         # Quiet best-effort open; do not dump noisy xdg-open output into logs.
-        if command -v xdg-open >/dev/null 2>&1; then
-            local user_bus
-            user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
+        local user_bus
+        user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
+
+        if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
+            if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
+                    "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+            else
+                "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+            fi
+        elif command -v xdg-open >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
                     xdg-open "${dash_path}" >/dev/null 2>&1 || true
@@ -2193,6 +2445,9 @@ EOF
 run_dash_open_only() {
     log_info ">>> Opening dashboard (best-effort)"
 
+    local dash_browser
+    dash_browser="${1:-${ZYPPER_AUTO_DASHBOARD_BROWSER:-${DASHBOARD_BROWSER:-}}}"
+
     # Best-effort regenerate so the page is fresh.
     generate_dashboard || true
 
@@ -2201,11 +2456,22 @@ run_dash_open_only() {
 
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${dash_path}" ]; then
         log_info "Dashboard path: ${dash_path}"
+        if [ -n "${dash_browser:-}" ]; then
+            log_info "Dashboard browser override: ${dash_browser}"
+        fi
         echo "Open in browser: xdg-open ${dash_path}" | tee -a "${LOG_FILE}"
 
-        if command -v xdg-open >/dev/null 2>&1; then
-            local user_bus
-            user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
+        local user_bus
+        user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
+
+        if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
+            if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
+                    "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+            else
+                "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+            fi
+        elif command -v xdg-open >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
                     xdg-open "${dash_path}" >/dev/null 2>&1 || true
@@ -4705,7 +4971,8 @@ elif [[ "${1:-}" == "--dashboard" || "${1:-}" == "--generate-dashboard" ]]; then
     exit $?
 elif [[ "${1:-}" == "--dash-open" ]]; then
     log_info "Dashboard open requested"
-    run_dash_open_only
+    shift || true
+    run_dash_open_only "${1:-}"
     exit $?
 elif [[ "${1:-}" == "--dash-install" ]]; then
     log_info "Enterprise quickstart requested"
@@ -9335,7 +9602,10 @@ log_debug "Command installation path: $COMMAND_PATH"
 
 # Copy the installer script to /usr/local/bin
 if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PATH" "$COMMAND_PATH"; then
-    execute_guarded "Make ${COMMAND_PATH} executable" chmod +x "$COMMAND_PATH"
+    # NOTE: Because this script uses umask 077, a plain 'chmod +x' would
+    # result in 700 (root-only). We want the command to be runnable by the
+    # desktop user (wrappers may still use sudo for privileged operations).
+    execute_guarded "Set ${COMMAND_PATH} permissions (755)" chmod 755 "$COMMAND_PATH"
     log_success "Command installed: zypper-auto-helper"
     log_info "You can now run: zypper-auto-helper --help"
 else
