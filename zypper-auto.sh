@@ -43,7 +43,7 @@ if [[ $# -gt 0 ]]; then
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
-        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|\
+        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --analyze|--health)
@@ -53,9 +53,36 @@ if [[ $# -gt 0 ]]; then
         -*)
             echo "Unknown option: $1"
             echo "Run 'zypper-auto-helper --help' for usage."
+            echo ""
+            echo "Tip: if you recently updated zypper-auto.sh, your installed command may be outdated."
+            echo "Update it by running one of:"
+            echo "  - sudo ./zypper-auto.sh install"
+            echo "  - sudo zypper-auto-helper install"
             exit 1
             ;;
     esac
+fi
+
+# Allow opening the dashboard WITHOUT sudo.
+# This improves UX because browser launching is tied to the user's desktop
+# session, and running via sudo often loses the GUI environment.
+if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
+    dash_path="$HOME/.local/share/zypper-notify/status.html"
+    if [ -f "${dash_path}" ]; then
+        echo "Dashboard path: ${dash_path}"
+        echo "Open in browser: xdg-open ${dash_path}"
+        if command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "${dash_path}" >/dev/null 2>&1 || true
+        fi
+        echo ""
+        echo "To refresh/regenerate first (requires sudo):"
+        echo "  sudo zypper-auto-helper --dashboard"
+        exit 0
+    else
+        echo "Dashboard file not found yet: ${dash_path}" >&2
+        echo "Generate it with: sudo zypper-auto-helper --dashboard" >&2
+        exit 1
+    fi
 fi
 
 # --- Logging / Configuration Defaults ---
@@ -2159,6 +2186,42 @@ EOF
 
     update_status "SUCCESS: Enterprise quickstart completed"
     return 0
+}
+
+# --- Helper: Open dashboard (CLI) ---
+# Regenerates dashboard first (best-effort) then opens the user copy.
+run_dash_open_only() {
+    log_info ">>> Opening dashboard (best-effort)"
+
+    # Best-effort regenerate so the page is fresh.
+    generate_dashboard || true
+
+    local dash_path
+    dash_path="${SUDO_USER_HOME:-}/.local/share/zypper-notify/status.html"
+
+    if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${dash_path}" ]; then
+        log_info "Dashboard path: ${dash_path}"
+        echo "Open in browser: xdg-open ${dash_path}" | tee -a "${LOG_FILE}"
+
+        if command -v xdg-open >/dev/null 2>&1; then
+            local user_bus
+            user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
+            if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
+                    xdg-open "${dash_path}" >/dev/null 2>&1 || true
+            else
+                xdg-open "${dash_path}" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        update_status "SUCCESS: Dashboard open attempted"
+        return 0
+    fi
+
+    log_error "Dashboard file not found yet: ${dash_path}"
+    log_info "Try: sudo zypper-auto-helper --dashboard"
+    update_status "FAILED: Dashboard file not found"
+    return 1
 }
 
 # --- Helper: Background diagnostic log follower (CLI) ---
@@ -4381,6 +4444,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --analyze, --health     Analyze recent logs and print a health report (errors, locks, notifier crashes)"
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
     echo "  --dashboard             Generate/update a static HTML status page"
+    echo "  --dash-open             Generate/refresh and open the dashboard in your browser"
     echo "  --dash-install          Enterprise quickstart: enable default hooks + generate/open dashboard"
     echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
@@ -4638,6 +4702,10 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
 elif [[ "${1:-}" == "--dashboard" || "${1:-}" == "--generate-dashboard" ]]; then
     log_info "Dashboard generation requested"
     run_generate_dashboard_only
+    exit $?
+elif [[ "${1:-}" == "--dash-open" ]]; then
+    log_info "Dashboard open requested"
+    run_dash_open_only
     exit $?
 elif [[ "${1:-}" == "--dash-install" ]]; then
     log_info "Enterprise quickstart requested"
@@ -6321,42 +6389,71 @@ update_status "Configuring zypper-auto-helper aliases..."
 
 # Bash configuration for zypper-auto-helper
 if [ -f "$SUDO_USER_HOME/.bashrc" ]; then
-    log_debug "Adding zypper-auto-helper alias to .bashrc"
-    # Remove old alias if it exists
+    log_debug "Adding zypper-auto-helper wrapper to .bashrc"
+    # Remove old alias/function block if it exists
     sed -i '/# zypper-auto-helper command alias/d' "$SUDO_USER_HOME/.bashrc"
     sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.bashrc"
-    # Add new alias
+    sed -i '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}$/d' "$SUDO_USER_HOME/.bashrc" 2>/dev/null || true
+
     echo "" >> "$SUDO_USER_HOME/.bashrc"
-    echo "# zypper-auto-helper command alias (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.bashrc"
-    echo "alias zypper-auto-helper='sudo /usr/local/bin/zypper-auto-helper'" >> "$SUDO_USER_HOME/.bashrc"
+    echo "# zypper-auto-helper command wrapper (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.bashrc"
+    echo "zypper-auto-helper() {" >> "$SUDO_USER_HOME/.bashrc"
+    echo "  if [ \"\${1:-}\" = \"--dash-open\" ]; then" >> "$SUDO_USER_HOME/.bashrc"
+    echo "    /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.bashrc"
+    echo "  else" >> "$SUDO_USER_HOME/.bashrc"
+    echo "    sudo /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.bashrc"
+    echo "  fi" >> "$SUDO_USER_HOME/.bashrc"
+    echo "}" >> "$SUDO_USER_HOME/.bashrc"
+
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.bashrc"
-    log_success "Added zypper-auto-helper alias to .bashrc"
+    log_success "Added zypper-auto-helper wrapper to .bashrc"
 fi
 
 # Fish configuration for zypper-auto-helper
 if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
-    log_debug "Adding zypper-auto-helper alias to fish config"
+    log_debug "Adding zypper-auto-helper wrapper to fish config"
     FISH_HELPER_FILE="$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish"
     cat > "$FISH_HELPER_FILE" << 'FISHHELPER'
-# zypper-auto-helper command alias (added by zypper-auto-helper)
-alias zypper-auto-helper='sudo /usr/local/bin/zypper-auto-helper'
+# zypper-auto-helper command wrapper (added by zypper-auto-helper)
+#
+# Most helper commands need root.
+# But dashboard opening should run as the desktop user so it can launch
+# the browser with the correct GUI environment.
+function zypper-auto-helper --wraps /usr/local/bin/zypper-auto-helper --description "zypper-auto-helper wrapper"
+    if test (count $argv) -ge 1
+        if test "$argv[1]" = "--dash-open"
+            command /usr/local/bin/zypper-auto-helper $argv
+            return $status
+        end
+    end
+
+    command sudo /usr/local/bin/zypper-auto-helper $argv
+end
 FISHHELPER
     chown "$SUDO_USER:$SUDO_USER" "$FISH_HELPER_FILE"
-    log_success "Added zypper-auto-helper alias to fish config"
+    log_success "Added zypper-auto-helper wrapper to fish config"
 fi
 
 # Zsh configuration for zypper-auto-helper
 if [ -f "$SUDO_USER_HOME/.zshrc" ]; then
-    log_debug "Adding zypper-auto-helper alias to .zshrc"
-    # Remove old alias if it exists
+    log_debug "Adding zypper-auto-helper wrapper to .zshrc"
+    # Remove old alias/function block if it exists
     sed -i '/# zypper-auto-helper command alias/d' "$SUDO_USER_HOME/.zshrc"
     sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.zshrc"
-    # Add new alias
+    sed -i '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}/d' "$SUDO_USER_HOME/.zshrc" 2>/dev/null || true
+
     echo "" >> "$SUDO_USER_HOME/.zshrc"
-    echo "# zypper-auto-helper command alias (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.zshrc"
-    echo "alias zypper-auto-helper='sudo /usr/local/bin/zypper-auto-helper'" >> "$SUDO_USER_HOME/.zshrc"
+    echo "# zypper-auto-helper command wrapper (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.zshrc"
+    echo "zypper-auto-helper() {" >> "$SUDO_USER_HOME/.zshrc"
+    echo "  if [ \"\${1:-}\" = \"--dash-open\" ]; then" >> "$SUDO_USER_HOME/.zshrc"
+    echo "    /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.zshrc"
+    echo "  else" >> "$SUDO_USER_HOME/.zshrc"
+    echo "    sudo /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.zshrc"
+    echo "  fi" >> "$SUDO_USER_HOME/.zshrc"
+    echo "}" >> "$SUDO_USER_HOME/.zshrc"
+
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.zshrc"
-    log_success "Added zypper-auto-helper alias to .zshrc"
+    log_success "Added zypper-auto-helper wrapper to .zshrc"
 fi
 
 log_success "zypper-auto-helper command aliases configured for all shells."

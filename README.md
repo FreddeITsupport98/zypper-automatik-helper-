@@ -909,6 +909,12 @@ Easiest quickstart (enables example hooks + opens dashboard):
 sudo zypper-auto-helper --dash-install
 ```
 
+Open dashboard only:
+
+```bash
+sudo zypper-auto-helper --dash-open
+```
+
 Drop executable hook scripts into:
 - `/etc/zypper-auto/hooks/pre.d/`  (runs before interactive updates)
 - `/etc/zypper-auto/hooks/post.d/` (runs after successful interactive updates)
@@ -939,6 +945,12 @@ Quickstart (enable example hooks + generate/open dashboard):
 
 ```bash
 sudo zypper-auto-helper --dash-install
+```
+
+Open dashboard only:
+
+```bash
+sudo zypper-auto-helper --dash-open
 ```
 
 Open it in your browser:
