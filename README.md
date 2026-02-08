@@ -886,7 +886,7 @@ journalctl --user -u zypper-notify-user.service -n 200 --no-pager
 You can optionally configure a webhook endpoint to receive success/failure notifications.
 
 1) Edit `/etc/zypper-auto.conf` and set:
-- `WEBHOOK_URL="..."`
+- `WEBHOOK_URL="..."` (leave empty to disable)
 
 Supported formats are auto-detected:
 - Discord webhooks
@@ -907,6 +907,20 @@ Drop executable hook scripts into:
 - `/etc/zypper-auto/hooks/pre.d/`  (runs before interactive updates)
 - `/etc/zypper-auto/hooks/post.d/` (runs after successful interactive updates)
 
+The installer also drops safe **template examples** (not executable) so users can quickly enable hooks:
+- `/etc/zypper-auto/hooks/pre.d/00-example-pre.sh.example`
+- `/etc/zypper-auto/hooks/post.d/00-example-post.sh.example`
+
+Enable a template by copying it to a new filename and making it executable:
+
+```bash
+sudo cp /etc/zypper-auto/hooks/pre.d/00-example-pre.sh.example /etc/zypper-auto/hooks/pre.d/10-my-pre-hook.sh
+sudo chmod +x /etc/zypper-auto/hooks/pre.d/10-my-pre-hook.sh
+
+sudo cp /etc/zypper-auto/hooks/post.d/00-example-post.sh.example /etc/zypper-auto/hooks/post.d/90-my-post-hook.sh
+sudo chmod +x /etc/zypper-auto/hooks/post.d/90-my-post-hook.sh
+```
+
 Hook failures are **non-fatal** and will be logged.
 
 #### HTML status dashboard
@@ -914,6 +928,12 @@ Hook failures are **non-fatal** and will be logged.
 A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
 - Root copy: `/var/log/zypper-auto/status.html`
 - User copy: `~/.local/share/zypper-notify/status.html`
+
+Open it in your browser:
+
+```bash
+xdg-open ~/.local/share/zypper-notify/status.html
+```
 
 You can regenerate it anytime:
 

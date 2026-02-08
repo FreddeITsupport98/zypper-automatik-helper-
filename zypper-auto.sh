@@ -1157,6 +1157,79 @@ ensure_hook_dirs() {
     execute_guarded "Set hook directory permissions" chmod 755 "${base}" "${base}/pre.d" "${base}/post.d" || true
 }
 
+install_hook_templates() {
+    # Best-effort: install example templates so users can quickly enable hooks
+    # by copying them to a new filename and making them executable.
+    local base
+    base="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+
+    local pre_tpl post_tpl
+    pre_tpl="${base}/pre.d/00-example-pre.sh.example"
+    post_tpl="${base}/post.d/00-example-post.sh.example"
+
+    if [ ! -f "${pre_tpl}" ]; then
+        if write_atomic "${pre_tpl}" <<'EOF'
+#!/usr/bin/env bash
+# Example pre-update hook for zypper-auto-helper
+#
+# To enable:
+#   sudo cp /etc/zypper-auto/hooks/pre.d/00-example-pre.sh.example /etc/zypper-auto/hooks/pre.d/10-my-pre-hook.sh
+#   sudo chmod +x /etc/zypper-auto/hooks/pre.d/10-my-pre-hook.sh
+set -euo pipefail
+
+stage="${HOOK_STAGE:-pre}"
+run_id="${ZNH_RUN_ID:-}"
+tid="${ZYPPER_TRACE_ID:-}"
+
+msg="[HOOK] stage=${stage} RUN=${run_id}${tid:+ TID=${tid}} (example hook)"
+
+if command -v logger >/dev/null 2>&1; then
+  logger -t zypper-auto-hook -- "$msg" || true
+fi
+
+# Optional file log (best-effort)
+echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >>/var/log/zypper-auto/hooks.log 2>/dev/null || true
+EOF
+        then
+            chmod 644 "${pre_tpl}" 2>/dev/null || true
+            log_success "Hook template installed: ${pre_tpl}"
+        else
+            log_warn "Failed to write hook template: ${pre_tpl} (non-fatal)"
+        fi
+    fi
+
+    if [ ! -f "${post_tpl}" ]; then
+        if write_atomic "${post_tpl}" <<'EOF'
+#!/usr/bin/env bash
+# Example post-update hook for zypper-auto-helper
+#
+# To enable:
+#   sudo cp /etc/zypper-auto/hooks/post.d/00-example-post.sh.example /etc/zypper-auto/hooks/post.d/90-my-post-hook.sh
+#   sudo chmod +x /etc/zypper-auto/hooks/post.d/90-my-post-hook.sh
+set -euo pipefail
+
+stage="${HOOK_STAGE:-post}"
+run_id="${ZNH_RUN_ID:-}"
+tid="${ZYPPER_TRACE_ID:-}"
+
+msg="[HOOK] stage=${stage} RUN=${run_id}${tid:+ TID=${tid}} (example hook)"
+
+if command -v logger >/dev/null 2>&1; then
+  logger -t zypper-auto-hook -- "$msg" || true
+fi
+
+# Optional file log (best-effort)
+echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >>/var/log/zypper-auto/hooks.log 2>/dev/null || true
+EOF
+        then
+            chmod 644 "${post_tpl}" 2>/dev/null || true
+            log_success "Hook template installed: ${post_tpl}"
+        else
+            log_warn "Failed to write hook template: ${post_tpl} (non-fatal)"
+        fi
+    fi
+}
+
 run_hooks() {
     local stage="$1"
 
@@ -4639,6 +4712,8 @@ update_status "All dependencies verified"
 
 # Ensure hook directories exist (enterprise extensibility).
 ensure_hook_dirs || true
+# Best-effort: provide hook templates so users can quickly enable hooks.
+install_hook_templates || true
 
 # --- 3. Clean Up Old Logs First ---
 log_info ">>> Cleaning up old log files..."
@@ -9256,6 +9331,14 @@ echo "Quick Commands:" | tee -a "${LOG_FILE}"
 echo "  sudo zypper-auto-helper --verify        # Check system health" | tee -a "${LOG_FILE}"
 echo "  sudo zypper-auto-helper --help          # Show help" | tee -a "${LOG_FILE}"
 echo "  cat ${STATUS_FILE}                      # View current status" | tee -a "${LOG_FILE}"
+echo "" | tee -a "${LOG_FILE}"
+
+echo "Enterprise Quickstart (optional):" | tee -a "${LOG_FILE}"
+echo "  1) Edit ${CONFIG_FILE} and set WEBHOOK_URL=\"...\" (leave empty to disable webhooks)" | tee -a "${LOG_FILE}"
+echo "  2) Enable hooks by copying templates and making them executable:" | tee -a "${LOG_FILE}"
+echo "     - ${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}/pre.d/00-example-pre.sh.example" | tee -a "${LOG_FILE}"
+echo "     - ${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}/post.d/00-example-post.sh.example" | tee -a "${LOG_FILE}"
+echo "  3) Open the dashboard: ${SUDO_USER_HOME}/.local/share/zypper-notify/status.html" | tee -a "${LOG_FILE}"
 echo "" | tee -a "${LOG_FILE}"
 echo "Service Status:" | tee -a "${LOG_FILE}"
 echo "  systemctl status ${DL_SERVICE_NAME}.timer" | tee -a "${LOG_FILE}"
