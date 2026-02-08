@@ -140,6 +140,8 @@ In addition to the downloader, a small root service periodically runs the same
     * Automatically resets failed states for the core units it manages and,
       when configured, sends a short desktop notification whenever it fixes
       one or more issues.
+    * Snapper root snapshot validation is best-effort and tries to be compatible with older Snapper versions/output formats.
+    * Cron conflict detection only flags cron entries that appear to *run* `zypper` (comment-only mentions are ignored).
     * Performs safety checks such as cleaning up stale `/run/zypp.pid`
       locks (when the PID is no longer running) and running
       `zypper clean --all` when free space on `/` falls below ~1 GiB.

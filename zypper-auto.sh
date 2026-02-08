@@ -2147,14 +2147,24 @@ fi
 log_debug "[21/${TOTAL_CHECKS}] Checking Snapper root config (if available)..."
 if command -v snapper >/dev/null 2>&1; then
     set +e
+    # Newer snapper versions support '--last N'. Some older versions do not.
     snapper_out=$(snapper -c root list --last 1 2>&1)
     snapper_rc=$?
+    if [ "$snapper_rc" -ne 0 ] && printf '%s\n' "$snapper_out" | grep -q "Unknown option '--last'"; then
+        snapper_out=$(snapper -c root list 2>&1)
+        snapper_rc=$?
+    fi
     set -e
+
     if [ "$snapper_rc" -eq 0 ]; then
-        if printf '%s\n' "$snapper_out" | grep -qiE '^[[:space:]]*$|no snapshots'; then
+        # snapper output can be ASCII pipes '|' or unicode table separators '│'
+        snapper_count=$(printf '%s\n' "$snapper_out" | awk '/^[[:space:]]*[0-9]+\*?[[:space:]]*[|│]/ {c++} END {print c+0}')
+        if [ "${snapper_count:-0}" -gt 0 ] 2>/dev/null; then
+            log_success "✓ Snapper root config appears functional (${snapper_count} snapshot(s) detected)"
+        elif printf '%s\n' "$snapper_out" | grep -qiE 'no snapshots'; then
             log_warn "⚠ Snapper root config exists but no snapshots were listed"
         else
-            log_success "✓ Snapper root config appears functional (snapshots listed)"
+            log_warn "⚠ Snapper root config check could not detect snapshots (output format unexpected)"
         fi
     else
         log_warn "⚠ Snapper root config check failed (rc=${snapper_rc}); Snapper may be missing/unconfigured"
@@ -2166,11 +2176,13 @@ fi
 
 # Check 22: Cron conflicts (best-effort)
 log_debug "[22/${TOTAL_CHECKS}] Checking for cron jobs that run zypper (conflicts)..."
-cron_hits=$(grep -R -n -E '\bzypper\b' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null | head -n 20 || true)
+# Ignore comment-only mentions to avoid false positives from documentation lines.
+# (With -n, grep prefixes results with 'file:line:', so the comment check must happen after that prefix.)
+cron_hits=$(grep -R -n -E ':[0-9]+:[[:space:]]*[^#].*\<zypper\>' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null | head -n 20 || true)
 if [ -z "${cron_hits:-}" ]; then
     log_success "✓ No zypper cron jobs detected"
 else
-    log_warn "⚠ Found cron entries referencing zypper (may conflict with systemd timers):"
+    log_warn "⚠ Found cron entries that appear to run zypper (may conflict with systemd timers):"
     printf '%s\n' "$cron_hits" | tee -a "${LOG_FILE}"
 fi
 
