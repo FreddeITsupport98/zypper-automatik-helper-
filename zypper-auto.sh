@@ -1556,7 +1556,7 @@ run_reset_config_only() {
     if [ -f "${CONFIG_FILE}" ]; then
         TS="$(date +%Y%m%d-%H%M%S)"
         BACKUP="${CONFIG_FILE}.bak-${TS}"
-        if cp -f "${CONFIG_FILE}" "${BACKUP}" >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Backup existing config to ${BACKUP}" cp -f "${CONFIG_FILE}" "${BACKUP}"; then
             log_info "Backed up existing config to ${BACKUP}"
         else
             log_error "Failed to back up existing config to ${BACKUP} (continuing)"
@@ -1565,7 +1565,7 @@ run_reset_config_only() {
 
     # Rewrite a fresh default config by removing it and letting load_config
     # regenerate the template.
-    rm -f "${CONFIG_FILE}" >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Remove existing config file to regenerate defaults" rm -f "${CONFIG_FILE}" || true
     load_config
 
     log_success "Configuration reset to defaults in ${CONFIG_FILE}"
@@ -1925,7 +1925,7 @@ run_diag_bundle_only() {
     fi
 
     # Create tar.xz bundle
-    if tar -cJf "${bundle_file}" "${include_files[@]}" >> "${LOG_FILE}" 2>&1; then
+    if execute_guarded "Create diagnostics bundle tarball (${bundle_file})" tar -cJf "${bundle_file}" "${include_files[@]}"; then
         log_success "Diagnostics bundle created at ${bundle_file}"
         update_status "SUCCESS: Diagnostics bundle created at ${bundle_file}"
         echo "Diagnostics bundle: ${bundle_file}"
@@ -1991,8 +1991,8 @@ run_debug_menu_only() {
                 if [ "${follower_active}" -eq 1 ] 2>/dev/null; then
                     # Currently enabled -> toggle OFF (stop and disable persistent service)
                     log_info "[debug-menu] Disabling diagnostics follower via toggle"
-                    systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
-                    systemctl disable zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+                    execute_guarded "Stop diagnostics follower service" systemctl stop zypper-auto-diag-logs.service || true
+                    execute_guarded "Disable diagnostics follower service" systemctl disable zypper-auto-diag-logs.service || true
                     update_status "SUCCESS: Diagnostics log follower disabled via debug menu toggle"
                     echo "Diagnostics follower disabled."
                 else
@@ -3078,23 +3078,25 @@ run_uninstall_helper_only() {
 
     # 1. Stop and disable root timers/services
     log_debug "Disabling root timers and services..."
-    systemctl disable --now zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
-    systemctl disable --now zypper-cache-cleanup.timer >> "${LOG_FILE}" 2>&1 || true
-    systemctl disable --now zypper-auto-verify.timer >> "${LOG_FILE}" 2>&1 || true
-    systemctl stop zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
-    systemctl stop zypper-cache-cleanup.service >> "${LOG_FILE}" 2>&1 || true
-    systemctl stop zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Disable root downloader timer" systemctl disable --now zypper-autodownload.timer || true
+    execute_guarded "Disable cache cleanup timer" systemctl disable --now zypper-cache-cleanup.timer || true
+    execute_guarded "Disable verification timer" systemctl disable --now zypper-auto-verify.timer || true
+    execute_guarded "Stop downloader service" systemctl stop zypper-autodownload.service || true
+    execute_guarded "Stop cache cleanup service" systemctl stop zypper-cache-cleanup.service || true
+    execute_guarded "Stop verification service" systemctl stop zypper-auto-verify.service || true
     # Diagnostics follower service (may or may not be enabled)
-    systemctl disable --now zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Disable diagnostics follower service" systemctl disable --now zypper-auto-diag-logs.service || true
 
     # 2. Stop and disable user timer/service
     if [ -n "${SUDO_USER:-}" ]; then
         log_debug "Disabling user timer and service for $SUDO_USER..."
         USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
-            systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
-            systemctl --user stop zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Disable user notifier timer" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user disable --now zypper-notify-user.timer || true
+        execute_guarded "Stop user notifier service" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user stop zypper-notify-user.service || true
     fi
 
     # 3. Remove systemd unit files and root binaries
@@ -3158,21 +3160,24 @@ run_uninstall_helper_only() {
 
     # 6. Reload systemd daemons
     log_debug "Reloading systemd daemons after uninstall..."
-    systemctl daemon-reload >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "systemd daemon-reload (post-uninstall)" systemctl daemon-reload || true
     if [ -n "${SUDO_USER:-}" ]; then
         USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
-            systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "systemctl --user daemon-reload (post-uninstall)" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user daemon-reload || true
     fi
 
     # 7. Clear any failed state in systemd for the removed units so
     #    `systemctl --user status` looks clean after uninstall.
     log_debug "Resetting failed state for removed systemd units (if any)..."
-    systemctl reset-failed zypper-autodownload.service zypper-cache-cleanup.service zypper-auto-verify.service >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Reset failed state for removed system units" \
+        systemctl reset-failed zypper-autodownload.service zypper-cache-cleanup.service zypper-auto-verify.service || true
     if [ -n "${SUDO_USER:-}" ]; then
         USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
-            systemctl --user reset-failed zypper-notify-user.service >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Reset failed state for removed user units" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user reset-failed zypper-notify-user.service || true
     fi
 
     log_success "Core zypper-auto-helper components uninstalled (installer script left in place)."
@@ -3937,7 +3942,8 @@ elif [[ "${1:-}" == "--diag-logs-on" ]]; then
     exit $?
 elif [[ "${1:-}" == "--diag-logs-off" ]]; then
     log_info "Diagnostics log follower disable mode requested"
-    systemctl stop zypper-auto-diag-logs.service >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Stop diagnostics follower service" systemctl stop zypper-auto-diag-logs.service || true
+    execute_guarded "Disable diagnostics follower service" systemctl disable zypper-auto-diag-logs.service || true
     update_status "SUCCESS: Diagnostics log follower disabled"
     exit 0
 elif [[ "${1:-}" == "--snapshot-state" ]]; then
@@ -4136,7 +4142,7 @@ if ! python3 -c "import gi" &> /dev/null; then
         log_info "Installing python3-gobject..."
         update_status "Installing python3-gobject..."
         
-        if ! sudo zypper install -y "python3-gobject" >> "${LOG_FILE}" 2>&1; then
+        if ! execute_guarded "Install python3-gobject" sudo zypper install -y "python3-gobject"; then
             log_error "Failed to install python3-gobject. Please install it manually and re-run this script."
             update_status "FAILED: Could not install python3-gobject"
             exit 1
@@ -4162,12 +4168,12 @@ cleanup_old_logs
 log_info ">>> Cleaning up all old system-wide services..."
 update_status "Removing old system services..."
 log_debug "Disabling old timers and services..."
-systemctl disable --now zypper-autodownload.timer >> "${LOG_FILE}" 2>&1 || true
-systemctl stop zypper-autodownload.service >> "${LOG_FILE}" 2>&1 || true
-systemctl disable --now zypper-notify.timer >> "${LOG_FILE}" 2>&1 || true
-systemctl stop zypper-notify.service >> "${LOG_FILE}" 2>&1 || true
-systemctl disable --now zypper-smart-updater.timer >> "${LOG_FILE}" 2>&1 || true
-systemctl stop zypper-smart-updater.service >> "${LOG_FILE}" 2>&1 || true
+execute_guarded "Disable legacy downloader timer" systemctl disable --now zypper-autodownload.timer || true
+execute_guarded "Stop legacy downloader service" systemctl stop zypper-autodownload.service || true
+execute_guarded "Disable legacy notifier timer" systemctl disable --now zypper-notify.timer || true
+execute_guarded "Stop legacy notifier service" systemctl stop zypper-notify.service || true
+execute_guarded "Disable legacy smart-updater timer" systemctl disable --now zypper-smart-updater.timer || true
+execute_guarded "Stop legacy smart-updater service" systemctl stop zypper-smart-updater.service || true
 
 log_debug "Removing old system binaries..."
 rm -f /usr/local/bin/zypper-run-install* >> "${LOG_FILE}" 2>&1
@@ -4180,17 +4186,18 @@ update_status "Removing old user services..."
 SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 log_debug "Disabling user timer..."
 USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
-sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable --now zypper-notify-user.timer >> "${LOG_FILE}" 2>&1 || true
+execute_guarded "Disable legacy user notifier timer" \
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable --now zypper-notify-user.timer || true
 
 # Force kill any running Python notifier processes
 log_debug "Force-killing any running Python notifier processes..."
-pkill -9 -f "zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1 || true
+execute_guarded "Kill any running legacy notifier processes" pkill -9 -f "zypper-notify-updater.py" || true
 sleep 1
 
 # Clear Python bytecode cache
 log_debug "Clearing Python bytecode cache..."
-find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete >> "${LOG_FILE}" 2>&1 || true
-find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + >> "${LOG_FILE}" 2>&1 || true
+execute_guarded "Clear legacy .pyc files" find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete || true
+execute_guarded "Clear legacy __pycache__ directories" find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + || true
 
 log_debug "Removing old user binaries and configs..."
 rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*" >> "${LOG_FILE}" 2>&1
