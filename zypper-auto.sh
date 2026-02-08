@@ -43,7 +43,7 @@ if [[ $# -gt 0 ]]; then
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
-        --send-webhook|--webhook|--generate-dashboard|--dashboard|\
+        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --analyze|--health)
@@ -2045,6 +2045,119 @@ run_generate_dashboard_only() {
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         echo "Dashboard generated (user): ${SUDO_USER_HOME}/.local/share/zypper-notify/status.html"
     fi
+    return 0
+}
+
+# --- Helper: Enterprise quickstart (hooks + dashboard) ---
+# Enables example hooks by copying templates into executable scripts (no overwrite)
+# and opens the user dashboard in a browser (best-effort).
+run_dash_install_only() {
+    log_info ">>> Enterprise quickstart: enabling default hook scripts + opening dashboard"
+
+    local base
+    base="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+
+    # Ensure hook directories exist + templates are present.
+    ensure_hook_dirs || true
+    install_hook_templates || true
+
+    local pre_tpl post_tpl pre_hook post_hook
+    pre_tpl="${base}/pre.d/00-example-pre.sh.example"
+    post_tpl="${base}/post.d/00-example-post.sh.example"
+
+    pre_hook="${base}/pre.d/10-enabled-example-pre.sh"
+    post_hook="${base}/post.d/90-enabled-example-post.sh"
+
+    # Enable default hooks by copying templates into executable scripts.
+    # Never overwrite existing user hooks.
+    if [ ! -f "${pre_hook}" ]; then
+        if [ -f "${pre_tpl}" ]; then
+            execute_guarded "Enable default pre-hook (${pre_hook})" cp -f "${pre_tpl}" "${pre_hook}" || true
+        else
+            if write_atomic "${pre_hook}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+stage="${HOOK_STAGE:-pre}"
+run_id="${ZNH_RUN_ID:-}"
+tid="${ZYPPER_TRACE_ID:-}"
+msg="[HOOK] stage=${stage} RUN=${run_id}${tid:+ TID=${tid}} (auto-enabled default hook)"
+command -v logger >/dev/null 2>&1 && logger -t zypper-auto-hook -- "$msg" || true
+echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >>/var/log/zypper-auto/hooks.log 2>/dev/null || true
+EOF
+            then
+                :
+            else
+                log_warn "Failed to create default pre-hook (non-fatal): ${pre_hook}"
+            fi
+        fi
+        chown root:root "${pre_hook}" 2>/dev/null || true
+        chmod 755 "${pre_hook}" 2>/dev/null || true
+    else
+        log_info "Pre-hook already exists; leaving in place: ${pre_hook}"
+    fi
+
+    if [ ! -f "${post_hook}" ]; then
+        if [ -f "${post_tpl}" ]; then
+            execute_guarded "Enable default post-hook (${post_hook})" cp -f "${post_tpl}" "${post_hook}" || true
+        else
+            if write_atomic "${post_hook}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+stage="${HOOK_STAGE:-post}"
+run_id="${ZNH_RUN_ID:-}"
+tid="${ZYPPER_TRACE_ID:-}"
+msg="[HOOK] stage=${stage} RUN=${run_id}${tid:+ TID=${tid}} (auto-enabled default hook)"
+command -v logger >/dev/null 2>&1 && logger -t zypper-auto-hook -- "$msg" || true
+echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >>/var/log/zypper-auto/hooks.log 2>/dev/null || true
+EOF
+            then
+                :
+            else
+                log_warn "Failed to create default post-hook (non-fatal): ${post_hook}"
+            fi
+        fi
+        chown root:root "${post_hook}" 2>/dev/null || true
+        chmod 755 "${post_hook}" 2>/dev/null || true
+    else
+        log_info "Post-hook already exists; leaving in place: ${post_hook}"
+    fi
+
+    # Refresh dashboard now.
+    generate_dashboard || true
+
+    # Best-effort: open user dashboard in browser.
+    local dash_path
+    dash_path="${SUDO_USER_HOME:-}/.local/share/zypper-notify/status.html"
+    if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${dash_path}" ]; then
+        log_info "Dashboard path: ${dash_path}"
+
+        # Quiet best-effort open; do not dump noisy xdg-open output into logs.
+        if command -v xdg-open >/dev/null 2>&1; then
+            local user_bus
+            user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
+            if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
+                    xdg-open "${dash_path}" >/dev/null 2>&1 || true
+            else
+                xdg-open "${dash_path}" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        # Also print a copy-paste line for manual opening.
+        echo "Open in browser: xdg-open ${dash_path}" | tee -a "${LOG_FILE}"
+    else
+        log_info "Dashboard file not found yet; run: sudo zypper-auto-helper --dashboard"
+    fi
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Enterprise quickstart complete." | tee -a "${LOG_FILE}"
+    echo "Next:" | tee -a "${LOG_FILE}"
+    echo "  1) Edit ${CONFIG_FILE} and set WEBHOOK_URL=\"...\" (optional)" | tee -a "${LOG_FILE}"
+    echo "  2) Put your own executable scripts in:" | tee -a "${LOG_FILE}"
+    echo "     - ${base}/pre.d/" | tee -a "${LOG_FILE}"
+    echo "     - ${base}/post.d/" | tee -a "${LOG_FILE}"
+
+    update_status "SUCCESS: Enterprise quickstart completed"
     return 0
 }
 
@@ -4268,6 +4381,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --analyze, --health     Analyze recent logs and print a health report (errors, locks, notifier crashes)"
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
     echo "  --dashboard             Generate/update a static HTML status page"
+    echo "  --dash-install          Enterprise quickstart: enable default hooks + generate/open dashboard"
     echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help                  Show this help message"
@@ -4524,6 +4638,10 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
 elif [[ "${1:-}" == "--dashboard" || "${1:-}" == "--generate-dashboard" ]]; then
     log_info "Dashboard generation requested"
     run_generate_dashboard_only
+    exit $?
+elif [[ "${1:-}" == "--dash-install" ]]; then
+    log_info "Enterprise quickstart requested"
+    run_dash_install_only
     exit $?
 elif [[ "${1:-}" == "--send-webhook" || "${1:-}" == "--webhook" ]]; then
     log_info "Webhook send requested"
@@ -9334,6 +9452,10 @@ echo "  cat ${STATUS_FILE}                      # View current status" | tee -a 
 echo "" | tee -a "${LOG_FILE}"
 
 echo "Enterprise Quickstart (optional):" | tee -a "${LOG_FILE}"
+echo "  Fastest: sudo zypper-auto-helper --dash-install" | tee -a "${LOG_FILE}"
+echo "  (enables example hooks + generates/opens dashboard)" | tee -a "${LOG_FILE}"
+echo "" | tee -a "${LOG_FILE}"
+echo "  Manual steps:" | tee -a "${LOG_FILE}"
 echo "  1) Edit ${CONFIG_FILE} and set WEBHOOK_URL=\"...\" (leave empty to disable webhooks)" | tee -a "${LOG_FILE}"
 echo "  2) Enable hooks by copying templates and making them executable:" | tee -a "${LOG_FILE}"
 echo "     - ${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}/pre.d/00-example-pre.sh.example" | tee -a "${LOG_FILE}"

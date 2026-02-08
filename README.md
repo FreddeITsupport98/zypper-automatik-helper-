@@ -903,6 +903,12 @@ Security note: treat `WEBHOOK_URL` like a secret token.
 
 #### Extensibility (pre/post hook scripts)
 
+Easiest quickstart (enables example hooks + opens dashboard):
+
+```bash
+sudo zypper-auto-helper --dash-install
+```
+
 Drop executable hook scripts into:
 - `/etc/zypper-auto/hooks/pre.d/`  (runs before interactive updates)
 - `/etc/zypper-auto/hooks/post.d/` (runs after successful interactive updates)
@@ -928,6 +934,12 @@ Hook failures are **non-fatal** and will be logged.
 A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
 - Root copy: `/var/log/zypper-auto/status.html`
 - User copy: `~/.local/share/zypper-notify/status.html`
+
+Quickstart (enable example hooks + generate/open dashboard):
+
+```bash
+sudo zypper-auto-helper --dash-install
+```
 
 Open it in your browser:
 
