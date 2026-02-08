@@ -1414,9 +1414,10 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
     if printf '%s\n' "$CURRENT_STATUS" | grep -qE '^(refreshing|downloading:)' && [ "$STATUS_AGE" -gt 3600 ]; then
         log_error "⚠ Warning: Stale download status '$CURRENT_STATUS' detected (age ${STATUS_AGE}s)"
         log_info "  → Auto-fixer: resetting download status and timing files so background downloads can resume cleanly"
-        echo "idle" > "/var/log/zypper-auto/download-status.txt" 2>>"${LOG_FILE}" || true
-        rm -f "/var/log/zypper-auto/download-last-check.txt" \
-              "/var/log/zypper-auto/download-start-time.txt" 2>>"${LOG_FILE}" || true
+        execute_guarded "Reset stale download-status.txt to idle" bash -lc "echo idle > /var/log/zypper-auto/download-status.txt" || true
+        execute_guarded "Remove stale downloader timing files" rm -f \
+              "/var/log/zypper-auto/download-last-check.txt" \
+              "/var/log/zypper-auto/download-start-time.txt" || true
         REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
         log_success "  ✓ Stale download status reset; helper will perform a fresh check on next run"
     fi
@@ -1763,7 +1764,7 @@ run_snapshot_state_only() {
 
     local diag_dir today diag_file
     diag_dir="${LOG_DIR}/diagnostics"
-    mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
     today="$(date +%Y-%m-%d)"
     diag_file="${diag_dir}/diag-${today}.log"
 
@@ -2141,14 +2142,15 @@ run_debug_menu_only() {
                 USER_BUS_PATH="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
                 diag_dir="${LOG_DIR}/diagnostics"
                 echo "Diagnostics logs directory: ${diag_dir}"
-                mkdir -p "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
+                execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
                 # Allow the desktop user to traverse the parent log directory
                 # without making all logs world-readable. 751 = traverse but
                 # not list contents; diagnostics subdir is then responsible for
                 # exposing only the intended files.
-                chmod 751 "${LOG_DIR}" >> "${LOG_FILE}" 2>&1 || true
-                chmod 755 "${diag_dir}" >> "${LOG_FILE}" 2>&1 || true
-                find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; >> "${LOG_FILE}" 2>&1 || true
+                execute_guarded "Allow desktop user to traverse ${LOG_DIR}" chmod 751 "${LOG_DIR}" || true
+                execute_guarded "Ensure diagnostics dir is user-traversable" chmod 755 "${diag_dir}" || true
+                execute_guarded "Ensure diagnostics logs are user-readable" \
+                    find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; || true
 
                 # Try to open the diagnostics folder in the user's desktop session.
                 # We avoid letting set -e abort the whole debug menu by
@@ -2183,7 +2185,8 @@ run_debug_menu_only() {
 
                         log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} XDG_CURRENT_DESKTOP=${_desktop:-<empty>} DESKTOP_SESSION=${_session_name:-<empty>} XDG_RUNTIME_DIR=${run_dir:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
 
-                        if sudo -u "${SUDO_USER}" \
+                        if execute_guarded "Open diagnostics folder via xdg-open (direct as user)" \
+                            sudo -u "${SUDO_USER}" env \
                             DISPLAY="${_disp}" \
                             WAYLAND_DISPLAY="${_wayland}" \
                             XDG_SESSION_TYPE="${_session}" \
@@ -2192,7 +2195,7 @@ run_debug_menu_only() {
                             DESKTOP_SESSION="${_session_name}" \
                             XDG_RUNTIME_DIR="${run_dir}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
-                            xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                            xdg-open "${diag_dir}"; then
                             _open_rc=0
                         else
                             _open_rc=$?
@@ -2215,7 +2218,8 @@ run_debug_menu_only() {
                         _session_name="${DESKTOP_SESSION:-}"
                         _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
                         log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} XDG_CURRENT_DESKTOP=${_desktop:-<empty>} DESKTOP_SESSION=${_session_name:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
-                        if sudo -u "${SUDO_USER}" \
+                        if execute_guarded "Open diagnostics folder via systemd-run + xdg-open" \
+                            sudo -u "${SUDO_USER}" env \
                             DISPLAY="${_disp}" \
                             WAYLAND_DISPLAY="${_wayland}" \
                             XDG_SESSION_TYPE="${_session}" \
@@ -2223,7 +2227,7 @@ run_debug_menu_only() {
                             XDG_CURRENT_DESKTOP="${_desktop}" \
                             DESKTOP_SESSION="${_session_name}" \
                             DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
-                            systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                            systemd-run --user --scope xdg-open "${diag_dir}"; then
                             _open_rc=0
                         else
                             _open_rc=$?
@@ -2240,8 +2244,9 @@ run_debug_menu_only() {
                                 log_info "[debug-menu] xdg-open unavailable or failed; trying ${_fm} to open ${diag_dir} for user ${SUDO_USER}"
                                 if command -v systemd-run >/dev/null 2>&1; then
                                     log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} systemd-run --user --scope ${_fm} ${diag_dir}"
-                                    if sudo -u "${SUDO_USER}" \
-                                        systemd-run --user --scope "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                                    if execute_guarded "Open diagnostics folder via systemd-run (${_fm})" \
+                                        sudo -u "${SUDO_USER}" \
+                                        systemd-run --user --scope "${_fm}" "${diag_dir}"; then
                                         _open_rc=0
                                         break
                                     else
@@ -2250,8 +2255,9 @@ run_debug_menu_only() {
                                     fi
                                 else
                                     log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} ${_fm} ${diag_dir}"
-                                    if sudo -u "${SUDO_USER}" \
-                                        "${_fm}" "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                                    if execute_guarded "Open diagnostics folder (${_fm})" \
+                                        sudo -u "${SUDO_USER}" \
+                                        "${_fm}" "${diag_dir}"; then
                                         _open_rc=0
                                         break
                                     else
@@ -2268,7 +2274,7 @@ run_debug_menu_only() {
                     # when invoked without sudo.
                     if command -v xdg-open >/dev/null 2>&1; then
                         log_debug "[debug-menu] attempting (no SUDO_USER): xdg-open ${diag_dir}"
-                        if xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                        if execute_guarded "Open diagnostics folder via xdg-open (no SUDO_USER)" xdg-open "${diag_dir}"; then
                             _open_rc=0
                         else
                             _open_rc=$?
@@ -2276,7 +2282,7 @@ run_debug_menu_only() {
                         fi
                     elif command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
                         log_debug "[debug-menu] attempting (no SUDO_USER): systemd-run --user --scope xdg-open ${diag_dir}"
-                        if systemd-run --user --scope xdg-open "${diag_dir}" >> "${LOG_FILE}" 2>&1; then
+                        if execute_guarded "Open diagnostics folder via systemd-run + xdg-open (no SUDO_USER)" systemd-run --user --scope xdg-open "${diag_dir}"; then
                             _open_rc=0
                         else
                             _open_rc=$?
@@ -2506,10 +2512,11 @@ run_reset_download_state_only() {
     # 1. Root-level downloader state under /var/log/zypper-auto
     if [ -d "${LOG_DIR}" ]; then
         log_debug "Clearing root download state files under ${LOG_DIR}..."
-        rm -f "${LOG_DIR}/download-status.txt" \
+        execute_guarded "Clear downloader state files" rm -f \
+              "${LOG_DIR}/download-status.txt" \
               "${LOG_DIR}/download-last-check.txt" \
               "${LOG_DIR}/download-start-time.txt" \
-              "${LOG_DIR}/dry-run-last.txt" >> "${LOG_FILE}" 2>&1 || true
+              "${LOG_DIR}/dry-run-last.txt" || true
     else
         log_debug "Log directory ${LOG_DIR} does not exist; nothing to reset at root level"
     fi
@@ -2521,11 +2528,12 @@ run_reset_download_state_only() {
 
         log_debug "Clearing user notifier state under ${USER_LOG_DIR} and ${USER_CACHE_DIR}..."
 
-        mkdir -p "${USER_LOG_DIR}" "${USER_CACHE_DIR}" >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Ensure user notifier state dirs exist" mkdir -p "${USER_LOG_DIR}" "${USER_CACHE_DIR}" || true
 
-        rm -f "${USER_LOG_DIR}/last-run-status.txt" \
+        execute_guarded "Clear user notifier state files" rm -f \
+              "${USER_LOG_DIR}/last-run-status.txt" \
               "${USER_LOG_DIR}/last-notified-snapshot.txt" \
-              "${USER_CACHE_DIR}/last-output.txt" >> "${LOG_FILE}" 2>&1 || true
+              "${USER_CACHE_DIR}/last-output.txt" || true
     fi
 
     log_success "Download/notifier state reset completed"
@@ -4185,9 +4193,10 @@ execute_guarded "Disable legacy smart-updater timer" systemctl disable --now zyp
 execute_guarded "Stop legacy smart-updater service" systemctl stop zypper-smart-updater.service || true
 
 log_debug "Removing old system binaries..."
-rm -f /usr/local/bin/zypper-run-install* >> "${LOG_FILE}" 2>&1
-rm -f /usr/local/bin/notify-updater >> "${LOG_FILE}" 2>&1
-rm -f /usr/local/bin/zypper-smart-updater-script >> "${LOG_FILE}" 2>&1
+execute_guarded "Remove legacy system binaries" rm -f \
+    /usr/local/bin/zypper-run-install* \
+    /usr/local/bin/notify-updater \
+    /usr/local/bin/zypper-smart-updater-script || true
 log_success "Old system services disabled and files removed"
 
 log_info ">>> Cleaning up old user-space services..."
@@ -4209,11 +4218,12 @@ execute_guarded "Clear legacy .pyc files" find "$SUDO_USER_HOME/.local/bin" -nam
 execute_guarded "Clear legacy __pycache__ directories" find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + || true
 
 log_debug "Removing old user binaries and configs..."
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-run-install*" >> "${LOG_FILE}" 2>&1
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*" >> "${LOG_FILE}" 2>&1
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater" >> "${LOG_FILE}" 2>&1
-rm -f "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1
-rm -f "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."* >> "${LOG_FILE}" 2>&1
+execute_guarded "Remove legacy user scripts and units" rm -f \
+    "$SUDO_USER_HOME/.local/bin/zypper-run-install*" \
+    "$SUDO_USER_HOME/.local/bin/zypper-open-terminal*" \
+    "$SUDO_USER_HOME/.local/bin/zypper-notify-updater" \
+    "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" \
+    "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."* || true
 log_success "Old user services disabled and files removed"
 
 # --- 5. Create/Update DOWNLOADER (Root Service) ---
@@ -4233,8 +4243,8 @@ elif [ "$DL_TIMER_INTERVAL_MINUTES" -ne 1 ]; then
 fi
 
 # Create service log directory
-mkdir -p "${LOG_DIR}/service-logs"
-chmod 755 "${LOG_DIR}/service-logs"
+execute_guarded "Ensure service logs directory exists" mkdir -p "${LOG_DIR}/service-logs" || true
+execute_guarded "Set service logs directory permissions" chmod 755 "${LOG_DIR}/service-logs" || true
 
 # First, create the downloader script with progress tracking
 DOWNLOADER_SCRIPT="/usr/local/bin/zypper-download-with-progress"
@@ -6545,6 +6555,9 @@ def on_action(notification, action_id, user_data):
             import uuid
             trace_id = f"GUI-{uuid.uuid4().hex[:8]}"
             env["ZYPPER_TRACE_ID"] = trace_id
+            # Also propagate the notifier's own RUN id so action scripts can be
+            # correlated back to this notifier run.
+            env["ZNH_RUN_ID"] = RUN_ID
             log_info(f"Generated Trace ID for install action: {trace_id}")
 
             try:
@@ -6560,6 +6573,7 @@ def on_action(notification, action_id, user_data):
                     "DBUS_SESSION_BUS_ADDRESS",
                     "XAUTHORITY",
                     "ZYPPER_TRACE_ID",
+                    "ZNH_RUN_ID",
                 ):
                     val = env.get(key)
                     if val:
@@ -7324,13 +7338,42 @@ set -euo pipefail
 LOG_FILE="$HOME/.local/share/zypper-notify/run-install.log"
 LOG_DIR="$(dirname "$LOG_FILE")"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+# Correlation IDs propagated from the notifier (when available)
+ZNH_RUN_ID="${ZNH_RUN_ID:-}"
+ZYPPER_TRACE_ID="${ZYPPER_TRACE_ID:-}"
+if [ -z "${ZNH_RUN_ID}" ]; then
+    ZNH_RUN_ID="RUN-$(date +%Y%m%dT%H%M%S)-$$"
+fi
+
 log() {
     # Best-effort logging; never fail the script because of logging issues.
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
     {
-        printf '[%s] %s\n' "$ts" "$*" >>"$LOG_FILE" 2>/dev/null || true
+        printf '[%s] [RUN=%s]%s %s\n' "$ts" "$ZNH_RUN_ID" "${ZYPPER_TRACE_ID:+ [TID=${ZYPPER_TRACE_ID}]}" "$*" >>"$LOG_FILE" 2>/dev/null || true
     } || true
+}
+
+execute_guarded() {
+    local desc="$1"; shift
+    local tmp
+    tmp="$(mktemp)"
+    log "EXEC: ${desc} -> $*"
+    if "$@" >"$tmp" 2>&1; then
+        # Always append captured output to the log (best-effort)
+        if [ -s "$tmp" ] 2>/dev/null; then
+            cat "$tmp" >>"$LOG_FILE" 2>/dev/null || true
+        fi
+        rm -f "$tmp" 2>/dev/null || true
+        return 0
+    else
+        local rc=$?
+        log "FAILED: ${desc} (rc=${rc})"
+        cat "$tmp" | tee -a "$LOG_FILE" >&2
+        rm -f "$tmp" 2>/dev/null || true
+        return $rc
+    fi
 }
 
 log "===== zypper-run-install started (PID $$) ====="
@@ -7424,7 +7467,7 @@ RUN_UPDATE() {
     # for the zypper lock while we're doing an interactive update.
     log "RUN_UPDATE: stopping zypper-autodownload.service/timer to avoid lock conflicts"
     set +e
-    pkexec systemctl stop zypper-autodownload.service zypper-autodownload.timer >/dev/null 2>&1
+    execute_guarded "Stop background downloader (avoid lock conflicts)" pkexec systemctl stop zypper-autodownload.service zypper-autodownload.timer || true
     set -e
 
     # If any other zypper process is still running at this point (for example
@@ -7475,7 +7518,7 @@ RUN_UPDATE() {
     DELTA_FILE="${PKG_DELTA_DIR}/update-delta-$(date +%Y%m%d-%H%M%S).log"
 
     log "RUN_UPDATE: Capturing pre-update package state into ${PKG_PRE_FILE}..."
-    if ! rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 2>>"$LOG_FILE" | sort >"${PKG_PRE_FILE}" 2>>"$LOG_FILE"; then
+    if ! execute_guarded "Capture pre-update package snapshot" bash -lc "rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\\n' | sort >\"${PKG_PRE_FILE}\""; then
         log "RUN_UPDATE: WARNING: failed to capture pre-update package snapshot (see log)"
     fi
 
@@ -7495,7 +7538,9 @@ RUN_UPDATE() {
         echo ""
         echo "⚠️  Update failed. Capturing system state for diagnostics..."
         set +e
-        sudo /usr/local/bin/zypper-auto-helper --snapshot-state >/dev/null 2>&1 &
+        # Best-effort: propagate correlation IDs into the helper snapshot.
+        sudo env ZYPPER_TRACE_ID="${ZYPPER_TRACE_ID:-}" ZNH_RUN_ID="${ZNH_RUN_ID:-}" \
+            /usr/local/bin/zypper-auto-helper --snapshot-state >/dev/null 2>&1 &
         set -e
         log "RUN_UPDATE: Auto-snapshot helper invoked in background."
     fi
@@ -7509,16 +7554,16 @@ RUN_UPDATE() {
     # and compute a delta file describing exactly which packages changed.
     if [ "$rc" -eq 0 ]; then
         log "RUN_UPDATE: Capturing post-update package state into ${PKG_POST_FILE}..."
-        if rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 2>>"$LOG_FILE" | sort >"${PKG_POST_FILE}" 2>>"$LOG_FILE"; then
+        if execute_guarded "Capture post-update package snapshot" bash -lc "rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\\n' | sort >\"${PKG_POST_FILE}\""; then
             log "RUN_UPDATE: Computing package delta into ${DELTA_FILE}..."
-            {
-                echo "=== Package Changes (post - pre) ==="
-                if [ -s "${PKG_PRE_FILE}" ] && [ -s "${PKG_POST_FILE}" ]; then
-                    comm -13 "${PKG_PRE_FILE}" "${PKG_POST_FILE}" || true
+            execute_guarded "Write package delta file" bash -lc "{
+                echo '=== Package Changes (post - pre) ==='
+                if [ -s \"${PKG_PRE_FILE}\" ] && [ -s \"${PKG_POST_FILE}\" ]; then
+                    comm -13 \"${PKG_PRE_FILE}\" \"${PKG_POST_FILE}\" || true
                 else
-                    echo "(one or both snapshot files were empty; delta may be incomplete)"
+                    echo '(one or both snapshot files were empty; delta may be incomplete)'
                 fi
-            } >"${DELTA_FILE}" 2>>"$LOG_FILE" || true
+            } >\"${DELTA_FILE}\"" || true
             local change_count
             change_count=$(wc -l <"${DELTA_FILE}" 2>/dev/null || echo 0)
             log "RUN_UPDATE: Delta calculation complete; ${change_count} lines written to ${DELTA_FILE}"
@@ -7818,8 +7863,8 @@ RUN_UPDATE() {
     # stale "Ready to install" notifications after you just installed updates.
     log "RUN_UPDATE: clearing downloader cache files after interactive run"
     set +e
-    pkexec rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt 2>>"$LOG_FILE" || \
-        rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt 2>>"$LOG_FILE" || true
+    execute_guarded "Clear downloader cache files (pkexec)" pkexec rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt || \
+        execute_guarded "Clear downloader cache files (fallback rm)" rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt || true
     set -e
 
     # Keep the terminal open so the user can read the output, even if stdin
