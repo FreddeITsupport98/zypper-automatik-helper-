@@ -119,7 +119,7 @@ This service's only job is to download packages when it's safe, and report progr
         * `downloading:X` - Downloading X packages (includes count)
         * `complete` - Ready for installation
         * `idle` - No updates available
-    * It will **only** start if `ConditionACPower=true` and `ConditionNotOnMeteredConnection=true` are met.
+    * It will **only** start if `ConditionACPower=true` is met, and it will **skip** running on metered connections (detected via `nmcli` / NetworkManager).
 * **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
 *    * Default schedule is derived from the config option `DL_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (allowed values: 1,5,10,15,30,60).
 *    * For example:
@@ -133,8 +133,9 @@ In addition to the downloader, a small root service periodically runs the same
 12-point verification and auto-repair logic as `zypper-auto-helper --verify`:
 
 * **Service:** `/etc/systemd/system/zypper-auto-verify.service`
-    * Runs `zypper-auto-helper --verify` as a oneshot root service.
+* Runs `zypper-auto-helper --verify` as a oneshot root service.
     * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
+    * Uses `python3 -B -m py_compile` for syntax checks so verification still works under systemd hardening (it won’t try to write `__pycache__/*.pyc` into the user’s home).
     * Automatically resets failed states for the core units it manages and,
       when configured, sends a short desktop notification whenever it fixes
       one or more issues.
@@ -146,8 +147,8 @@ In addition to the downloader, a small root service periodically runs the same
       `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
       installer converts this into a simple calendar schedule in the same
       way as the downloader timer (minutely, hourly, or `*:0/N`).
-+
-+### 4. The Notifier (User Service)
+
+### 4. The Notifier (User Service)
 
 * **Service:** `~/.config/systemd/user/zypper-notify-user.service`
     * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
@@ -648,10 +649,15 @@ The helper includes a small diagnostics toolkit built around aggregated log foll
 
 - `zypper-auto-helper --diag-logs-on` / `--diag-logs-off`
   - `--diag-logs-on` starts a tiny background systemd unit (`zypper-auto-diag-logs.service`) that:
-    - Follows the latest installer log, all service logs, and the notifier log (when present).
+    - Follows helper service logs and the notifier log (when present).
+    - Also follows the helper's `trace.log`, which includes mirrored structured install/verify output.
+      This ensures the aggregated diagnostics log continues to capture new installs even though each
+      install uses a new `install-YYYYMMDD-HHMMSS.log` filename.
     - Tags each line with its source (`[SRC=INSTALL]`, `[SRC=DOWNLOADER]`, `[SRC=NOTIFIER]`, etc.).
     - Writes everything into a daily diagnostics file:
       - `/var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log`
+      - The writer is **auto-rotating**: at midnight it seamlessly starts writing to the new day's file
+        without needing a service restart.
     - Keeps only ~10 days of diagnostics logs, pruning older files automatically.
   - `--diag-logs-off` stops the background follower and marks diagnostics as disabled in `last-status.txt`.
 

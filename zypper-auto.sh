@@ -202,6 +202,16 @@ _log_write() {
     local line
     line="[${level}] ${ts} [RUN=${RUN_ID}]${trace_tag} $*"
     echo "${line}" >> "${LOG_FILE}"
+
+    # Also mirror all structured log lines into TRACE_LOG so the background
+    # diagnostics follower can capture install/verify activity into the
+    # aggregated per-day diagnostics log, even though each install uses a new
+    # install-*.log filename.
+    # Best-effort only: never fail the helper because TRACE_LOG is not writable.
+    if [ -n "${TRACE_LOG:-}" ]; then
+        echo "${line}" >> "${TRACE_LOG}" 2>/dev/null || true
+    fi
+
     if [ "${level}" = "ERROR" ]; then
         echo "${line}" >&2
     fi
@@ -958,9 +968,11 @@ run_self_check() {
     log_success "Bash syntax check passed for installer"
 
     # Check Python notifier syntax if it already exists
+    # NOTE: use -B so this still works under systemd services with ProtectHome=read-only
+    # (py_compile normally tries to write __pycache__/*.pyc next to the source file).
     if [ -f "$NOTIFY_SCRIPT_PATH" ]; then
         log_debug "Checking Python syntax of $NOTIFY_SCRIPT_PATH"
-        if ! python3 -m py_compile "$NOTIFY_SCRIPT_PATH" >> "${LOG_FILE}" 2>&1; then
+        if ! python3 -B -m py_compile "$NOTIFY_SCRIPT_PATH" >> "${LOG_FILE}" 2>&1; then
             log_error "Self-check FAILED: Python syntax error in $NOTIFY_SCRIPT_PATH"
             update_status "FAILED: Python syntax error in notifier script"
             exit 1
@@ -1070,14 +1082,17 @@ if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --us
     # Check if enabled
     if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-enabled "${NT_SERVICE_NAME}.timer" &>/dev/null; then
         log_success "✓ User notifier timer is active and enabled"
-        # Deep health check: verify it's actually triggering
-        NEXT_TRIGGER=$(sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user list-timers "${NT_SERVICE_NAME}.timer" 2>/dev/null | grep -o "left" || echo "")
-        if [ -n "$NEXT_TRIGGER" ]; then
-            log_success "  ✓ Timer has upcoming triggers scheduled"
+        # Deep health check: verify it's actually triggering.
+        # Use systemctl show NextElapseUSecRealtime instead of parsing list-timers output.
+        local next_elapse
+        next_elapse=$(sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user show "${NT_SERVICE_NAME}.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true)
+        if [ -n "${next_elapse}" ] && [ "${next_elapse}" != "n/a" ]; then
+            log_success "  ✓ Timer has an upcoming trigger scheduled: ${next_elapse}"
         else
-            log_error "  ⚠ Warning: Timer is active but no triggers scheduled"
-            log_info "  → Restarting to reset trigger schedule..."
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user restart "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+            log_info "  ⚠ Timer is active but no next trigger is scheduled; restarting to reset schedule..."
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+                systemctl --user restart "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
         fi
     else
         log_error "✗ User timer is active but NOT enabled"
@@ -1136,12 +1151,13 @@ fi
 log_debug "Checking Python notifier script..."
 if [ -x "${NOTIFY_SCRIPT_PATH}" ]; then
     log_success "✓ Python notifier script is executable"
-    # Check Python syntax
-    if python3 -m py_compile "${NOTIFY_SCRIPT_PATH}" &>/dev/null; then
+    # Check Python syntax.
+    # IMPORTANT: use -B so this works under systemd hardening (ProtectHome=read-only).
+    if python3 -B -m py_compile "${NOTIFY_SCRIPT_PATH}" &>/dev/null; then
         log_success "✓ Python script syntax is valid"
     else
-        log_error "✗ Python script has syntax errors"
-        log_error "  → Cannot auto-fix: syntax errors require manual intervention"
+        log_error "✗ Python script failed to compile (syntax error or environment issue)"
+        log_error "  → Cannot auto-fix: inspect the file and run: python3 -B -m py_compile ${NOTIFY_SCRIPT_PATH}"
         VERIFICATION_FAILED=1
     fi
 else
@@ -1519,13 +1535,16 @@ run_diag_logs_runner_only() {
     # runner is restarted independently of the CLI helper.
     find "${diag_dir}" -type f -name 'diag-*.log' -mtime +9 -print -delete >> "${LOG_FILE}" 2>&1 || true
 
+    # We still append an initial header to today's file, but the follower output
+    # itself is written via an auto-rotating writer so it switches to a new
+    # diag-YYYY-MM-DD.log automatically at midnight without restarting.
     today="$(date +%Y-%m-%d)"
     diag_file="${diag_dir}/diag-${today}.log"
 
-    log_info "Diagnostics log file for today: ${diag_file}"
+    log_info "Diagnostics logs will be written under: ${diag_dir} (auto-rotating per day)"
 
     # Append a compact environment/config snapshot to the diagnostics file so
-    # each day's log is self-contained for debugging.
+    # today's log starts with context.
     {
         echo "===== Zypper Auto-Helper Diagnostics Session Start: $(date '+%Y-%m-%d %H:%M:%S') ====="
         echo "Host: $(hostname 2>/dev/null || echo 'unknown')"
@@ -1545,38 +1564,40 @@ run_diag_logs_runner_only() {
         echo "======================================================================"
     } >> "${diag_file}" 2>/dev/null || true
 
-    # Build the list of log files to follow, mirroring --live-logs.
-    local latest_install_log tail_cmd=""
+    # Build the list of log files to follow.
+    local follow_paths=()
+
+    # Best-effort: include the most recent install log at runner start.
+    # Future installs will still be captured via TRACE_LOG mirroring.
+    local latest_install_log
     latest_install_log=""
     if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
         latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
     fi
-
     if [ -n "${latest_install_log}" ]; then
-        tail_cmd+=" ${latest_install_log}"
+        follow_paths+=("${latest_install_log}")
     fi
 
     if [ -d "${LOG_DIR}/service-logs" ]; then
-        # shellcheck disable=SC2086
+        local f
         for f in "${LOG_DIR}/service-logs"/*.log; do
             if [ -f "$f" ]; then
-                tail_cmd+=" $f"
+                follow_paths+=("$f")
             fi
         done
     fi
 
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
-        tail_cmd+=" ${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log"
+        follow_paths+=("${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log")
     fi
 
-    # Include the high-volume TRACE_LOG when present so diagnostics
-    # bundles see shell traces and log_trace events alongside other
-    # sources. This will appear with a SRC=TRACE tag in diagnostics.
+    # Include TRACE_LOG so diagnostics logs always capture structured install/
+    # verify activity (the helper mirrors _log_write lines into TRACE_LOG).
     if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
-        tail_cmd+=" ${TRACE_LOG}"
+        follow_paths+=("${TRACE_LOG}")
     fi
 
-    if [ -z "${tail_cmd}" ]; then
+    if [ "${#follow_paths[@]}" -eq 0 ]; then
         log_info "No existing logs found to follow; diagnostics follower will idle until logs exist."
         : > "${diag_file}" 2>/dev/null || true
         return 0
@@ -1589,15 +1610,16 @@ run_diag_logs_runner_only() {
         return 1
     fi
 
-    # Build the full command. We call the helper with all log files as
-    # arguments and append its tagged output into the diagnostics file. We
-    # wrap everything in /usr/bin/sh -lc so that environment and quoting
-    # behave as expected under systemd.
-    local cmd
-    cmd="${diag_follower}${tail_cmd} >> $(printf '%q' "${diag_file}") 2>&1"
-
-    log_debug "Starting diagnostic follower runner: ${cmd}"
-    exec /usr/bin/sh -lc "${cmd}"
+    # Auto-rotating writer: each line is appended to diag-YYYY-MM-DD.log based
+    # on the current date, so at midnight it seamlessly starts writing to the
+    # new day's file without restarting.
+    log_debug "Starting diagnostic follower runner (auto-rotating output)..."
+    "${diag_follower}" "${follow_paths[@]}" 2>&1 | \
+        awk -v diag_dir="${diag_dir}" '{
+            file = diag_dir "/diag-" strftime("%Y-%m-%d") ".log";
+            print $0 >> file;
+            fflush(file);
+        }'
 }
 
 # --- Helper: Snapshot current system/helper state into diagnostics log (CLI) ---
@@ -4097,6 +4119,40 @@ DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
 CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-10}"
 DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
 
+# Skip running any downloads on metered connections.
+# We cannot rely on systemd's ConditionNotOnMeteredConnection everywhere,
+# so we enforce it inside the downloader as well.
+is_metered() {
+    command -v nmcli >/dev/null 2>&1 || return 1
+
+    local line name uuid active ident metered
+
+    # Format: NAME:UUID:ACTIVE
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        IFS=':' read -r name uuid active <<<"$line" || true
+        [ "${active:-}" = "yes" ] || continue
+        ident="${uuid:-${name:-}}"
+        [ -n "$ident" ] || continue
+
+        metered=$(nmcli -g GENERAL.METERED connection show "$ident" 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]' | head -n1 || true)
+        case "${metered}" in
+            yes|guess-yes|payg|guess-payg)
+                return 0
+                ;;
+        esac
+    done < <(nmcli -t -f NAME,UUID,ACTIVE connection show 2>/dev/null || true)
+
+    return 1
+}
+
+if is_metered; then
+    echo "Metered connection detected via nmcli; skipping downloader run." >&2
+    # Reset status to idle so the user notifier doesn't get stuck showing stale stages.
+    write_status "idle"
+    exit 0
+fi
+
 # Smart minimum interval between refresh/dry-run runs. This reuses the
 # same CACHE_EXPIRY_MINUTES knob as the notifier so we don't hammer
 # mirrors with constant metadata/solver checks when the timer is very
@@ -4334,7 +4390,6 @@ write_atomic "${DL_SERVICE_FILE}" << EOF
 [Unit]
 Description=Download Tumbleweed updates in background
 ConditionACPower=true
-ConditionNotOnMeteredConnection=true
 Wants=network-online.target
 After=network-online.target nss-lookup.target
 
