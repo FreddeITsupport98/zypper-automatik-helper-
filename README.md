@@ -857,6 +857,10 @@ The notifier’s detailed log now includes a run tag too:
 - `ERROR` - Something went wrong, includes details
 - `SUCCESS` - Operation completed successfully
 
+#### Guarded command execution (installer / verify)
+
+Most critical operations (systemctl enable/restart, zypper maintenance commands, etc.) are executed via a guarded wrapper that captures stdout/stderr into the install log. If a command fails, its full captured output is also surfaced immediately on stderr so you don’t need to hunt through log files to see *why* it failed.
+
 #### Journald / syslog integration (best-effort)
 
 The helper also emits structured lines to the system journal (without changing the existing file logs). Useful commands:

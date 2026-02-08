@@ -407,9 +407,11 @@ execute_guarded() {
     # Run command, capture all output to temp file
     if "$@" >"$tmp_out" 2>&1; then
         log_success "${desc}"
-        # Optional: Log command output to file only if DEBUG_MODE is on
-        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null; then
-            sed 's/^/  [CMD_OUT] /' "$tmp_out" >> "${LOG_FILE}" 2>/dev/null || true
+        # Always append command output to the on-disk log (best-effort). This
+        # keeps behaviour similar to the older '>> ${LOG_FILE} 2>&1' approach
+        # while still allowing us to surface output on failure.
+        if [ -s "$tmp_out" ] 2>/dev/null; then
+            cat "$tmp_out" >> "${LOG_FILE}" 2>/dev/null || true
         fi
         rm -f "$tmp_out" 2>/dev/null || true
         return 0
@@ -1086,24 +1088,22 @@ run_self_check() {
 
     # Check bash syntax of this installer
     log_debug "Checking bash syntax of $0"
-    if ! bash -n "$0" >> "${LOG_FILE}" 2>&1; then
+    if ! execute_guarded "Bash syntax check for installer" bash -n "$0"; then
         log_error "Self-check FAILED: bash syntax error in $0"
         update_status "FAILED: Bash syntax error in installer script"
         exit 1
     fi
-    log_success "Bash syntax check passed for installer"
 
     # Check Python notifier syntax if it already exists
     # NOTE: use -B so this still works under systemd services with ProtectHome=read-only
     # (py_compile normally tries to write __pycache__/*.pyc next to the source file).
     if [ -f "$NOTIFY_SCRIPT_PATH" ]; then
         log_debug "Checking Python syntax of $NOTIFY_SCRIPT_PATH"
-        if ! python3 -B -m py_compile "$NOTIFY_SCRIPT_PATH" >> "${LOG_FILE}" 2>&1; then
+        if ! execute_guarded "Python syntax check for notifier" python3 -B -m py_compile "$NOTIFY_SCRIPT_PATH"; then
             log_error "Self-check FAILED: Python syntax error in $NOTIFY_SCRIPT_PATH"
             update_status "FAILED: Python syntax error in notifier script"
             exit 1
         fi
-        log_success "Python syntax check passed for notifier"
     else
         log_info "Python notifier $NOTIFY_SCRIPT_PATH not found yet (first install?)"
     fi
@@ -1134,22 +1134,21 @@ attempt_repair() {
     # Before attempting any repair, clear potential "failed" states on
     # the core units we manage so systemd is willing to restart them.
     # This is safe to run even when we're repairing something else.
-    systemctl reset-failed "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" \
-        >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Reset failed state for core system units" \
+        systemctl reset-failed "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" || true
     if [ -n "${SUDO_USER:-}" ] && [ -n "${USER_BUS_PATH:-}" ]; then
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
-            systemctl --user reset-failed \
-                "${NT_SERVICE_NAME}.service" "${NT_SERVICE_NAME}.timer" \
-                >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Reset failed state for user notifier units" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user reset-failed "${NT_SERVICE_NAME}.service" "${NT_SERVICE_NAME}.timer" || true
     fi
 
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))  # Track that we're attempting a repair
 
     for i in $(seq 1 $max_attempts); do
         log_info "  → Repair attempt $i/$max_attempts: $check_name"
-        if eval "$repair_command" >> "${LOG_FILE}" 2>&1; then
+        if log_command "$repair_command"; then
             sleep 0.5  # Brief pause for system to stabilize
-            if eval "$verify_command" &>/dev/null; then
+            if bash -lc "$verify_command" &>/dev/null; then
                 log_success "  ✓ Repaired successfully on attempt $i"
                 return 0
             fi
@@ -1189,8 +1188,8 @@ else
             log_error "  ✗ CRITICAL: Service files missing - installation may have failed"
             VERIFICATION_FAILED=1
         else
-            systemctl daemon-reload >> "${LOG_FILE}" 2>&1
-            systemctl enable --now "${DL_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+            execute_guarded "systemd daemon-reload (nuclear repair)" systemctl daemon-reload
+            execute_guarded "Enable + start ${DL_SERVICE_NAME}.timer (nuclear repair)" systemctl enable --now "${DL_SERVICE_NAME}.timer"
             sleep 1
             if systemctl is-active "${DL_SERVICE_NAME}.timer" &>/dev/null; then
                 log_success "  ✓ Nuclear repair successful"
@@ -1217,8 +1216,9 @@ if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --us
             log_success "  ✓ Timer has an upcoming trigger scheduled: ${next_elapse}"
         else
             log_info "  ⚠ Timer is active but no next trigger is scheduled; restarting to reset schedule..."
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
-                systemctl --user restart "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+            execute_guarded "Restart user timer ${NT_SERVICE_NAME}.timer (fix missing next trigger)" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+                systemctl --user restart "${NT_SERVICE_NAME}.timer"
         fi
     else
         log_error "✗ User timer is active but NOT enabled"
@@ -1247,18 +1247,25 @@ else
             # Check file permissions
             if [ ! -r "${NT_SERVICE_FILE}" ] || [ ! -r "${NT_TIMER_FILE}" ]; then
                 log_error "  ⚠ Service files have wrong permissions"
-                chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}" "${NT_TIMER_FILE}" >> "${LOG_FILE}" 2>&1
-                chmod 644 "${NT_SERVICE_FILE}" "${NT_TIMER_FILE}" >> "${LOG_FILE}" 2>&1
+                execute_guarded "Fix ownership for user unit files" \
+                    chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}" "${NT_TIMER_FILE}"
+                execute_guarded "Fix permissions for user unit files" \
+                    chmod 644 "${NT_SERVICE_FILE}" "${NT_TIMER_FILE}"
             fi
             
             # Final attempt
             log_info "  → Stage 3: Nuclear option - full service reset..."
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user stop "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user unmask "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1
+            execute_guarded "Stop user timer ${NT_SERVICE_NAME}.timer (nuclear repair)" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user stop "${NT_SERVICE_NAME}.timer" || true
+            execute_guarded "Disable user timer ${NT_SERVICE_NAME}.timer (nuclear repair)" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable "${NT_SERVICE_NAME}.timer" || true
+            execute_guarded "Unmask user timer ${NT_SERVICE_NAME}.timer (nuclear repair)" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user unmask "${NT_SERVICE_NAME}.timer" || true
+            execute_guarded "systemctl --user daemon-reload (nuclear repair)" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload
             sleep 1
-            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1
+            execute_guarded "Enable + start user timer ${NT_SERVICE_NAME}.timer (nuclear repair)" \
+                sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer"
             sleep 1
             
             if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user is-active "${NT_SERVICE_NAME}.timer" &>/dev/null; then
@@ -1290,8 +1297,8 @@ else
     log_error "✗ Python notifier script is missing or not executable"
     if [ -f "${NOTIFY_SCRIPT_PATH}" ]; then
         log_info "  → Attempting to fix: making script executable..."
-        chmod +x "${NOTIFY_SCRIPT_PATH}" >> "${LOG_FILE}" 2>&1
-        chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}" >> "${LOG_FILE}" 2>&1
+        execute_guarded "Make notifier script executable" chmod +x "${NOTIFY_SCRIPT_PATH}"
+        execute_guarded "Fix notifier script ownership" chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
         if [ -x "${NOTIFY_SCRIPT_PATH}" ]; then
             log_success "  ✓ Fixed: Python script is now executable"
         else
@@ -1347,7 +1354,7 @@ if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
     if [ $PROCESS_COUNT -gt 1 ]; then
         log_error "⚠ Warning: $PROCESS_COUNT Python notifier processes running (expected 0-1)"
         log_info "  → Attempting to fix: killing stale processes..."
-        pkill -9 -f "zypper-notify-updater.py" >> "${LOG_FILE}" 2>&1
+        execute_guarded "Kill stale notifier processes" pkill -9 -f "zypper-notify-updater.py" || true
         sleep 1
         if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
             NEW_COUNT=$(pgrep -f "zypper-notify-updater.py" | wc -l)
@@ -1367,8 +1374,8 @@ log_debug "Checking Python bytecode cache..."
 if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
     log_error "⚠ Warning: Python bytecode cache exists (may cause issues)"
     log_info "  → Attempting to fix: clearing bytecode cache..."
-    find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete >> "${LOG_FILE}" 2>&1
-    find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + >> "${LOG_FILE}" 2>&1 || true
+    execute_guarded "Delete .pyc files" find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete
+    execute_guarded "Remove __pycache__ directories" find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + || true
     if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
         log_error "  ✗ Failed to clear bytecode cache completely"
     else
@@ -1425,7 +1432,7 @@ if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
         if ! kill -0 "$ZYPP_LOCK_PID" 2>/dev/null; then
             log_error "⚠ Warning: Found stale zypp lock at $ZYPP_LOCK_FILE (PID $ZYPP_LOCK_PID is not running)"
             log_info "  → Attempting to remove stale lock file..."
-            if rm -f "$ZYPP_LOCK_FILE" >> "${LOG_FILE}" 2>&1; then
+            if execute_guarded "Remove stale zypp lock file" rm -f "$ZYPP_LOCK_FILE"; then
                 log_success "  ✓ Removed stale zypp lock file"
             else
                 log_error "  ✗ Failed to remove stale zypp lock file"
@@ -1445,7 +1452,7 @@ ROOT_FREE_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
     log_error "⚠ Warning: Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
     log_info "  → Attempting to free space with 'zypper clean --all'..."
-    if zypper --non-interactive clean --all >> "${LOG_FILE}" 2>&1; then
+    if execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
         sleep 1
         ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
         if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
@@ -1635,8 +1642,8 @@ WantedBy=multi-user.target
 EOF
 
     # Reload systemd daemon and (re)start the diagnostics follower service.
-    if systemctl daemon-reload >> "${LOG_FILE}" 2>&1 && \
-       systemctl enable --now "${DIAG_SERVICE_NAME}.service" >> "${LOG_FILE}" 2>&1; then
+    if execute_guarded "systemd daemon-reload (diagnostics follower)" systemctl daemon-reload && \
+       execute_guarded "Enable + start ${DIAG_SERVICE_NAME}.service" systemctl enable --now "${DIAG_SERVICE_NAME}.service"; then
         log_success "Diagnostics follower enabled as persistent service (${DIAG_SERVICE_NAME}.service)"
         update_status "SUCCESS: Diagnostics log follower enabled (persistent)"
         return 0
@@ -3454,7 +3461,7 @@ run_setup_sf_only() {
     else
         log_info "snap command not found; installing 'snapd' via zypper..."
         update_status "Installing snapd..."
-        if zypper -n install snapd >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Install snapd via zypper" zypper -n install snapd; then
             log_success "snapd successfully installed"
             snap_ok=1
         else
@@ -3510,9 +3517,9 @@ run_setup_sf_only() {
     if [ "$snap_ok" -eq 1 ]; then
         log_info "Ensuring snapd core services are enabled and running..."
         if systemctl list-unit-files snapd.service >/dev/null 2>&1; then
-            if systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket >> "${LOG_FILE}" 2>&1; then
-                log_success "snapd core services enabled and started (snapd.apparmor, snapd.seeded, snapd, snapd.socket)"
-            else
+        if execute_guarded "Enable + start snapd core services" systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket; then
+            log_success "snapd core services enabled and started (snapd.apparmor, snapd.seeded, snapd, snapd.socket)"
+        else
                 log_error "Failed to enable/start snapd core services automatically. You may need to run the commands below manually."
                 # Keep rc marked as non-zero so the final status reports a warning.
                 rc=1
@@ -3535,7 +3542,7 @@ run_setup_sf_only() {
     else
         log_info "Flatpak not found; installing 'flatpak' via zypper..."
         update_status "Installing flatpak..."
-        if zypper -n install flatpak >> "${LOG_FILE}" 2>&1; then
+        if execute_guarded "Install flatpak via zypper" zypper -n install flatpak; then
             log_success "Flatpak successfully installed"
             flatpak_ok=1
         else
@@ -4558,10 +4565,10 @@ log_success "Downloader timer file created"
 log_info ">>> Enabling (root) downloader timer: ${DL_SERVICE_NAME}.timer"
 update_status "Enabling system downloader timer..."
 log_debug "Reloading systemd daemon..."
-systemctl daemon-reload >> "${LOG_FILE}" 2>&1
+execute_guarded "systemd daemon-reload" systemctl daemon-reload
 
 log_debug "Enabling and starting timer..."
-if systemctl enable --now "${DL_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
+if execute_guarded "Enable + start ${DL_SERVICE_NAME}.timer" systemctl enable --now "${DL_SERVICE_NAME}.timer"; then
     log_success "Downloader timer enabled and started"
 else
     log_error "Failed to enable downloader timer"
@@ -4603,8 +4610,8 @@ log_success "Cache cleanup timer file created"
 
 log_info ">>> Enabling (root) cache cleanup timer: ${CLEANUP_SERVICE_NAME}.timer"
 update_status "Enabling cache cleanup timer..."
-systemctl daemon-reload >> "${LOG_FILE}" 2>&1
-if systemctl enable --now "${CLEANUP_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
+execute_guarded "systemd daemon-reload (cache cleanup)" systemctl daemon-reload
+if execute_guarded "Enable + start ${CLEANUP_SERVICE_NAME}.timer" systemctl enable --now "${CLEANUP_SERVICE_NAME}.timer"; then
 log_success "Cache cleanup timer enabled and started"
 else
     log_error "Failed to enable cache cleanup timer (non-fatal)"
@@ -4667,8 +4674,8 @@ log_success "Verification timer file created"
 
 log_info ">>> Enabling (root) verification timer: ${VERIFY_SERVICE_NAME}.timer"
 update_status "Enabling verification timer..."
-systemctl daemon-reload >> "${LOG_FILE}" 2>&1
-if systemctl enable --now "${VERIFY_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
+execute_guarded "systemd daemon-reload (verification timer)" systemctl daemon-reload
+if execute_guarded "Enable + start ${VERIFY_SERVICE_NAME}.timer" systemctl enable --now "${VERIFY_SERVICE_NAME}.timer"; then
     log_success "Verification timer enabled and started"
 else
     log_error "Failed to enable verification timer (non-fatal)"
@@ -8162,8 +8169,8 @@ log_debug "Installer script path: $INSTALLER_SCRIPT_PATH"
 log_debug "Command installation path: $COMMAND_PATH"
 
 # Copy the installer script to /usr/local/bin
-if cp "$INSTALLER_SCRIPT_PATH" "$COMMAND_PATH" >> "${LOG_FILE}" 2>&1; then
-    chmod +x "$COMMAND_PATH" >> "${LOG_FILE}" 2>&1
+if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PATH" "$COMMAND_PATH"; then
+    execute_guarded "Make ${COMMAND_PATH} executable" chmod +x "$COMMAND_PATH"
     log_success "Command installed: zypper-auto-helper"
     log_info "You can now run: zypper-auto-helper --help"
 else
@@ -8182,17 +8189,20 @@ log_info ">>> Reloading user systemd daemon and (re)starting ${NT_SERVICE_NAME}.
 update_status "Enabling user services..."
 log_debug "User bus path: $USER_BUS_PATH"
 
-if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload >> "${LOG_FILE}" 2>&1; then
+if execute_guarded "systemctl --user daemon-reload" \
+    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user daemon-reload; then
     log_success "User systemd daemon reloaded"
     
     log_debug "Enabling user timer: ${NT_SERVICE_NAME}.timer"
-    if sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1; then
+    if execute_guarded "Enable + start user timer ${NT_SERVICE_NAME}.timer" \
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user enable --now "${NT_SERVICE_NAME}.timer"; then
         log_success "User notifier timer enabled and started"
         # Some systemd versions can leave the timer in an 'elapsed' state
         # with no NEXT trigger after unit changes. Force a restart so it
         # gets a fresh schedule and actually fires again for this user.
         log_debug "Restarting user timer to ensure it is scheduled"
-        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user restart "${NT_SERVICE_NAME}.timer" >> "${LOG_FILE}" 2>&1 || true
+        execute_guarded "Restart user timer ${NT_SERVICE_NAME}.timer" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user restart "${NT_SERVICE_NAME}.timer" || true
     else
         log_error "Failed to enable user timer (non-fatal)"
         log_info "You may need to run manually as the target user:"
