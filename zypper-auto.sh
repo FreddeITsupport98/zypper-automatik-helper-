@@ -1616,10 +1616,22 @@ run_verification_only() {
     # It can be called standalone or as part of installation
     
     VERIFICATION_FAILED=0
-    REPAIR_ATTEMPTS=0
+    # Allow a wrapper to run verification multiple times while preserving a
+    # cumulative repair counter across attempts.
+    REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
     MAX_REPAIR_ATTEMPTS=3
-    local TOTAL_CHECKS=31
-    
+    local TOTAL_CHECKS=37
+
+    # Flags used to coordinate "later" repair stages so early checks don't
+    # permanently fail verification when follow-up auto-repair can recover.
+    DISK_SPACE_CRITICAL=0
+    DISK_SPACE_CLEANED_ZYPPER=0
+    RPMDB_STRUCTURAL_FAILED=0
+
+    # Repo refresh hints so we can decide whether to run deeper GPG repairs.
+    REPO_REFRESH_FAILED=0
+    REPO_REFRESH_USED_GPG_IMPORT=0
+
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
 
@@ -1984,20 +1996,25 @@ fi
 log_debug "[12/${TOTAL_CHECKS}] Checking root filesystem free space..."
 ROOT_FREE_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
-    log_error "⚠ Warning: Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
-    log_info "  → Attempting to free space with 'zypper clean --all'..."
+    log_warn "⚠ Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
+    log_info "  → Attempting best-effort cleanup with 'zypper clean --all'..."
+
+    DISK_SPACE_CLEANED_ZYPPER=1
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
     if execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
         sleep 1
         ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
         if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
             log_success "  ✓ Free space after cleanup: ${ROOT_FREE_MB_AFTER}MB (>= 1024MB)"
         else
-            log_error "  ✗ Still low on space after cleanup (currently ${ROOT_FREE_MB_AFTER:-unknown}MB)"
-            VERIFICATION_FAILED=1
+            log_warn "  ⚠ Still low on space after cleanup (currently ${ROOT_FREE_MB_AFTER:-unknown}MB)"
+            log_info "  → Advanced reclamation will run later (see Check 32)"
+            DISK_SPACE_CRITICAL=1
         fi
     else
-        log_error "  ✗ 'zypper clean --all' failed; please free space manually"
-        VERIFICATION_FAILED=1
+        log_warn "  ⚠ 'zypper clean --all' failed; advanced reclamation will run later (see Check 32)"
+        DISK_SPACE_CRITICAL=1
     fi
 else
     log_success "✓ Root filesystem has sufficient free space (${ROOT_FREE_MB:-unknown}MB)"
@@ -2030,16 +2047,16 @@ if [ -n "${RPMDB_VERIFY_BIN}" ] && [ -n "${RPM_DB_FILE}" ]; then
             log_success "✓ RPM database structural check passed"
         else
             log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
-            log_error "  → Manual recovery (risky): sudo rpm --rebuilddb"
-            VERIFICATION_FAILED=1
+            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 34)"
+            RPMDB_STRUCTURAL_FAILED=1
         fi
     else
         if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
             log_success "✓ RPM database structural check passed"
         else
             log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
-            log_error "  → Manual recovery (risky): sudo rpm --rebuilddb"
-            VERIFICATION_FAILED=1
+            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 34)"
+            RPMDB_STRUCTURAL_FAILED=1
         fi
     fi
 else
@@ -2176,16 +2193,20 @@ if [ "${refresh_ok}" -eq 1 ] 2>/dev/null; then
     log_success "✓ zypper refresh succeeded (repos reachable)"
 else
     log_warn "⚠ zypper refresh failed. Attempting auto-repair (force refresh)..."
+    REPO_REFRESH_FAILED=1
 
     # Attempt a force refresh first (no key auto-import).
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
     if command -v timeout >/dev/null 2>&1; then
         if execute_guarded "Force zypper refresh" timeout 60 zypper --non-interactive refresh --force; then
             log_success "  ✓ Auto-repair successful: Repository metadata refreshed"
+            REPO_REFRESH_FAILED=0
         else
             log_warn "  ⚠ Force refresh failed; attempting with --gpg-auto-import-keys as a last resort..."
             if execute_guarded "Force zypper refresh (auto-import keys)" timeout 60 zypper --non-interactive --gpg-auto-import-keys refresh --force; then
                 log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
+                REPO_REFRESH_FAILED=0
+                REPO_REFRESH_USED_GPG_IMPORT=1
             else
                 log_error "  ✗ Repository refresh failed even after force attempts"
                 VERIFICATION_FAILED=1
@@ -2194,10 +2215,13 @@ else
     else
         if execute_guarded "Force zypper refresh" zypper --non-interactive refresh --force; then
             log_success "  ✓ Auto-repair successful: Repository metadata refreshed"
+            REPO_REFRESH_FAILED=0
         else
             log_warn "  ⚠ Force refresh failed; attempting with --gpg-auto-import-keys as a last resort..."
             if execute_guarded "Force zypper refresh (auto-import keys)" zypper --non-interactive --gpg-auto-import-keys refresh --force; then
                 log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
+                REPO_REFRESH_FAILED=0
+                REPO_REFRESH_USED_GPG_IMPORT=1
             else
                 log_error "  ✗ Repository refresh failed even after force attempts"
                 VERIFICATION_FAILED=1
@@ -2588,6 +2612,405 @@ else
     log_info "ℹ AppArmor is not active (disabled or not installed)"
 fi
 
+# Check 32: Proactive disk space reclamation (auto-fix)
+log_debug "[32/${TOTAL_CHECKS}] Verifying disk space headroom..."
+disk_avail=""
+disk_avail=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
+if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -gt 2000 ] 2>/dev/null; then
+    log_success "✓ Disk space is healthy (${disk_avail}MB free)"
+else
+    if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]]; then
+        log_warn "⚠ Disk space is low/critical (${disk_avail}MB free). Updates may fail."
+    else
+        log_warn "⚠ Unable to determine disk headroom reliably; attempting best-effort cleanup anyway"
+    fi
+
+    # Only run the aggressive cleanup if space is low OR earlier checks flagged it.
+    if [ "${DISK_SPACE_CRITICAL:-0}" -eq 1 ] 2>/dev/null || ([[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -le 2000 ] 2>/dev/null); then
+        log_info "  → Attempting auto-repair: vacuum journals and clean caches/snapshots..."
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+        if command -v journalctl >/dev/null 2>&1; then
+            if command -v timeout >/dev/null 2>&1; then
+                execute_guarded "Vacuum system journals" timeout 30 journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+            else
+                execute_guarded "Vacuum system journals" journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+            fi
+        fi
+
+        # Skip repeating zypper clean if we already did it in Check 12.
+        if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null; then
+            execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
+        fi
+
+        if command -v snapper >/dev/null 2>&1; then
+            if command -v timeout >/dev/null 2>&1; then
+                execute_guarded "Run snapper cleanup" timeout 60 snapper cleanup number >/dev/null 2>&1 || true
+            else
+                execute_guarded "Run snapper cleanup" snapper cleanup number >/dev/null 2>&1 || true
+            fi
+        fi
+
+        disk_avail_after=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
+        if [[ "${disk_avail_after:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail_after" -gt 1000 ] 2>/dev/null; then
+            log_success "  ✓ Space reclaimed! Now ${disk_avail_after}MB free."
+            DISK_SPACE_CRITICAL=0
+        else
+            log_error "  ✗ Disk still too full after cleanup (currently ${disk_avail_after:-unknown}MB). Manual intervention needed."
+            VERIFICATION_FAILED=1
+        fi
+    fi
+fi
+
+# Check 33: Zypper lock state (deadlock killer)
+log_debug "[33/${TOTAL_CHECKS}] Checking for zypper locks (stale vs active)..."
+lock_found=0
+for zlock in /run/zypp.pid /var/run/zypp.pid; do
+    if [ -f "$zlock" ]; then
+        lock_found=1
+        lock_pid=$(cat "$zlock" 2>/dev/null || echo "")
+        if [[ "${lock_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            log_warn "⚠ Zypper lock held by running PID ${lock_pid} (${zlock}). Skipping auto-fix (may be legitimate update)."
+        else
+            log_warn "⚠ Found stale zypper lock file (${zlock}) (PID ${lock_pid:-unknown} not running)."
+            log_info "  → Attempting auto-repair: removing stale lock file..."
+            if execute_guarded "Remove stale zypper lock" rm -f "$zlock"; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                log_success "  ✓ Stale lock removed"
+            else
+                log_error "  ✗ Failed to remove stale lock file"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    fi
+done
+if [ "$lock_found" -eq 0 ] 2>/dev/null; then
+    log_success "✓ No zypper lock files detected"
+fi
+
+# Check 34: RPM database repair (nuclear option; best-effort)
+log_debug "[34/${TOTAL_CHECKS}] Verifying RPM database integrity and attempting repair if needed..."
+rpmdb_needs_repair=0
+
+# If earlier structural check failed, we already know we should repair.
+if [ "${RPMDB_STRUCTURAL_FAILED:-0}" -eq 1 ] 2>/dev/null; then
+    rpmdb_needs_repair=1
+fi
+
+# Re-evaluate DB path and verify again (defensive; does not assume Check 13 ran).
+RPM_DB_PATH2=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
+if [ -z "${RPM_DB_PATH2:-}" ]; then
+    RPM_DB_PATH2="/usr/lib/sysimage/rpm"
+fi
+RPM_DB_FILE2=""
+if [ -f "${RPM_DB_PATH2}/Packages" ]; then
+    RPM_DB_FILE2="${RPM_DB_PATH2}/Packages"
+elif [ -f "${RPM_DB_PATH2}/rpmdb.sqlite" ]; then
+    RPM_DB_FILE2="${RPM_DB_PATH2}/rpmdb.sqlite"
+fi
+RPMDB_VERIFY_BIN2=""
+if command -v rpmdb_verify >/dev/null 2>&1; then
+    RPMDB_VERIFY_BIN2="$(command -v rpmdb_verify)"
+elif [ -x /usr/lib/rpm/rpmdb_verify ]; then
+    RPMDB_VERIFY_BIN2="/usr/lib/rpm/rpmdb_verify"
+fi
+
+if [ -n "${RPMDB_VERIFY_BIN2:-}" ] && [ -n "${RPM_DB_FILE2:-}" ]; then
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 15 "${RPMDB_VERIFY_BIN2}" "${RPM_DB_FILE2}" >/dev/null 2>&1
+        rpmdb_verify_rc=$?
+    else
+        "${RPMDB_VERIFY_BIN2}" "${RPM_DB_FILE2}" >/dev/null 2>&1
+        rpmdb_verify_rc=$?
+    fi
+    set -e
+
+    if [ "$rpmdb_verify_rc" -eq 0 ] 2>/dev/null; then
+        log_success "✓ RPM database is healthy"
+    else
+        rpmdb_needs_repair=1
+    fi
+else
+    # Fallback: if we cannot structural-verify, attempt a cheap query.
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 20 rpm -qa >/dev/null 2>&1
+        rpm_query_rc=$?
+    else
+        rpm -qa >/dev/null 2>&1
+        rpm_query_rc=$?
+    fi
+    set -e
+
+    if [ "$rpm_query_rc" -eq 0 ] 2>/dev/null; then
+        log_success "✓ RPM query sanity check passed (structural verify not available)"
+    else
+        rpmdb_needs_repair=1
+    fi
+fi
+
+if [ "$rpmdb_needs_repair" -eq 1 ] 2>/dev/null; then
+    log_error "✗ RPM database appears unhealthy/corrupted"
+    log_info "  → Attempting auto-repair: backing up and rebuilding RPM database..."
+
+    ts="$(date +%s)"
+    rpmdb_backup="${RPM_DB_PATH2}.bak.${ts}"
+
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+    # Backup (best-effort)
+    if [ -d "${RPM_DB_PATH2}" ]; then
+        execute_guarded "Backup RPM DB directory" cp -a "${RPM_DB_PATH2}" "${rpmdb_backup}" >/dev/null 2>&1 || true
+    fi
+
+    # Rebuild (guard with timeout to avoid indefinite hangs)
+    rebuild_ok=0
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 180 rpm --rebuilddb >/dev/null 2>&1
+        rebuild_rc=$?
+    else
+        rpm --rebuilddb >/dev/null 2>&1
+        rebuild_rc=$?
+    fi
+    set -e
+
+    if [ "$rebuild_rc" -eq 0 ] 2>/dev/null; then
+        rebuild_ok=1
+    fi
+
+    if [ "$rebuild_ok" -eq 1 ] 2>/dev/null; then
+        # Re-verify after rebuild (best-effort)
+        if [ -n "${RPMDB_VERIFY_BIN2:-}" ] && [ -n "${RPM_DB_FILE2:-}" ]; then
+            set +e
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 15 "${RPMDB_VERIFY_BIN2}" "${RPM_DB_FILE2}" >/dev/null 2>&1
+                post_rc=$?
+            else
+                "${RPMDB_VERIFY_BIN2}" "${RPM_DB_FILE2}" >/dev/null 2>&1
+                post_rc=$?
+            fi
+            set -e
+
+            if [ "$post_rc" -eq 0 ] 2>/dev/null; then
+                log_success "  ✓ RPM database rebuilt successfully"
+                RPMDB_STRUCTURAL_FAILED=0
+            else
+                log_error "  ✗ RPM database rebuild completed but structural verify still fails"
+                VERIFICATION_FAILED=1
+            fi
+        else
+            # If we can't verify structurally, rely on rpm query sanity.
+            set +e
+            rpm -qa >/dev/null 2>&1
+            post_query_rc=$?
+            set -e
+            if [ "$post_query_rc" -eq 0 ] 2>/dev/null; then
+                log_success "  ✓ RPM database rebuilt successfully (rpm query OK)"
+                RPMDB_STRUCTURAL_FAILED=0
+            else
+                log_error "  ✗ RPM database rebuild failed (rpm query still failing)"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    else
+        log_error "  ✗ Failed to rebuild RPM database (rc=${rebuild_rc:-unknown})"
+        VERIFICATION_FAILED=1
+    fi
+fi
+
+# Check 35: Dependency & package consistency (deep repair)
+log_debug "[35/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
+if command -v zypper >/dev/null 2>&1; then
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
+        zypper_verify_rc=$?
+    else
+        zypper --non-interactive --quiet verify >/dev/null 2>&1
+        zypper_verify_rc=$?
+    fi
+    set -e
+
+    if [ "$zypper_verify_rc" -eq 0 ] 2>/dev/null; then
+        log_success "✓ Package dependencies are consistent"
+    else
+        log_warn "⚠ Broken package dependencies detected (interrupted update?)"
+        log_info "  → Attempting deep repair: zypper install --fix-broken --force-resolution"
+
+        if command -v timeout >/dev/null 2>&1; then
+            if execute_guarded "Repair broken dependencies" timeout 900 zypper --non-interactive install --fix-broken --force-resolution; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            else
+                log_error "  ✗ Failed to run dependency repair"
+                VERIFICATION_FAILED=1
+            fi
+        else
+            if execute_guarded "Repair broken dependencies" zypper --non-interactive install --fix-broken --force-resolution; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            else
+                log_error "  ✗ Failed to run dependency repair"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+
+        # Double-check
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
+            zypper_verify_rc2=$?
+        else
+            zypper --non-interactive --quiet verify >/dev/null 2>&1
+            zypper_verify_rc2=$?
+        fi
+        set -e
+
+        if [ "$zypper_verify_rc2" -eq 0 ] 2>/dev/null; then
+            log_success "  ✓ Dependencies successfully repaired"
+        else
+            log_error "  ✗ Dependencies still broken after repair attempt"
+            VERIFICATION_FAILED=1
+        fi
+    fi
+else
+    log_info "ℹ zypper not available; skipping dependency consistency check"
+fi
+
+# Check 36: Btrfs metadata health (advanced repair)
+log_debug "[36/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
+root_fstype2=""
+if command -v findmnt >/dev/null 2>&1; then
+    root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+fi
+if [ "${root_fstype2:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
+    meta_total=""
+    meta_used=""
+    meta_line=$(btrfs filesystem df / 2>/dev/null | grep -E '^Metadata' | head -n 1 || true)
+    if [ -n "${meta_line:-}" ]; then
+        meta_total=$(printf '%s\n' "$meta_line" | sed -n 's/.*total=\([^,]*\),.*/\1/p')
+        meta_used=$(printf '%s\n' "$meta_line" | sed -n 's/.*used=\(.*\)$/\1/p')
+    fi
+
+    # Convert size strings like 2.00GiB / 565.97MiB / 16.00KiB into MiB.
+    __znh_to_mib() {
+        local v="$1"
+        local num unit
+        num=$(printf '%s' "$v" | sed -E 's/^([0-9]+(\.[0-9]+)?).*/\1/')
+        unit=$(printf '%s' "$v" | sed -E 's/^[0-9]+(\.[0-9]+)?//')
+        case "$unit" in
+            KiB) awk -v n="$num" 'BEGIN{printf "%.2f", n/1024}' ;;
+            MiB) awk -v n="$num" 'BEGIN{printf "%.2f", n}' ;;
+            GiB) awk -v n="$num" 'BEGIN{printf "%.2f", n*1024}' ;;
+            TiB) awk -v n="$num" 'BEGIN{printf "%.2f", n*1024*1024}' ;;
+            B)   awk -v n="$num" 'BEGIN{printf "%.2f", n/1024/1024}' ;;
+            *)   echo "" ;;
+        esac
+    }
+
+    meta_total_mib=$(__znh_to_mib "${meta_total:-}")
+    meta_used_mib=$(__znh_to_mib "${meta_used:-}")
+
+    meta_pct=""
+    if [ -n "${meta_total_mib:-}" ] && [ -n "${meta_used_mib:-}" ]; then
+        meta_pct=$(awk -v u="$meta_used_mib" -v t="$meta_total_mib" 'BEGIN{ if (t>0) printf "%d", (u/t)*100; else print "" }')
+    fi
+
+    if [[ "${meta_pct:-}" =~ ^[0-9]+$ ]] && [ "$meta_pct" -ge 85 ] 2>/dev/null; then
+        log_warn "⚠ Btrfs metadata usage is high (~${meta_pct}% used). Attempting balance of empty chunks..."
+
+        # Avoid starting a balance if one is already running.
+        bal_out=$(btrfs balance status / 2>/dev/null || true)
+        if printf '%s\n' "$bal_out" | grep -qi 'is running'; then
+            log_warn "  ⚠ A btrfs balance is already running; skipping new balance start"
+        else
+            set +e
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 180 btrfs balance start --enqueue --full-balance -dusage=0 -musage=0 / >/dev/null 2>&1
+                bal_rc=$?
+            else
+                btrfs balance start --enqueue --full-balance -dusage=0 -musage=0 / >/dev/null 2>&1
+                bal_rc=$?
+            fi
+            set -e
+
+            if [ "$bal_rc" -eq 0 ] 2>/dev/null; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                log_success "✓ Btrfs empty-chunk balance completed"
+            else
+                log_warn "⚠ Btrfs balance failed or timed out (rc=${bal_rc}). Filesystem may be very full or read-only."
+            fi
+        fi
+    else
+        if [ -n "${meta_pct:-}" ]; then
+            log_success "✓ Btrfs metadata usage OK (~${meta_pct}% used)"
+        else
+            log_info "ℹ Unable to parse Btrfs metadata usage; skipping balance"
+        fi
+    fi
+else
+    log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
+fi
+
+# Check 37: GPG keyring/signature handling (deep repair)
+log_debug "[37/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
+if command -v zypper >/dev/null 2>&1; then
+    # Only do deeper GPG repair when repo refresh is failing or required key auto-import.
+    if [ "${REPO_REFRESH_FAILED:-0}" -eq 1 ] 2>/dev/null || [ "${REPO_REFRESH_USED_GPG_IMPORT:-0}" -eq 1 ] 2>/dev/null; then
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+            gpg_test_out=$(timeout 60 zypper --non-interactive refresh --force 2>&1)
+            gpg_test_rc=$?
+        else
+            gpg_test_out=$(zypper --non-interactive refresh --force 2>&1)
+            gpg_test_rc=$?
+        fi
+        set -e
+
+        if [ "$gpg_test_rc" -eq 0 ] 2>/dev/null; then
+            log_success "✓ Repository refresh OK (GPG handling looks consistent)"
+        else
+            if printf '%s\n' "$gpg_test_out" | grep -qiE 'gpg|signature|NOKEY|public key|keyring|repomd\.xml.*signature'; then
+                log_warn "⚠ Refresh failures look GPG/signature-related. Initiating deep GPG repair..."
+                log_info "  → Step 1: zypper clean --all"
+                execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
+
+                log_info "  → Step 2: wipe raw metadata cache (/var/cache/zypp/raw)"
+                if [ -d /var/cache/zypp/raw ]; then
+                    execute_guarded "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
+                fi
+
+                log_info "  → Step 3: force refresh with key auto-import"
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                if command -v timeout >/dev/null 2>&1; then
+                    if execute_guarded "Rebuild repo keys and refresh" timeout 120 zypper --non-interactive --gpg-auto-import-keys refresh --force; then
+                        log_success "  ✓ Deep GPG repair succeeded"
+                        REPO_REFRESH_FAILED=0
+                    else
+                        log_error "  ✗ Deep GPG repair failed"
+                        VERIFICATION_FAILED=1
+                    fi
+                else
+                    if execute_guarded "Rebuild repo keys and refresh" zypper --non-interactive --gpg-auto-import-keys refresh --force; then
+                        log_success "  ✓ Deep GPG repair succeeded"
+                        REPO_REFRESH_FAILED=0
+                    else
+                        log_error "  ✗ Deep GPG repair failed"
+                        VERIFICATION_FAILED=1
+                    fi
+                fi
+            else
+                log_info "ℹ Refresh failed, but error does not look GPG-related; skipping deep GPG repair"
+                printf '%s\n' "$gpg_test_out" | head -n 20 | tee -a "${LOG_FILE}"
+            fi
+        fi
+    else
+        log_success "✓ No repo refresh failures detected earlier; skipping deep GPG repair"
+    fi
+else
+    log_info "ℹ zypper not available; skipping deep GPG check"
+fi
+
 # Calculate repair statistics
 # We approximate "problems detected" as the combination of issues we
 # attempted to repair plus any remaining failures, so the numbers always
@@ -2595,39 +3018,47 @@ fi
 PROBLEMS_FIXED=$REPAIR_ATTEMPTS
 PROBLEMS_DETECTED=$((REPAIR_ATTEMPTS + VERIFICATION_FAILED))
 
-echo "" | tee -a "${LOG_FILE}"
-echo "==============================================" | tee -a "${LOG_FILE}"
-echo "Verification Summary:" | tee -a "${LOG_FILE}"
-echo "  - Checks performed: ${TOTAL_CHECKS}" | tee -a "${LOG_FILE}"
-echo "  - Problems detected: $PROBLEMS_DETECTED" | tee -a "${LOG_FILE}"
-echo "  - Problems auto-fixed: $PROBLEMS_FIXED" | tee -a "${LOG_FILE}"
-echo "  - Remaining issues: $VERIFICATION_FAILED" | tee -a "${LOG_FILE}"
-echo "==============================================" | tee -a "${LOG_FILE}"
-echo "" | tee -a "${LOG_FILE}"
+# Expose a few summary values for wrappers (e.g., retry logic).
+VERIFICATION_LAST_TOTAL_CHECKS=$TOTAL_CHECKS
+VERIFICATION_LAST_PROBLEMS_FIXED=$PROBLEMS_FIXED
+VERIFICATION_LAST_PROBLEMS_DETECTED=$PROBLEMS_DETECTED
+VERIFICATION_LAST_REMAINING=$VERIFICATION_FAILED
 
-if [ $VERIFICATION_FAILED -eq 0 ]; then
-    log_success ">>> All verification checks passed! ✓"
-    if [ $PROBLEMS_FIXED -gt 0 ]; then
-        log_success "  ✓ Auto-repair fixed $PROBLEMS_FIXED issue(s)"
+if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null; then
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "Verification Summary:" | tee -a "${LOG_FILE}"
+    echo "  - Checks performed: ${TOTAL_CHECKS}" | tee -a "${LOG_FILE}"
+    echo "  - Problems detected: $PROBLEMS_DETECTED" | tee -a "${LOG_FILE}"
+    echo "  - Problems auto-fixed: $PROBLEMS_FIXED" | tee -a "${LOG_FILE}"
+    echo "  - Remaining issues: $VERIFICATION_FAILED" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+
+    if [ $VERIFICATION_FAILED -eq 0 ]; then
+        log_success ">>> All verification checks passed! ✓"
+        if [ $PROBLEMS_FIXED -gt 0 ]; then
+            log_success "  ✓ Auto-repair fixed $PROBLEMS_FIXED issue(s)"
+        fi
+    else
+        log_error ">>> $VERIFICATION_FAILED verification check(s) failed!"
+        log_error "  → Auto-repair attempted but could not fix all issues"
+        log_info "  → Review logs: ${LOG_FILE}"
+        if [ "${#CONFIG_WARNINGS[@]}" -gt 0 ]; then
+            log_info "  → Config warnings detected; consider: sudo zypper-auto-helper --reset-config"
+        fi
+        log_info "  → Common fixes:"
+        log_info "     - Check systemd permissions: sudo loginctl enable-linger $SUDO_USER"
+        log_info "     - Verify DBUS session: echo \$DBUS_SESSION_BUS_ADDRESS"
+        log_info "     - Re-run installation: sudo $0 install"
     fi
-else
-    log_error ">>> $VERIFICATION_FAILED verification check(s) failed!"
-    log_error "  → Auto-repair attempted but could not fix all issues"
-    log_info "  → Review logs: ${LOG_FILE}"
-    if [ "${#CONFIG_WARNINGS[@]}" -gt 0 ]; then
-        log_info "  → Config warnings detected; consider: sudo zypper-auto-helper --reset-config"
-    fi
-    log_info "  → Common fixes:"
-    log_info "     - Check systemd permissions: sudo loginctl enable-linger $SUDO_USER"
-    log_info "     - Verify DBUS session: echo \$DBUS_SESSION_BUS_ADDRESS"
-    log_info "     - Re-run installation: sudo $0 install"
+    echo "" | tee -a "${LOG_FILE}"
 fi
-echo "" | tee -a "${LOG_FILE}"
 
 # Optionally notify the primary user when auto-repair fixed issues.
 # This is primarily intended for the periodic zypper-auto-verify.timer
 # service, but also applies when --verify is run manually.
-if [ "$PROBLEMS_FIXED" -gt 0 ] && [[ "${VERIFY_NOTIFY_USER_ENABLED,,}" == "true" ]]; then
+if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null && [ "$PROBLEMS_FIXED" -gt 0 ] && [[ "${VERIFY_NOTIFY_USER_ENABLED,,}" == "true" ]]; then
     if command -v notify-send >/dev/null 2>&1; then
         local summary details
         summary="Fixed ${PROBLEMS_FIXED} issue(s) with the update system"
@@ -2649,6 +3080,80 @@ fi
 
     # Return exit code based on verification results
     return $VERIFICATION_FAILED
+}
+
+# --- Helper: Smart verification with retries (Deep Repair orchestration) ---
+# Runs run_verification_only up to N times, suppressing the full summary on
+# intermediate attempts. This helps when deep repairs fix structural issues
+# that require a second verification pass.
+run_smart_verification() {
+    local max_retries
+    max_retries="${1:-2}"
+
+    if ! [[ "${max_retries}" =~ ^[0-9]+$ ]] || [ "${max_retries}" -lt 1 ] 2>/dev/null; then
+        max_retries=2
+    fi
+
+    local attempt rc
+    attempt=1
+    rc=1
+
+    # Preserve cumulative repairs across attempts.
+    local cumulative_repairs
+    cumulative_repairs=${REPAIR_ATTEMPTS_BASE:-0}
+
+    while [ "$attempt" -le "$max_retries" ] 2>/dev/null; do
+        log_info "=== Verification Run (Attempt ${attempt}/${max_retries}) ==="
+
+        REPAIR_ATTEMPTS_BASE=$cumulative_repairs
+        if [ "$attempt" -lt "$max_retries" ] 2>/dev/null; then
+            ZNH_SUPPRESS_VERIFICATION_SUMMARY=1
+        else
+            ZNH_SUPPRESS_VERIFICATION_SUMMARY=0
+        fi
+
+        run_verification_only
+        rc=$?
+
+        # Capture updated repair count from this attempt.
+        cumulative_repairs=${REPAIR_ATTEMPTS:-$cumulative_repairs}
+
+        if [ "$rc" -eq 0 ] 2>/dev/null; then
+            # If the first attempt succeeded while summaries were suppressed,
+            # print a compact summary so users still see "Checks performed".
+            if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -eq 1 ] 2>/dev/null; then
+                echo "" | tee -a "${LOG_FILE}"
+                echo "==============================================" | tee -a "${LOG_FILE}"
+                echo "Verification Summary:" | tee -a "${LOG_FILE}"
+                echo "  - Checks performed: ${VERIFICATION_LAST_TOTAL_CHECKS:-unknown}" | tee -a "${LOG_FILE}"
+                echo "  - Problems detected: ${VERIFICATION_LAST_PROBLEMS_DETECTED:-?}" | tee -a "${LOG_FILE}"
+                echo "  - Problems auto-fixed: ${VERIFICATION_LAST_PROBLEMS_FIXED:-?}" | tee -a "${LOG_FILE}"
+                echo "  - Remaining issues: ${VERIFICATION_LAST_REMAINING:-?}" | tee -a "${LOG_FILE}"
+                echo "==============================================" | tee -a "${LOG_FILE}"
+                echo "" | tee -a "${LOG_FILE}"
+                log_success ">>> All verification checks passed! ✓"
+                if [ "${VERIFICATION_LAST_PROBLEMS_FIXED:-0}" -gt 0 ] 2>/dev/null; then
+                    log_success "  ✓ Auto-repair fixed ${VERIFICATION_LAST_PROBLEMS_FIXED} issue(s)"
+                fi
+                echo "" | tee -a "${LOG_FILE}"
+            fi
+
+            ZNH_SUPPRESS_VERIFICATION_SUMMARY=0
+            return 0
+        fi
+
+        if [ "$attempt" -lt "$max_retries" ] 2>/dev/null; then
+            log_warn "=== Verification detected remaining issues; retrying after repairs... ==="
+            attempt=$((attempt + 1))
+            sleep 2
+        else
+            ZNH_SUPPRESS_VERIFICATION_SUMMARY=0
+            return $rc
+        fi
+    done
+
+    ZNH_SUPPRESS_VERIFICATION_SUMMARY=0
+    return $rc
 }
 
 # --- Helper: Config reset mode (CLI) ---
@@ -5468,7 +5973,7 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
     # a fatal installer error.
     trap - ERR
     set +e
-    run_verification_only
+    run_smart_verification 2
     rc=$?
     set -e
 
@@ -10069,7 +10574,7 @@ fi
 if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
     # Only run verification during installation, not in verify-only mode
     # (verify-only mode calls the function directly and exits)
-    run_verification_only
+    run_smart_verification 1
     VERIFICATION_EXIT_CODE=$?
 else
     # Should never reach here - verify mode exits earlier

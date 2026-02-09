@@ -44,7 +44,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
     * Shell aliases automatically configured for Bash, Zsh, and Fish
     * Commands: `--verify`, `--repair`, `--diagnose`, `--check`, `--help`
-* **Advanced Verification & Auto-Repair (v51):** Comprehensive 31-point health check system:
+* **Advanced Verification & Auto-Repair (v51):** Comprehensive 37-point health check system:
     * Verifies services, scripts, permissions, processes, and cache
     * Multi-stage auto-repair with retry logic (up to 3 attempts per issue)
     * Deep health checks: active + enabled + triggers scheduled
@@ -131,7 +131,7 @@ This service's only job is to download packages when it's safe, and report progr
 ### 3. Periodic Verification / Auto-Repair Service
 
 In addition to the downloader, a small root service periodically runs the same
-31-point verification and auto-repair logic as `zypper-auto-helper --verify`:
+37-point verification and auto-repair logic as `zypper-auto-helper --verify`:
 
 * **Service:** `/etc/systemd/system/zypper-auto-verify.service`
 * Runs `zypper-auto-helper --verify` as a oneshot root service.
@@ -143,7 +143,7 @@ In addition to the downloader, a small root service periodically runs the same
     * Snapper root snapshot validation is best-effort and tries to be compatible with older Snapper versions/output formats.
     * Cron conflict detection only flags cron entries that appear to *run* `zypper` (comment-only mentions are ignored).
     * Extra hardening checks include world-writable file scans, basic SSH hardening checks, NTP sync status, orphaned package detection, SMART disk health (when available), kernel taint warnings, reboot-required detection, memory headroom checks, and AppArmor status.
-    * Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, and reloading AppArmor when it’s active but profiles aren’t enabled.
+    * Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, reloading AppArmor when it’s active but profiles aren’t enabled, proactive disk space reclamation (journal vacuum + cache cleanup + snapper cleanup), RPM DB rebuild (with backup) when corruption is detected, dependency repair (`zypper verify` + `install --fix-broken`), Btrfs metadata balancing on high metadata usage, and deep GPG cache/key repair for signature-related refresh failures.
     * Performs safety checks such as cleaning up stale `/run/zypp.pid`
       locks (when the PID is no longer running) and running
       `zypper clean --all` when free space on `/` falls below ~1 GiB.
