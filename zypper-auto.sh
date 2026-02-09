@@ -1632,6 +1632,12 @@ run_verification_only() {
     REPO_REFRESH_FAILED=0
     REPO_REFRESH_USED_GPG_IMPORT=0
 
+    # Track whether zypper appears to be legitimately running (lock held by a
+    # live process). When true, we avoid running zypper-based checks/repairs
+    # that would fail or interfere with an in-progress update.
+    ZYPPER_LOCK_ACTIVE=0
+    ZYPPER_LOCK_PID_ACTIVE=""
+
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
 
@@ -1968,24 +1974,35 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
     fi
 fi
 
-# Check 11: Stale zypp lock cleanup
-log_debug "[11/${TOTAL_CHECKS}] Checking for stale zypp lock file..."
+# Check 11: zypp lock state (stale vs active)
+log_debug "[11/${TOTAL_CHECKS}] Checking for zypp lock file (stale vs active)..."
 if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
     ZYPP_LOCK_FILE="/run/zypp.pid"
     [ -f "/var/run/zypp.pid" ] && ZYPP_LOCK_FILE="/var/run/zypp.pid"
     ZYPP_LOCK_PID=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
-    if [ -n "$ZYPP_LOCK_PID" ]; then
-        if ! kill -0 "$ZYPP_LOCK_PID" 2>/dev/null; then
-            log_error "⚠ Warning: Found stale zypp lock at $ZYPP_LOCK_FILE (PID $ZYPP_LOCK_PID is not running)"
+
+    # If PID is numeric and alive: treat as an active/legitimate lock.
+    if [[ "${ZYPP_LOCK_PID:-}" =~ ^[0-9]+$ ]] && kill -0 "$ZYPP_LOCK_PID" 2>/dev/null; then
+        ZYPPER_LOCK_ACTIVE=1
+        ZYPPER_LOCK_PID_ACTIVE="$ZYPP_LOCK_PID"
+        log_warn "⚠ zypper appears to be running (lock held by PID ${ZYPP_LOCK_PID}); skipping zypper-based repairs"
+    else
+        # PID is missing/non-numeric OR process is dead.
+        # Never remove the lock if any zypper process is currently running.
+        if pgrep -x zypper >/dev/null 2>&1; then
+            ZYPPER_LOCK_ACTIVE=1
+            ZYPPER_LOCK_PID_ACTIVE="${ZYPP_LOCK_PID:-unknown}"
+            log_warn "⚠ zypp lock file looks stale but a zypper process is running; NOT removing lock (${ZYPP_LOCK_FILE})"
+        else
+            log_warn "⚠ Found stale zypp lock at ${ZYPP_LOCK_FILE} (PID ${ZYPP_LOCK_PID:-unknown} not running)"
             log_info "  → Attempting to remove stale lock file..."
             if execute_guarded "Remove stale zypp lock file" rm -f "$ZYPP_LOCK_FILE"; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
                 log_success "  ✓ Removed stale zypp lock file"
             else
                 log_error "  ✗ Failed to remove stale zypp lock file"
                 VERIFICATION_FAILED=1
             fi
-        else
-            log_debug "  → zypp lock PID $ZYPP_LOCK_PID is alive; leaving lock in place"
         fi
     fi
 else
@@ -2002,7 +2019,10 @@ if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
     DISK_SPACE_CLEANED_ZYPPER=1
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
 
-    if execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
+    if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+        log_warn "  ⚠ Skipping 'zypper clean --all' because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+        DISK_SPACE_CRITICAL=1
+    elif execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
         sleep 1
         ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
         if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
@@ -2178,22 +2198,26 @@ else
 fi
 
 log_debug "[18/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; auto-fix)..."
-refresh_ok=0
-if command -v timeout >/dev/null 2>&1; then
-    if timeout 25 zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
-        refresh_ok=1
-    fi
-else
-    if zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
-        refresh_ok=1
-    fi
-fi
 
-if [ "${refresh_ok}" -eq 1 ] 2>/dev/null; then
-    log_success "✓ zypper refresh succeeded (repos reachable)"
+if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+    log_warn "⚠ Skipping repo refresh check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 else
-    log_warn "⚠ zypper refresh failed. Attempting auto-repair (force refresh)..."
-    REPO_REFRESH_FAILED=1
+    refresh_ok=0
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 25 zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
+            refresh_ok=1
+        fi
+    else
+        if zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
+            refresh_ok=1
+        fi
+    fi
+
+    if [ "${refresh_ok}" -eq 1 ] 2>/dev/null; then
+        log_success "✓ zypper refresh succeeded (repos reachable)"
+    else
+        log_warn "⚠ zypper refresh failed. Attempting auto-repair (force refresh)..."
+        REPO_REFRESH_FAILED=1
 
     # Attempt a force refresh first (no key auto-import).
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
@@ -2227,6 +2251,7 @@ else
                 VERIFICATION_FAILED=1
             fi
         fi
+    fi
     fi
 fi
 
@@ -2413,7 +2438,9 @@ fi
 
 # Check 26: Orphaned packages (best-effort)
 log_debug "[26/${TOTAL_CHECKS}] Checking for orphaned packages (no repository)..."
-if command -v zypper >/dev/null 2>&1; then
+if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+    log_warn "⚠ Skipping orphaned package check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+elif command -v zypper >/dev/null 2>&1; then
     set +e
     if command -v timeout >/dev/null 2>&1; then
         orphans_out=$(timeout 20 zypper --no-refresh --non-interactive packages --orphaned 2>&1)
@@ -2638,8 +2665,9 @@ else
             fi
         fi
 
-        # Skip repeating zypper clean if we already did it in Check 12.
-        if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null; then
+        # Skip repeating zypper clean if we already did it in Check 12, or if
+        # zypper appears to be running (lock held by a live process).
+        if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null && [ "${ZYPPER_LOCK_ACTIVE:-0}" -ne 1 ] 2>/dev/null; then
             execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
         fi
 
@@ -2670,16 +2698,25 @@ for zlock in /run/zypp.pid /var/run/zypp.pid; do
         lock_found=1
         lock_pid=$(cat "$zlock" 2>/dev/null || echo "")
         if [[ "${lock_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            ZYPPER_LOCK_ACTIVE=1
+            ZYPPER_LOCK_PID_ACTIVE="$lock_pid"
             log_warn "⚠ Zypper lock held by running PID ${lock_pid} (${zlock}). Skipping auto-fix (may be legitimate update)."
         else
-            log_warn "⚠ Found stale zypper lock file (${zlock}) (PID ${lock_pid:-unknown} not running)."
-            log_info "  → Attempting auto-repair: removing stale lock file..."
-            if execute_guarded "Remove stale zypper lock" rm -f "$zlock"; then
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-                log_success "  ✓ Stale lock removed"
+            # Never remove a lock file if any zypper process is currently running.
+            if pgrep -x zypper >/dev/null 2>&1; then
+                ZYPPER_LOCK_ACTIVE=1
+                ZYPPER_LOCK_PID_ACTIVE="${lock_pid:-unknown}"
+                log_warn "⚠ zypper is running but lock PID is invalid/unknown; NOT removing lock file (${zlock})"
             else
-                log_error "  ✗ Failed to remove stale lock file"
-                VERIFICATION_FAILED=1
+                log_warn "⚠ Found stale zypper lock file (${zlock}) (PID ${lock_pid:-unknown} not running)."
+                log_info "  → Attempting auto-repair: removing stale lock file..."
+                if execute_guarded "Remove stale zypper lock" rm -f "$zlock"; then
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                    log_success "  ✓ Stale lock removed"
+                else
+                    log_error "  ✗ Failed to remove stale lock file"
+                    VERIFICATION_FAILED=1
+                fi
             fi
         fi
     fi
@@ -2822,7 +2859,9 @@ fi
 
 # Check 35: Dependency & package consistency (deep repair)
 log_debug "[35/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
-if command -v zypper >/dev/null 2>&1; then
+if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+    log_warn "⚠ Skipping dependency consistency check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+elif command -v zypper >/dev/null 2>&1; then
     set +e
     if command -v timeout >/dev/null 2>&1; then
         timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
@@ -2954,7 +2993,9 @@ fi
 
 # Check 37: GPG keyring/signature handling (deep repair)
 log_debug "[37/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
-if command -v zypper >/dev/null 2>&1; then
+if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+    log_warn "⚠ Skipping deep GPG check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+elif command -v zypper >/dev/null 2>&1; then
     # Only do deeper GPG repair when repo refresh is failing or required key auto-import.
     if [ "${REPO_REFRESH_FAILED:-0}" -eq 1 ] 2>/dev/null || [ "${REPO_REFRESH_USED_GPG_IMPORT:-0}" -eq 1 ] 2>/dev/null; then
         set +e
