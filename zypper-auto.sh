@@ -108,6 +108,14 @@ STATUS_FILE="${LOG_DIR}/last-status.txt"
 MAX_LOG_FILES=10  # Keep only the last 10 log files (overridable via /etc/zypper-auto.conf)
 MAX_LOG_SIZE_MB=50  # Maximum size for a single log file in MB (overridable)
 
+# Safety/observability state (used by EXIT trap + verification wrappers)
+ZNH_LOG_CLEANUP_DONE=0
+FLIGHT_REPORT_ENABLED=0
+FLIGHT_REPORT_PRINTED=0
+REPAIR_SAFETY_PRE_SNAP_ID=""
+REPAIR_SAFETY_POST_SNAP_ID=""
+REPAIR_SAFETY_SNAPSHOT_FINALIZED=0
+
 # Accumulator for any configuration warnings so we can surface them
 # once at the end of installation.
 CONFIG_WARNINGS=()
@@ -158,6 +166,13 @@ fi
 
 # Cleanup old log files with compression and rotation
 cleanup_old_logs() {
+    # Allow calling cleanup multiple times (e.g., early in main flow and
+    # again later during install) without doing duplicate work.
+    if [ "${ZNH_LOG_CLEANUP_DONE:-0}" -eq 1 ] 2>/dev/null; then
+        return 0
+    fi
+    ZNH_LOG_CLEANUP_DONE=1
+
     log_debug "Cleaning up old log files in ${LOG_DIR}..."
 
     # 1. Compress installer logs older than 1 day (keep very recent logs raw
@@ -197,6 +212,50 @@ cleanup_old_logs() {
                 gzip "${rotated}" 2>/dev/null || true
                 touch "${large_log}" 2>/dev/null || true
             done
+
+        # Delete rotated/compressed service logs older than 30 days to avoid
+        # unbounded growth on long-lived systems.
+        find "${LOG_DIR}/service-logs" -name "*.gz" -type f -mtime +30 -delete 2>/dev/null || true
+    fi
+
+    # 5. TRACE_LOG can grow indefinitely across runs (by design). Apply the
+    # same size-based rotation as service logs, and clean up old rotations.
+    local trace_limit_mb trace_limit_bytes trace_size_bytes
+    trace_limit_mb="${MAX_LOG_SIZE_MB:-50}"
+    if ! [[ "${trace_limit_mb}" =~ ^[0-9]+$ ]]; then
+        trace_limit_mb=50
+    fi
+    trace_limit_bytes=$((trace_limit_mb * 1024 * 1024))
+
+    if [ -n "${TRACE_LOG:-}" ] && [ -f "${TRACE_LOG}" ]; then
+        trace_size_bytes=$(stat -c %s "${TRACE_LOG}" 2>/dev/null || echo 0)
+        if [[ "${trace_size_bytes:-0}" =~ ^[0-9]+$ ]] && [ "${trace_size_bytes}" -gt "${trace_limit_bytes}" ] 2>/dev/null; then
+            local rotated
+            rotated="${TRACE_LOG}.$(date +%Y%m%d-%H%M%S)"
+            log_info "Rotating large trace log: ${TRACE_LOG} (${trace_size_bytes} bytes)"
+            mv "${TRACE_LOG}" "${rotated}" 2>/dev/null || true
+            gzip "${rotated}" 2>/dev/null || true
+            touch "${TRACE_LOG}" 2>/dev/null || true
+            chmod 640 "${TRACE_LOG}" 2>/dev/null || true
+        fi
+
+        # Cleanup old trace rotations (>30 days)
+        find "${LOG_DIR}" -maxdepth 1 -name "trace.log.*.gz" -type f -mtime +30 -delete 2>/dev/null || true
+    fi
+
+    # 6. Optional history file maintenance (if present).
+    # Keep last 50 lines to prevent infinite growth.
+    local history_file
+    history_file="${LOG_DIR}/history.txt"
+    if [ -f "${history_file}" ]; then
+        local tmp
+        tmp="$(mktemp)"
+        tail -n 50 "${history_file}" >"${tmp}" 2>/dev/null || true
+        if [ -s "${tmp}" ] 2>/dev/null; then
+            mv -f "${tmp}" "${history_file}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null || true
+        else
+            rm -f "${tmp}" 2>/dev/null || true
+        fi
     fi
 
     log_success "Log rotation and compression completed"
@@ -1541,6 +1600,11 @@ log_success "Root privileges confirmed"
 
 # Load configuration now that we have root privileges (for /etc writes)
 load_config
+
+# --- Early housekeeping (Janitor) ---
+# Do log rotation/compression early so long-running systems don't accumulate
+# unlimited history under /var/log/zypper-auto.
+cleanup_old_logs || true
 
 # Prefer SUDO_USER when present (normal case when run via sudo).
 # When invoked by systemd services (e.g. --verify from zypper-auto-verify
@@ -3196,6 +3260,245 @@ run_smart_verification() {
     ZNH_SUPPRESS_VERIFICATION_SUMMARY=0
     return $rc
 }
+
+# --- Safety Net: pre/post Snapper snapshot for verification/repair ---
+__znh_start_repair_safety_snapshot() {
+    # Only snapshot once per invocation.
+    if [ -n "${REPAIR_SAFETY_PRE_SNAP_ID:-}" ]; then
+        return 0
+    fi
+
+    # Only attempt when snapper is present and we're root.
+    if [ "${EUID:-1}" -ne 0 ] 2>/dev/null; then
+        return 0
+    fi
+    if ! command -v snapper >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # If snapper is already running (e.g., timers), avoid competing.
+    if pgrep -x snapper >/dev/null 2>&1; then
+        log_warn "📸 Snapper is already running; skipping Pre-Repair Safety Snapshot"
+        return 0
+    fi
+
+    log_info "📸 Creating Pre-Repair Safety Snapshot (Safety Net)..."
+
+    local out rc
+    set +e
+    out=$(snapper create --type pre --cleanup-algorithm number \
+        --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
+    rc=$?
+    set -e
+
+    if [ "$rc" -eq 0 ] 2>/dev/null; then
+        # snapper prints the snapshot number on stdout.
+        REPAIR_SAFETY_PRE_SNAP_ID=$(printf '%s\n' "$out" | tail -n 1 | tr -d '\r' | tr -cd '0-9')
+        if [[ "${REPAIR_SAFETY_PRE_SNAP_ID:-}" =~ ^[0-9]+$ ]]; then
+            log_success "📸 Pre-Repair Safety Snapshot created (pre=${REPAIR_SAFETY_PRE_SNAP_ID})"
+        else
+            # If parsing failed, keep raw output for debugging but don't treat as fatal.
+            REPAIR_SAFETY_PRE_SNAP_ID=""
+            log_warn "📸 Snapper pre-snapshot succeeded but snapshot number could not be parsed (output: ${out})"
+        fi
+    else
+        log_warn "📸 Failed to create Pre-Repair Safety Snapshot (snapper rc=${rc}); proceeding without snapshot"
+        if [ -n "${out:-}" ]; then
+            printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
+        fi
+    fi
+
+    return 0
+}
+
+__znh_finalize_repair_safety_snapshot() {
+    # Finalize only once.
+    if [ "${REPAIR_SAFETY_SNAPSHOT_FINALIZED:-0}" -eq 1 ] 2>/dev/null; then
+        return 0
+    fi
+
+    if [ -z "${REPAIR_SAFETY_PRE_SNAP_ID:-}" ]; then
+        return 0
+    fi
+
+    if [ "${EUID:-1}" -ne 0 ] 2>/dev/null; then
+        return 0
+    fi
+    if ! command -v snapper >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local rc="${1:-0}"
+    local desc
+    desc="Zypper-Auto Repair Complete"
+    if [ "$rc" -ne 0 ] 2>/dev/null; then
+        desc="Zypper-Auto Repair Complete (rc=${rc})"
+    fi
+
+    log_info "📸 Finalizing Safety Snapshot (post)..."
+
+    local out post_rc
+    set +e
+    out=$(snapper create --type post --cleanup-algorithm number \
+        --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
+    post_rc=$?
+    set -e
+
+    if [ "$post_rc" -eq 0 ] 2>/dev/null; then
+        REPAIR_SAFETY_POST_SNAP_ID=$(printf '%s\n' "$out" | tail -n 1 | tr -d '\r' | tr -cd '0-9')
+        if [[ "${REPAIR_SAFETY_POST_SNAP_ID:-}" =~ ^[0-9]+$ ]]; then
+            log_success "📸 Safety Snapshot finalized (post=${REPAIR_SAFETY_POST_SNAP_ID}, pre=${REPAIR_SAFETY_PRE_SNAP_ID})"
+        else
+            REPAIR_SAFETY_POST_SNAP_ID=""
+            log_warn "📸 Snapper post-snapshot succeeded but snapshot number could not be parsed (output: ${out})"
+        fi
+    else
+        log_warn "📸 Failed to create post snapshot (snapper rc=${post_rc}); pre snapshot ${REPAIR_SAFETY_PRE_SNAP_ID} is still available"
+        if [ -n "${out:-}" ]; then
+            printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
+        fi
+    fi
+
+    REPAIR_SAFETY_SNAPSHOT_FINALIZED=1
+    return 0
+}
+
+run_smart_verification_with_safety_net() {
+    local max_retries
+    max_retries="${1:-2}"
+
+    # Enable the Flight Report for this invocation.
+    FLIGHT_REPORT_ENABLED=1
+
+    __znh_start_repair_safety_snapshot || true
+
+    run_smart_verification "${max_retries}"
+    local rc=$?
+
+    # Best-effort: finalize snapshot immediately, but also keep an EXIT trap
+    # as a backstop in case of unexpected early exits.
+    __znh_finalize_repair_safety_snapshot "$rc" || true
+
+    return "$rc"
+}
+
+# --- Flight Report (executive summary) ---
+print_flight_report() {
+    local exit_rc="${1:-0}"
+
+    # Only print for runs that actually executed verification.
+    if [ "${FLIGHT_REPORT_ENABLED:-0}" -ne 1 ] 2>/dev/null; then
+        return 0
+    fi
+    if [ "${FLIGHT_REPORT_PRINTED:-0}" -eq 1 ] 2>/dev/null; then
+        return 0
+    fi
+    FLIGHT_REPORT_PRINTED=1
+
+    local total remaining fixed detected
+    total="${VERIFICATION_LAST_TOTAL_CHECKS:-unknown}"
+    remaining="${VERIFICATION_LAST_REMAINING:-?}"
+    fixed="${VERIFICATION_LAST_PROBLEMS_FIXED:-0}"
+    detected="${VERIFICATION_LAST_PROBLEMS_DETECTED:-?}"
+
+    echo ""
+    echo "==================================================="
+    echo "   ZYPPER-AUTO FLIGHT REPORT: $(date '+%Y-%m-%d %H:%M')"
+    echo "==================================================="
+    printf "%-30s : %s\n" "Total Checks Performed" "${total}"
+    printf "%-30s : %s\n" "Problems Detected" "${detected}"
+    printf "%-30s : %s\n" "Auto-Repairs Executed" "${fixed}"
+
+    local status_plain
+    if [ "${exit_rc}" -eq 0 ] 2>/dev/null && [ "${remaining}" -eq 0 ] 2>/dev/null; then
+        status_plain="HEALTHY"
+    else
+        status_plain="UNHEALTHY (Intervention Needed)"
+    fi
+
+    if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+        if [ "${status_plain}" = "HEALTHY" ]; then
+            printf "%-30s : \033[1;32m%s\033[0m\n" "System Status" "${status_plain}"
+        else
+            printf "%-30s : \033[1;31m%s\033[0m\n" "System Status" "${status_plain}"
+        fi
+    else
+        printf "%-30s : %s\n" "System Status" "${status_plain}"
+    fi
+
+    if [ -n "${REPAIR_SAFETY_PRE_SNAP_ID:-}" ]; then
+        echo "---------------------------------------------------"
+        echo "📸 Safety Net (Snapper):"
+        echo "  - Pre-Repair snapshot : ${REPAIR_SAFETY_PRE_SNAP_ID}"
+        if [ -n "${REPAIR_SAFETY_POST_SNAP_ID:-}" ]; then
+            echo "  - Post-Repair snapshot: ${REPAIR_SAFETY_POST_SNAP_ID}"
+            echo "  - Inspect changes     : sudo snapper status ${REPAIR_SAFETY_PRE_SNAP_ID}..${REPAIR_SAFETY_POST_SNAP_ID}"
+        fi
+        echo "  - Rollback (undo)     : sudo snapper rollback ${REPAIR_SAFETY_PRE_SNAP_ID}"
+    fi
+
+    if [ "${fixed}" -gt 0 ] 2>/dev/null && [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE}" ]; then
+        echo "---------------------------------------------------"
+        echo "⚠ Actions Taken (recent repair intents from log):"
+        grep -E "→ Attempting|Attempting to fix|Attempting deep repair|Attempting auto-repair" "${LOG_FILE}" 2>/dev/null \
+            | tail -n 20 | sed 's/^/    - /' || true
+    fi
+
+    echo "==================================================="
+    if [ -n "${LOG_FILE:-}" ]; then
+        echo "Full logs available at: ${LOG_FILE}"
+    fi
+    echo ""
+
+    # Also append a plain (no ANSI) copy of the report into the run log so
+    # it can be retrieved later without scrolling through all checks.
+    if [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE}" ]; then
+        {
+            echo ""
+            echo "==================================================="
+            echo "ZYPPER-AUTO FLIGHT REPORT: $(date '+%Y-%m-%d %H:%M')"
+            echo "==================================================="
+            printf "%-30s : %s\n" "Total Checks Performed" "${total}"
+            printf "%-30s : %s\n" "Problems Detected" "${detected}"
+            printf "%-30s : %s\n" "Auto-Repairs Executed" "${fixed}"
+            printf "%-30s : %s\n" "System Status" "${status_plain}"
+            if [ -n "${REPAIR_SAFETY_PRE_SNAP_ID:-}" ]; then
+                echo "Safety Snapshot (pre)         : ${REPAIR_SAFETY_PRE_SNAP_ID}"
+                if [ -n "${REPAIR_SAFETY_POST_SNAP_ID:-}" ]; then
+                    echo "Safety Snapshot (post)        : ${REPAIR_SAFETY_POST_SNAP_ID}"
+                fi
+            fi
+            echo "Full logs available at: ${LOG_FILE}"
+            echo "==================================================="
+            echo ""
+        } >>"${LOG_FILE}" 2>/dev/null || true
+    fi
+
+    return 0
+}
+
+__znh_exit_handler() {
+    # Preserve original exit code.
+    local rc=$?
+
+    # Avoid recursion.
+    trap - EXIT
+
+    # Ensure EXIT handler itself doesn't abort due to set -e.
+    set +e
+
+    # Backstop: finalize safety snapshot if a pre snapshot exists.
+    __znh_finalize_repair_safety_snapshot "${rc}" || true
+
+    # Print report (only when enabled).
+    print_flight_report "${rc}" || true
+
+    exit "${rc}"
+}
+
+# Always register the EXIT handler, but it is gated by FLIGHT_REPORT_ENABLED
+# and REPAIR_SAFETY_PRE_SNAP_ID so it won't spam in non-verification modes.
+trap '__znh_exit_handler' EXIT
 
 # --- Helper: Config reset mode (CLI) ---
 run_reset_config_only() {
@@ -6014,7 +6317,7 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
     # a fatal installer error.
     trap - ERR
     set +e
-    run_smart_verification 2
+    run_smart_verification_with_safety_net 2
     rc=$?
     set -e
 
@@ -10615,7 +10918,7 @@ fi
 if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
     # Only run verification during installation, not in verify-only mode
     # (verify-only mode calls the function directly and exits)
-    run_smart_verification 1
+    run_smart_verification_with_safety_net 1
     VERIFICATION_EXIT_CODE=$?
 else
     # Should never reach here - verify mode exits earlier

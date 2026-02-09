@@ -144,6 +144,8 @@ In addition to the downloader, a small root service periodically runs the same
     * Cron conflict detection only flags cron entries that appear to *run* `zypper` (comment-only mentions are ignored).
     * Extra hardening checks include world-writable file scans, basic SSH hardening checks, NTP sync status, orphaned package detection, SMART disk health (when available), kernel taint warnings, reboot-required detection, memory headroom checks, and AppArmor status.
     * Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, reloading AppArmor when it’s active but profiles aren’t enabled, proactive disk space reclamation (journal vacuum + cache cleanup + snapper cleanup), RPM DB rebuild (with backup) when corruption is detected, dependency repair (`zypper verify` + `install --fix-broken`), Btrfs metadata balancing on high metadata usage, and deep GPG cache/key repair for signature-related refresh failures.
+    * **Safety Net:** when Snapper is available, verification/auto-repair creates a **pre/post** snapshot pair before running any repair actions, so you have an "undo" point if something goes wrong.
+    * **Flight Report:** after verification completes, the helper prints an executive summary (checks performed, repairs executed, health status, and snapshot IDs when available).
     * Performs safety checks such as cleaning up stale `/run/zypp.pid`
       locks (when the PID is no longer running), **but never removes lockfiles when a real
       `zypper` process is running**, and it will **skip zypper-based repairs/cleanups**
