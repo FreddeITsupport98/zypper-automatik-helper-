@@ -1893,13 +1893,47 @@ else
     VERIFICATION_FAILED=1
 fi
 
-# Check 10: Status file exists
-log_debug "Checking status file..."
-if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
-    CURRENT_STATUS=$(cat /var/log/zypper-auto/download-status.txt)
-    log_success "✓ Status file exists (current: $CURRENT_STATUS)"
+# Check 10: Status file integrity (auto-fix enabled)
+log_debug "[10/${TOTAL_CHECKS}] Checking status file integrity..."
+local DL_STATUS_FILE
+DL_STATUS_FILE="/var/log/zypper-auto/download-status.txt"
+CURRENT_STATUS=""
+
+# Helper status format: idle | refreshing | downloading:... | complete | complete:...
+__znh_validate_download_status_ok() {
+    local s="$1"
+    printf '%s\n' "$s" | grep -qE '^(idle|refreshing|downloading:|complete($|:))'
+}
+
+if [ -s "${DL_STATUS_FILE}" ]; then
+    CURRENT_STATUS=$(cat "${DL_STATUS_FILE}" 2>/dev/null || echo "")
+    if __znh_validate_download_status_ok "${CURRENT_STATUS:-}"; then
+        log_success "✓ Status file exists and is valid (current: ${CURRENT_STATUS:-unknown})"
+    else
+        log_warn "⚠ Status file content looks invalid. Auto-repairing to 'idle'..."
+        mkdir -p /var/log/zypper-auto
+        echo "idle" > "${DL_STATUS_FILE}"
+        chmod 644 "${DL_STATUS_FILE}" 2>/dev/null || true
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        CURRENT_STATUS="idle"
+        log_success "  ✓ Reset status file content (idle)"
+    fi
+elif [ -f "${DL_STATUS_FILE}" ]; then
+    log_warn "⚠ Status file exists but is empty. Auto-repairing..."
+    mkdir -p /var/log/zypper-auto
+    echo "idle" > "${DL_STATUS_FILE}"
+    chmod 644 "${DL_STATUS_FILE}" 2>/dev/null || true
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+    CURRENT_STATUS="idle"
+    log_success "  ✓ Created default status file content (idle)"
 else
-    log_info "ℹ Status file will be created on first run"
+    log_warn "⚠ Status file is missing. Auto-repairing..."
+    mkdir -p /var/log/zypper-auto
+    echo "idle" > "${DL_STATUS_FILE}"
+    chmod 644 "${DL_STATUS_FILE}" 2>/dev/null || true
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+    CURRENT_STATUS="idle"
+    log_success "  ✓ Created default status file (idle)"
 fi
 
 # Auto-fix: detect and reset stale download status so the helper does not
@@ -2035,14 +2069,30 @@ log_debug "[14/${TOTAL_CHECKS}] Verifying critical system packages (rpm -V)..."
     fi
 )
 
-# Check 15: Global systemd failed units
+# Check 15: Global systemd failed units (auto-fix enabled)
 log_debug "[15/${TOTAL_CHECKS}] Checking for failed systemd units (global)..."
 FAILED_UNITS=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
 if [ -z "${FAILED_UNITS:-}" ]; then
     log_success "✓ No failed systemd units detected"
 else
-    log_warn "⚠ Failed systemd units detected (may impact updates/networking):"
-    echo "${FAILED_UNITS}" | head -n 20 | sed 's/^/  - /' | tee -a "${LOG_FILE}"
+    log_warn "⚠ Failed systemd units detected: $(echo "$FAILED_UNITS" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+    log_info "  → Attempting auto-repair: resetting failed unit states..."
+
+    if execute_guarded "Reset failed systemd units" systemctl reset-failed; then
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        FAILED_UNITS_AFTER=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+        if [ -z "${FAILED_UNITS_AFTER:-}" ]; then
+            log_success "  ✓ Auto-repair successful: All failed states cleared"
+        else
+            log_error "  ✗ Some units remain failed: $(echo "$FAILED_UNITS_AFTER" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+            # Only fail verification for units likely to impact updates/networking.
+            if echo "$FAILED_UNITS_AFTER" | grep -qE '(zypper|zypp|NetworkManager|wicked|systemd-networkd|wpa_supplicant)'; then
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    else
+        log_error "  ✗ Failed to reset systemd failed states"
+    fi
 fi
 
 # Check 16: Systemd flapping/stale service hint (restart counters)
@@ -2066,12 +2116,39 @@ if [ "${flap_warned}" -eq 0 ] 2>/dev/null; then
     log_success "✓ No high restart counters detected on core units"
 fi
 
-# Check 17: DNS resolution for primary repo domain (best-effort)
+# Check 17: DNS resolution for primary repo domain (auto-fix enabled)
 log_debug "[17/${TOTAL_CHECKS}] Checking DNS resolution for download.opensuse.org..."
 if getent hosts download.opensuse.org >/dev/null 2>&1; then
     log_success "✓ DNS resolution OK for download.opensuse.org"
 else
-    log_warn "⚠ DNS resolution FAILED for download.opensuse.org (repo refresh may fail)"
+    log_warn "⚠ DNS resolution FAILED. Attempting auto-repair..."
+
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+    # Best-effort: flush resolver caches first (less disruptive than a network restart).
+    if command -v resolvectl >/dev/null 2>&1; then
+        execute_guarded "Flush systemd-resolved DNS caches" resolvectl flush-caches >/dev/null 2>&1 || true
+    fi
+
+    # Avoid restarting the whole network stack during an active SSH session.
+    if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+        log_warn "  ⚠ Skipping NetworkManager/wicked restart (SSH session detected)"
+    else
+        if systemctl is-active NetworkManager.service >/dev/null 2>&1 || systemctl is-active NetworkManager >/dev/null 2>&1; then
+            execute_guarded "Restart NetworkManager" systemctl restart NetworkManager
+            sleep 5
+        elif systemctl is-active wicked.service >/dev/null 2>&1 || systemctl is-active wicked >/dev/null 2>&1; then
+            execute_guarded "Restart wicked" systemctl restart wicked
+            sleep 5
+        fi
+    fi
+
+    if getent hosts download.opensuse.org >/dev/null 2>&1; then
+        log_success "  ✓ Auto-repair successful: DNS resolution restored"
+    else
+        log_error "  ✗ DNS resolution still failing after repair attempts"
+        VERIFICATION_FAILED=1
+    fi
 fi
 
 # Check 18: Repository accessibility (best-effort; network may be offline)
@@ -2083,44 +2160,98 @@ else
     VERIFICATION_FAILED=1
 fi
 
-log_debug "[18/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; timeout)..."
+log_debug "[18/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; auto-fix)..."
+refresh_ok=0
 if command -v timeout >/dev/null 2>&1; then
     if timeout 25 zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
-        log_success "✓ zypper refresh succeeded (repos reachable)"
-    else
-        log_warn "⚠ zypper refresh failed or timed out (network/repo issue?)"
+        refresh_ok=1
     fi
 else
     if zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
-        log_success "✓ zypper refresh succeeded (repos reachable)"
-    else
-        log_warn "⚠ zypper refresh failed (network/repo issue?)"
+        refresh_ok=1
     fi
 fi
 
-# Check 19: Sudoers permissions hardening
+if [ "${refresh_ok}" -eq 1 ] 2>/dev/null; then
+    log_success "✓ zypper refresh succeeded (repos reachable)"
+else
+    log_warn "⚠ zypper refresh failed. Attempting auto-repair (force refresh)..."
+
+    # Attempt a force refresh first (no key auto-import).
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+    if command -v timeout >/dev/null 2>&1; then
+        if execute_guarded "Force zypper refresh" timeout 60 zypper --non-interactive refresh --force; then
+            log_success "  ✓ Auto-repair successful: Repository metadata refreshed"
+        else
+            log_warn "  ⚠ Force refresh failed; attempting with --gpg-auto-import-keys as a last resort..."
+            if execute_guarded "Force zypper refresh (auto-import keys)" timeout 60 zypper --non-interactive --gpg-auto-import-keys refresh --force; then
+                log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
+            else
+                log_error "  ✗ Repository refresh failed even after force attempts"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    else
+        if execute_guarded "Force zypper refresh" zypper --non-interactive refresh --force; then
+            log_success "  ✓ Auto-repair successful: Repository metadata refreshed"
+        else
+            log_warn "  ⚠ Force refresh failed; attempting with --gpg-auto-import-keys as a last resort..."
+            if execute_guarded "Force zypper refresh (auto-import keys)" zypper --non-interactive --gpg-auto-import-keys refresh --force; then
+                log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
+            else
+                log_error "  ✗ Repository refresh failed even after force attempts"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    fi
+fi
+
+# Check 19: Sudoers permissions hardening (auto-fix enabled)
 log_debug "[19/${TOTAL_CHECKS}] Checking sudoers permissions..."
 bad_sudoers=0
+
+sudoers_mode=""
 if [ -f /etc/sudoers ]; then
     sudoers_mode=$(stat -c %a /etc/sudoers 2>/dev/null || echo "")
     if [ -n "${sudoers_mode:-}" ] && [ "${sudoers_mode}" != "440" ]; then
-        log_error "✗ /etc/sudoers permissions are ${sudoers_mode} (expected 440)"
         bad_sudoers=1
     fi
 fi
+
+# Quick scan for any bad perms in included files
 if [ -d /etc/sudoers.d ]; then
-    while IFS= read -r -d '' f; do
-        m=$(stat -c %a "$f" 2>/dev/null || echo "")
-        if [ -n "${m:-}" ] && [ "$m" != "440" ]; then
-            log_error "✗ $f permissions are $m (expected 440)"
-            bad_sudoers=1
-        fi
-    done < <(find /etc/sudoers.d -maxdepth 1 -type f -print0 2>/dev/null)
+    if find /etc/sudoers.d -maxdepth 1 -type f ! -perm 440 -print -quit 2>/dev/null | grep -q .; then
+        bad_sudoers=1
+    fi
 fi
+
 if [ "${bad_sudoers}" -eq 0 ] 2>/dev/null; then
-    log_success "✓ sudoers permissions look correct"
+    log_success "✓ sudoers permissions look correct (0440)"
 else
-    log_warn "⚠ sudoers permissions issues detected; review /etc/sudoers and /etc/sudoers.d"
+    log_warn "⚠ Sudoers permissions are incorrect (security risk)"
+
+    if [ -n "${sudoers_mode:-}" ] && [ "${sudoers_mode}" != "440" ]; then
+        log_warn "  - /etc/sudoers mode is ${sudoers_mode} (expected 440)"
+    fi
+    if [ -d /etc/sudoers.d ]; then
+        bad_files=$(find /etc/sudoers.d -maxdepth 1 -type f ! -perm 440 2>/dev/null | head -n 20 || true)
+        if [ -n "${bad_files:-}" ]; then
+            log_warn "  - sudoers.d files with incorrect perms (first 20):"
+            printf '%s\n' "$bad_files" | sed 's/^/    - /' | tee -a "${LOG_FILE}"
+        fi
+    fi
+
+    log_info "  → Attempting auto-repair: enforcing 0440 permissions..."
+    execute_guarded "Fix /etc/sudoers permissions" chmod 440 /etc/sudoers >/dev/null 2>&1 || true
+    execute_guarded "Fix /etc/sudoers.d/* permissions" find /etc/sudoers.d -maxdepth 1 -type f -exec chmod 440 {} + >/dev/null 2>&1 || true
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+    new_mode=$(stat -c %a /etc/sudoers 2>/dev/null || echo "")
+    if [ "$new_mode" = "440" ] 2>/dev/null; then
+        log_success "  ✓ Sudoers permissions fixed successfully"
+    else
+        log_error "  ✗ Failed to fix /etc/sudoers permissions (current: ${new_mode:-unknown})"
+    fi
 fi
 
 # Check 20: Btrfs filesystem health (device error stats)
@@ -2421,7 +2552,7 @@ else
     log_info "ℹ Unable to determine available memory; skipping memory headroom check"
 fi
 
-# Check 31: AppArmor security status
+# Check 31: AppArmor security status (auto-fix enabled)
 log_debug "[31/${TOTAL_CHECKS}] Verifying AppArmor security status..."
 if systemctl is-active apparmor.service >/dev/null 2>&1 || systemctl is-active apparmor >/dev/null 2>&1; then
     if command -v aa-status >/dev/null 2>&1; then
@@ -2429,16 +2560,32 @@ if systemctl is-active apparmor.service >/dev/null 2>&1 || systemctl is-active a
         aa-status --enabled >/dev/null 2>&1
         aa_rc=$?
         set -e
+
         if [ "$aa_rc" -eq 0 ]; then
-            log_success "✓ AppArmor is active and profiles are enabled"
+            log_success "✓ AppArmor is active and profiles are loaded"
         else
-            log_warn "⚠ AppArmor service is active but profiles may not be enabled"
+            log_warn "⚠ AppArmor is active but profiles do not appear to be enabled"
+            log_info "  → Attempting auto-repair: reloading AppArmor..."
+
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            execute_guarded "Reload AppArmor" systemctl reload apparmor >/dev/null 2>&1 || \
+                execute_guarded "Restart AppArmor" systemctl restart apparmor >/dev/null 2>&1 || true
+
+            set +e
+            aa-status --enabled >/dev/null 2>&1
+            aa_rc2=$?
+            set -e
+            if [ "$aa_rc2" -eq 0 ]; then
+                log_success "  ✓ Auto-repair successful: AppArmor profiles enabled"
+            else
+                log_warn "  ⚠ AppArmor reload did not enable profiles (reboot or manual intervention may be required)"
+            fi
         fi
     else
-        log_success "✓ AppArmor service is active"
+        log_success "✓ AppArmor service is active (aa-status not found)"
     fi
 else
-    log_warn "⚠ AppArmor is not active (disabled or not installed)"
+    log_info "ℹ AppArmor is not active (disabled or not installed)"
 fi
 
 # Calculate repair statistics
