@@ -145,8 +145,11 @@ In addition to the downloader, a small root service periodically runs the same
     * Extra hardening checks include world-writable file scans, basic SSH hardening checks, NTP sync status, orphaned package detection, SMART disk health (when available), kernel taint warnings, reboot-required detection, memory headroom checks, and AppArmor status.
     * Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, reloading AppArmor when it’s active but profiles aren’t enabled, proactive disk space reclamation (journal vacuum + cache cleanup + snapper cleanup), RPM DB rebuild (with backup) when corruption is detected, dependency repair (`zypper verify` + `install --fix-broken`), Btrfs metadata balancing on high metadata usage, and deep GPG cache/key repair for signature-related refresh failures.
     * Performs safety checks such as cleaning up stale `/run/zypp.pid`
-      locks (when the PID is no longer running) and running
-      `zypper clean --all` when free space on `/` falls below ~1 GiB.
+      locks (when the PID is no longer running), **but never removes lockfiles when a real
+      `zypper` process is running**, and it will **skip zypper-based repairs/cleanups**
+      (repo refresh fixes, orphan checks, dependency repair, `zypper clean --all`, deep GPG repair)
+      when an active lock is detected.
+      It also runs `zypper clean --all` when free space on `/` falls below ~1 GiB.
 * **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
     * Default schedule is derived from `VERIFY_TIMER_INTERVAL_MINUTES` in
       `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
