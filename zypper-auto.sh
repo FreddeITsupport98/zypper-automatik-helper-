@@ -1618,7 +1618,7 @@ run_verification_only() {
     VERIFICATION_FAILED=0
     REPAIR_ATTEMPTS=0
     MAX_REPAIR_ATTEMPTS=3
-    local TOTAL_CHECKS=28
+    local TOTAL_CHECKS=31
     
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
@@ -2337,6 +2337,108 @@ if [ -r /proc/sys/kernel/tainted ]; then
     fi
 else
     log_info "ℹ /proc/sys/kernel/tainted not available; skipping kernel taint check"
+fi
+
+# Check 29: Pending system reboot (runtime consistency)
+log_debug "[29/${TOTAL_CHECKS}] Checking if system reboot is required (zypper needs-reboot)..."
+if command -v zypper >/dev/null 2>&1; then
+    set +e
+    zypper needs-reboot >/dev/null 2>&1
+    needs_reboot_rc=$?
+    set -e
+
+    # On openSUSE, zypper returns 1 when a reboot is needed.
+    if [ "$needs_reboot_rc" -eq 1 ]; then
+        log_warn "⚠ System reboot is pending (core libraries/kernel updated)"
+        log_info "  → Recommended: reboot before applying further updates"
+    elif [ "$needs_reboot_rc" -eq 0 ]; then
+        log_success "✓ No pending reboot detected"
+    else
+        # Some zypper versions may not support needs-reboot.
+        set +e
+        zypper needs-rebooting >/dev/null 2>&1
+        needs_rebooting_rc=$?
+        set -e
+        if [ "$needs_rebooting_rc" -eq 1 ]; then
+            log_warn "⚠ System reboot is pending (core libraries/kernel updated)"
+            log_info "  → Recommended: reboot before applying further updates"
+        elif [ "$needs_rebooting_rc" -eq 0 ]; then
+            log_success "✓ No pending reboot detected"
+        else
+            log_info "ℹ Reboot check not available (zypper needs-reboot returned rc=${needs_reboot_rc})"
+        fi
+    fi
+else
+    log_info "ℹ zypper not available; skipping reboot requirement check"
+fi
+
+# Check 30: Memory headroom (solver safety)
+log_debug "[30/${TOTAL_CHECKS}] Checking memory headroom for update solver..."
+mem_avail_mb=""
+if [ -r /proc/meminfo ]; then
+    mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo "")
+    if [[ "${mem_avail_kb:-}" =~ ^[0-9]+$ ]]; then
+        mem_avail_mb=$((mem_avail_kb / 1024))
+    fi
+fi
+if [ -z "${mem_avail_mb:-}" ] && command -v free >/dev/null 2>&1; then
+    # free(1) 'available' column is typically $7
+    mem_avail_mb=$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}' || echo "")
+fi
+
+if [[ "${mem_avail_mb:-}" =~ ^[0-9]+$ ]]; then
+    if [ "$mem_avail_mb" -lt 150 ] 2>/dev/null; then
+        log_error "✗ CRITICAL: Low available memory (${mem_avail_mb}MB). Updates may trigger OOM or fail mid-transaction."
+        log_info "  → Recommended: close apps / stop heavy services, then re-run verification before updating"
+
+        # Best-effort mitigation: dropping caches can help, but does not solve true memory pressure.
+        if command -v sysctl >/dev/null 2>&1; then
+            log_info "  → Attempting best-effort: drop filesystem caches (may temporarily free RAM)"
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            execute_guarded "Drop filesystem caches" sysctl -w vm.drop_caches=3 >/dev/null 2>&1 || true
+        fi
+
+        # Re-check memory after best-effort cache drop
+        mem_avail_kb2=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo "")
+        if [[ "${mem_avail_kb2:-}" =~ ^[0-9]+$ ]]; then
+            mem_avail_mb2=$((mem_avail_kb2 / 1024))
+            if [ "$mem_avail_mb2" -ge 300 ] 2>/dev/null; then
+                log_success "  ✓ Memory recovered (now ${mem_avail_mb2}MB available)"
+            else
+                log_warn "  ⚠ Still low on memory after cache drop (${mem_avail_mb2}MB available)"
+            fi
+        fi
+
+        # Mark as failed: running updates under severe memory pressure is unsafe.
+        VERIFICATION_FAILED=1
+    elif [ "$mem_avail_mb" -lt 300 ] 2>/dev/null; then
+        log_warn "⚠ Low available memory (${mem_avail_mb}MB). Large updates may be risky."
+        log_info "  → Recommended: keep at least ~300MB+ available before running 'zypper dup'"
+    else
+        log_success "✓ Sufficient memory available (${mem_avail_mb}MB)"
+    fi
+else
+    log_info "ℹ Unable to determine available memory; skipping memory headroom check"
+fi
+
+# Check 31: AppArmor security status
+log_debug "[31/${TOTAL_CHECKS}] Verifying AppArmor security status..."
+if systemctl is-active apparmor.service >/dev/null 2>&1 || systemctl is-active apparmor >/dev/null 2>&1; then
+    if command -v aa-status >/dev/null 2>&1; then
+        set +e
+        aa-status --enabled >/dev/null 2>&1
+        aa_rc=$?
+        set -e
+        if [ "$aa_rc" -eq 0 ]; then
+            log_success "✓ AppArmor is active and profiles are enabled"
+        else
+            log_warn "⚠ AppArmor service is active but profiles may not be enabled"
+        fi
+    else
+        log_success "✓ AppArmor service is active"
+    fi
+else
+    log_warn "⚠ AppArmor is not active (disabled or not installed)"
 fi
 
 # Calculate repair statistics
