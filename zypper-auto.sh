@@ -1414,6 +1414,18 @@ generate_dashboard() {
     now="$(date '+%Y-%m-%d %H:%M:%S')"
     last_status=$(cat "${STATUS_FILE}" 2>/dev/null || echo "Unknown")
 
+    # Determine status color for a quick-glance badge.
+    local status_color last_status_lc
+    status_color="#7f8c8d" # Default gray
+    last_status_lc="${last_status,,}"
+    if [[ "${last_status_lc}" == *"error"* ]] || [[ "${last_status_lc}" == *"failed"* ]] || [[ "${last_status_lc}" == *"crash"* ]]; then
+        status_color="#e74c3c" # Red
+    elif [[ "${last_status_lc}" == *"complete"* ]] || [[ "${last_status_lc}" == *"success"* ]]; then
+        status_color="#2ecc71" # Green
+    elif [[ "${last_status_lc}" == *"downloading"* ]] || [[ "${last_status_lc}" == *"refreshing"* ]]; then
+        status_color="#3498db" # Blue
+    fi
+
     last_install_log=""
     if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
         last_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
@@ -1422,6 +1434,39 @@ generate_dashboard() {
     last_install_tail=""
     if [ -n "${last_install_log}" ] && [ -f "${last_install_log}" ]; then
         last_install_tail=$(tail -n 40 "${last_install_log}" 2>/dev/null || true)
+    fi
+
+    # Extract the last appended Flight Report (executive summary) from the most recent log.
+    # This makes the dashboard useful without scrolling huge verification logs.
+    local flight_report_raw
+    flight_report_raw=""
+    if [ -n "${last_install_log}" ] && [ -f "${last_install_log}" ]; then
+        flight_report_raw=$(awk '
+            BEGIN {cap=0; buf=""; last=""; pending_sep=""; }
+            /^===================================================$/ {
+                if (cap==1) {
+                    buf = buf $0 "\n";
+                    last = buf;
+                    buf="";
+                    cap=0;
+                } else {
+                    pending_sep=$0;
+                }
+                next;
+            }
+            /^ZYPPER-AUTO FLIGHT REPORT:/ {
+                cap=1;
+                buf="";
+                if (pending_sep!="") { buf = pending_sep "\n"; pending_sep=""; }
+                buf = buf $0 "\n";
+                next;
+            }
+            cap==1 { buf = buf $0 "\n"; }
+            END {
+                if (last!="") printf "%s", last;
+                else if (buf!="") printf "%s", buf;
+            }
+        ' "${last_install_log}" 2>/dev/null || true)
     fi
 
     local dl_timer nt_timer verify_timer
@@ -1434,9 +1479,30 @@ generate_dashboard() {
         nt_timer=$(sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="$bus" systemctl --user is-active "${NT_SERVICE_NAME}.timer" 2>/dev/null || echo "unknown")
     fi
 
-    local last_status_esc last_tail_esc
+    # Timer status classes for badges.
+    local dl_timer_class verify_timer_class nt_timer_class
+    dl_timer_class="timer-inactive"
+    verify_timer_class="timer-inactive"
+    nt_timer_class="timer-inactive"
+    if [ "${dl_timer}" = "active" ]; then dl_timer_class="timer-active"; fi
+    if [ "${verify_timer}" = "active" ]; then verify_timer_class="timer-active"; fi
+    if [ "${nt_timer}" = "active" ]; then nt_timer_class="timer-active"; fi
+
+    # System metrics for quick scanning.
+    local kernel_ver uptime_info disk_usage
+    kernel_ver=$(uname -r 2>/dev/null || echo "Unknown")
+    if command -v uptime >/dev/null 2>&1; then
+        uptime_info=$(uptime -p 2>/dev/null | sed 's/^up //' || echo "Unknown")
+    else
+        uptime_info="Unknown"
+    fi
+    disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' || echo "?")
+
+    local last_status_esc last_tail_esc last_install_log_esc flight_report_esc
     last_status_esc="$(_html_escape "$last_status")"
     last_tail_esc="$(_html_escape "$last_install_tail")"
+    last_install_log_esc="$(_html_escape "$last_install_log")"
+    flight_report_esc="$(_html_escape "$flight_report_raw")"
 
     mkdir -p "$(dirname "${out_root}")" 2>/dev/null || true
 
@@ -1448,27 +1514,138 @@ generate_dashboard() {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Zypper Auto Status</title>
   <style>
-    body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
-    .card { background: white; padding: 16px 18px; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.10); max-width: 980px; }
-    .row { margin: 10px 0; }
-    .label { color: #555; display: inline-block; min-width: 160px; }
-    pre { background: #111; color: #eee; padding: 12px; border-radius: 8px; overflow: auto; }
-    .muted { color: #666; }
+    :root {
+        --bg: #f4f4f9;
+        --card-bg: #ffffff;
+        --text: #333;
+        --muted: #666;
+        --accent: #2c3e50;
+        --border: #e1e1e8;
+        --shadow: rgba(0,0,0,0.08);
+        --subtle: rgba(0,0,0,0.04);
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #121212;
+            --card-bg: #1e1e1e;
+            --text: #e0e0e0;
+            --muted: #aaa;
+            --accent: #ecf0f1;
+            --border: #333;
+            --shadow: rgba(0,0,0,0.55);
+            --subtle: rgba(255,255,255,0.05);
+        }
+    }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        padding: 20px;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    .card {
+        background: var(--card-bg);
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 4px 10px var(--shadow);
+        margin-bottom: 20px;
+        border: 1px solid var(--border);
+    }
+    h1 { margin: 0; font-size: 1.5rem; color: var(--accent); display: flex; align-items: center; gap: 10px; }
+    h2 { font-size: 1.1rem; color: var(--muted); margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+    .stat-box { background: var(--subtle); padding: 12px; border-radius: 10px; border: 1px solid var(--border); }
+    .stat-label { font-size: 0.82rem; color: var(--muted); display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-value { font-weight: 600; font-size: 1rem; }
+    .status-badge {
+        display: inline-block;
+        padding: 6px 14px;
+        border-radius: 20px;
+        color: white;
+        font-weight: 700;
+        font-size: 0.9rem;
+        background-color: ${status_color};
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        max-width: 100%;
+        overflow-wrap: anywhere;
+    }
+    .timer-active { color: #2ecc71; font-weight: 800; }
+    .timer-inactive { color: #e74c3c; font-weight: 800; }
+    pre {
+        background: #111;
+        color: #f0f0f0;
+        padding: 15px;
+        border-radius: 10px;
+        overflow-x: auto;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+        border: 1px solid #333;
+    }
+    .footer { font-size: 0.8rem; color: var(--muted); text-align: center; margin-top: 30px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Zypper Auto Status</h1>
-    <div class="row"><span class="label">Generated:</span> ${now}</div>
-    <div class="row"><span class="label">Current state:</span> <strong>${last_status_esc}</strong></div>
-    <div class="row"><span class="label">Helper RUN:</span> <code>${RUN_ID}</code></div>
-    <div class="row"><span class="label">Downloader timer:</span> <code>${dl_timer}</code></div>
-    <div class="row"><span class="label">Verify timer:</span> <code>${verify_timer}</code></div>
-    <div class="row"><span class="label">Notifier timer:</span> <code>${nt_timer}</code></div>
-    <hr />
-    <h3>Recent install log tail</h3>
-    <div class="muted">${last_install_log}</div>
-    <pre>${last_tail_esc}</pre>
+  <div class="container">
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
+          <h1>Zypper Auto Status</h1>
+          <span class="status-badge">${last_status_esc}</span>
+      </div>
+      <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">Generated: ${now}</p>
+
+      <div class="grid" style="margin-top: 18px;">
+        <div class="stat-box">
+            <span class="stat-label">Kernel</span>
+            <span class="stat-value">${kernel_ver}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Uptime</span>
+            <span class="stat-value">${uptime_info}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Disk Usage (/)</span>
+            <span class="stat-value">${disk_usage}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Helper RUN ID</span>
+            <span class="stat-value"><code>${RUN_ID}</code></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Service Health</h2>
+      <div class="grid">
+        <div class="stat-box">
+            <span class="stat-label">Downloader Timer</span>
+            <span class="stat-value ${dl_timer_class}">${dl_timer}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Verify/Repair Timer</span>
+            <span class="stat-value ${verify_timer_class}">${verify_timer}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">User Notifier Timer</span>
+            <span class="stat-value ${nt_timer_class}">${nt_timer}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent Activity Log</h2>
+      <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: ${last_install_log_esc}</div>
+      <pre>${last_tail_esc}</pre>
+    </div>
+
+    <div class="card">
+      <h2>Flight Report (Last Run)</h2>
+      <div class="stat-label" style="margin-bottom:10px; text-transform:none;">Source: ${last_install_log_esc}</div>
+      <pre>${flight_report_esc:-No flight report found in latest log.}</pre>
+    </div>
+
+    <div class="footer">Generated by zypper-auto-helper</div>
   </div>
 </body>
 </html>

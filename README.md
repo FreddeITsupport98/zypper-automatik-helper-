@@ -958,6 +958,12 @@ A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
 - Root copy: `/var/log/zypper-auto/status.html`
 - User copy: `~/.local/share/zypper-notify/status.html`
 
+It is designed as a quick-glance dashboard (card layout + dark mode support) and includes:
+- Color-coded status badge (success/active vs errors)
+- Service health indicators for the downloader/verify/notifier timers
+- Basic system metrics (kernel version, uptime, disk usage for `/`)
+- The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
+
 Quickstart (enable example hooks + generate/open dashboard):
 
 ```bash
