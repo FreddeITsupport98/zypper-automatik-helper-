@@ -1410,8 +1410,9 @@ generate_dashboard() {
         out_user="${SUDO_USER_HOME}/.local/share/zypper-notify/status.html"
     fi
 
-    local last_status last_install_log last_install_tail now
+    local last_status last_install_log last_install_tail now now_iso
     now="$(date '+%Y-%m-%d %H:%M:%S')"
+    now_iso="$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
     last_status=$(cat "${STATUS_FILE}" 2>/dev/null || echo "Unknown")
 
     # Determine status color for a quick-glance badge.
@@ -1433,7 +1434,9 @@ generate_dashboard() {
 
     last_install_tail=""
     if [ -n "${last_install_log}" ] && [ -f "${last_install_log}" ]; then
-        last_install_tail=$(tail -n 40 "${last_install_log}" 2>/dev/null || true)
+        # Use a slightly larger tail for the dashboard so it feels like a UI,
+        # without embedding the entire log.
+        last_install_tail=$(tail -n 100 "${last_install_log}" 2>/dev/null || true)
     fi
 
     # Extract the last appended Flight Report (executive summary) from the most recent
@@ -1502,14 +1505,28 @@ generate_dashboard() {
     if [ "${nt_timer}" = "active" ]; then nt_timer_class="timer-active"; fi
 
     # System metrics for quick scanning.
-    local kernel_ver uptime_info disk_usage
+    local kernel_ver uptime_info disk_used disk_total disk_percent disk_usage_display mem_usage
     kernel_ver=$(uname -r 2>/dev/null || echo "Unknown")
     if command -v uptime >/dev/null 2>&1; then
         uptime_info=$(uptime -p 2>/dev/null | sed 's/^up //' || echo "Unknown")
     else
         uptime_info="Unknown"
     fi
-    disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' || echo "?")
+
+    # Disk: used/total + percent integer.
+    disk_used=$(df -h / 2>/dev/null | awk 'NR==2 {print $3}' || echo "?")
+    disk_total=$(df -h / 2>/dev/null | awk 'NR==2 {print $2}' || echo "?")
+    disk_percent=$(df -P / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%' || echo "0")
+    if ! [[ "${disk_percent:-}" =~ ^[0-9]+$ ]]; then
+        disk_percent=0
+    fi
+    disk_usage_display="${disk_used}/${disk_total} (${disk_percent}%)"
+
+    # Memory: used/total (best-effort)
+    mem_usage="Unknown"
+    if command -v free >/dev/null 2>&1; then
+        mem_usage=$(free -h 2>/dev/null | awk '/^Mem:/ {print $3 "/" $2}' || echo "Unknown")
+    fi
 
     local last_status_esc last_tail_esc last_install_log_esc flight_report_esc flight_report_log_esc
     last_status_esc="$(_html_escape "$last_status")"
@@ -1537,6 +1554,8 @@ generate_dashboard() {
         --border: #e1e1e8;
         --shadow: rgba(0,0,0,0.08);
         --subtle: rgba(0,0,0,0.04);
+        --code-bg: #111;
+        --code-text: #f0f0f0;
     }
     @media (prefers-color-scheme: dark) {
         :root {
@@ -1548,6 +1567,8 @@ generate_dashboard() {
             --border: #333;
             --shadow: rgba(0,0,0,0.55);
             --subtle: rgba(255,255,255,0.05);
+            --code-bg: #000;
+            --code-text: #d4d4d4;
         }
     }
     body {
@@ -1565,19 +1586,23 @@ generate_dashboard() {
         box-shadow: 0 4px 10px var(--shadow);
         margin-bottom: 20px;
         border: 1px solid var(--border);
+        transition: transform 0.2s ease;
     }
+    .card:hover { transform: translateY(-2px); }
     h1 { margin: 0; font-size: 1.5rem; color: var(--accent); display: flex; align-items: center; gap: 10px; }
     h2 { font-size: 1.1rem; color: var(--muted); margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
     .stat-box { background: var(--subtle); padding: 12px; border-radius: 10px; border: 1px solid var(--border); }
     .stat-label { font-size: 0.82rem; color: var(--muted); display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat-value { font-weight: 600; font-size: 1rem; }
+    .stat-value { font-weight: 700; font-size: 1rem; }
+
+    /* Status badges */
     .status-badge {
         display: inline-block;
         padding: 6px 14px;
         border-radius: 20px;
         color: white;
-        font-weight: 700;
+        font-weight: 800;
         font-size: 0.9rem;
         background-color: ${status_color};
         box-shadow: 0 2px 4px rgba(0,0,0,0.2);
@@ -1586,16 +1611,48 @@ generate_dashboard() {
     }
     .timer-active { color: #2ecc71; font-weight: 800; }
     .timer-inactive { color: #e74c3c; font-weight: 800; }
+
+    /* Disk usage bar */
+    .progress-track { height: 8px; background: var(--border); border-radius: 6px; margin-top: 10px; overflow: hidden; }
+    .progress-fill { height: 100%; background: #3498db; border-radius: 6px; width: 0%; transition: width 0.6s ease; }
+
+    /* Logs */
+    .log-container { position: relative; }
+    .copy-btn {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: rgba(255,255,255,0.08);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        padding: 6px 10px;
+        font-size: 0.85rem;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .copy-btn:hover { background: rgba(255,255,255,0.14); color: var(--text); }
+
     pre {
-        background: #111;
-        color: #f0f0f0;
+        background: var(--code-bg);
+        color: var(--code-text);
         padding: 15px;
         border-radius: 10px;
         overflow-x: auto;
         font-size: 0.85rem;
         white-space: pre-wrap;
         border: 1px solid #333;
+        max-height: 420px;
+        overflow-y: auto;
     }
+
+    /* Keyword highlighting */
+    .log-time { color: #888; }
+    .log-info { color: #61afef; }
+    .log-success { color: #98c379; font-weight: 800; }
+    .log-warn { color: #e5c07b; font-weight: 800; }
+    .log-error { color: #e06c75; font-weight: 900; }
+
     .footer { font-size: 0.8rem; color: var(--muted); text-align: center; margin-top: 30px; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
@@ -1607,7 +1664,9 @@ generate_dashboard() {
           <h1>Zypper Auto Status</h1>
           <span class="status-badge">${last_status_esc}</span>
       </div>
-      <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">Generated: ${now}</p>
+      <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">
+        Generated <span id="time-ago">just now</span> (<span style="font-family:monospace">${now}</span>)
+      </p>
 
       <div class="grid" style="margin-top: 18px;">
         <div class="stat-box">
@@ -1619,12 +1678,15 @@ generate_dashboard() {
             <span class="stat-value">${uptime_info}</span>
         </div>
         <div class="stat-box">
-            <span class="stat-label">Disk Usage (/)</span>
-            <span class="stat-value">${disk_usage}</span>
+            <span class="stat-label">Memory (Used/Total)</span>
+            <span class="stat-value">${mem_usage}</span>
         </div>
         <div class="stat-box">
-            <span class="stat-label">Helper RUN ID</span>
-            <span class="stat-value"><code>${RUN_ID}</code></span>
+            <span class="stat-label">Disk Usage (/)</span>
+            <span class="stat-value">${disk_usage_display}</span>
+            <div class="progress-track">
+                <div class="progress-fill" id="disk-bar" data-percent="${disk_percent}"></div>
+            </div>
         </div>
       </div>
     </div>
@@ -1650,17 +1712,142 @@ generate_dashboard() {
     <div class="card">
       <h2>Recent Activity Log</h2>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: ${last_install_log_esc}</div>
-      <pre>${last_tail_esc}</pre>
+      <div class="log-container">
+          <button class="copy-btn" onclick="copyBlock('log-content', this)">Copy Log</button>
+          <pre id="log-content">${last_tail_esc}</pre>
+      </div>
     </div>
 
     <div class="card">
       <h2>Flight Report (Last Run)</h2>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">Source: ${flight_report_log_esc:-No Flight Report log found yet.}</div>
-      <pre>${flight_report_esc:-No flight report found yet. Run: sudo zypper-auto-helper --verify}</pre>
+      <div class="log-container">
+          <button class="copy-btn" onclick="copyBlock('flight-content', this)">Copy Flight Report</button>
+          <pre id="flight-content">${flight_report_esc:-No flight report found yet. Run: sudo zypper-auto-helper --verify}</pre>
+      </div>
     </div>
 
-    <div class="footer">Generated by zypper-auto-helper</div>
+    <div class="footer">Generated by zypper-auto-helper | RUN: <code>${RUN_ID}</code></div>
   </div>
+
+  <script>
+    // 1) Live "time ago" counter
+    var genTime = new Date("${now_iso}");
+    function _timeAgoText(diffSeconds) {
+        if (diffSeconds < 5) return "just now";
+        if (diffSeconds < 60) return diffSeconds + " sec ago";
+        var mins = Math.floor(diffSeconds / 60);
+        if (mins < 60) return mins + " min" + (mins === 1 ? "" : "s") + " ago";
+        var hrs = Math.floor(mins / 60);
+        if (hrs < 48) return hrs + " hour" + (hrs === 1 ? "" : "s") + " ago";
+        var days = Math.floor(hrs / 24);
+        return days + " day" + (days === 1 ? "" : "s") + " ago";
+    }
+    function updateTimeAgo() {
+        var diff = Math.floor((new Date() - genTime) / 1000);
+        var el = document.getElementById("time-ago");
+        if (el) el.textContent = _timeAgoText(diff);
+    }
+    updateTimeAgo();
+    setInterval(updateTimeAgo, 15000);
+
+    // 2) Disk bar animation + color
+    (function() {
+        var bar = document.getElementById("disk-bar");
+        if (!bar) return;
+        var pct = parseInt(bar.getAttribute("data-percent") || "0", 10);
+        if (isNaN(pct)) pct = 0;
+        setTimeout(function() { bar.style.width = pct + "%"; }, 80);
+        if (pct >= 90) bar.style.backgroundColor = "#e74c3c";      // red
+        else if (pct >= 75) bar.style.backgroundColor = "#f39c12"; // orange
+        else bar.style.backgroundColor = "#2ecc71";               // green
+    })();
+
+    // 3) Smart keyword highlighting (log readability)
+    function highlightBlock(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+
+        // Start from the escaped HTML text we generated server-side.
+        var html = el.innerHTML;
+
+        // Prefix markers
+        html = html.replace(/\[ERR\]/g, '<span class="log-error">[ERR]</span>');
+        html = html.replace(/\[WARN\]/g, '<span class="log-warn">[WARN]</span>');
+        html = html.replace(/\[OK\]/g, '<span class="log-success">[OK]</span>');
+        html = html.replace(/\[INFO\]/g, '<span class="log-info">[INFO]</span>');
+        html = html.replace(/\[DBG\]/g, '<span class="log-info">[DBG]</span>');
+
+        // Timestamps like: [2026-02-09 21:20:20]
+        html = html.replace(/^\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]*\]/gm, function(m) {
+            return '<span class="log-time">' + m + '</span>';
+        });
+
+        // Keywords
+        html = html.replace(/\b(error|failed|failure|critical)\b/gi, function(m) {
+            return '<span class="log-error">' + m + '</span>';
+        });
+        html = html.replace(/\b(warn|warning)\b/gi, function(m) {
+            return '<span class="log-warn">' + m + '</span>';
+        });
+        html = html.replace(/\b(success|complete|fixed|repaired|enabled|started)\b/gi, function(m) {
+            return '<span class="log-success">' + m + '</span>';
+        });
+        html = html.replace(/\b(installing|installed|install|removing|removed|cleanup|cleaning)\b/gi, function(m) {
+            return '<span class="log-warn">' + m + '</span>';
+        });
+
+        el.innerHTML = html;
+    }
+    highlightBlock('log-content');
+    highlightBlock('flight-content');
+
+    // 4) Copy button (Clipboard API + fallback)
+    function copyBlock(id, btn) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var text = el.innerText || el.textContent || '';
+
+        function done(ok) {
+            if (!btn) return;
+            var old = btn.textContent;
+            btn.textContent = ok ? 'Copied!' : 'Copy failed';
+            setTimeout(function() { btn.textContent = old; }, 2000);
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function() {
+                done(true);
+            }, function() {
+                // Fallback
+                try {
+                    var ta = document.createElement('textarea');
+                    ta.value = text;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    done(true);
+                } catch (e) {
+                    done(false);
+                }
+            });
+        } else {
+            try {
+                var ta2 = document.createElement('textarea');
+                ta2.value = text;
+                document.body.appendChild(ta2);
+                ta2.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta2);
+                done(true);
+            } catch (e2) {
+                done(false);
+            }
+        }
+    }
+    window.copyBlock = copyBlock;
+  </script>
 </body>
 </html>
 EOF

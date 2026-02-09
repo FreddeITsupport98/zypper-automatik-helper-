@@ -961,8 +961,9 @@ A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
 It is designed as a quick-glance dashboard (card layout + dark mode support) and includes:
 - Color-coded status badge (success/active vs errors)
 - Service health indicators for the downloader/verify/notifier timers
-- Basic system metrics (kernel version, uptime, disk usage for `/`)
+- Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
+- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, and automatic keyword highlighting in logs
 
 Quickstart (enable example hooks + generate/open dashboard):
 
