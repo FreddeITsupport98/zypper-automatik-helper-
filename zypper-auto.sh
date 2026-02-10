@@ -1415,6 +1415,36 @@ generate_dashboard() {
     now_iso="$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
     last_status=$(cat "${STATUS_FILE}" 2>/dev/null || echo "Unknown")
 
+    # Pending updates count (from cached dry-run output)
+    local pending_count dry_file
+    pending_count="0"
+    dry_file="${LOG_DIR}/dry-run-last.txt"
+    if [ -f "${dry_file}" ]; then
+        pending_count=$(grep -oP "\d+(?= packages to upgrade)" "${dry_file}" 2>/dev/null | head -1 || true)
+        if [ -z "${pending_count:-}" ]; then
+            pending_count=$(grep -Eo "[0-9]+ packages to upgrade" "${dry_file}" 2>/dev/null | head -1 | awk '{print $1}' || true)
+        fi
+        if ! [[ "${pending_count:-}" =~ ^[0-9]+$ ]]; then
+            pending_count="0"
+        fi
+    fi
+
+    # Feature toggles (visual state)
+    local feat_flatpak feat_snap feat_soar feat_brew feat_pipx
+    local feat_flatpak_class feat_snap_class feat_soar_class feat_brew_class feat_pipx_class
+
+    feat_flatpak=$([[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
+    feat_snap=$([[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
+    feat_soar=$([[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
+    feat_brew=$([[ "${ENABLE_BREW_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
+    feat_pipx=$([[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
+
+    feat_flatpak_class=$([[ "${feat_flatpak}" == "ON" ]] && echo "feat-on" || echo "feat-off")
+    feat_snap_class=$([[ "${feat_snap}" == "ON" ]] && echo "feat-on" || echo "feat-off")
+    feat_soar_class=$([[ "${feat_soar}" == "ON" ]] && echo "feat-on" || echo "feat-off")
+    feat_brew_class=$([[ "${feat_brew}" == "ON" ]] && echo "feat-on" || echo "feat-off")
+    feat_pipx_class=$([[ "${feat_pipx}" == "ON" ]] && echo "feat-on" || echo "feat-off")
+
     # Determine status color for a quick-glance badge.
     local status_color last_status_lc
     status_color="#7f8c8d" # Default gray
@@ -1543,7 +1573,7 @@ generate_dashboard() {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Zypper Auto Status</title>
+  <title>Zypper Auto Command Center</title>
   <style>
     :root {
         --bg: #f4f4f9;
@@ -1595,6 +1625,38 @@ generate_dashboard() {
     .stat-box { background: var(--subtle); padding: 12px; border-radius: 10px; border: 1px solid var(--border); }
     .stat-label { font-size: 0.82rem; color: var(--muted); display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
     .stat-value { font-weight: 700; font-size: 1rem; }
+
+    /* Feature toggles */
+    .feat-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .feat-badge { font-size: 0.8rem; padding: 6px 10px; border-radius: 10px; background: var(--subtle); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 8px; }
+    .feat-dot { font-size: 0.9rem; }
+    .feat-on { color: #2ecc71; font-weight: 900; }
+    .feat-off { color: var(--muted); font-weight: 900; }
+
+    /* Command Center action buttons */
+    .action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 12px; }
+    .cmd-btn {
+        background: var(--subtle);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 14px;
+        border-radius: 12px;
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.2s;
+        position: relative;
+        overflow: hidden;
+    }
+    .cmd-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px var(--shadow); }
+    .cmd-btn:active { transform: translateY(0); }
+    .cmd-label { display: block; font-weight: 900; font-size: 0.95rem; margin-bottom: 4px; }
+    .cmd-desc { display: block; font-size: 0.78rem; color: var(--muted); }
+    .cmd-copy-feedback {
+        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+        background: #2ecc71; color: white; display: flex; align-items: center; justify-content: center;
+        font-weight: 900; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    }
+    .cmd-btn.copied .cmd-copy-feedback { opacity: 1; }
 
     /* Status badges */
     .status-badge {
@@ -1661,11 +1723,11 @@ generate_dashboard() {
   <div class="container">
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
-          <h1>Zypper Auto Status</h1>
+          <h1>🚀 Zypper Auto Command Center</h1>
           <span class="status-badge">${last_status_esc}</span>
       </div>
       <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">
-        Generated <span id="time-ago">just now</span> (<span style="font-family:monospace">${now}</span>)
+        Generated <span id="time-ago">just now</span> (<span style="font-family:monospace">${now}</span>) • Pending Updates: <strong>${pending_count}</strong>
       </p>
 
       <div class="grid" style="margin-top: 18px;">
@@ -1688,6 +1750,57 @@ generate_dashboard() {
                 <div class="progress-fill" id="disk-bar" data-percent="${disk_percent}"></div>
             </div>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>⚙️ Features & Config</h2>
+      <div class="stat-label" style="text-transform:none;">Active Modules</div>
+      <div class="feat-grid">
+        <div class="feat-badge"><span class="feat-dot ${feat_flatpak_class}">●</span> Flatpak: <strong>${feat_flatpak}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_snap_class}">●</span> Snap: <strong>${feat_snap}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_soar_class}">●</span> Soar: <strong>${feat_soar}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_brew_class}">●</span> Brew: <strong>${feat_brew}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_pipx_class}">●</span> Pipx: <strong>${feat_pipx}</strong></div>
+      </div>
+
+      <div style="margin-top: 14px;">
+        <span class="stat-label" style="text-transform:none;">Run ID</span>
+        <code style="font-size:0.85rem; background:var(--subtle); padding:2px 6px; border-radius:6px; border:1px solid var(--border);">${RUN_ID}</code>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>⚡ Quick Actions (Click to Copy)</h2>
+      <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
+        These buttons copy a command to your clipboard (your browser will not run it automatically).
+      </div>
+      <div class="action-grid">
+        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --verify', this)">
+            <span class="cmd-label">Verify & Fix</span>
+            <span class="cmd-desc">Health checks + auto-repair</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
+        <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper install', this)">
+            <span class="cmd-label">Install Updates</span>
+            <span class="cmd-desc">Launch the interactive updater</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
+        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --logs', this)">
+            <span class="cmd-label">View Logs</span>
+            <span class="cmd-desc">Tail recent log files</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
+        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --reset-config', this)">
+            <span class="cmd-label">Reset Config</span>
+            <span class="cmd-desc">Recreate defaults (with backup)</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
+        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --dashboard', this)">
+            <span class="cmd-label">Refresh Dashboard</span>
+            <span class="cmd-desc">Regenerate this page</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
       </div>
     </div>
 
@@ -1731,6 +1844,48 @@ generate_dashboard() {
   </div>
 
   <script>
+    // 0) Command Center clipboard copy (with fallback)
+    function copyCmd(cmd, btn) {
+        function feedback(ok) {
+            if (!btn) return;
+            if (ok) {
+                btn.classList.add('copied');
+                setTimeout(function() { btn.classList.remove('copied'); }, 1500);
+            }
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(cmd).then(function() {
+                feedback(true);
+            }, function() {
+                try {
+                    var ta = document.createElement('textarea');
+                    ta.value = cmd;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    feedback(true);
+                } catch (e) {
+                    feedback(false);
+                }
+            });
+        } else {
+            try {
+                var ta2 = document.createElement('textarea');
+                ta2.value = cmd;
+                document.body.appendChild(ta2);
+                ta2.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta2);
+                feedback(true);
+            } catch (e2) {
+                feedback(false);
+            }
+        }
+    }
+    window.copyCmd = copyCmd;
+
     // 1) Live "time ago" counter
     var genTime = new Date("${now_iso}");
     function _timeAgoText(diffSeconds) {
@@ -7534,8 +7689,15 @@ generate_dashboard() {
         return 0
     fi
 
+    # Prefer delegating dashboard generation to the main helper (keeps UI consistent).
+    if [ -x /usr/local/bin/zypper-auto-helper ]; then
+        sudo /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Fallback: minimal status page (only if helper is not installed).
     local out_root out_user now last_status last_tail
-    out_root="/var/log/zypper-auto/status.html"
+    out_root="${LOG_DIR:-/var/log/zypper-auto}/status.html"
     out_user=""
     if [ -n "${SUDO_USER:-}" ]; then
         user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6)
@@ -7548,23 +7710,23 @@ generate_dashboard() {
     last_status=$(cat "$HELPER_STATUS_FILE" 2>/dev/null || echo "Unknown")
 
     last_tail=""
-    if ls -1 /var/log/zypper-auto/install-*.log >/dev/null 2>&1; then
-        last_log=$(ls -1t /var/log/zypper-auto/install-*.log 2>/dev/null | head -1 || true)
+    if ls -1 "${LOG_DIR:-/var/log/zypper-auto}"/install-*.log >/dev/null 2>&1; then
+        last_log=$(ls -1t "${LOG_DIR:-/var/log/zypper-auto}"/install-*.log 2>/dev/null | head -1 || true)
         if [ -n "$last_log" ]; then
-            last_tail=$(tail -n 20 "$last_log" 2>/dev/null || true)
+            last_tail=$(tail -n 40 "$last_log" 2>/dev/null || true)
         fi
     fi
 
     last_status_esc="$(_html_escape "$last_status")"
     last_tail_esc="$(_html_escape "$last_tail")"
 
-    sudo mkdir -p /var/log/zypper-auto >/dev/null 2>&1 || true
+    sudo mkdir -p "$(dirname "$out_root")" >/dev/null 2>&1 || true
     cat >"$out_root" <<DASHBOARD_EOF
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Zypper Auto Status</title>
 <style>body{font-family:sans-serif;padding:20px;background:#f4f4f9}.card{background:#fff;padding:16px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1);max-width:980px}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}</style>
 </head><body><div class="card">
-<h1>Zypper Auto Status</h1>
+<h1>Zypper Auto Status (Fallback)</h1>
 <p><strong>Generated:</strong> ${now}</p>
 <p><strong>Current state:</strong> ${last_status_esc}</p>
 <p><strong>Wrapper RUN:</strong> <code>${RUN_ID}</code></p>

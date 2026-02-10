@@ -960,6 +960,9 @@ A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
 
 It is designed as a quick-glance dashboard (card layout + dark mode support) and includes:
 - Color-coded status badge (success/active vs errors)
+- Pending updates count (parsed from the cached dry-run output: `/var/log/zypper-auto/dry-run-last.txt`)
+- Visual feature toggles (Flatpak/Snap/Soar/Brew/Pipx on/off)
+- "Command Center" quick actions: big buttons that **copy** the correct helper command to your clipboard
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
