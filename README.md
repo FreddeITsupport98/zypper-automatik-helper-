@@ -966,7 +966,7 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
-- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, and automatic keyword highlighting in logs
+- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), plus subtle JS effects (toast notifications, ripple clicks, and live-update highlights)
 
 Quickstart (enable example hooks + generate/open dashboard):
 

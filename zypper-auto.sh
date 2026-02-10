@@ -1575,56 +1575,238 @@ generate_dashboard() {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Zypper Auto Command Center</title>
   <style>
+    html { color-scheme: light dark; }
+
     :root {
-        --bg: #f4f4f9;
-        --card-bg: #ffffff;
-        --text: #333;
-        --muted: #666;
-        --accent: #2c3e50;
-        --border: #e1e1e8;
-        --shadow: rgba(0,0,0,0.08);
-        --subtle: rgba(0,0,0,0.04);
-        --code-bg: #111;
-        --code-text: #f0f0f0;
+        --bg: #f6f7fb;
+        --card-bg: rgba(255,255,255,0.78);
+        --text: #0f172a;
+        --muted: rgba(15,23,42,0.68);
+        --accent: #2563eb;
+        --accent-2: #7c3aed;
+        --border: rgba(15,23,42,0.10);
+        --shadow: 0 10px 30px rgba(15,23,42,0.10);
+        --subtle: rgba(15,23,42,0.04);
+        --code-bg: #0b1220;
+        --code-text: #e5e7eb;
+        --focus: rgba(37, 99, 235, 0.35);
+        --success: #16a34a;
+        --danger: #ef4444;
+        --warning: #f59e0b;
+
+        --radius: 16px;
+        --radius-sm: 12px;
     }
+
+    /* Explicit theme overrides (JS toggles html[data-theme]) */
+    html[data-theme="dark"] {
+        --bg: #0b1220;
+        --card-bg: rgba(17, 24, 39, 0.72);
+        --text: #e5e7eb;
+        --muted: rgba(229,231,235,0.70);
+        --accent: #60a5fa;
+        --accent-2: #a78bfa;
+        --border: rgba(255,255,255,0.10);
+        --shadow: 0 16px 40px rgba(0,0,0,0.55);
+        --subtle: rgba(255,255,255,0.06);
+        --code-bg: #060b14;
+        --code-text: #d1d5db;
+        --focus: rgba(96, 165, 250, 0.40);
+    }
+
+    /* Default to dark when system prefers dark, unless user forced a theme */
     @media (prefers-color-scheme: dark) {
-        :root {
-            --bg: #121212;
-            --card-bg: #1e1e1e;
-            --text: #e0e0e0;
-            --muted: #aaa;
-            --accent: #ecf0f1;
-            --border: #333;
-            --shadow: rgba(0,0,0,0.55);
-            --subtle: rgba(255,255,255,0.05);
-            --code-bg: #000;
-            --code-text: #d4d4d4;
+        html:not([data-theme]) {
+            --bg: #0b1220;
+            --card-bg: rgba(17, 24, 39, 0.72);
+            --text: #e5e7eb;
+            --muted: rgba(229,231,235,0.70);
+            --accent: #60a5fa;
+            --accent-2: #a78bfa;
+            --border: rgba(255,255,255,0.10);
+            --shadow: 0 16px 40px rgba(0,0,0,0.55);
+            --subtle: rgba(255,255,255,0.06);
+            --code-bg: #060b14;
+            --code-text: #d1d5db;
+            --focus: rgba(96, 165, 250, 0.40);
         }
     }
+
+    * { box-sizing: border-box; }
+
     body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        padding: 20px;
-        background: var(--bg);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        padding: 24px;
+        margin: 0;
         color: var(--text);
-        line-height: 1.5;
+        line-height: 1.55;
+
+        /* Layered gradients for a modern "pro" look */
+        background:
+            radial-gradient(1200px 700px at 15% 5%, rgba(37,99,235,0.16), transparent 60%),
+            radial-gradient(900px 600px at 85% 10%, rgba(124,58,237,0.14), transparent 55%),
+            radial-gradient(900px 600px at 50% 95%, rgba(16,185,129,0.10), transparent 55%),
+            var(--bg);
     }
-    .container { max-width: 900px; margin: 0 auto; }
+
+    .container { max-width: 1040px; margin: 0 auto; }
+
     .card {
         background: var(--card-bg);
         padding: 24px;
-        border-radius: 12px;
-        box-shadow: 0 4px 10px var(--shadow);
-        margin-bottom: 20px;
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        margin-bottom: 18px;
         border: 1px solid var(--border);
-        transition: transform 0.2s ease;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
     }
-    .card:hover { transform: translateY(-2px); }
-    h1 { margin: 0; font-size: 1.5rem; color: var(--accent); display: flex; align-items: center; gap: 10px; }
-    h2 { font-size: 1.1rem; color: var(--muted); margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
-    .stat-box { background: var(--subtle); padding: 12px; border-radius: 10px; border: 1px solid var(--border); }
-    .stat-label { font-size: 0.82rem; color: var(--muted); display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat-value { font-weight: 700; font-size: 1rem; }
+    .card:hover { transform: translateY(-2px); border-color: rgba(37,99,235,0.18); }
+
+    h1 {
+        margin: 0;
+        font-size: 1.35rem;
+        letter-spacing: 0.2px;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    h2 {
+        font-size: 1.02rem;
+        margin: 0 0 14px 0;
+        padding-bottom: 10px;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+        letter-spacing: 0.2px;
+    }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+
+    .stat-box {
+        background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00)), var(--subtle);
+        padding: 14px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset;
+    }
+
+    .stat-label {
+        font-size: 0.78rem;
+        color: var(--muted);
+        display: block;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        font-weight: 800;
+    }
+
+    .stat-value { font-weight: 800; font-size: 1.02rem; }
+
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    /* Small pill controls */
+    .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.04);
+        color: var(--muted);
+        font-weight: 800;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+        user-select: none;
+    }
+    .pill:hover { transform: translateY(-1px); border-color: rgba(37,99,235,0.30); background: rgba(37,99,235,0.07); }
+    .pill:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
+
+    input[type="checkbox"] { accent-color: var(--accent); }
+
+    /* JS-only motion effects (kept subtle) */
+    @media (prefers-reduced-motion: reduce) {
+        * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
+
+    html.js .card {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    html.js .card.enter {
+        opacity: 1;
+        transform: translateY(0);
+        transition: opacity 380ms ease, transform 380ms ease, border-color 180ms ease, box-shadow 180ms ease;
+    }
+
+    @keyframes flash {
+        0%   { box-shadow: 0 0 0 0 rgba(37,99,235,0.0); }
+        30%  { box-shadow: 0 0 0 6px rgba(37,99,235,0.18); }
+        100% { box-shadow: 0 0 0 0 rgba(37,99,235,0.0); }
+    }
+    .flash {
+        animation: flash 700ms ease;
+        border-radius: 10px;
+    }
+
+    @keyframes pulseGlow {
+        0%   { transform: translateY(0); filter: saturate(1); }
+        50%  { transform: translateY(-1px); filter: saturate(1.2); }
+        100% { transform: translateY(0); filter: saturate(1); }
+    }
+    .pulse {
+        animation: pulseGlow 600ms ease;
+    }
+
+    /* Ripple effect */
+    .ripple {
+        position: absolute;
+        border-radius: 999px;
+        transform: scale(0);
+        opacity: 0.7;
+        pointer-events: none;
+        background: radial-gradient(circle, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.25) 35%, rgba(255,255,255,0.0) 70%);
+        animation: ripple 650ms ease-out;
+        mix-blend-mode: overlay;
+    }
+    @keyframes ripple {
+        to { transform: scale(12); opacity: 0; }
+    }
+
+    /* Toast */
+    #toast-wrap {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        display: grid;
+        gap: 10px;
+        z-index: 9999;
+        max-width: min(420px, calc(100vw - 36px));
+    }
+    .toast {
+        background: rgba(17, 24, 39, 0.82);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 14px;
+        padding: 12px 14px;
+        box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        font-weight: 800;
+        font-size: 0.92rem;
+        transform: translateY(10px);
+        opacity: 0;
+        animation: toastIn 260ms ease forwards;
+    }
+    .toast small { display:block; font-weight: 700; opacity: 0.8; margin-top: 4px; }
+    .toast.ok { border-color: rgba(34,197,94,0.35); }
+    .toast.err { border-color: rgba(239,68,68,0.35); }
+    @keyframes toastIn { to { transform: translateY(0); opacity: 1; } }
+    @keyframes toastOut { to { transform: translateY(6px); opacity: 0; } }
 
     /* Feature toggles */
     .feat-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
@@ -1636,38 +1818,57 @@ generate_dashboard() {
     /* Command Center action buttons */
     .action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 12px; }
     .cmd-btn {
-        background: var(--subtle);
+        font-family: inherit;
+        background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.00)), var(--subtle);
         border: 1px solid var(--border);
         color: var(--text);
         padding: 14px;
-        border-radius: 12px;
+        border-radius: var(--radius-sm);
         cursor: pointer;
         text-align: left;
-        transition: all 0.2s;
+        transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
         position: relative;
         overflow: hidden;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset;
     }
-    .cmd-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px var(--shadow); }
-    .cmd-btn:active { transform: translateY(0); }
-    .cmd-label { display: block; font-weight: 900; font-size: 0.95rem; margin-bottom: 4px; }
-    .cmd-desc { display: block; font-size: 0.78rem; color: var(--muted); }
+    .cmd-btn:hover {
+        transform: translateY(-2px);
+        border-color: rgba(37,99,235,0.30);
+        box-shadow: 0 18px 40px rgba(15,23,42,0.12);
+    }
+    .cmd-btn:active { transform: translateY(-1px) scale(0.99); }
+    .cmd-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
+    .cmd-label { display: block; font-weight: 950; font-size: 0.95rem; margin-bottom: 5px; letter-spacing: 0.15px; }
+    .cmd-desc { display: block; font-size: 0.80rem; color: var(--muted); line-height: 1.25; }
     .cmd-copy-feedback {
         position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-        background: #2ecc71; color: white; display: flex; align-items: center; justify-content: center;
-        font-weight: 900; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+        background: linear-gradient(90deg, var(--success), #22c55e);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 900;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.18s;
     }
     .cmd-btn.copied .cmd-copy-feedback { opacity: 1; }
 
     /* Status badges */
     .status-badge {
-        display: inline-block;
-        padding: 6px 14px;
-        border-radius: 20px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 14px;
+        border-radius: 999px;
         color: white;
-        font-weight: 800;
-        font-size: 0.9rem;
-        background-color: var(--status-color, ${status_color});
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        font-weight: 900;
+        font-size: 0.86rem;
+        background:
+            linear-gradient(90deg, rgba(255,255,255,0.18), rgba(255,255,255,0.05)),
+            var(--status-color, ${status_color});
+        box-shadow: 0 10px 22px rgba(0,0,0,0.18);
+        border: 1px solid rgba(255,255,255,0.18);
         max-width: 100%;
         overflow-wrap: anywhere;
     }
@@ -1675,8 +1876,8 @@ generate_dashboard() {
     .timer-inactive { color: #e74c3c; font-weight: 800; }
 
     /* Disk usage bar */
-    .progress-track { height: 8px; background: var(--border); border-radius: 6px; margin-top: 10px; overflow: hidden; }
-    .progress-fill { height: 100%; background: #3498db; border-radius: 6px; width: 0%; transition: width 0.6s ease; }
+    .progress-track { height: 10px; background: rgba(0,0,0,0.06); border-radius: 999px; margin-top: 10px; overflow: hidden; border: 1px solid var(--border); }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; width: 0%; transition: width 0.45s ease; }
 
     /* Logs */
     .log-container { position: relative; }
@@ -1684,28 +1885,33 @@ generate_dashboard() {
         position: absolute;
         top: 10px;
         right: 10px;
-        background: rgba(255,255,255,0.08);
+        font-family: inherit;
+        background: rgba(255,255,255,0.06);
         border: 1px solid var(--border);
         color: var(--muted);
-        padding: 6px 10px;
+        padding: 8px 10px;
         font-size: 0.85rem;
-        border-radius: 8px;
+        border-radius: 10px;
         cursor: pointer;
-        transition: all 0.2s;
+        transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
     }
-    .copy-btn:hover { background: rgba(255,255,255,0.14); color: var(--text); }
+    .copy-btn:hover { transform: translateY(-1px); border-color: rgba(37,99,235,0.28); background: rgba(37,99,235,0.08); color: var(--text); }
+    .copy-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
 
     pre {
-        background: var(--code-bg);
+        background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.00)), var(--code-bg);
         color: var(--code-text);
-        padding: 15px;
-        border-radius: 10px;
+        padding: 16px;
+        border-radius: var(--radius-sm);
         overflow-x: auto;
-        font-size: 0.85rem;
+        font-size: 0.86rem;
         white-space: pre-wrap;
-        border: 1px solid #333;
-        max-height: 420px;
+        border: 1px solid rgba(255,255,255,0.12);
+        max-height: 460px;
         overflow-y: auto;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset;
     }
 
     /* Keyword highlighting */
@@ -1715,8 +1921,7 @@ generate_dashboard() {
     .log-warn { color: #e5c07b; font-weight: 800; }
     .log-error { color: #e06c75; font-weight: 900; }
 
-    .footer { font-size: 0.8rem; color: var(--muted); text-align: center; margin-top: 30px; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .footer { font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 28px; }
   </style>
 </head>
 <body>
@@ -1729,11 +1934,12 @@ generate_dashboard() {
       <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">
         Generated <span id="time-ago">just now</span> (<span style="font-family:monospace" id="generated-at">${now}</span>) • Pending Updates: <strong id="pending-count">${pending_count}</strong>
       </p>
-      <div style="margin-top:10px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
-        <label style="font-size:0.9rem; color: var(--muted); font-weight: 800; display:flex; gap:8px; align-items:center;">
+      <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <label class="pill" style="gap:10px;">
           <input type="checkbox" id="live-toggle" /> Live mode
         </label>
-        <span style="font-size:0.8rem; color: var(--muted);">(Polls <code>status-data.json</code> every 5s; works best when opened via <code>http://</code>)</span>
+        <button class="pill" id="theme-toggle" type="button" title="Toggle theme (auto/light/dark)">Theme: Auto</button>
+        <span style="font-size:0.85rem; color: var(--muted);">Live polls <code>status-data.json</code> and <code>download-status.txt</code> (best via <code>http://</code>).</span>
       </div>
 
       <div class="grid" style="margin-top: 18px;">
@@ -1939,8 +2145,72 @@ generate_dashboard() {
   </div>
 
   <script>
+    // Enable JS-only styling hooks
+    try { document.documentElement.classList.add('js'); } catch (e) {}
+
     // Global UI state (used by live polling)
     var genTime = new Date("${now_iso}");
+
+    // Toast notifications (non-intrusive)
+    function ensureToastWrap() {
+        var w = document.getElementById('toast-wrap');
+        if (w) return w;
+        w = document.createElement('div');
+        w.id = 'toast-wrap';
+        document.body.appendChild(w);
+        return w;
+    }
+
+    function toast(msg, detail, kind) {
+        // kind: 'ok' | 'err'
+        try {
+            var w = ensureToastWrap();
+            var t = document.createElement('div');
+            t.className = 'toast ' + (kind || 'ok');
+            t.textContent = msg;
+            if (detail) {
+                var s = document.createElement('small');
+                s.textContent = detail;
+                t.appendChild(s);
+            }
+            w.appendChild(t);
+            setTimeout(function() {
+                t.style.animation = 'toastOut 200ms ease forwards';
+                setTimeout(function() { if (t && t.parentNode) t.parentNode.removeChild(t); }, 240);
+            }, 2200);
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    // Ripple click effect on buttons
+    function addRipple(el, x, y) {
+        if (!el) return;
+        try {
+            // Ensure positioning context
+            var cs = window.getComputedStyle(el);
+            if (cs.position === 'static') {
+                el.style.position = 'relative';
+            }
+
+            var r = document.createElement('span');
+            r.className = 'ripple';
+
+            var rect = el.getBoundingClientRect();
+            var cx = (typeof x === 'number') ? x - rect.left : rect.width / 2;
+            var cy = (typeof y === 'number') ? y - rect.top : rect.height / 2;
+
+            r.style.left = cx + 'px';
+            r.style.top = cy + 'px';
+            r.style.width = '10px';
+            r.style.height = '10px';
+
+            el.appendChild(r);
+            setTimeout(function() { if (r && r.parentNode) r.parentNode.removeChild(r); }, 700);
+        } catch (e) {
+            // ignore
+        }
+    }
 
     // 0) Command Center clipboard copy (with fallback)
     function copyCmd(cmd, btn) {
@@ -1948,7 +2218,11 @@ generate_dashboard() {
             if (!btn) return;
             if (ok) {
                 btn.classList.add('copied');
-                setTimeout(function() { btn.classList.remove('copied'); }, 1500);
+                btn.classList.add('pulse');
+                setTimeout(function() { btn.classList.remove('copied'); btn.classList.remove('pulse'); }, 1500);
+                toast('Copied command', cmd.length > 80 ? (cmd.slice(0, 80) + '…') : cmd, 'ok');
+            } else {
+                toast('Copy failed', 'Your browser blocked clipboard access.', 'err');
             }
         }
 
@@ -2072,7 +2346,10 @@ generate_dashboard() {
             if (!btn) return;
             var old = btn.textContent;
             btn.textContent = ok ? 'Copied!' : 'Copy failed';
-            setTimeout(function() { btn.textContent = old; }, 2000);
+            btn.classList.add('pulse');
+            setTimeout(function() { btn.textContent = old; btn.classList.remove('pulse'); }, 2000);
+            if (ok) toast('Copied text', id, 'ok');
+            else toast('Copy failed', 'Clipboard access blocked.', 'err');
         }
 
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -2108,11 +2385,61 @@ generate_dashboard() {
     }
     window.copyBlock = copyBlock;
 
+    // Theme toggle (Auto/Light/Dark)
+    function setTheme(mode) {
+        // mode: 'auto' | 'light' | 'dark'
+        try { localStorage.setItem('znh_theme', mode); } catch (e) { /* ignore */ }
+
+        // Remove explicit theme for auto, otherwise set data-theme.
+        if (mode === 'auto') {
+            document.documentElement.removeAttribute('data-theme');
+        } else {
+            document.documentElement.setAttribute('data-theme', mode);
+        }
+
+        var btn = document.getElementById('theme-toggle');
+        if (btn) {
+            var label = (mode === 'auto') ? 'Auto' : (mode === 'dark' ? 'Dark' : 'Light');
+            btn.textContent = 'Theme: ' + label;
+        }
+    }
+
+    (function() {
+        var mode = 'auto';
+        try {
+            mode = localStorage.getItem('znh_theme') || 'auto';
+        } catch (e) {
+            mode = 'auto';
+        }
+        if (mode !== 'auto' && mode !== 'light' && mode !== 'dark') mode = 'auto';
+        setTheme(mode);
+
+        var btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        btn.addEventListener('click', function() {
+            var current = 'auto';
+            try { current = localStorage.getItem('znh_theme') || 'auto'; } catch (e) { current = 'auto'; }
+            var next = 'auto';
+            if (current === 'auto') next = 'light';
+            else if (current === 'light') next = 'dark';
+            else next = 'auto';
+            setTheme(next);
+        });
+    })();
+
     // 5) Live polling (realtime-ish dashboard)
     function setText(id, val) {
         var el = document.getElementById(id);
         if (!el) return;
-        el.textContent = (val === undefined || val === null) ? "" : String(val);
+        var next = (val === undefined || val === null) ? "" : String(val);
+        if (el.textContent !== next) {
+            el.textContent = next;
+            // Subtle "updated" highlight
+            el.classList.remove('flash');
+            // Reflow so animation restarts
+            void el.offsetWidth;
+            el.classList.add('flash');
+        }
     }
 
     function setClass(id, on) {
@@ -2285,6 +2612,26 @@ generate_dashboard() {
                 // ignore
             });
     }
+
+    // One-time: entrance animation for cards
+    (function() {
+        var cards = document.querySelectorAll('.card');
+        for (var i = 0; i < cards.length; i++) {
+            (function(card, idx) {
+                setTimeout(function() { card.classList.add('enter'); }, 60 + (idx * 55));
+            })(cards[i], i);
+        }
+    })();
+
+    // One-time: wire ripple effect to buttons
+    (function() {
+        var targets = document.querySelectorAll('.cmd-btn, .copy-btn, .pill');
+        for (var i = 0; i < targets.length; i++) {
+            targets[i].addEventListener('click', function(e) {
+                addRipple(this, e.clientX, e.clientY);
+            }, { passive: true });
+        }
+    })();
 
     // Live poll intervals
     setInterval(pollLive, 5000);
