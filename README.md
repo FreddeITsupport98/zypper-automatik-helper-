@@ -99,7 +99,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 -----
 
-## 🛠️ How It Works: The v58 Architecture
+## 🛠️ How It Works: The v64 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
 
@@ -1102,6 +1102,17 @@ systemctl status zypper-autodownload.service
 - The system is working as designed - updates only run on AC power and unmetered connections
 
 ### Version History
+
+- **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
+  - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
+  - 🧾 **NEW: Dashboard live logs + log view switching** – dashboard can follow `dashboard-live.log` and switch Recent Activity views (Live / Logs tail / Diagnostics / journalctl).
+  - 🔋 **IMPROVED: Power safety detection** – installer now ensures `upower` is installed and the notifier uses `/sys/class/power_supply` fallbacks (then upower) for more reliable AC/battery detection.
+  - ✅ **IMPROVED: Dependency prompt UX (default Yes)** – missing required dependencies now prompt with `[Y/n]` (recommended).
+  - 🧰 **NEW: Recommended dev tool prompt** – offers to install `ShellCheck` (optional, default Yes) to help maintain bash code quality.
+
+- **v63** (2026-02-08): **Dashboard Live Mode & Local Serve/Open Workflow**
+  - 🌐 **NEW: `--dash-open` / `--dash-stop` workflow** – starts/stops a local HTTP server so the dashboard can fetch live data (avoids `file://` fetch restrictions).
+  - 🔁 **IMPROVED: Live polling pipeline** – dashboard polls JSON status + downloader progress and updates UI in place.
 
 - **v62** (2026-01-21): **State Reset Helper & Typo-Safe CLI**
   - 🧼 **NEW: Download/notifier state reset helper** – `zypper-auto-helper --reset-downloads` (alias: `--reset-state`) now clears downloader state files (`download-status.txt`, `download-last-check.txt`, `download-start-time.txt`, `dry-run-last.txt`) and user notifier caches (`last-run-status.txt`, `last_notification.txt`, etc.), then reloads and restarts the core timers/services. This is a safe, "soft" reset for fixing stale "X updates pending" notifications without reinstalling.

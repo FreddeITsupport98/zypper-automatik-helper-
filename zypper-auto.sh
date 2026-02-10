@@ -1,10 +1,12 @@
 #!/bin/bash
 #
-#       VERSION 58 - Scripted uninstaller, external config, and hardening
-# This script installs the current architecture with a safe uninstaller,
-# an external configuration file, and improved systemd hardening.
-# It replaces 'sudo' with 'pkexec' in the Python script to ensure
-# zypper refresh/dry-run is not instantly blocked by pam_kwallet5.
+#       VERSION 64 - Dashboard Command Center, diagnostics, and hardened update automation
+# This installer deploys the zypper auto-helper stack (downloader + notifier +
+# verification/auto-repair tooling), with:
+# - a live HTML "Command Center" dashboard (optional)
+# - improved diagnostics and support tools
+# - safer power/metered-network detection
+# - optional enterprise hooks + webhook notifications
 #
 # MUST be run with sudo or as root.
 
@@ -1961,10 +1963,11 @@ generate_dashboard() {
 
     /* Logs */
     .log-container { position: relative; }
-    .copy-btn {
+
+    .copy-btn,
+    .jump-btn {
         position: absolute;
         top: 10px;
-        right: 10px;
         font-family: inherit;
         background: rgba(255,255,255,0.06);
         border: 1px solid var(--border);
@@ -1973,12 +1976,25 @@ generate_dashboard() {
         font-size: 0.85rem;
         border-radius: 10px;
         cursor: pointer;
-        transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+        transition: transform 150ms ease, border-color 150ms ease, background 150ms ease, opacity 150ms ease;
         backdrop-filter: blur(6px);
         -webkit-backdrop-filter: blur(6px);
+        user-select: none;
     }
-    .copy-btn:hover { transform: translateY(-1px); border-color: rgba(37,99,235,0.28); background: rgba(37,99,235,0.08); color: var(--text); }
-    .copy-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
+
+    .copy-btn { right: 10px; }
+    .jump-btn { right: 104px; opacity: 0; pointer-events: none; }
+    .log-container.show-jump .jump-btn { opacity: 1; pointer-events: auto; }
+
+    .copy-btn:hover,
+    .jump-btn:hover {
+        transform: translateY(-1px);
+        border-color: rgba(37,99,235,0.28);
+        background: rgba(37,99,235,0.08);
+        color: var(--text);
+    }
+    .copy-btn:focus,
+    .jump-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
 
     pre {
         background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.00)), var(--code-bg);
@@ -2222,7 +2238,8 @@ generate_dashboard() {
         <button class="pill" type="button" onclick="copyCmd('journalctl -t zypper-auto-helper -n 200 --no-pager', this)">Copy: journalctl</button>
       </div>
 
-      <div class="log-container">
+      <div class="log-container" id="recent-log-wrap">
+          <button class="jump-btn" id="jump-log-btn" type="button" title="Jump to latest log lines">Latest</button>
           <button class="copy-btn" onclick="copyBlock('log-content', this)">Copy Log</button>
           <pre id="log-content">${last_tail_esc}</pre>
       </div>
@@ -2231,7 +2248,8 @@ generate_dashboard() {
     <div class="card">
       <h2>Flight Report (Last Run)</h2>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">Source: <span id="flight-report-log">${flight_report_log_esc:-No Flight Report log found yet.}</span></div>
-      <div class="log-container">
+      <div class="log-container" id="flight-log-wrap">
+          <button class="jump-btn" id="jump-flight-btn" type="button" title="Jump to latest lines">Latest</button>
           <button class="copy-btn" onclick="copyBlock('flight-content', this)">Copy Flight Report</button>
           <pre id="flight-content">${flight_report_esc:-No flight report found yet. Run: sudo zypper-auto-helper --verify}</pre>
       </div>
@@ -2432,6 +2450,10 @@ generate_dashboard() {
     highlightBlock('log-content');
     highlightBlock('flight-content');
 
+    // Wire "Latest" jump buttons (recent log + flight report).
+    wireJumpButton('log-content', 'recent-log-wrap', 'jump-log-btn');
+    wireJumpButton('flight-content', 'flight-log-wrap', 'jump-flight-btn');
+
     // 4) Copy button (Clipboard API + fallback)
     function copyBlock(id, btn) {
         var el = document.getElementById(id);
@@ -2480,6 +2502,43 @@ generate_dashboard() {
         }
     }
     window.copyBlock = copyBlock;
+
+    // Log UX: show a "Latest" button when the user scrolls away from bottom.
+    function _nearBottom(el) {
+        if (!el) return true;
+        return (el.scrollHeight - el.scrollTop - el.clientHeight) < 120;
+    }
+
+    function updateJumpButton(preId, wrapId) {
+        var pre = document.getElementById(preId);
+        var wrap = document.getElementById(wrapId);
+        if (!pre || !wrap) return;
+        if (_nearBottom(pre)) wrap.classList.remove('show-jump');
+        else wrap.classList.add('show-jump');
+    }
+
+    function wireJumpButton(preId, wrapId, btnId) {
+        var pre = document.getElementById(preId);
+        var wrap = document.getElementById(wrapId);
+        var btn = document.getElementById(btnId);
+        if (!pre || !wrap || !btn) return;
+
+        btn.addEventListener('click', function() {
+            try {
+                pre.scrollTop = pre.scrollHeight;
+                updateJumpButton(preId, wrapId);
+            } catch (e) {
+                // ignore
+            }
+        });
+
+        pre.addEventListener('scroll', function() {
+            updateJumpButton(preId, wrapId);
+        }, { passive: true });
+
+        // Initial state
+        updateJumpButton(preId, wrapId);
+    }
 
     // Theme toggle (Auto/Light/Dark)
     function setTheme(mode) {
@@ -2591,10 +2650,23 @@ generate_dashboard() {
         setClass('feat-pipx-dot', !!d.feat_pipx);
 
         // Logs (re-highlight after replacing)
+        // IMPORTANT: do not overwrite the Recent Activity Log content when the user
+        // has selected a different log view tab (live/diag/journal). Those views
+        // are updated by pollRecentActivityLog() instead.
         var logEl = document.getElementById('log-content');
         if (logEl && d.last_install_tail !== undefined) {
-            logEl.textContent = d.last_install_tail || '';
-            highlightBlock('log-content');
+            var view = (typeof logView === 'undefined') ? 'install' : logView;
+            if (view === 'install') {
+                // Same auto-scroll semantics as the live log poller.
+                var nearBottom2 = (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight) < 80;
+                logEl.textContent = d.last_install_tail || '';
+                highlightBlock('log-content');
+                if (nearBottom2 || _logAutoScrollOnce) {
+                    logEl.scrollTop = logEl.scrollHeight;
+                    _logAutoScrollOnce = false;
+                }
+                updateJumpButton('log-content', 'recent-log-wrap');
+            }
         }
         var flightEl = document.getElementById('flight-content');
         if (flightEl && d.flight_report_raw !== undefined) {
@@ -2713,6 +2785,11 @@ generate_dashboard() {
 
     // Realtime Recent Activity Log (multi-source)
     var _lastLiveLog = '';
+    // When true, the next successful log render will scroll to the bottom so the
+    // user sees the latest events immediately. After that, we only keep the
+    // view pinned to bottom when the user is already near the bottom.
+    var _logAutoScrollOnce = true;
+
     var logView = (function() {
         try {
             return localStorage.getItem('znh_log_view') || 'live';
@@ -2760,6 +2837,9 @@ generate_dashboard() {
 
         // Reset cache so the next poll definitely updates the DOM.
         _lastLiveLog = '';
+        // After switching views, auto-scroll to the latest entries once.
+        _logAutoScrollOnce = true;
+        updateJumpButton('log-content', 'recent-log-wrap');
         _updateLogTabsUI();
 
         // Fetch immediately even if live mode is off (useful for click-to-view).
@@ -2815,9 +2895,15 @@ generate_dashboard() {
 
                 el.textContent = tailed;
                 highlightBlock('log-content');
-                if (nearBottom) {
+
+                // Default behaviour: always show latest entries the first time
+                // (or after view switches). After that, only auto-scroll when
+                // the user is already near the bottom.
+                if (nearBottom || _logAutoScrollOnce) {
                     el.scrollTop = el.scrollHeight;
+                    _logAutoScrollOnce = false;
                 }
+                updateJumpButton('log-content', 'recent-log-wrap');
             })
             .catch(function() {
                 // If files aren't accessible (e.g. opened via file://), do nothing.
