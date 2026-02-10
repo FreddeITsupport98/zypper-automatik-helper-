@@ -109,7 +109,6 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         # Live dashboard: serve the user dashboard dir over a local HTTP server.
         # This avoids browser restrictions around fetch() on file:// URLs and
         # enables realtime polling (status-data.json, download-status.txt, dashboard-live.log).
-        local port url pid_file
         port=8765
         url="http://127.0.0.1:${port}/status.html?live=1"
         pid_file="${dash_dir}/dashboard-http.pid"
@@ -1797,6 +1796,15 @@ generate_dashboard() {
     }
     .pill:hover { transform: translateY(-1px); border-color: rgba(37,99,235,0.30); background: rgba(37,99,235,0.07); }
     .pill:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
+    .pill.active {
+        background: linear-gradient(135deg, rgba(37,99,235,0.20), rgba(124,58,237,0.16));
+        border-color: rgba(37,99,235,0.38);
+        color: var(--text);
+    }
+    html[data-theme="dark"] .pill.active,
+    html:not([data-theme]) .pill.active {
+        color: var(--text);
+    }
 
     input[type="checkbox"] { accent-color: var(--accent); }
 
@@ -2199,7 +2207,15 @@ generate_dashboard() {
       <h2>Recent Activity Log</h2>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: <span id="last-install-log">${last_install_log_esc}</span></div>
 
-      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 12px 0;">
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 10px 0;">
+        <button class="pill log-tab" type="button" data-view="live">View: Live</button>
+        <button class="pill log-tab" type="button" data-view="install">View: Logs (tail)</button>
+        <button class="pill log-tab" type="button" data-view="diag">View: Diagnostics</button>
+        <button class="pill log-tab" type="button" data-view="journal">View: journalctl</button>
+        <span style="font-size:0.82rem; color: var(--muted);">Source: <code id="log-source-hint">dashboard-live.log</code></span>
+      </div>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 0 0 12px 0;">
         <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper --live-logs', this)">Copy: Live Logs</button>
         <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper debug', this)">Copy: Debug Menu</button>
         <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper --logs', this)">Copy: Logs (tail)</button>
@@ -2695,25 +2711,92 @@ generate_dashboard() {
             });
     }
 
-    // Realtime Recent Activity Log
+    // Realtime Recent Activity Log (multi-source)
     var _lastLiveLog = '';
+    var logView = (function() {
+        try {
+            return localStorage.getItem('znh_log_view') || 'live';
+        } catch (e) {
+            return 'live';
+        }
+    })();
+
     function tailLines(s, n) {
         var lines = (s || '').split('\n');
         if (lines.length <= n) return (s || '');
         return lines.slice(Math.max(0, lines.length - n)).join('\n');
     }
 
-    function pollRecentActivityLog() {
-        if (!liveEnabled) return;
+    function _updateLogTabsUI() {
+        try {
+            var tabs = document.querySelectorAll('.log-tab');
+            for (var i = 0; i < tabs.length; i++) {
+                var v = tabs[i].getAttribute('data-view') || '';
+                if (v === logView) tabs[i].classList.add('active');
+                else tabs[i].classList.remove('active');
+            }
 
-        // Prefer user-served dashboard-live.log (same directory as status.html)
-        // This is written by the helper in realtime.
-        var url = 'dashboard-live.log?ts=' + Date.now();
+            var hint = document.getElementById('log-source-hint');
+            if (hint) {
+                var txt = 'dashboard-live.log';
+                if (logView === 'install') txt = 'dashboard-install-tail.log';
+                else if (logView === 'diag') txt = 'dashboard-diag-tail.log';
+                else if (logView === 'journal') txt = 'dashboard-journal-tail.log';
+                hint.textContent = txt;
+            }
+        } catch (e) {
+            // ignore
+        }
+    }
 
-        // Best-effort: use HTTP Range to avoid downloading huge logs.
+    function setLogView(v) {
+        if (!v) return;
+        logView = v;
+        try {
+            localStorage.setItem('znh_log_view', v);
+        } catch (e) {
+            // ignore
+        }
+
+        // Reset cache so the next poll definitely updates the DOM.
+        _lastLiveLog = '';
+        _updateLogTabsUI();
+
+        // Fetch immediately even if live mode is off (useful for click-to-view).
+        pollRecentActivityLog(true);
+    }
+
+    // Wire log view tabs
+    (function() {
+        var tabs = document.querySelectorAll('.log-tab');
+        for (var i = 0; i < tabs.length; i++) {
+            tabs[i].addEventListener('click', function() {
+                setLogView(this.getAttribute('data-view') || 'live');
+            });
+        }
+        _updateLogTabsUI();
+    })();
+
+    function pollRecentActivityLog(force) {
+        if (!liveEnabled && !force) return;
+
+        // Log sources are pre-rendered by the helper into files located next to status.html
+        // so the browser never executes commands.
+        var base = 'dashboard-live.log';
+        var rangeBytes = 60000;
+        if (logView === 'install') base = 'dashboard-install-tail.log';
+        else if (logView === 'diag') base = 'dashboard-diag-tail.log';
+        else if (logView === 'journal') base = 'dashboard-journal-tail.log';
+
+        var url = base + '?ts=' + Date.now();
+        var headers = {};
+        if (logView === 'live' || logView === 'diag' || logView === 'journal') {
+            headers['Range'] = 'bytes=-' + String(rangeBytes);
+        }
+
         fetch(url, {
             cache: 'no-store',
-            headers: { 'Range': 'bytes=-60000' }
+            headers: headers
         })
             .then(function(r) {
                 if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
@@ -2737,7 +2820,7 @@ generate_dashboard() {
                 }
             })
             .catch(function() {
-                // If dashboard-live.log isn't accessible, do nothing.
+                // If files aren't accessible (e.g. opened via file://), do nothing.
             });
     }
 
@@ -2821,6 +2904,35 @@ JSON_EOF
 
     chmod 644 "${out_json_root}" 2>/dev/null || true
 
+    # Extra pre-rendered log views for the dashboard toggles
+    local out_install_tail_root out_diag_tail_root out_journal_tail_root
+    out_install_tail_root="${LOG_DIR}/dashboard-install-tail.log"
+    out_diag_tail_root="${LOG_DIR}/dashboard-diag-tail.log"
+    out_journal_tail_root="${LOG_DIR}/dashboard-journal-tail.log"
+
+    printf '%s\n' "${last_install_tail}" >"${out_install_tail_root}" 2>/dev/null || true
+    chmod 644 "${out_install_tail_root}" 2>/dev/null || true
+
+    local diag_src
+    diag_src="${LOG_DIR}/diagnostics/diag-$(date +%Y-%m-%d).log"
+    if [ -f "${diag_src}" ]; then
+        tail -n 220 "${diag_src}" >"${out_diag_tail_root}" 2>/dev/null || true
+    else
+        printf '%s\n' "No diagnostics log found at ${diag_src}. Enable via: sudo zypper-auto-helper --diag-logs-on" >"${out_diag_tail_root}" 2>/dev/null || true
+    fi
+    chmod 644 "${out_diag_tail_root}" 2>/dev/null || true
+
+    if command -v journalctl >/dev/null 2>&1; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 2 journalctl -t zypper-auto-helper -n 200 --no-pager >"${out_journal_tail_root}" 2>/dev/null || true
+        else
+            journalctl -t zypper-auto-helper -n 200 --no-pager >"${out_journal_tail_root}" 2>/dev/null || true
+        fi
+    else
+        printf '%s\n' "journalctl not available on this system." >"${out_journal_tail_root}" 2>/dev/null || true
+    fi
+    chmod 644 "${out_journal_tail_root}" 2>/dev/null || true
+
     chmod 644 "${out_root}" 2>/dev/null || true
 
     if [ -n "${out_user}" ]; then
@@ -2831,8 +2943,20 @@ JSON_EOF
         mkdir -p "${out_user_dir}" 2>/dev/null || true
         cp -f "${out_root}" "${out_user}" 2>/dev/null || true
         cp -f "${out_json_root}" "${out_user_json}" 2>/dev/null || true
-        chown "${SUDO_USER}:${SUDO_USER}" "${out_user}" "${out_user_json}" 2>/dev/null || true
-        chmod 644 "${out_user}" "${out_user_json}" 2>/dev/null || true
+        cp -f "${out_install_tail_root}" "${out_user_dir}/dashboard-install-tail.log" 2>/dev/null || true
+        cp -f "${out_diag_tail_root}" "${out_user_dir}/dashboard-diag-tail.log" 2>/dev/null || true
+        cp -f "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
+        chown "${SUDO_USER}:${SUDO_USER}" \
+            "${out_user}" "${out_user_json}" \
+            "${out_user_dir}/dashboard-install-tail.log" \
+            "${out_user_dir}/dashboard-diag-tail.log" \
+            "${out_user_dir}/dashboard-journal-tail.log" \
+            2>/dev/null || true
+        chmod 644 "${out_user}" "${out_user_json}" \
+            "${out_user_dir}/dashboard-install-tail.log" \
+            "${out_user_dir}/dashboard-diag-tail.log" \
+            "${out_user_dir}/dashboard-journal-tail.log" \
+            2>/dev/null || true
     fi
 
     log_success "Dashboard generated: ${out_root}${out_user:+ (user copy: ${out_user})}"
@@ -6829,19 +6953,19 @@ check_and_install() {
     local purpose=$3
 
     log_debug "Checking for command: $cmd (package: $package)"
-    
+
     if ! command -v "$cmd" &> /dev/null; then
         log_info "---"
         log_info "⚠️  Dependency missing: '$cmd' ($purpose)."
         log_info "   This is provided by the package '$package'."
-        read -p "   May I install it for you? (y/n) " -n 1 -r
-        echo
+        read -p "   Install it now? [Y/n]: " -r REPLY
+        REPLY="${REPLY:-Y}"
         log_debug "User response: $REPLY"
-        
+
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             log_info "Installing $package..."
             update_status "Installing dependency: $package"
-            
+
             if ! execute_guarded "Install dependency package '$package' (provides '$cmd')" sudo zypper install -y "$package"; then
                 log_error "Failed to install $package. Please install it manually and re-run this script."
                 update_status "FAILED: Could not install $package"
@@ -7786,8 +7910,34 @@ fi
 update_status "Checking dependencies..."
 log_info ">>> Checking dependencies..."
 check_and_install "nmcli" "NetworkManager" "checking metered connection"
+check_and_install "upower" "upower" "battery/AC power detection (laptop safety)"
 check_and_install "python3" "python3" "running the notifier script"
 check_and_install "pkexec" "polkit" "graphical authentication"
+
+# ShellCheck is not strictly required at runtime, but is highly recommended
+# for safer maintenance of this bash-heavy project.
+if ! command -v shellcheck >/dev/null 2>&1; then
+    log_info "---"
+    log_info "ℹ Recommended tool missing: 'shellcheck' (ShellCheck)"
+    log_info "   Purpose: Bash static analysis (helps catch quoting/syntax bugs early)"
+    log_info "   Package: ShellCheck"
+    read -p "   Install ShellCheck now? [Y/n]: " -r REPLY_SHELLCHECK
+    REPLY_SHELLCHECK="${REPLY_SHELLCHECK:-Y}"
+    log_debug "User response (ShellCheck): $REPLY_SHELLCHECK"
+
+    if [[ $REPLY_SHELLCHECK =~ ^[Yy]$ ]]; then
+        log_info "Installing ShellCheck..."
+        update_status "Installing recommended tool: ShellCheck"
+        if execute_guarded "Install ShellCheck (recommended)" sudo zypper install -y "ShellCheck"; then
+            log_success "ShellCheck installed"
+        else
+            # Non-fatal: leave install continuing.
+            log_warn "ShellCheck install failed (non-fatal). You can install it later with: sudo zypper install ShellCheck"
+        fi
+    else
+        log_info "ShellCheck install skipped (continuing)."
+    fi
+fi
 
 # Check Python version (must be 3.7+)
 log_debug "Checking Python version..."
@@ -7806,14 +7956,14 @@ log_debug "Checking for PyGObject..."
 if ! python3 -c "import gi" &> /dev/null; then
     log_info "---"
     log_info "⚠️  Dependency missing: 'python3-gobject' (for notifications)."
-    read -p "   May I install it for you? (y/n) " -n 1 -r
-    echo
-    log_debug "User response: $REPLY"
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    read -p "   Install python3-gobject now? [Y/n]: " -r REPLY_GI
+    REPLY_GI="${REPLY_GI:-Y}"
+    log_debug "User response (PyGObject): $REPLY_GI"
+
+    if [[ $REPLY_GI =~ ^[Yy]$ ]]; then
         log_info "Installing python3-gobject..."
         update_status "Installing python3-gobject..."
-        
+
         if ! execute_guarded "Install python3-gobject" sudo zypper install -y "python3-gobject"; then
             log_error "Failed to install python3-gobject. Please install it manually and re-run this script."
             update_status "FAILED: Could not install python3-gobject"
@@ -10092,19 +10242,96 @@ def on_ac_power(form_factor: str) -> bool:
     """Check if the system is on AC power.
 
     On true desktops we treat AC as always on; on laptops and unknown
-    form factors we consult upower and err on the side of safety.
+    form factors we consult /sys power_supply first, then upower.
     """
     log_debug(f"Checking AC power status (form_factor: {form_factor})")
     if form_factor == "desktop":
         log_debug("Desktop detected, assuming AC power always available")
         return True
 
+    def _ac_via_sys() -> bool | None:
+        """Return True/False when /sys exposes a mains/AC adapter, else None."""
+        try:
+            ps = Path("/sys/class/power_supply")
+            if not ps.is_dir():
+                return None
+
+            ac_found = False
+            ac_online_any = False
+            ac_offline_any = False
+
+            for dev in ps.iterdir():
+                tf = dev / "type"
+                of = dev / "online"
+                if not tf.is_file() or not of.is_file():
+                    continue
+
+                t = tf.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                if t not in ("mains", "ac"):
+                    continue
+
+                ac_found = True
+                raw = of.read_text(encoding="utf-8", errors="ignore").strip()
+                if raw == "1":
+                    ac_online_any = True
+                elif raw == "0":
+                    ac_offline_any = True
+
+            if not ac_found:
+                return None
+
+            if ac_online_any:
+                log_info("AC power detected: plugged in (via /sys)")
+                return True
+            if ac_offline_any:
+                log_info("AC power detected: on battery (via /sys)")
+                return False
+
+            return None
+        except Exception as e:
+            log_debug(f"/sys AC power detection failed: {e}")
+            return None
+
+    def _battery_state_via_sys() -> str | None:
+        """Return a best-effort battery status (charging/discharging/full/unknown) via /sys."""
+        try:
+            ps = Path("/sys/class/power_supply")
+            if not ps.is_dir():
+                return None
+            for dev in ps.iterdir():
+                tf = dev / "type"
+                sf = dev / "status"
+                if not tf.is_file() or not sf.is_file():
+                    continue
+                t = tf.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                if t != "battery":
+                    continue
+                return sf.read_text(encoding="utf-8", errors="ignore").strip().lower() or None
+            return None
+        except Exception as e:
+            log_debug(f"/sys battery status detection failed: {e}")
+            return None
+
+    sys_ac = _ac_via_sys()
+    if sys_ac is not None:
+        return sys_ac
+
+    # /sys did not expose a mains device; attempt upower.
     try:
         devices = subprocess.check_output(["upower", "-e"], text=True).strip().splitlines()
         line_power_devices = [d for d in devices if "line_power" in d]
 
         if not line_power_devices:
-            # Laptop but no explicit line_power device; be conservative
+            # Some systems expose battery info but no line_power device in upower.
+            # Fall back to battery state via /sys as a best-effort heuristic.
+            bstate = _battery_state_via_sys() or ""
+            if "discharging" in bstate:
+                log_info("AC power inferred: on battery (battery is discharging; via /sys)")
+                return False
+            if "charging" in bstate:
+                log_info("AC power inferred: plugged in (battery is charging; via /sys)")
+                return True
+
             log_error("No line_power device found; treating as battery (unsafe)")
             return False
 
@@ -10117,7 +10344,7 @@ def on_ac_power(form_factor: str) -> bool:
                     if value in ("yes", "true"):
                         log_info("AC power detected: plugged in")
                         return True
-                    elif value in ("no", "false"):
+                    if value in ("no", "false"):
                         log_info("AC power detected: on battery")
                         return False
 

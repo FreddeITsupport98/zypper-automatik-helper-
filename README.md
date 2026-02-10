@@ -89,7 +89,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
 * **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v58) to ensure a clean migration.
-* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing.
+* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing (**default Yes / recommended**). It also recommends installing `ShellCheck` (optional) for safer maintenance of the bash scripts.
 * **Safe Scripted Uninstaller (v58+):** New `--uninstall-zypper-helper` mode (alias: `--uninstall-zypper`) in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
 *  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
 *  * `--dry-run` – show exactly what would be removed without making any changes
@@ -966,7 +966,7 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
-- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), subtle JS effects (toast notifications, ripple clicks, and live-update highlights), plus quick-copy log tools (live logs, debug menu, journalctl)
+- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), subtle JS effects (toast notifications, ripple clicks, and live-update highlights), plus Recent Activity Log **view switching** (Live / Logs tail / Diagnostics / journalctl) and quick-copy log tools.
 
 Quickstart (enable example hooks + generate/open dashboard):
 
