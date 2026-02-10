@@ -43,7 +43,7 @@ if [[ $# -gt 0 ]]; then
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
-        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|\
+        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --analyze|--health)
@@ -70,6 +70,30 @@ fi
 # Optional browser override (best-effort):
 #   zypper-auto-helper --dash-open firefox
 #   ZYPPER_AUTO_DASHBOARD_BROWSER=firefox zypper-auto-helper --dash-open
+if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
+    dash_dir="$HOME/.local/share/zypper-notify"
+    pid_file="${dash_dir}/dashboard-http.pid"
+
+    if [ -f "${pid_file}" ]; then
+        old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+        if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null; then
+            kill "${old_pid}" 2>/dev/null || true
+            sleep 0.1
+            if kill -0 "${old_pid}" 2>/dev/null; then
+                kill -9 "${old_pid}" 2>/dev/null || true
+            fi
+            echo "Stopped dashboard server (pid=${old_pid})."
+        else
+            echo "Dashboard server not running (stale pid file: ${pid_file})."
+        fi
+        rm -f "${pid_file}" 2>/dev/null || true
+    else
+        echo "No dashboard server pid file found at ${pid_file}."
+    fi
+
+    exit 0
+fi
+
 if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
     dash_path="${dash_dir}/status.html"
@@ -5033,6 +5057,54 @@ EOF
 
 # --- Helper: Open dashboard (CLI) ---
 # Regenerates dashboard first (best-effort) then opens the user copy.
+run_dash_stop_only() {
+    log_info ">>> Stopping live dashboard server (best-effort)"
+
+    local dash_dir pid_file
+
+    dash_dir=""
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        dash_dir="${SUDO_USER_HOME}/.local/share/zypper-notify"
+    elif [ -n "${SUDO_USER:-}" ]; then
+        # Best-effort fallback if SUDO_USER_HOME isn't set
+        local user_home
+        user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6)
+        if [ -n "${user_home:-}" ]; then
+            dash_dir="${user_home}/.local/share/zypper-notify"
+        fi
+    else
+        dash_dir="$HOME/.local/share/zypper-notify"
+    fi
+
+    pid_file="${dash_dir}/dashboard-http.pid"
+
+    if [ -f "${pid_file}" ]; then
+        local old_pid
+        old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+        if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null; then
+            kill "${old_pid}" 2>/dev/null || true
+            sleep 0.1
+            if kill -0 "${old_pid}" 2>/dev/null; then
+                kill -9 "${old_pid}" 2>/dev/null || true
+            fi
+            log_success "Dashboard server stopped (pid=${old_pid})"
+            update_status "SUCCESS: Dashboard server stopped"
+            echo "Stopped dashboard server (pid=${old_pid})."
+        else
+            log_info "Dashboard server not running (stale pid file: ${pid_file})"
+            update_status "SUCCESS: Dashboard server not running"
+            echo "Dashboard server not running (stale pid file: ${pid_file})."
+        fi
+        rm -f "${pid_file}" 2>/dev/null || true
+    else
+        log_info "No dashboard server pid file found at ${pid_file}"
+        update_status "SUCCESS: No dashboard server pid file found"
+        echo "No dashboard server pid file found at ${pid_file}."
+    fi
+
+    return 0
+}
+
 run_dash_open_only() {
     log_info ">>> Opening dashboard (best-effort)"
 
@@ -7302,6 +7374,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
     echo "  --dashboard             Generate/update a static HTML status page"
     echo "  --dash-open             Generate/refresh and open the dashboard in your browser"
+    echo "  --dash-stop             Stop the local live dashboard server started by --dash-open"
     echo "  --dash-install          Enterprise quickstart: enable default hooks + generate/open dashboard"
     echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
@@ -7559,6 +7632,10 @@ elif [[ "${1:-}" == "--test-notify" ]]; then
 elif [[ "${1:-}" == "--dashboard" || "${1:-}" == "--generate-dashboard" ]]; then
     log_info "Dashboard generation requested"
     run_generate_dashboard_only
+    exit $?
+elif [[ "${1:-}" == "--dash-stop" ]]; then
+    log_info "Dashboard server stop requested"
+    run_dash_stop_only
     exit $?
 elif [[ "${1:-}" == "--dash-open" ]]; then
     log_info "Dashboard open requested"
