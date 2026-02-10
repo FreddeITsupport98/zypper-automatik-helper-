@@ -1666,7 +1666,7 @@ generate_dashboard() {
         color: white;
         font-weight: 800;
         font-size: 0.9rem;
-        background-color: ${status_color};
+        background-color: var(--status-color, ${status_color});
         box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         max-width: 100%;
         overflow-wrap: anywhere;
@@ -1724,28 +1724,34 @@ generate_dashboard() {
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
           <h1>🚀 Zypper Auto Command Center</h1>
-          <span class="status-badge">${last_status_esc}</span>
+          <span class="status-badge" id="status-badge">${last_status_esc}</span>
       </div>
       <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">
-        Generated <span id="time-ago">just now</span> (<span style="font-family:monospace">${now}</span>) • Pending Updates: <strong>${pending_count}</strong>
+        Generated <span id="time-ago">just now</span> (<span style="font-family:monospace" id="generated-at">${now}</span>) • Pending Updates: <strong id="pending-count">${pending_count}</strong>
       </p>
+      <div style="margin-top:10px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <label style="font-size:0.9rem; color: var(--muted); font-weight: 800; display:flex; gap:8px; align-items:center;">
+          <input type="checkbox" id="live-toggle" /> Live mode
+        </label>
+        <span style="font-size:0.8rem; color: var(--muted);">(Polls <code>status-data.json</code> every 5s; works best when opened via <code>http://</code>)</span>
+      </div>
 
       <div class="grid" style="margin-top: 18px;">
         <div class="stat-box">
             <span class="stat-label">Kernel</span>
-            <span class="stat-value">${kernel_ver}</span>
+            <span class="stat-value" id="kernel-ver">${kernel_ver}</span>
         </div>
         <div class="stat-box">
             <span class="stat-label">Uptime</span>
-            <span class="stat-value">${uptime_info}</span>
+            <span class="stat-value" id="uptime-info">${uptime_info}</span>
         </div>
         <div class="stat-box">
             <span class="stat-label">Memory (Used/Total)</span>
-            <span class="stat-value">${mem_usage}</span>
+            <span class="stat-value" id="mem-usage">${mem_usage}</span>
         </div>
         <div class="stat-box">
             <span class="stat-label">Disk Usage (/)</span>
-            <span class="stat-value">${disk_usage_display}</span>
+            <span class="stat-value" id="disk-usage">${disk_usage_display}</span>
             <div class="progress-track">
                 <div class="progress-fill" id="disk-bar" data-percent="${disk_percent}"></div>
             </div>
@@ -1757,16 +1763,16 @@ generate_dashboard() {
       <h2>⚙️ Features & Config</h2>
       <div class="stat-label" style="text-transform:none;">Active Modules</div>
       <div class="feat-grid">
-        <div class="feat-badge"><span class="feat-dot ${feat_flatpak_class}">●</span> Flatpak: <strong>${feat_flatpak}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_snap_class}">●</span> Snap: <strong>${feat_snap}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_soar_class}">●</span> Soar: <strong>${feat_soar}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_brew_class}">●</span> Brew: <strong>${feat_brew}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_pipx_class}">●</span> Pipx: <strong>${feat_pipx}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_brew_class}" id="feat-brew-dot">●</span> Brew: <strong id="feat-brew-val">${feat_brew}</strong></div>
+        <div class="feat-badge"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
       </div>
 
       <div style="margin-top: 14px;">
         <span class="stat-label" style="text-transform:none;">Run ID</span>
-        <code style="font-size:0.85rem; background:var(--subtle); padding:2px 6px; border-radius:6px; border:1px solid var(--border);">${RUN_ID}</code>
+        <code style="font-size:0.85rem; background:var(--subtle); padding:2px 6px; border-radius:6px; border:1px solid var(--border);" id="run-id">${RUN_ID}</code>
       </div>
     </div>
 
@@ -1821,6 +1827,16 @@ generate_dashboard() {
       <details style="margin-top: 14px;">
         <summary style="cursor:pointer; color: var(--muted); font-weight: 800;">More actions…</summary>
         <div class="action-grid" style="margin-top: 12px;">
+          <button class="cmd-btn" onclick="copyCmd('python3 -m http.server --directory /var/log/zypper-auto 8765', this)">
+              <span class="cmd-label">Serve Live Dashboard</span>
+              <span class="cmd-desc">Start local server for realtime polling</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('xdg-open http://127.0.0.1:8765/status.html?live=1', this)">
+              <span class="cmd-label">Open Live URL</span>
+              <span class="cmd-desc">Open served dashboard in browser</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
           <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --live-logs', this)">
               <span class="cmd-label">Live Logs</span>
               <span class="cmd-desc">Follow logs in real time (Ctrl+C)</span>
@@ -1880,22 +1896,30 @@ generate_dashboard() {
       <div class="grid">
         <div class="stat-box">
             <span class="stat-label">Downloader Timer</span>
-            <span class="stat-value ${dl_timer_class}">${dl_timer}</span>
+            <span class="stat-value ${dl_timer_class}" id="dl-timer">${dl_timer}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Downloader Status</span>
+            <span class="stat-value" id="downloader-status">(live mode off)</span>
+            <div class="progress-track" style="margin-top:10px;">
+                <div class="progress-fill" id="download-bar" data-percent="0"></div>
+            </div>
+            <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="downloader-detail"></div>
         </div>
         <div class="stat-box">
             <span class="stat-label">Verify/Repair Timer</span>
-            <span class="stat-value ${verify_timer_class}">${verify_timer}</span>
+            <span class="stat-value ${verify_timer_class}" id="verify-timer">${verify_timer}</span>
         </div>
         <div class="stat-box">
             <span class="stat-label">User Notifier Timer</span>
-            <span class="stat-value ${nt_timer_class}">${nt_timer}</span>
+            <span class="stat-value ${nt_timer_class}" id="notifier-timer">${nt_timer}</span>
         </div>
       </div>
     </div>
 
     <div class="card">
       <h2>Recent Activity Log</h2>
-      <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: ${last_install_log_esc}</div>
+      <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: <span id="last-install-log">${last_install_log_esc}</span></div>
       <div class="log-container">
           <button class="copy-btn" onclick="copyBlock('log-content', this)">Copy Log</button>
           <pre id="log-content">${last_tail_esc}</pre>
@@ -1904,7 +1928,7 @@ generate_dashboard() {
 
     <div class="card">
       <h2>Flight Report (Last Run)</h2>
-      <div class="stat-label" style="margin-bottom:10px; text-transform:none;">Source: ${flight_report_log_esc:-No Flight Report log found yet.}</div>
+      <div class="stat-label" style="margin-bottom:10px; text-transform:none;">Source: <span id="flight-report-log">${flight_report_log_esc:-No Flight Report log found yet.}</span></div>
       <div class="log-container">
           <button class="copy-btn" onclick="copyBlock('flight-content', this)">Copy Flight Report</button>
           <pre id="flight-content">${flight_report_esc:-No flight report found yet. Run: sudo zypper-auto-helper --verify}</pre>
@@ -1915,6 +1939,9 @@ generate_dashboard() {
   </div>
 
   <script>
+    // Global UI state (used by live polling)
+    var genTime = new Date("${now_iso}");
+
     // 0) Command Center clipboard copy (with fallback)
     function copyCmd(cmd, btn) {
         function feedback(ok) {
@@ -1958,7 +1985,6 @@ generate_dashboard() {
     window.copyCmd = copyCmd;
 
     // 1) Live "time ago" counter
-    var genTime = new Date("${now_iso}");
     function _timeAgoText(diffSeconds) {
         if (diffSeconds < 5) return "just now";
         if (diffSeconds < 60) return diffSeconds + " sec ago";
@@ -1978,16 +2004,24 @@ generate_dashboard() {
     setInterval(updateTimeAgo, 15000);
 
     // 2) Disk bar animation + color
-    (function() {
+    function updateDiskBar(pct) {
         var bar = document.getElementById("disk-bar");
         if (!bar) return;
-        var pct = parseInt(bar.getAttribute("data-percent") || "0", 10);
-        if (isNaN(pct)) pct = 0;
-        setTimeout(function() { bar.style.width = pct + "%"; }, 80);
-        if (pct >= 90) bar.style.backgroundColor = "#e74c3c";      // red
-        else if (pct >= 75) bar.style.backgroundColor = "#f39c12"; // orange
-        else bar.style.backgroundColor = "#2ecc71";               // green
-    })();
+        var n = parseInt(pct || "0", 10);
+        if (isNaN(n)) n = 0;
+        bar.setAttribute("data-percent", String(n));
+        bar.style.width = n + "%";
+        if (n >= 90) bar.style.backgroundColor = "#e74c3c";      // red
+        else if (n >= 75) bar.style.backgroundColor = "#f39c12"; // orange
+        else bar.style.backgroundColor = "#2ecc71";             // green
+    }
+
+    // Initial disk bar draw
+    setTimeout(function() {
+        var bar0 = document.getElementById("disk-bar");
+        if (!bar0) return;
+        updateDiskBar(bar0.getAttribute("data-percent") || "0");
+    }, 80);
 
     // 3) Smart keyword highlighting (log readability)
     function highlightBlock(id) {
@@ -2073,18 +2107,255 @@ generate_dashboard() {
         }
     }
     window.copyBlock = copyBlock;
+
+    // 5) Live polling (realtime-ish dashboard)
+    function setText(id, val) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = (val === undefined || val === null) ? "" : String(val);
+    }
+
+    function setClass(id, on) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.classList.remove('feat-on');
+        el.classList.remove('feat-off');
+        el.classList.add(on ? 'feat-on' : 'feat-off');
+    }
+
+    function applyLiveData(d) {
+        if (!d) return;
+
+        if (d.generated_iso) {
+            genTime = new Date(d.generated_iso);
+        }
+
+        if (d.status_color) {
+            document.documentElement.style.setProperty('--status-color', d.status_color);
+        }
+
+        setText('status-badge', d.last_status);
+        setText('generated-at', d.generated_human);
+        setText('pending-count', d.pending_count);
+
+        setText('kernel-ver', d.kernel_ver);
+        setText('uptime-info', d.uptime_info);
+        setText('mem-usage', d.mem_usage);
+        setText('disk-usage', d.disk_usage_display);
+        if (d.disk_percent !== undefined && d.disk_percent !== null) {
+            updateDiskBar(d.disk_percent);
+        }
+
+        setText('dl-timer', d.dl_timer);
+        setText('verify-timer', d.verify_timer);
+        setText('notifier-timer', d.nt_timer);
+
+        setText('last-install-log', d.last_install_log);
+        setText('flight-report-log', d.flight_report_log);
+        setText('run-id', d.run_id);
+
+        // Feature toggles
+        setText('feat-flatpak-val', d.feat_flatpak ? 'ON' : 'OFF');
+        setText('feat-snap-val', d.feat_snap ? 'ON' : 'OFF');
+        setText('feat-soar-val', d.feat_soar ? 'ON' : 'OFF');
+        setText('feat-brew-val', d.feat_brew ? 'ON' : 'OFF');
+        setText('feat-pipx-val', d.feat_pipx ? 'ON' : 'OFF');
+
+        setClass('feat-flatpak-dot', !!d.feat_flatpak);
+        setClass('feat-snap-dot', !!d.feat_snap);
+        setClass('feat-soar-dot', !!d.feat_soar);
+        setClass('feat-brew-dot', !!d.feat_brew);
+        setClass('feat-pipx-dot', !!d.feat_pipx);
+
+        // Logs (re-highlight after replacing)
+        var logEl = document.getElementById('log-content');
+        if (logEl && d.last_install_tail !== undefined) {
+            logEl.textContent = d.last_install_tail || '';
+            highlightBlock('log-content');
+        }
+        var flightEl = document.getElementById('flight-content');
+        if (flightEl && d.flight_report_raw !== undefined) {
+            flightEl.textContent = d.flight_report_raw || '';
+            highlightBlock('flight-content');
+        }
+    }
+
+    var liveEnabled = false;
+    try {
+        var params = new URLSearchParams(window.location.search);
+        liveEnabled = (params.get('live') === '1') || (localStorage.getItem('znh_live') === '1');
+    } catch (e) {
+        liveEnabled = false;
+    }
+
+    var liveFailures = 0;
+
+    // Live mode toggle
+    (function() {
+        var t = document.getElementById('live-toggle');
+        if (!t) return;
+        t.checked = !!liveEnabled;
+        t.addEventListener('change', function() {
+            liveEnabled = !!t.checked;
+            try {
+                localStorage.setItem('znh_live', liveEnabled ? '1' : '0');
+            } catch (e) {
+                // ignore
+            }
+            if (liveEnabled) {
+                pollLive();
+            }
+        });
+    })();
+
+    function pollLive() {
+        if (!liveEnabled) return;
+        fetch('status-data.json?ts=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function(d) {
+                liveFailures = 0;
+                applyLiveData(d);
+            })
+            .catch(function() {
+                // When opened as file://, many browsers block fetch().
+                liveFailures++;
+                if (liveFailures >= 3) {
+                    // Fallback: full reload every 15s (still useful if some other process regenerates the file)
+                    setTimeout(function() { window.location.reload(); }, 15000);
+                }
+            });
+    }
+
+    function parseDownloadStatus(raw) {
+        // Expected formats:
+        //  - idle
+        //  - refreshing
+        //  - downloading:PKGS:SIZE:DOWNLOADED:PCT
+        //  - complete:DOWNLOADED:TOTAL
+        var s = (raw || '').trim();
+        if (!s) return { state: 'unknown', pct: 0, detail: '' };
+
+        if (s.indexOf('downloading:') === 0) {
+            var parts = s.split(':');
+            var pkgs = parts[1] || '0';
+            var size = parts[2] || 'unknown';
+            var done = parts[3] || '0';
+            var pct = parseInt(parts[4] || '0', 10);
+            if (isNaN(pct)) pct = 0;
+            return { state: 'downloading', pct: pct, detail: done + '/' + pkgs + ' pkgs • ' + size };
+        }
+
+        if (s.indexOf('complete:') === 0) {
+            var parts2 = s.split(':');
+            var done2 = parts2[1] || '0';
+            var total2 = parts2[2] || '0';
+            return { state: 'complete', pct: 100, detail: done2 + '/' + total2 + ' downloaded' };
+        }
+
+        return { state: s, pct: 0, detail: '' };
+    }
+
+    function updateDownloadUI(obj) {
+        var st = document.getElementById('downloader-status');
+        var det = document.getElementById('downloader-detail');
+        var bar = document.getElementById('download-bar');
+        if (st) st.textContent = obj.state;
+        if (det) det.textContent = obj.detail || '';
+        if (bar) {
+            var pct = parseInt(obj.pct || '0', 10);
+            if (isNaN(pct)) pct = 0;
+            bar.style.width = pct + '%';
+            if (pct >= 90) bar.style.backgroundColor = '#2ecc71';
+            else bar.style.backgroundColor = '#3498db';
+        }
+    }
+
+    function pollDownloaderStatus() {
+        if (!liveEnabled) return;
+        fetch('download-status.txt?ts=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) { return r.ok ? r.text() : ''; })
+            .then(function(txt) {
+                var obj = parseDownloadStatus(txt);
+                updateDownloadUI(obj);
+            })
+            .catch(function() {
+                // ignore
+            });
+    }
+
+    // Live poll intervals
+    setInterval(pollLive, 5000);
+    setInterval(pollDownloaderStatus, 2000);
+    pollLive();
+    pollDownloaderStatus();
   </script>
 </body>
 </html>
 EOF
 
+    # Also generate a machine-readable data file for live polling.
+    local out_json_root
+    out_json_root="${LOG_DIR}/status-data.json"
+
+    local json_last_status json_last_install_log json_last_install_tail json_flight_report_raw json_flight_report_log
+    json_last_status="$(_json_escape "$last_status")"
+    json_last_install_log="$(_json_escape "$last_install_log")"
+    json_last_install_tail="$(_json_escape "$last_install_tail")"
+    json_flight_report_raw="$(_json_escape "$flight_report_raw")"
+    json_flight_report_log="$(_json_escape "$flight_report_log")"
+
+    cat >"${out_json_root}" <<JSON_EOF
+{
+  "generated_iso": "${now_iso}",
+  "generated_human": "${now}",
+  "run_id": "$(_json_escape "$RUN_ID")",
+
+  "last_status": "${json_last_status}",
+  "status_color": "$(_json_escape "$status_color")",
+
+  "pending_count": ${pending_count},
+
+  "feat_flatpak": $([[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]] && echo true || echo false),
+  "feat_snap": $([[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]] && echo true || echo false),
+  "feat_soar": $([[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]] && echo true || echo false),
+  "feat_brew": $([[ "${ENABLE_BREW_UPDATES,,}" == "true" ]] && echo true || echo false),
+  "feat_pipx": $([[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]] && echo true || echo false),
+
+  "dl_timer": "$(_json_escape "$dl_timer")",
+  "verify_timer": "$(_json_escape "$verify_timer")",
+  "nt_timer": "$(_json_escape "$nt_timer")",
+
+  "kernel_ver": "$(_json_escape "$kernel_ver")",
+  "uptime_info": "$(_json_escape "$uptime_info")",
+  "mem_usage": "$(_json_escape "$mem_usage")",
+  "disk_usage_display": "$(_json_escape "$disk_usage_display")",
+  "disk_percent": ${disk_percent},
+
+  "last_install_log": "${json_last_install_log}",
+  "last_install_tail": "${json_last_install_tail}",
+
+  "flight_report_log": "${json_flight_report_log}",
+  "flight_report_raw": "${json_flight_report_raw}"
+}
+JSON_EOF
+
+    chmod 644 "${out_json_root}" 2>/dev/null || true
+
     chmod 644 "${out_root}" 2>/dev/null || true
 
     if [ -n "${out_user}" ]; then
-        mkdir -p "$(dirname "${out_user}")" 2>/dev/null || true
+        local out_user_dir out_user_json
+        out_user_dir="$(dirname "${out_user}")"
+        out_user_json="${out_user_dir}/status-data.json"
+
+        mkdir -p "${out_user_dir}" 2>/dev/null || true
         cp -f "${out_root}" "${out_user}" 2>/dev/null || true
-        chown "${SUDO_USER}:${SUDO_USER}" "${out_user}" 2>/dev/null || true
-        chmod 644 "${out_user}" 2>/dev/null || true
+        cp -f "${out_json_root}" "${out_user_json}" 2>/dev/null || true
+        chown "${SUDO_USER}:${SUDO_USER}" "${out_user}" "${out_user_json}" 2>/dev/null || true
+        chmod 644 "${out_user}" "${out_user_json}" 2>/dev/null || true
     fi
 
     log_success "Dashboard generated: ${out_root}${out_user:+ (user copy: ${out_user})}"

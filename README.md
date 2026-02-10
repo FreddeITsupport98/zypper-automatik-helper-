@@ -1000,6 +1000,21 @@ You can regenerate it anytime:
 sudo zypper-auto-helper --dashboard
 ```
 
+##### Live mode (realtime-ish)
+The dashboard also writes a small JSON file alongside the HTML:
+- `/var/log/zypper-auto/status-data.json`
+
+If you open the dashboard through a local web server (recommended), you can enable **Live mode** in the UI and it will:
+- poll `status-data.json` every ~5 seconds to update the cards
+- poll `download-status.txt` every ~2 seconds to show realtime background download progress
+
+Quickstart (serve + open live):
+
+```bash
+python3 -m http.server --directory /var/log/zypper-auto 8765
+xdg-open http://127.0.0.1:8765/status.html?live=1
+```
+
 #### Console output (interactive)
 
 When you run the helper manually in a terminal, it also prints a readable, color-coded console stream, while keeping the on-disk logs plain text.
