@@ -355,6 +355,26 @@ _log_write() {
         echo "${line}" >> "${TRACE_LOG}" 2>/dev/null || true
     fi
 
+    # 2b) Dashboard live log: a stable file name that the HTML dashboard can
+    # poll in realtime (when served via http://). This is intentionally kept
+    # as plain text (same structured line format) so it can be tailed/grepped.
+    local dash_live_root
+    dash_live_root="${LOG_DIR}/dashboard-live.log"
+    echo "${line}" >> "${dash_live_root}" 2>/dev/null || true
+    chmod 644 "${dash_live_root}" 2>/dev/null || true
+
+    # Also mirror to the user's dashboard directory (best-effort) so the user
+    # can run a local web server without needing access to /var/log.
+    if [ -n "${SUDO_USER_HOME:-}" ] && [ -n "${SUDO_USER:-}" ]; then
+        local dash_live_user_dir dash_live_user
+        dash_live_user_dir="${SUDO_USER_HOME}/.local/share/zypper-notify"
+        dash_live_user="${dash_live_user_dir}/dashboard-live.log"
+        mkdir -p "${dash_live_user_dir}" 2>/dev/null || true
+        echo "${line}" >> "${dash_live_user}" 2>/dev/null || true
+        chown "${SUDO_USER}:${SUDO_USER}" "${dash_live_user}" 2>/dev/null || true
+        chmod 644 "${dash_live_user}" 2>/dev/null || true
+    fi
+
     # 3) Also emit to the system journal (best-effort).
     # This provides: journalctl -t zypper-auto-helper
     if [ "${JOURNAL_LOGGING_ENABLED:-0}" -eq 1 ] 2>/dev/null && command -v logger >/dev/null 2>&1; then
@@ -2033,7 +2053,7 @@ generate_dashboard() {
       <details style="margin-top: 14px;">
         <summary style="cursor:pointer; color: var(--muted); font-weight: 800;">More actions…</summary>
         <div class="action-grid" style="margin-top: 12px;">
-          <button class="cmd-btn" onclick="copyCmd('python3 -m http.server --directory /var/log/zypper-auto 8765', this)">
+          <button class="cmd-btn" onclick="copyCmd('python3 -m http.server --directory ~/.local/share/zypper-notify 8765', this)">
               <span class="cmd-label">Serve Live Dashboard</span>
               <span class="cmd-desc">Start local server for realtime polling</span>
               <div class="cmd-copy-feedback">Copied!</div>
@@ -2126,6 +2146,14 @@ generate_dashboard() {
     <div class="card">
       <h2>Recent Activity Log</h2>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: <span id="last-install-log">${last_install_log_esc}</span></div>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 12px 0;">
+        <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper --live-logs', this)">Copy: Live Logs</button>
+        <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper debug', this)">Copy: Debug Menu</button>
+        <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper --logs', this)">Copy: Logs (tail)</button>
+        <button class="pill" type="button" onclick="copyCmd('journalctl -t zypper-auto-helper -n 200 --no-pager', this)">Copy: journalctl</button>
+      </div>
+
       <div class="log-container">
           <button class="copy-btn" onclick="copyBlock('log-content', this)">Copy Log</button>
           <pre id="log-content">${last_tail_esc}</pre>
@@ -2531,6 +2559,8 @@ generate_dashboard() {
             }
             if (liveEnabled) {
                 pollLive();
+                pollDownloaderStatus();
+                pollRecentActivityLog();
             }
         });
     })();
@@ -2613,6 +2643,52 @@ generate_dashboard() {
             });
     }
 
+    // Realtime Recent Activity Log
+    var _lastLiveLog = '';
+    function tailLines(s, n) {
+        var lines = (s || '').split('\n');
+        if (lines.length <= n) return (s || '');
+        return lines.slice(Math.max(0, lines.length - n)).join('\n');
+    }
+
+    function pollRecentActivityLog() {
+        if (!liveEnabled) return;
+
+        // Prefer user-served dashboard-live.log (same directory as status.html)
+        // This is written by the helper in realtime.
+        var url = 'dashboard-live.log?ts=' + Date.now();
+
+        // Best-effort: use HTTP Range to avoid downloading huge logs.
+        fetch(url, {
+            cache: 'no-store',
+            headers: { 'Range': 'bytes=-60000' }
+        })
+            .then(function(r) {
+                if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
+                return r.text();
+            })
+            .then(function(txt) {
+                var tailed = tailLines(txt, 220);
+                if (tailed === _lastLiveLog) return;
+                _lastLiveLog = tailed;
+
+                var el = document.getElementById('log-content');
+                if (!el) return;
+
+                // Keep scroll pinned to bottom if the user is already near bottom.
+                var nearBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80;
+
+                el.textContent = tailed;
+                highlightBlock('log-content');
+                if (nearBottom) {
+                    el.scrollTop = el.scrollHeight;
+                }
+            })
+            .catch(function() {
+                // If dashboard-live.log isn't accessible, do nothing.
+            });
+    }
+
     // One-time: entrance animation for cards
     (function() {
         var cards = document.querySelectorAll('.card');
@@ -2636,8 +2712,10 @@ generate_dashboard() {
     // Live poll intervals
     setInterval(pollLive, 5000);
     setInterval(pollDownloaderStatus, 2000);
+    setInterval(pollRecentActivityLog, 2000);
     pollLive();
     pollDownloaderStatus();
+    pollRecentActivityLog();
   </script>
 </body>
 </html>

@@ -966,7 +966,7 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
-- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), plus subtle JS effects (toast notifications, ripple clicks, and live-update highlights)
+- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), subtle JS effects (toast notifications, ripple clicks, and live-update highlights), plus quick-copy log tools (live logs, debug menu, journalctl)
 
 Quickstart (enable example hooks + generate/open dashboard):
 
@@ -1001,8 +1001,9 @@ sudo zypper-auto-helper --dashboard
 ```
 
 ##### Live mode (realtime-ish)
-The dashboard also writes a small JSON file alongside the HTML:
+The dashboard also writes small sidecar files alongside the HTML:
 - `/var/log/zypper-auto/status-data.json`
+- `~/.local/share/zypper-notify/dashboard-live.log` (realtime log stream for Live mode)
 
 If you open the dashboard through a local web server (recommended), you can enable **Live mode** in the UI and it will:
 - poll `status-data.json` every ~5 seconds to update the cards
@@ -1011,7 +1012,7 @@ If you open the dashboard through a local web server (recommended), you can enab
 Quickstart (serve + open live):
 
 ```bash
-python3 -m http.server --directory /var/log/zypper-auto 8765
+python3 -m http.server --directory ~/.local/share/zypper-notify 8765
 xdg-open http://127.0.0.1:8765/status.html?live=1
 ```
 
