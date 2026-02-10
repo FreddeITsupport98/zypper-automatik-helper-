@@ -962,7 +962,7 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Color-coded status badge (success/active vs errors)
 - Pending updates count (parsed from the cached dry-run output: `/var/log/zypper-auto/dry-run-last.txt`)
 - Visual feature toggles (Flatpak/Snap/Soar/Brew/Pipx on/off)
-- "Command Center" quick actions: big buttons that **copy** the correct helper command to your clipboard
+- "Command Center" quick actions: big buttons that **copy** the correct helper command to your clipboard (verify/fix, install updates, health report, logs, reset downloads/config, refresh/open dashboard, diagnostics)
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log

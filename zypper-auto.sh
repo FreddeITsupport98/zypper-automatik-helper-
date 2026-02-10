@@ -1778,7 +1778,7 @@ generate_dashboard() {
       <div class="action-grid">
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --verify', this)">
             <span class="cmd-label">Verify & Fix</span>
-            <span class="cmd-desc">Health checks + auto-repair</span>
+            <span class="cmd-desc">Health checks + auto-repair (includes RPM DB repair)</span>
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
         <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper install', this)">
@@ -1786,9 +1786,19 @@ generate_dashboard() {
             <span class="cmd-desc">Launch the interactive updater</span>
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
+        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --health', this)">
+            <span class="cmd-label">Health Report</span>
+            <span class="cmd-desc">Analyze recent runs (errors, locks, crashes)</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --logs', this)">
             <span class="cmd-label">View Logs</span>
-            <span class="cmd-desc">Tail recent log files</span>
+            <span class="cmd-desc">Tail recent installer/service/notifier logs</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
+        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --reset-downloads', this)">
+            <span class="cmd-label">Reset Downloads</span>
+            <span class="cmd-desc">Clear cached state + restart timers</span>
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --reset-config', this)">
@@ -1801,7 +1811,68 @@ generate_dashboard() {
             <span class="cmd-desc">Regenerate this page</span>
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
+        <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --dash-open', this)">
+            <span class="cmd-label">Open Dashboard</span>
+            <span class="cmd-desc">Generate + open in your browser</span>
+            <div class="cmd-copy-feedback">Copied!</div>
+        </button>
       </div>
+
+      <details style="margin-top: 14px;">
+        <summary style="cursor:pointer; color: var(--muted); font-weight: 800;">More actions…</summary>
+        <div class="action-grid" style="margin-top: 12px;">
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --live-logs', this)">
+              <span class="cmd-label">Live Logs</span>
+              <span class="cmd-desc">Follow logs in real time (Ctrl+C)</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --rm-conflict', this)">
+              <span class="cmd-label">Fix RPM Conflicts</span>
+              <span class="cmd-desc">Clean safe duplicate RPM versions</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --check', this)">
+              <span class="cmd-label">Self Check</span>
+              <span class="cmd-desc">Syntax checks only</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --test-notify', this)">
+              <span class="cmd-label">Test Notification</span>
+              <span class="cmd-desc">Verify GUI/DBus wiring</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --snapshot-state', this)">
+              <span class="cmd-label">Snapshot State</span>
+              <span class="cmd-desc">Write diagnostics snapshot</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --diag-bundle', this)">
+              <span class="cmd-label">Diag Bundle</span>
+              <span class="cmd-desc">Collect a support bundle</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --diag-logs-on', this)">
+              <span class="cmd-label">Diag Logs ON</span>
+              <span class="cmd-desc">Enable aggregated log follower</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --diag-logs-off', this)">
+              <span class="cmd-label">Diag Logs OFF</span>
+              <span class="cmd-desc">Disable aggregated log follower</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --setup-SF', this)">
+              <span class="cmd-label">Setup Snap/Flatpak</span>
+              <span class="cmd-desc">Install + configure stores/remotes</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper debug', this)">
+              <span class="cmd-label">Debug Menu</span>
+              <span class="cmd-desc">Interactive diagnostics tools</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+        </div>
+      </details>
     </div>
 
     <div class="card">
