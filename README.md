@@ -918,7 +918,7 @@ Easiest quickstart (enables example hooks + opens dashboard):
 sudo zypper-auto-helper --dash-install
 ```
 
-Open dashboard only:
+Open dashboard only (opens **live mode** via a local http server):
 
 ```bash
 zypper-auto-helper --dash-open
@@ -979,6 +979,8 @@ Open dashboard only:
 ```bash
 zypper-auto-helper --dash-open
 ```
+
+This starts a background local server on `127.0.0.1:8765` serving `~/.local/share/zypper-notify/` so the dashboard can poll live data files.
 
 Force a specific browser (optional):
 

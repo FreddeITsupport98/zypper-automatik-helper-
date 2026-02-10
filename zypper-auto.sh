@@ -71,7 +71,8 @@ fi
 #   zypper-auto-helper --dash-open firefox
 #   ZYPPER_AUTO_DASHBOARD_BROWSER=firefox zypper-auto-helper --dash-open
 if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
-    dash_path="$HOME/.local/share/zypper-notify/status.html"
+    dash_dir="$HOME/.local/share/zypper-notify"
+    dash_path="${dash_dir}/status.html"
     dash_browser="${2:-${ZYPPER_AUTO_DASHBOARD_BROWSER:-${DASHBOARD_BROWSER:-}}}"
 
     if [ -f "${dash_path}" ]; then
@@ -80,14 +81,41 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         if [ -n "${dash_browser:-}" ]; then
             echo "Browser override: ${dash_browser}"
         fi
-        echo "Open in browser: xdg-open ${dash_path}"
+
+        # Live dashboard: serve the user dashboard dir over a local HTTP server.
+        # This avoids browser restrictions around fetch() on file:// URLs and
+        # enables realtime polling (status-data.json, download-status.txt, dashboard-live.log).
+        local port url pid_file
+        port=8765
+        url="http://127.0.0.1:${port}/status.html?live=1"
+        pid_file="${dash_dir}/dashboard-http.pid"
+
+        mkdir -p "${dash_dir}" 2>/dev/null || true
+
+        server_running=0
+        if [ -f "${pid_file}" ]; then
+            old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+            if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null; then
+                server_running=1
+            fi
+        fi
+
+        if [ "${server_running}" -ne 1 ] 2>/dev/null; then
+            # Start server in the background; keep stdout/stderr quiet.
+            if command -v python3 >/dev/null 2>&1; then
+                ( python3 -m http.server --directory "${dash_dir}" "${port}" >/dev/null 2>&1 & echo $! >"${pid_file}" ) || true
+                sleep 0.2
+            fi
+        fi
+
+        echo "Open live dashboard: ${url}"
 
         # Best-effort open.
         # Prefer explicit browser when requested; fall back to xdg-open.
         if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
-            "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+            "${dash_browser}" "${url}" >/dev/null 2>&1 || true
         elif command -v xdg-open >/dev/null 2>&1; then
-            xdg-open "${dash_path}" >/dev/null 2>&1 || true
+            xdg-open "${url}" >/dev/null 2>&1 || true
         fi
 
         echo ""
