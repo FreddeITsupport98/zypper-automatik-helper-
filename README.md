@@ -233,6 +233,11 @@ zypper-auto-helper --soar           # Install/upgrade the optional Soar CLI help
 zypper-auto-helper --brew           # Install/upgrade Homebrew (brew) for the system/user
 zypper-auto-helper --pip-package    # Install/guide pipx and manage Python CLI tools (alias: --pipx)
 
+# Snapper tools
+zypper-auto-helper snapper          # Snapper submenu (status/list/create/cleanup/timers)
+zypper-auto-helper snapper status   # Show snapper configs, snapshot detection, and timer state
+zypper-auto-helper snapper auto     # Enable common snapper timers (timeline + cleanup + boot)
+
 # Diagnostics & debugging
 zypper-auto-helper debug            # Interactive debug/diagnostics tools menu
 zypper-auto-helper --logs           # Show tails of installer, service, and notifier logs
@@ -247,6 +252,15 @@ zypper-auto-helper --test-notify    # Send a test desktop notification to verify
 # Scripted uninstaller
 zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
+
+### Shell tab completion
+
+The installer installs best-effort **tab completion** for `zypper-auto-helper`:
+- Bash: `/etc/bash_completion.d/zypper-auto-helper` (or system completions dir)
+- Zsh: `/usr/share/zsh/site-functions/_zypper-auto-helper` (or `/usr/local/share/...`)
+- Fish: `~/.config/fish/completions/zypper-auto-helper.fish`
+
+Restart your shell (or start a new terminal) after installing/upgrading.
 
 You normally run `zypper-auto-helper` **without** `sudo`; it will prompt for elevation internally when needed.
 
@@ -1083,6 +1097,12 @@ systemctl status zypper-autodownload.service
 - Check if the downloader timer is active: `systemctl status zypper-autodownload.timer`
 - Check the downloader log for errors: `sudo cat /var/log/zypper-auto/service-logs/downloader-error.log`
 - Verify conditions are met (AC power, not metered): Check systemd conditions
+
+**Problem: Interactive update failed ("Update failed. Capturing system state...")**
+- The Ready-to-Install update window prints the log destinations (including clickable `file://...` links).
+- Check the Ready-to-Install helper log: `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+- For full system helper logs (may require sudo): `/var/log/zypper-auto/`
+- Easy opener (file manager): `zypper-auto-helper --show-logs`
 
 **Problem: Not receiving notifications**
 - Check notifier timer: `systemctl --user status zypper-notify-user.timer`

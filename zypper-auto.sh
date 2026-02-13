@@ -5726,6 +5726,239 @@ run_diag_bundle_only() {
     fi
 }
 
+# --- Helper: Snapper tools menu (CLI) ---
+run_snapper_menu_only() {
+    # This menu is intended for root-only maintenance tasks.
+    # We intentionally disable 'set -e' while the menu is active so that
+    # snapper/systemctl errors do not abort the entire helper.
+    set +e
+
+    if ! command -v snapper >/dev/null 2>&1; then
+        log_error "Snapper is not installed (command 'snapper' not found)."
+        echo "Snapper is not installed. Install it with:" 
+        echo "  sudo zypper install snapper"
+        set -e
+        return 1
+    fi
+
+    __znh_snapper_list_last_root() {
+        local n="${1:-10}"
+        if [[ ! "${n}" =~ ^[0-9]+$ ]]; then
+            n=10
+        fi
+        local out rc
+
+        echo ""
+        echo "-- Root snapshots (last ${n}) --"
+
+        out=$(snapper -c root list --last "${n}" 2>&1)
+        rc=$?
+        if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "Unknown option '--last'"; then
+            out=$(snapper -c root list 2>&1)
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+                # Best-effort tail when --last is unsupported.
+                printf '%s\n' "$out" | tail -n $((n + 6))
+                return 0
+            fi
+        fi
+
+        printf '%s\n' "$out"
+        return $rc
+    }
+
+    __znh_snapper_status() {
+        echo ""
+        echo "=============================================="
+        echo "  Zypper Auto-Helper: Snapper Status"
+        echo "=============================================="
+
+        echo ""
+        echo "-- snapper list-configs --"
+        snapper list-configs 2>&1 || true
+
+        __znh_snapper_list_last_root 1 || true
+
+        echo ""
+        echo "-- snapper systemd timers (unit files) --"
+        # Show unit-file state if available (enabled/disabled/static).
+        systemctl list-unit-files --no-legend 'snapper-*.timer' 2>/dev/null || echo "(no snapper timers found via systemd)"
+
+        echo ""
+        echo "Tip: openSUSE typically provides these timers (if installed):"
+        echo "  - snapper-timeline.timer (automatic snapshots)"
+        echo "  - snapper-cleanup.timer  (automatic cleanup)"
+        echo "  - snapper-boot.timer     (boot snapshots)"
+    }
+
+    __znh_snapper_create_snapshot() {
+        local desc="${1:-}"
+        if [ -z "${desc}" ]; then
+            read -p "Snapshot description (blank = default): " -r desc
+        fi
+        desc="${desc:-Zypper Auto-Helper manual snapshot}"
+
+        echo ""
+        echo "Creating Snapper snapshot (single): ${desc}"
+        snapper -c root create --type single --cleanup-algorithm number --description "${desc}" --print-number
+        return $?
+    }
+
+    __znh_snapper_cleanup_now() {
+        local alg="${1:-number}"
+        echo ""
+        echo "About to run: snapper cleanup ${alg}"
+        echo "This deletes old snapshots according to your Snapper config retention rules."
+        read -p "Proceed? [y/N]: " -r ans
+        if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
+            echo "Cleanup cancelled."
+            return 0
+        fi
+
+        snapper cleanup "${alg}"
+        return $?
+    }
+
+    __znh_snapper_timer_exists() {
+        local unit="$1"
+        local out first
+        out=$(systemctl list-unit-files --no-legend "${unit}" 2>/dev/null)
+        first=$(awk 'NR==1 {print $1}' <<<"${out}")
+        [ "${first}" = "${unit}" ]
+    }
+
+    __znh_snapper_auto_timers() {
+        local action="${1:-enable}"
+        local units=(snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer)
+
+        echo ""
+        echo "Snapper timer management (${action})"
+
+        for u in "${units[@]}"; do
+            if __znh_snapper_timer_exists "${u}"; then
+                if [ "${action}" = "enable" ]; then
+                    execute_guarded "Enable + start ${u}" systemctl enable --now "${u}" || true
+                else
+                    execute_guarded "Disable + stop ${u}" systemctl disable --now "${u}" || true
+                fi
+            else
+                echo "- Timer not found (skipping): ${u}"
+            fi
+        done
+
+        echo ""
+        echo "Current snapper timers (if any):"
+        systemctl --no-pager list-timers 'snapper-*.timer' 2>/dev/null || true
+        return 0
+    }
+
+    # Non-interactive subcommands:
+    #   zypper-auto-helper snapper status
+    #   zypper-auto-helper snapper list [N]
+    #   zypper-auto-helper snapper create [DESCRIPTION]
+    #   zypper-auto-helper snapper cleanup [number|timeline|empty-pre-post]
+    #   zypper-auto-helper snapper auto   (enable timers)
+    #   zypper-auto-helper snapper auto-off (disable timers)
+    local sub="${1:-}"
+    case "${sub}" in
+        status)
+            shift
+            __znh_snapper_status
+            set -e
+            return 0
+            ;;
+        list)
+            shift
+            __znh_snapper_list_last_root "${1:-10}" || true
+            set -e
+            return 0
+            ;;
+        create)
+            shift
+            __znh_snapper_create_snapshot "${*:-}"
+            local rc=$?
+            set -e
+            return $rc
+            ;;
+        cleanup)
+            shift
+            __znh_snapper_cleanup_now "${1:-number}"
+            local rc=$?
+            set -e
+            return $rc
+            ;;
+        auto)
+            shift
+            __znh_snapper_auto_timers enable
+            set -e
+            return 0
+            ;;
+        auto-off)
+            shift
+            __znh_snapper_auto_timers disable
+            set -e
+            return 0
+            ;;
+        "")
+            # Interactive menu below
+            ;;
+        *)
+            echo "Unknown snapper subcommand: ${sub}"
+            echo "Try: zypper-auto-helper snapper status"
+            set -e
+            return 1
+            ;;
+    esac
+
+    while true; do
+        echo ""
+        echo "=============================================="
+        echo "  Zypper Auto-Helper Snapper Menu"
+        echo "=============================================="
+        echo "  1) Status (configs + snapshot detection + timers)"
+        echo "  2) List recent snapshots (root)"
+        echo "  3) Create snapshot (single)"
+        echo "  4) Cleanup old snapshots now (snapper cleanup number)"
+        echo "  5) AUTO: Enable snapper timers (timeline + cleanup + boot)"
+        echo "  6) AUTO: Disable snapper timers"
+        echo "  7) Exit (7 / E / Q)"
+        echo ""
+        read -p "Select an option [1-7, E, Q]: " -r choice
+        log_info "[snapper-menu] User selected: ${choice}"
+
+        case "${choice}" in
+            1)
+                __znh_snapper_status
+                ;;
+            2)
+                __znh_snapper_list_last_root 10 || true
+                ;;
+            3)
+                __znh_snapper_create_snapshot
+                ;;
+            4)
+                __znh_snapper_cleanup_now number
+                ;;
+            5)
+                __znh_snapper_auto_timers enable
+                ;;
+            6)
+                __znh_snapper_auto_timers disable
+                ;;
+            7|e|E|q|Q)
+                echo "Exiting Snapper menu."
+                break
+                ;;
+            *)
+                echo "Invalid selection: '${choice}'."
+                ;;
+        esac
+    done
+
+    set -e
+    return 0
+}
+
 # --- Helper: Interactive debug / diagnostics menu (CLI) ---
 run_debug_menu_only() {
     log_info ">>> Interactive debug / diagnostics tools menu..."
@@ -6936,7 +7169,15 @@ run_uninstall_helper_only() {
             "$SUDO_USER_HOME/.local/bin/zypper-view-changes" \
             "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" \
-            "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" || true
+            "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" \
+            "$SUDO_USER_HOME/.config/fish/completions/zypper-auto-helper.fish" || true
+
+        # Remove system-wide completions (best-effort)
+        execute_guarded "Remove bash/zsh completion files" rm -f \
+            /etc/bash_completion.d/zypper-auto-helper \
+            /usr/share/bash-completion/completions/zypper-auto-helper \
+            /usr/share/zsh/site-functions/_zypper-auto-helper \
+            /usr/local/share/zsh/site-functions/_zypper-auto-helper || true
 
         # Remove bash/zsh aliases we added (non-fatal if missing)
         execute_guarded "Remove bash/zsh aliases added by helper" bash -lc "\
@@ -7565,6 +7806,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "Commands:"
     echo "  install                 Install or update the zypper auto-updater system (default)"
     echo "  debug                   Open interactive debug/diagnostics tools menu"
+    echo "  snapper                 Open Snapper tools menu (status/list/create/cleanup/timers)"
     echo "  --verify                Run verification and auto-repair checks"
     echo "  --repair                Same as --verify (alias)"
     echo "  --diagnose              Same as --verify (alias)"
@@ -7771,6 +8013,11 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
     wait || true
     trap - INT TERM
     exit 0
+elif [[ "${1:-}" == "snapper" ]]; then
+    log_info "Snapper tools menu requested"
+    shift || true
+    run_snapper_menu_only "$@"
+    exit $?
 elif [[ "${1:-}" == "debug" || "${1:-}" == "--debug-menu" ]]; then
     log_info "Interactive debug/diagnostics menu requested"
     run_debug_menu_only
@@ -9635,6 +9882,186 @@ if [ -f "$SUDO_USER_HOME/.zshrc" ]; then
 fi
 
 log_success "zypper-auto-helper command aliases configured for all shells."
+
+# --- 7d. Install shell completions (bash/zsh/fish) ---
+install_shell_completions() {
+    log_info ">>> Installing shell completion scripts for zypper-auto-helper (bash/zsh/fish)..."
+
+    # Top-level commands/options (first word after 'zypper-auto-helper')
+    local ZNH_CLI_WORDS
+    # Keep this as a single line so the generated completion scripts are
+    # syntactically robust across distros/shells.
+    ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --help -h help"
+
+    # Snapper submenu
+    local ZNH_SNAPPER_SUB
+    ZNH_SNAPPER_SUB="status list create cleanup auto auto-off"
+    local ZNH_SNAPPER_CLEANUP_ALGOS
+    ZNH_SNAPPER_CLEANUP_ALGOS="number timeline empty-pre-post"
+
+    # --- bash completion (system-wide) ---
+    local bash_dir bash_file
+    bash_dir=""
+    if [ -d "/etc/bash_completion.d" ]; then
+        bash_dir="/etc/bash_completion.d"
+    elif [ -d "/usr/share/bash-completion/completions" ]; then
+        bash_dir="/usr/share/bash-completion/completions"
+    fi
+
+    if [ -n "${bash_dir}" ]; then
+        bash_file="${bash_dir}/zypper-auto-helper"
+        log_debug "Writing bash completion file: ${bash_file}"
+        write_atomic "${bash_file}" <<EOF
+# bash completion for zypper-auto-helper (installed by zypper-auto-helper)
+
+_znh_zypper_auto_helper() {
+    local cur prev cword words
+    cur="\${COMP_WORDS[COMP_CWORD]}"
+    prev="\${COMP_WORDS[COMP_CWORD-1]}"
+    cword=\${COMP_CWORD}
+    words=("\${COMP_WORDS[@]}")
+
+    # Complete first argument
+    if [ \${cword} -eq 1 ]; then
+        COMPREPLY=( \$(compgen -W "${ZNH_CLI_WORDS}" -- "\${cur}") )
+        return 0
+    fi
+
+    # Snapper submenu
+    if [ "\${words[1]}" = "snapper" ]; then
+        if [ \${cword} -eq 2 ]; then
+            COMPREPLY=( \$(compgen -W "${ZNH_SNAPPER_SUB}" -- "\${cur}") )
+            return 0
+        fi
+        if [ "\${words[2]}" = "cleanup" ] && [ \${cword} -eq 3 ]; then
+            COMPREPLY=( \$(compgen -W "${ZNH_SNAPPER_CLEANUP_ALGOS}" -- "\${cur}") )
+            return 0
+        fi
+    fi
+
+    COMPREPLY=()
+    return 0
+}
+
+complete -F _znh_zypper_auto_helper zypper-auto-helper 2>/dev/null || true
+EOF
+        chmod 644 "${bash_file}" 2>/dev/null || true
+        log_success "Installed bash completion: ${bash_file}"
+    else
+        log_debug "Bash completion directory not found; skipping bash completion install"
+    fi
+
+    # --- zsh completion (system-wide when possible) ---
+    local zsh_dir zsh_file
+    zsh_dir=""
+    if [ -d "/usr/share/zsh/site-functions" ]; then
+        zsh_dir="/usr/share/zsh/site-functions"
+    elif [ -d "/usr/local/share/zsh/site-functions" ]; then
+        zsh_dir="/usr/local/share/zsh/site-functions"
+    fi
+
+    if [ -n "${zsh_dir}" ]; then
+        zsh_file="${zsh_dir}/_zypper-auto-helper"
+        log_debug "Writing zsh completion file: ${zsh_file}"
+        write_atomic "${zsh_file}" <<'EOF'
+#compdef zypper-auto-helper
+
+# zsh completion for zypper-auto-helper (installed by zypper-auto-helper)
+
+local -a _znh_cmds
+_znh_cmds=(
+  install debug snapper
+  --verify --repair --diagnose --check --self-check
+  --soar --brew --pip-package --pipx --setup-SF
+  --reset-config --reset-downloads --reset-state --rm-conflict
+  --logs --log --live-logs --analyze --health
+  --test-notify --status
+  --dashboard --generate-dashboard --dash-open --dash-stop --dash-install
+  --send-webhook --webhook
+  --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner
+  --show-logs --show-loggs
+  --uninstall-zypper --uninstall-zypper-helper
+  --help -h help
+)
+
+local -a _znh_snapper_sub
+_znh_snapper_sub=(status list create cleanup auto auto-off)
+
+local -a _znh_snapper_cleanup
+_znh_snapper_cleanup=(number timeline empty-pre-post)
+
+_arguments -C \
+  '1:command:->cmds' \
+  '*::arg:->args'
+
+case $state in
+  cmds)
+    _values 'zypper-auto-helper command' $_znh_cmds
+    ;;
+  args)
+    if [[ ${words[2]} == snapper ]]; then
+      if (( CURRENT == 3 )); then
+        _values 'snapper subcommand' $_znh_snapper_sub
+        return
+      fi
+      if [[ ${words[3]} == cleanup && $CURRENT == 4 ]]; then
+        _values 'cleanup algorithm' $_znh_snapper_cleanup
+        return
+      fi
+    fi
+    ;;
+esac
+EOF
+        chmod 644 "${zsh_file}" 2>/dev/null || true
+        log_success "Installed zsh completion: ${zsh_file}"
+    else
+        log_debug "Zsh site-functions directory not found; skipping zsh completion install"
+    fi
+
+    # --- fish completion (per-user) ---
+    if [ -n "${SUDO_USER_HOME:-}" ] && [ -d "${SUDO_USER_HOME}/.config/fish" ]; then
+        local fish_comp_dir fish_comp_file
+        fish_comp_dir="${SUDO_USER_HOME}/.config/fish/completions"
+        fish_comp_file="${fish_comp_dir}/zypper-auto-helper.fish"
+
+        mkdir -p "${fish_comp_dir}" 2>/dev/null || true
+
+        log_debug "Writing fish completion file: ${fish_comp_file}"
+        write_atomic "${fish_comp_file}" <<EOF
+# fish completion for zypper-auto-helper (installed by zypper-auto-helper)
+
+# top-level
+complete -c zypper-auto-helper -f -a "install debug snapper"
+
+# common option-like commands
+complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check"
+complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
+complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
+complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
+complete -c zypper-auto-helper -f -a "--test-notify --status"
+complete -c zypper-auto-helper -f -a "--dashboard --generate-dashboard --dash-open --dash-stop --dash-install"
+complete -c zypper-auto-helper -f -a "--send-webhook --webhook"
+complete -c zypper-auto-helper -f -a "--diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner"
+complete -c zypper-auto-helper -f -a "--show-logs --show-loggs"
+complete -c zypper-auto-helper -f -a "--uninstall-zypper --uninstall-zypper-helper"
+complete -c zypper-auto-helper -f -a "--help -h help"
+
+# snapper submenu
+complete -c zypper-auto-helper -n '__fish_seen_subcommand_from snapper' -f -a "status list create cleanup auto auto-off"
+complete -c zypper-auto-helper -n '__fish_seen_subcommand_from snapper; and __fish_seen_subcommand_from cleanup' -f -a "number timeline empty-pre-post"
+EOF
+        chown "$SUDO_USER:$SUDO_USER" "${fish_comp_file}" 2>/dev/null || true
+        chmod 644 "${fish_comp_file}" 2>/dev/null || true
+        log_success "Installed fish completion: ${fish_comp_file}"
+    else
+        log_debug "Fish config directory not present for user; skipping fish completion install"
+    fi
+
+    log_success "Shell completions installed (where supported). Restart your shell to activate."
+    return 0
+}
+
+install_shell_completions || true
 
 # --- 8. Create/Update NOTIFIER (User Service) ---
 log_info ">>> Creating (user) notifier service: ${NT_SERVICE_FILE}"
@@ -11880,6 +12307,20 @@ RUN_UPDATE() {
         log "RUN_UPDATE: Failure detected (rc=$rc). Triggering auto-snapshot via helper..."
         echo ""
         echo "⚠️  Update failed. Capturing system state for diagnostics..."
+
+        # On failure, print the log destination clearly so terminals can
+        # hyperlink it (file://...). This makes it easy for users to click
+        # straight into the folder and attach the right logs to bug reports.
+        echo ""
+        echo "Logs saved to:"
+        echo "  - Ready-to-Install log: ${LOG_FILE}"
+        echo "  - Ready-to-Install log folder: ${LOG_DIR}"
+        echo "    Clickable: file://${LOG_DIR}"
+        echo "  - System helper logs (root): /var/log/zypper-auto"
+        echo "    Clickable: file:///var/log/zypper-auto"
+        echo ""
+        echo "Tip: you can also open the diagnostics folder via: zypper-auto-helper --show-logs"
+
         set +e
         # Best-effort: propagate correlation IDs into the helper snapshot.
         sudo env ZYPPER_TRACE_ID="${ZYPPER_TRACE_ID:-}" ZNH_RUN_ID="${ZNH_RUN_ID:-}" \
