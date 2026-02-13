@@ -143,7 +143,7 @@ In addition to the downloader, a small root service periodically runs the same
     * Snapper root snapshot validation is best-effort and tries to be compatible with older Snapper versions/output formats.
     * Cron conflict detection only flags cron entries that appear to *run* `zypper` (comment-only mentions are ignored).
     * Extra hardening checks include world-writable file scans, basic SSH hardening checks, NTP sync status, orphaned package detection, SMART disk health (when available), kernel taint warnings, reboot-required detection, memory headroom checks, and AppArmor status.
-    * Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, reloading AppArmor when it’s active but profiles aren’t enabled, proactive disk space reclamation (journal vacuum + cache cleanup + snapper cleanup), RPM DB rebuild (with backup) when corruption is detected, dependency repair (`zypper verify` + `install --fix-broken`), Btrfs metadata balancing on high metadata usage, and deep GPG cache/key repair for signature-related refresh failures.
+* Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, reloading AppArmor when it’s active but profiles aren’t enabled, proactive disk space reclamation (journal vacuum + cache cleanup + snapper cleanup), RPM DB rebuild (with backup) when corruption is detected, dependency verification (`zypper verify --details` is captured when failures are detected), Btrfs metadata balancing on high metadata usage, and deep GPG cache/key repair for signature-related refresh failures.
     * **Safety Net:** when Snapper is available, verification/auto-repair creates a **pre/post** snapshot pair before running any repair actions, so you have an "undo" point if something goes wrong.
     * **Flight Report:** after verification completes, the helper prints an executive summary (checks performed, repairs executed, health status, and snapshot IDs when available).
     * Performs safety checks such as cleaning up stale `/run/zypp.pid`
@@ -1125,7 +1125,9 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
-  - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
+  - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path (highlighted in color when supported) and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
+  - 🎛️ **IMPROVED:** debug menu option **5** always prints a clickable `file://...` link even when auto-open succeeds/fails, so you can open the folder manually.
+  - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 

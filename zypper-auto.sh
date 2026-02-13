@@ -3219,6 +3219,21 @@ get_user_bus() {
     printf 'unix:path=/run/user/%s/bus' "$uid"
 }
 
+# Print a clickable URL (e.g. file:///path) to the console.
+# Uses color when supported so the link is easier to spot.
+print_clickable_url() {
+    local url="$1"
+    if [ -z "${url}" ]; then
+        return 0
+    fi
+
+    if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null && [ -t 1 ]; then
+        printf '%b%s%b\n' "${C_CYAN}" "${url}" "${C_RESET}"
+    else
+        printf '%s\n' "${url}"
+    fi
+}
+
 # Best-effort: open a folder in the desktop user's session.
 # Returns 0 if an opener command succeeded, non-zero otherwise.
 open_folder_in_desktop_session() {
@@ -3241,6 +3256,10 @@ open_folder_in_desktop_session() {
         run_dir="/run/user/${uid}"
         bus="$(get_user_bus "${user}" 2>/dev/null || true)"
 
+        # Minimal sane PATH for GUI launchers when invoked from sudo/root.
+        local base_path
+        base_path="/usr/local/bin:/usr/bin:/bin"
+
         # Try to query the user systemd environment for GUI variables.
         local env_dump
         env_dump=""
@@ -3262,10 +3281,49 @@ open_folder_in_desktop_session() {
         session_name="$(__znh_env_from_dump DESKTOP_SESSION)"; session_name="${session_name:-${DESKTOP_SESSION:-}}"
         dbus="$(__znh_env_from_dump DBUS_SESSION_BUS_ADDRESS)"; dbus="${dbus:-${bus:-${DBUS_SESSION_BUS_ADDRESS:-}}}"
 
-        # 1) Direct xdg-open as the user
-        if command -v xdg-open >/dev/null 2>&1; then
+        # 0) KDE-native openers (often more reliable than xdg-open on Plasma)
+        local kio
+        for kio in kioclient5 kioclient kde-open5 kde-open; do
+            local kio_bin
+            kio_bin=$(command -v "${kio}" 2>/dev/null || true)
+            if [ -n "${kio_bin}" ]; then
+                log_debug "[folder-open] attempting ${kio} as ${user}: folder=${folder}"
+
+                local kio_args=()
+                case "${kio}" in
+                    kioclient5|kioclient)
+                        kio_args=(exec "${folder}")
+                        ;;
+                    kde-open5|kde-open)
+                        kio_args=("${folder}")
+                        ;;
+                esac
+
+                if sudo -u "${user}" env \
+                    PATH="${base_path}" \
+                    DISPLAY="${disp}" \
+                    WAYLAND_DISPLAY="${wayland}" \
+                    XDG_SESSION_TYPE="${session}" \
+                    XAUTHORITY="${xauth}" \
+                    XDG_CURRENT_DESKTOP="${desktop}" \
+                    DESKTOP_SESSION="${session_name}" \
+                    XDG_RUNTIME_DIR="${run_dir}" \
+                    DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                    "${kio_bin}" "${kio_args[@]}" >/dev/null 2>&1; then
+                    return 0
+                else
+                    open_rc=$?
+                fi
+            fi
+        done
+
+        # 1) Direct xdg-open as the user (absolute path so sudo PATH quirks don't break)
+        local xdg_open_bin
+        xdg_open_bin=$(command -v xdg-open 2>/dev/null || true)
+        if [ -n "${xdg_open_bin}" ]; then
             log_debug "[folder-open] attempting xdg-open as ${user}: folder=${folder} DISPLAY=${disp:-<empty>} WAYLAND_DISPLAY=${wayland:-<empty>} XDG_RUNTIME_DIR=${run_dir:-<empty>} DBUS_SESSION_BUS_ADDRESS=${dbus:-<empty>}"
             if sudo -u "${user}" env \
+                PATH="${base_path}" \
                 DISPLAY="${disp}" \
                 WAYLAND_DISPLAY="${wayland}" \
                 XDG_SESSION_TYPE="${session}" \
@@ -3274,7 +3332,7 @@ open_folder_in_desktop_session() {
                 DESKTOP_SESSION="${session_name}" \
                 XDG_RUNTIME_DIR="${run_dir}" \
                 DBUS_SESSION_BUS_ADDRESS="${dbus}" \
-                xdg-open "${folder}" >/dev/null 2>&1; then
+                "${xdg_open_bin}" "${folder}" >/dev/null 2>&1; then
                 return 0
             else
                 open_rc=$?
@@ -3282,41 +3340,70 @@ open_folder_in_desktop_session() {
         fi
 
         # 2) systemd-run scope (user) + xdg-open
-        if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+        local systemd_run_bin
+        systemd_run_bin=$(command -v systemd-run 2>/dev/null || true)
+        if [ -n "${systemd_run_bin}" ] && [ -n "${xdg_open_bin:-}" ]; then
             log_debug "[folder-open] attempting systemd-run --user --scope xdg-open as ${user}: folder=${folder}"
             if sudo -u "${user}" env \
+                PATH="${base_path}" \
                 XDG_RUNTIME_DIR="${run_dir}" \
                 DBUS_SESSION_BUS_ADDRESS="${dbus}" \
-                systemd-run --user --scope \
+                "${systemd_run_bin}" --user --scope \
                 --setenv="DISPLAY=${disp}" \
                 --setenv="WAYLAND_DISPLAY=${wayland}" \
                 --setenv="XDG_SESSION_TYPE=${session}" \
                 --setenv="XAUTHORITY=${xauth}" \
                 --setenv="XDG_CURRENT_DESKTOP=${desktop}" \
                 --setenv="DESKTOP_SESSION=${session_name}" \
-                xdg-open "${folder}" >/dev/null 2>&1; then
+                "${xdg_open_bin}" "${folder}" >/dev/null 2>&1; then
                 return 0
             else
                 open_rc=$?
             fi
         fi
 
-        # 3) Fallback to common file managers
+        # 2b) GNOME-ish opener
+        local gio_bin
+        gio_bin=$(command -v gio 2>/dev/null || true)
+        if [ -n "${gio_bin}" ]; then
+            log_debug "[folder-open] attempting gio open as ${user}: folder=${folder}"
+            if sudo -u "${user}" env \
+                PATH="${base_path}" \
+                DISPLAY="${disp}" \
+                WAYLAND_DISPLAY="${wayland}" \
+                XDG_SESSION_TYPE="${session}" \
+                XAUTHORITY="${xauth}" \
+                XDG_CURRENT_DESKTOP="${desktop}" \
+                DESKTOP_SESSION="${session_name}" \
+                XDG_RUNTIME_DIR="${run_dir}" \
+                DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                "${gio_bin}" open "${folder}" >/dev/null 2>&1; then
+                return 0
+            else
+                open_rc=$?
+            fi
+        fi
+
+        # 3) Fallback to common file managers (use absolute paths from root env)
         local fm
         for fm in dolphin nautilus nemo thunar pcmanfm caja konqueror; do
-            if sudo -u "${user}" command -v "${fm}" >/dev/null 2>&1; then
+            local fm_bin
+            fm_bin=$(command -v "${fm}" 2>/dev/null || true)
+            if [ -n "${fm_bin}" ]; then
                 log_debug "[folder-open] attempting ${fm} as ${user}: folder=${folder}"
-                if command -v systemd-run >/dev/null 2>&1; then
+                if [ -n "${systemd_run_bin:-}" ]; then
                     if sudo -u "${user}" env \
+                        PATH="${base_path}" \
                         XDG_RUNTIME_DIR="${run_dir}" \
                         DBUS_SESSION_BUS_ADDRESS="${dbus}" \
-                        systemd-run --user --scope "${fm}" "${folder}" >/dev/null 2>&1; then
+                        "${systemd_run_bin}" --user --scope "${fm_bin}" "${folder}" >/dev/null 2>&1; then
                         return 0
                     else
                         open_rc=$?
                     fi
                 else
                     if sudo -u "${user}" env \
+                        PATH="${base_path}" \
                         DISPLAY="${disp}" \
                         WAYLAND_DISPLAY="${wayland}" \
                         XDG_SESSION_TYPE="${session}" \
@@ -3325,7 +3412,7 @@ open_folder_in_desktop_session() {
                         DESKTOP_SESSION="${session_name}" \
                         XDG_RUNTIME_DIR="${run_dir}" \
                         DBUS_SESSION_BUS_ADDRESS="${dbus}" \
-                        "${fm}" "${folder}" >/dev/null 2>&1; then
+                        "${fm_bin}" "${folder}" >/dev/null 2>&1; then
                         return 0
                     else
                         open_rc=$?
@@ -4715,22 +4802,16 @@ elif command -v zypper >/dev/null 2>&1; then
         log_success "✓ Package dependencies are consistent"
     else
         log_warn "⚠ Broken package dependencies detected (interrupted update?)"
-        log_info "  → Attempting deep repair: zypper install --fix-broken --force-resolution"
+        log_info "  → Capturing details: zypper verify --details"
 
+        # NOTE: Older builds attempted 'zypper install --fix-broken' (APT-style).
+        # openSUSE zypper does NOT support that flag. Instead, capture the
+        # detailed verify output so the user can resolve it (usually via an
+        # interactive 'zypper dup' that chooses a solver solution).
         if command -v timeout >/dev/null 2>&1; then
-            if execute_guarded "Repair broken dependencies" timeout 900 zypper --non-interactive install --fix-broken --force-resolution; then
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-            else
-                log_error "  ✗ Failed to run dependency repair"
-                VERIFICATION_FAILED=1
-            fi
+            execute_optional "Dependency verify details" timeout 120 zypper --non-interactive verify --details
         else
-            if execute_guarded "Repair broken dependencies" zypper --non-interactive install --fix-broken --force-resolution; then
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-            else
-                log_error "  ✗ Failed to run dependency repair"
-                VERIFICATION_FAILED=1
-            fi
+            execute_optional "Dependency verify details" zypper --non-interactive verify --details
         fi
 
         # Double-check
@@ -6374,6 +6455,8 @@ run_debug_menu_only() {
                 USER_BUS_PATH="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
                 diag_dir="${LOG_DIR}/diagnostics"
                 echo "Diagnostics logs directory: ${diag_dir}"
+                echo "Clickable:"
+                print_clickable_url "file://${diag_dir}"
                 execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
                 # Allow the desktop user to traverse the parent log directory
                 # without making all logs world-readable. 751 = traverse but
@@ -6455,7 +6538,7 @@ run_debug_menu_only() {
                 if [ -n "${LOG_FOLDER_OPENER:-}" ]; then
                     candidates="${LOG_FOLDER_OPENER}"
                 fi
-                candidates="${candidates} dolphin nautilus nemo thunar pcmanfm caja konqueror xdg-open"
+                candidates="${candidates} kioclient5 kioclient kde-open5 kde-open gio xdg-open dolphin nautilus nemo thunar pcmanfm caja konqueror"
 
                 for tool in ${candidates}; do
                     # Skip duplicates in the candidates list
@@ -6466,37 +6549,25 @@ run_debug_menu_only() {
                     seen_tools="${seen_tools:-} ${tool}"
 
                     if [ -n "${SUDO_USER:-}" ]; then
-                        if ! sudo -u "${target_user}" command -v "${tool}" >/dev/null 2>&1; then
+                        # NOTE: 'command -v' is a shell builtin. Do NOT run it directly via sudo.
+                        tool_path=$(sudo -u "${target_user}" env PATH="/usr/local/bin:/usr/bin:/bin" \
+                            sh -lc "command -v ${tool} 2>/dev/null | head -n 1" 2>/dev/null || true)
+                        if [ -z "${tool_path}" ]; then
                             echo "  - ${tool}: not in PATH for ${target_user}"
                             log_debug "[debug-menu][opener-test] ${tool} not in PATH for ${target_user}"
                             continue
                         fi
-                        echo "  - ${tool}: FOUND in PATH for ${target_user}"
-                        log_info "[debug-menu][opener-test] ${tool} found in PATH for ${target_user}"
-                        if sudo -u "${target_user}" DBUS_SESSION_BUS_ADDRESS="${bus}" "${tool}" --version >/dev/null 2>&1; then
-                            echo "      basic '--version' invocation: OK"
-                            log_debug "[debug-menu][opener-test] ${tool} --version OK"
-                        else
-                            rc=$?
-                            echo "      basic '--version' invocation: FAILED (rc=${rc})"
-                            log_error "[debug-menu][opener-test] ${tool} --version failed (rc=${rc})"
-                        fi
+                        echo "  - ${tool}: FOUND (${tool_path})"
+                        log_info "[debug-menu][opener-test] ${tool} found: ${tool_path}"
                     else
-                        if ! command -v "${tool}" >/dev/null 2>&1; then
+                        tool_path=$(command -v "${tool}" 2>/dev/null || true)
+                        if [ -z "${tool_path}" ]; then
                             echo "  - ${tool}: not in PATH (no SUDO_USER)"
                             log_debug "[debug-menu][opener-test] ${tool} not in PATH (no SUDO_USER)"
                             continue
                         fi
-                        echo "  - ${tool}: FOUND in PATH (no SUDO_USER)"
-                        log_info "[debug-menu][opener-test] ${tool} found in PATH (no SUDO_USER)"
-                        if DBUS_SESSION_BUS_ADDRESS="${bus}" "${tool}" --version >/dev/null 2>&1; then
-                            echo "      basic '--version' invocation: OK"
-                            log_debug "[debug-menu][opener-test] ${tool} --version OK (no SUDO_USER)"
-                        else
-                            rc=$?
-                            echo "      basic '--version' invocation: FAILED (rc=${rc})"
-                            log_error "[debug-menu][opener-test] ${tool} --version failed (rc=${rc}) (no SUDO_USER)"
-                        fi
+                        echo "  - ${tool}: FOUND (${tool_path})"
+                        log_info "[debug-menu][opener-test] ${tool} found: ${tool_path} (no SUDO_USER)"
                     fi
                 done
 
@@ -8129,7 +8200,8 @@ elif [[ "${1:-}" == "--show-logs" || "${1:-}" == "--show-loggs" ]]; then
     log_info "Diagnostics logs browser requested"
     diag_dir="${LOG_DIR}/diagnostics"
     echo "Diagnostics logs directory: ${diag_dir}"
-    echo "Clickable: file://${diag_dir}"
+    echo "Clickable:"
+    print_clickable_url "file://${diag_dir}"
 
     # Ensure directory exists and is user-readable
     execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
