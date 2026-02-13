@@ -637,6 +637,77 @@ execute_guarded() {
     fi
 }
 
+# Execute a command best-effort (non-fatal), capturing output like execute_guarded
+# but logging failures at WARN level so missing legacy units/processes do not
+# spam diagnostics logs as [ERROR].
+#
+# Always returns 0.
+execute_optional() {
+    local desc="$1"
+    shift
+
+    local tmp_out cmd_str
+    tmp_out="$(mktemp)"
+    cmd_str="$(_format_cmd "$@")"
+
+    log_debug "EXEC (optional): [${desc}] -> ${cmd_str}"
+
+    if "$@" >"$tmp_out" 2>&1; then
+        # Optional operations should not clutter logs on success.
+        log_debug "OPTIONAL OK: ${desc}"
+
+        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null || [ "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-0}" -eq 1 ] 2>/dev/null; then
+            if [ -s "$tmp_out" ] 2>/dev/null; then
+                sed 's/^/  [CMD_OUT] /' "$tmp_out" >>"${LOG_FILE}" 2>/dev/null || true
+                if [ -n "${TRACE_LOG:-}" ]; then
+                    sed 's/^/[CMD_OUT] /' "$tmp_out" >>"${TRACE_LOG}" 2>/dev/null || true
+                fi
+            fi
+        fi
+
+        rm -f "$tmp_out" 2>/dev/null || true
+        return 0
+    else
+        local rc=$?
+        log_warn "OPTIONAL FAILED: ${desc} (Exit Code: ${rc})"
+        log_warn "Command was: ${cmd_str}"
+
+        if [ -s "$tmp_out" ] 2>/dev/null; then
+            sed 's/^/  [CMD_OUT] /' "$tmp_out" >>"${LOG_FILE}" 2>/dev/null || true
+            if [ -n "${TRACE_LOG:-}" ]; then
+                sed 's/^/[CMD_OUT] /' "$tmp_out" >>"${TRACE_LOG}" 2>/dev/null || true
+            fi
+        fi
+
+        rm -f "$tmp_out" 2>/dev/null || true
+        return 0
+    fi
+}
+
+# Helper: best-effort check whether a system unit file exists.
+__znh_unit_file_exists_system() {
+    local unit="$1"
+    local out first
+    out=$(systemctl list-unit-files --no-legend "${unit}" 2>/dev/null || true)
+    first=$(printf '%s\n' "$out" | awk 'NR==1 {print $1}')
+    [ "${first}" = "${unit}" ]
+}
+
+# Helper: best-effort check whether a user unit file exists.
+__znh_unit_file_exists_user() {
+    local user="$1" unit="$2"
+    [ -z "${user}" ] && return 1
+
+    local bus out first
+    bus="$(get_user_bus "${user}" 2>/dev/null || true)"
+    [ -z "${bus}" ] && return 1
+
+    out=$(sudo -u "${user}" DBUS_SESSION_BUS_ADDRESS="${bus}" \
+        systemctl --user list-unit-files --no-legend "${unit}" 2>/dev/null || true)
+    first=$(printf '%s\n' "$out" | awk 'NR==1 {print $1}')
+    [ "${first}" = "${unit}" ]
+}
+
 # Backward-compatible wrapper for older call sites.
 # NOTE: Prefer execute_guarded with real argv whenever possible.
 log_command() {
@@ -3148,6 +3219,142 @@ get_user_bus() {
     printf 'unix:path=/run/user/%s/bus' "$uid"
 }
 
+# Best-effort: open a folder in the desktop user's session.
+# Returns 0 if an opener command succeeded, non-zero otherwise.
+open_folder_in_desktop_session() {
+    local folder="$1"
+    local user="${2:-${SUDO_USER:-}}"
+
+    if [ -z "${folder}" ]; then
+        return 2
+    fi
+
+    local open_rc=1
+
+    # Prefer user launch when available.
+    if [ -n "${user:-}" ] && [ "${user}" != "root" ]; then
+        local uid run_dir bus
+        uid=$(id -u "${user}" 2>/dev/null || true)
+        if ! [[ "${uid:-}" =~ ^[0-9]+$ ]]; then
+            return 1
+        fi
+        run_dir="/run/user/${uid}"
+        bus="$(get_user_bus "${user}" 2>/dev/null || true)"
+
+        # Try to query the user systemd environment for GUI variables.
+        local env_dump
+        env_dump=""
+        if [ -n "${bus}" ]; then
+            env_dump=$(sudo -u "${user}" DBUS_SESSION_BUS_ADDRESS="${bus}" systemctl --user show-environment 2>/dev/null || true)
+        fi
+
+        __znh_env_from_dump() {
+            local k="$1"
+            printf '%s\n' "${env_dump}" | sed -n "s/^${k}=//p" | head -n 1
+        }
+
+        local disp wayland session xauth desktop session_name dbus
+        disp="$(__znh_env_from_dump DISPLAY)";            disp="${disp:-${DISPLAY:-}}"
+        wayland="$(__znh_env_from_dump WAYLAND_DISPLAY)"; wayland="${wayland:-${WAYLAND_DISPLAY:-}}"
+        session="$(__znh_env_from_dump XDG_SESSION_TYPE)"; session="${session:-${XDG_SESSION_TYPE:-}}"
+        xauth="$(__znh_env_from_dump XAUTHORITY)";         xauth="${xauth:-${XAUTHORITY:-}}"
+        desktop="$(__znh_env_from_dump XDG_CURRENT_DESKTOP)"; desktop="${desktop:-${XDG_CURRENT_DESKTOP:-}}"
+        session_name="$(__znh_env_from_dump DESKTOP_SESSION)"; session_name="${session_name:-${DESKTOP_SESSION:-}}"
+        dbus="$(__znh_env_from_dump DBUS_SESSION_BUS_ADDRESS)"; dbus="${dbus:-${bus:-${DBUS_SESSION_BUS_ADDRESS:-}}}"
+
+        # 1) Direct xdg-open as the user
+        if command -v xdg-open >/dev/null 2>&1; then
+            log_debug "[folder-open] attempting xdg-open as ${user}: folder=${folder} DISPLAY=${disp:-<empty>} WAYLAND_DISPLAY=${wayland:-<empty>} XDG_RUNTIME_DIR=${run_dir:-<empty>} DBUS_SESSION_BUS_ADDRESS=${dbus:-<empty>}"
+            if sudo -u "${user}" env \
+                DISPLAY="${disp}" \
+                WAYLAND_DISPLAY="${wayland}" \
+                XDG_SESSION_TYPE="${session}" \
+                XAUTHORITY="${xauth}" \
+                XDG_CURRENT_DESKTOP="${desktop}" \
+                DESKTOP_SESSION="${session_name}" \
+                XDG_RUNTIME_DIR="${run_dir}" \
+                DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                xdg-open "${folder}" >/dev/null 2>&1; then
+                return 0
+            else
+                open_rc=$?
+            fi
+        fi
+
+        # 2) systemd-run scope (user) + xdg-open
+        if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+            log_debug "[folder-open] attempting systemd-run --user --scope xdg-open as ${user}: folder=${folder}"
+            if sudo -u "${user}" env \
+                XDG_RUNTIME_DIR="${run_dir}" \
+                DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                systemd-run --user --scope \
+                --setenv="DISPLAY=${disp}" \
+                --setenv="WAYLAND_DISPLAY=${wayland}" \
+                --setenv="XDG_SESSION_TYPE=${session}" \
+                --setenv="XAUTHORITY=${xauth}" \
+                --setenv="XDG_CURRENT_DESKTOP=${desktop}" \
+                --setenv="DESKTOP_SESSION=${session_name}" \
+                xdg-open "${folder}" >/dev/null 2>&1; then
+                return 0
+            else
+                open_rc=$?
+            fi
+        fi
+
+        # 3) Fallback to common file managers
+        local fm
+        for fm in dolphin nautilus nemo thunar pcmanfm caja konqueror; do
+            if sudo -u "${user}" command -v "${fm}" >/dev/null 2>&1; then
+                log_debug "[folder-open] attempting ${fm} as ${user}: folder=${folder}"
+                if command -v systemd-run >/dev/null 2>&1; then
+                    if sudo -u "${user}" env \
+                        XDG_RUNTIME_DIR="${run_dir}" \
+                        DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                        systemd-run --user --scope "${fm}" "${folder}" >/dev/null 2>&1; then
+                        return 0
+                    else
+                        open_rc=$?
+                    fi
+                else
+                    if sudo -u "${user}" env \
+                        DISPLAY="${disp}" \
+                        WAYLAND_DISPLAY="${wayland}" \
+                        XDG_SESSION_TYPE="${session}" \
+                        XAUTHORITY="${xauth}" \
+                        XDG_CURRENT_DESKTOP="${desktop}" \
+                        DESKTOP_SESSION="${session_name}" \
+                        XDG_RUNTIME_DIR="${run_dir}" \
+                        DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                        "${fm}" "${folder}" >/dev/null 2>&1; then
+                        return 0
+                    else
+                        open_rc=$?
+                    fi
+                fi
+            fi
+        done
+
+        return "${open_rc}"
+    fi
+
+    # No SUDO_USER / root-only context: attempt as current user.
+    if command -v xdg-open >/dev/null 2>&1; then
+        if xdg-open "${folder}" >/dev/null 2>&1; then
+            return 0
+        fi
+        return $?
+    fi
+
+    if command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
+        if systemd-run --user --scope xdg-open "${folder}" >/dev/null 2>&1; then
+            return 0
+        fi
+        return $?
+    fi
+
+    return 127
+}
+
 # --- 2. Sanity Checks & User Detection ---
 update_status "Running sanity checks..."
 log_info ">>> Running Sanity Checks..."
@@ -3495,7 +3702,7 @@ log_debug "Checking for stale Python processes..."
 if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
     PROCESS_COUNT=$(pgrep -f "zypper-notify-updater.py" | wc -l)
     if [ $PROCESS_COUNT -gt 1 ]; then
-        log_error "⚠ Warning: $PROCESS_COUNT Python notifier processes running (expected 0-1)"
+        log_warn "⚠ Warning: $PROCESS_COUNT Python notifier processes running (expected 0-1)"
         log_info "  → Attempting to fix: killing stale processes..."
         execute_guarded "Kill stale notifier processes" pkill -9 -f "zypper-notify-updater.py" || true
         sleep 1
@@ -3514,13 +3721,19 @@ fi
 
 # Check 8: Python bytecode cache is clear
 log_debug "Checking Python bytecode cache..."
-if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
-    log_error "⚠ Warning: Python bytecode cache exists (may cause issues)"
+if find "$SUDO_USER_HOME/.local/bin" \( -type f -name "*.pyc" -o -type d -name "__pycache__" \) -print 2>/dev/null | grep -q .; then
+    log_warn "⚠ Warning: Python bytecode cache exists (may cause issues)"
     log_info "  → Attempting to fix: clearing bytecode cache..."
-    execute_guarded "Delete .pyc files" find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete
+
+    # Best-effort: fix ownership first (old runs may have created root-owned cache).
+    execute_guarded "Fix ownership for bytecode cache artifacts" \
+        find "$SUDO_USER_HOME/.local/bin" \( -type f -name "*.pyc" -o -type d -name "__pycache__" \) \
+        -exec chown "$SUDO_USER:$SUDO_USER" {} + 2>/dev/null || true
+
+    execute_guarded "Delete .pyc files" find "$SUDO_USER_HOME/.local/bin" -type f -name "*.pyc" -delete
     execute_guarded "Remove __pycache__ directories" find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + || true
-    if find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -o -name "__pycache__" 2>/dev/null | grep -q .; then
-        log_error "  ✗ Failed to clear bytecode cache completely"
+    if find "$SUDO_USER_HOME/.local/bin" \( -type f -name "*.pyc" -o -type d -name "__pycache__" \) -print 2>/dev/null | grep -q .; then
+        log_warn "  ✗ Failed to clear bytecode cache completely"
     else
         log_success "  ✓ Fixed: Python bytecode cache cleared"
     fi
@@ -3589,7 +3802,7 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
     STATUS_AGE=$((NOW_TS - STATUS_MTIME))
     # Treat anything older than 1 hour in an in-progress state as stale.
     if printf '%s\n' "$CURRENT_STATUS" | grep -qE '^(refreshing|downloading:)' && [ "$STATUS_AGE" -gt 3600 ]; then
-        log_error "⚠ Warning: Stale download status '$CURRENT_STATUS' detected (age ${STATUS_AGE}s)"
+        log_warn "⚠ Warning: Stale download status '$CURRENT_STATUS' detected (age ${STATUS_AGE}s)"
         log_info "  → Auto-fixer: resetting download status and timing files so background downloads can resume cleanly"
         execute_guarded "Reset stale download-status.txt to idle" bash -lc "echo idle > /var/log/zypper-auto/download-status.txt" || true
         execute_guarded "Remove stale downloader timing files" rm -f \
@@ -6172,150 +6385,16 @@ run_debug_menu_only() {
                     find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; || true
 
                 # Try to open the diagnostics folder in the user's desktop session.
-                # We avoid letting set -e abort the whole debug menu by
-                # wrapping all launch attempts in conditional tests.
-                local _open_rc=1
-
-                if [ -n "${SUDO_USER:-}" ]; then
-                    # Prefer running xdg-open directly as the desktop user first,
-                    # which most closely matches what you'd do in your own
-                    # terminal. If that fails, fall back to systemd-run scopes
-                    # and finally to specific file managers.
-
-                    # Calculate the correct runtime directory for the user so that
-                    # Wayland/DBus/Pulse sockets under /run/user/<uid> are visible
-                    # to the helper when launched from a root session.
-                    local target_uid run_dir
-                    target_uid=$(id -u "${SUDO_USER}") || target_uid=""
-                    run_dir="/run/user/${target_uid}"
-
-                        if command -v xdg-open >/dev/null 2>&1; then
-                            local _disp _wayland _session _xauth _dbus _desktop _session_name
-                        _disp="${DISPLAY:-}"
-                        _wayland="${WAYLAND_DISPLAY:-}"
-                        _session="${XDG_SESSION_TYPE:-}"
-                        _xauth="${XAUTHORITY:-}"
-                        _desktop="${XDG_CURRENT_DESKTOP:-}"
-                        _session_name="${DESKTOP_SESSION:-}"
-                        # Prefer a real user bus address if we could compute one;
-                        # otherwise fall back to whatever DBUS_SESSION_BUS_ADDRESS
-                        # we inherited from the current environment.
-                        _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
-
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} XDG_CURRENT_DESKTOP=${_desktop:-<empty>} DESKTOP_SESSION=${_session_name:-<empty>} XDG_RUNTIME_DIR=${run_dir:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} xdg-open ${diag_dir}"
-
-                        if execute_guarded "Open diagnostics folder via xdg-open (direct as user)" \
-                            sudo -u "${SUDO_USER}" env \
-                            DISPLAY="${_disp}" \
-                            WAYLAND_DISPLAY="${_wayland}" \
-                            XDG_SESSION_TYPE="${_session}" \
-                            XAUTHORITY="${_xauth}" \
-                            XDG_CURRENT_DESKTOP="${_desktop}" \
-                            DESKTOP_SESSION="${_session_name}" \
-                            XDG_RUNTIME_DIR="${run_dir}" \
-                            DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
-                            xdg-open "${diag_dir}"; then
-                            _open_rc=0
-                        else
-                            _open_rc=$?
-                            log_error "[debug-menu] direct xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER} (XDG_RUNTIME_DIR=${run_dir})"
-                        fi
-                    fi
-
-                    # If direct xdg-open failed, try via systemd-run so the
-                    # helper can still work when invoked from non-GUI/root
-                    # contexts.
-                    if [ "${_open_rc}" -ne 0 ] 2>/dev/null && \
-                       command -v systemd-run >/dev/null 2>&1 && \
-                       command -v xdg-open >/dev/null 2>&1; then
-                        local _disp _wayland _session _xauth _dbus _desktop _session_name
-                        _disp="${DISPLAY:-}"
-                        _wayland="${WAYLAND_DISPLAY:-}"
-                        _session="${XDG_SESSION_TYPE:-}"
-                        _xauth="${XAUTHORITY:-}"
-                        _desktop="${XDG_CURRENT_DESKTOP:-}"
-                        _session_name="${DESKTOP_SESSION:-}"
-                        _dbus="${USER_BUS_PATH:-${DBUS_SESSION_BUS_ADDRESS:-}}"
-                        log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} DISPLAY=${_disp:-<empty>} WAYLAND_DISPLAY=${_wayland:-<empty>} XDG_SESSION_TYPE=${_session:-<empty>} XDG_CURRENT_DESKTOP=${_desktop:-<empty>} DESKTOP_SESSION=${_session_name:-<empty>} DBUS_SESSION_BUS_ADDRESS=${_dbus:-<empty>} systemd-run --user --scope xdg-open ${diag_dir}"
-                        if execute_guarded "Open diagnostics folder via systemd-run + xdg-open" \
-                            sudo -u "${SUDO_USER}" env \
-                            DISPLAY="${_disp}" \
-                            WAYLAND_DISPLAY="${_wayland}" \
-                            XDG_SESSION_TYPE="${_session}" \
-                            XAUTHORITY="${_xauth}" \
-                            XDG_CURRENT_DESKTOP="${_desktop}" \
-                            DESKTOP_SESSION="${_session_name}" \
-                            DBUS_SESSION_BUS_ADDRESS="${_dbus}" \
-                            systemd-run --user --scope xdg-open "${diag_dir}"; then
-                            _open_rc=0
-                        else
-                            _open_rc=$?
-                            log_error "[debug-menu] systemd-run xdg-open failed with exit code ${_open_rc} for user ${SUDO_USER}"
-                        fi
-                    fi
-
-                    # 3) If both xdg-open paths failed or are unavailable, try
-                    # common graphical file managers.
-                    if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
-                        local _fm
-                        for _fm in dolphin nautilus nemo thunar pcmanfm caja konqueror; do
-                            if sudo -u "${SUDO_USER}" command -v "${_fm}" >/dev/null 2>&1; then
-                                log_info "[debug-menu] xdg-open unavailable or failed; trying ${_fm} to open ${diag_dir} for user ${SUDO_USER}"
-                                if command -v systemd-run >/dev/null 2>&1; then
-                                    log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} systemd-run --user --scope ${_fm} ${diag_dir}"
-                                    if execute_guarded "Open diagnostics folder via systemd-run (${_fm})" \
-                                        sudo -u "${SUDO_USER}" \
-                                        systemd-run --user --scope "${_fm}" "${diag_dir}"; then
-                                        _open_rc=0
-                                        break
-                                    else
-                                        _open_rc=$?
-                                        log_error "[debug-menu] systemd-run ${_fm} failed with exit code ${_open_rc} for user ${SUDO_USER}"
-                                    fi
-                                else
-                                    log_debug "[debug-menu] attempting: sudo -u ${SUDO_USER} ${_fm} ${diag_dir}"
-                                    if execute_guarded "Open diagnostics folder (${_fm})" \
-                                        sudo -u "${SUDO_USER}" \
-                                        "${_fm}" "${diag_dir}"; then
-                                        _open_rc=0
-                                        break
-                                    else
-                                        _open_rc=$?
-                                        log_error "[debug-menu] direct ${_fm} failed with exit code ${_open_rc} for user ${SUDO_USER}"
-                                    fi
-                                fi
-                            fi
-                        done
-                    fi
+                local _open_rc
+                if open_folder_in_desktop_session "${diag_dir}" "${SUDO_USER:-}"; then
+                    _open_rc=0
                 else
-                    # No SUDO_USER detected (should be rare in debug mode);
-                    # try as the current user so the menu remains usable even
-                    # when invoked without sudo.
-                    if command -v xdg-open >/dev/null 2>&1; then
-                        log_debug "[debug-menu] attempting (no SUDO_USER): xdg-open ${diag_dir}"
-                        if execute_guarded "Open diagnostics folder via xdg-open (no SUDO_USER)" xdg-open "${diag_dir}"; then
-                            _open_rc=0
-                        else
-                            _open_rc=$?
-                            log_error "[debug-menu] direct xdg-open failed with exit code ${_open_rc} (no SUDO_USER)"
-                        fi
-                    elif command -v systemd-run >/dev/null 2>&1 && command -v xdg-open >/dev/null 2>&1; then
-                        log_debug "[debug-menu] attempting (no SUDO_USER): systemd-run --user --scope xdg-open ${diag_dir}"
-                        if execute_guarded "Open diagnostics folder via systemd-run + xdg-open (no SUDO_USER)" systemd-run --user --scope xdg-open "${diag_dir}"; then
-                            _open_rc=0
-                        else
-                            _open_rc=$?
-                            log_error "[debug-menu] systemd-run xdg-open failed with exit code ${_open_rc} (no SUDO_USER)"
-                        fi
-                    else
-                        _open_rc=1
-                        log_error "[debug-menu] xdg-open not found in PATH and no SUDO_USER available"
-                    fi
+                    _open_rc=$?
                 fi
 
                 if [ "${_open_rc}" -ne 0 ] 2>/dev/null; then
-                    log_error "[debug-menu] Could not open diagnostics folder automatically (exit code ${_open_rc})"
-                    log_error "[debug-menu][SUMMARY] option=5 action=open-folder outcome=FAIL rc=${_open_rc} diag_dir=${diag_dir} user=${SUDO_USER:-<unset>}"
+                    log_warn "[debug-menu] Could not open diagnostics folder automatically (exit code ${_open_rc})"
+                    log_warn "[debug-menu][SUMMARY] option=5 action=open-folder outcome=FAIL rc=${_open_rc} diag_dir=${diag_dir} user=${SUDO_USER:-<unset>}"
                     echo "Could not launch the file manager automatically. You can still access diagnostics logs at: ${diag_dir}"
                     echo "Clickable URL (many terminals/terminals-in-IDE will detect this): file://${diag_dir}"
                     echo "Tip: run 'systemd-run --user --scope xdg-open ${diag_dir}' or open it with your preferred file manager as your normal user."
@@ -6324,7 +6403,7 @@ run_debug_menu_only() {
                     # around this failure (systemd unit status, status files,
                     # disk/network summary, and a short zypper preview).
                     if ! run_snapshot_state_only; then
-                        log_error "[debug-menu] Auto diagnostics snapshot after option 5 failure failed"
+                        log_warn "[debug-menu] Auto diagnostics snapshot after option 5 failure failed"
                     else
                         log_info "[debug-menu] Auto diagnostics snapshot captured after option 5 failure"
                     fi
@@ -8048,29 +8127,28 @@ elif [[ "${1:-}" == "--diag-logs-runner" ]]; then
     exit $?
 elif [[ "${1:-}" == "--show-logs" || "${1:-}" == "--show-loggs" ]]; then
     log_info "Diagnostics logs browser requested"
-    local diag_dir
     diag_dir="${LOG_DIR}/diagnostics"
     echo "Diagnostics logs directory: ${diag_dir}"
+    echo "Clickable: file://${diag_dir}"
 
     # Ensure directory exists and is user-readable
     execute_guarded "Ensure diagnostics log directory exists (${diag_dir})" mkdir -p "${diag_dir}" || true
+
+    # Allow the desktop user to traverse the parent log directory without
+    # making all logs world-readable.
+    execute_guarded "Allow desktop user to traverse ${LOG_DIR}" chmod 751 "${LOG_DIR}" || true
+
     execute_guarded "Ensure diagnostics directory is traversable" chmod 755 "${diag_dir}" || true
     execute_guarded "Ensure diagnostics logs are user-readable" \
         find "${diag_dir}" -type f -name 'diag-*.log' -exec chmod 644 {} \; || true
 
-    # Try to open the diagnostics folder in the user's file manager when possible.
-    if command -v xdg-open >/dev/null 2>&1; then
-        if [ -n "${SUDO_USER:-}" ]; then
-            USER_BUS_PATH="unix:path=/run/user/$(id -u "${SUDO_USER}")/bus"
-            log_debug "Opening diagnostics folder via xdg-open for SUDO_USER=${SUDO_USER}"
-            execute_guarded "Open diagnostics folder via xdg-open (user)" \
-                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${USER_BUS_PATH}" \
-                xdg-open "${diag_dir}" || true
-        else
-            log_debug "Opening diagnostics folder via xdg-open as current user"
-            execute_guarded "Open diagnostics folder via xdg-open" xdg-open "${diag_dir}" || true
-        fi
+    # Try to open the folder (best-effort). If no GUI session is available,
+    # this may fail; the clickable path printed above is the fallback.
+    if ! open_folder_in_desktop_session "${diag_dir}" "${SUDO_USER:-}"; then
+        rc=$?
+        log_warn "--show-logs: could not open folder automatically (rc=${rc}). Use the printed file:// URL."
     fi
+
     exit 0
 elif [[ "${1:-}" == "--test-notify" ]]; then
     log_info "Notification system self-test requested"
@@ -8328,12 +8406,41 @@ cleanup_old_logs
 log_info ">>> Cleaning up all old system-wide services..."
 update_status "Removing old system services..."
 log_debug "Disabling old timers and services..."
-execute_guarded "Disable legacy downloader timer" systemctl disable --now zypper-autodownload.timer || true
-execute_guarded "Stop legacy downloader service" systemctl stop zypper-autodownload.service || true
-execute_guarded "Disable legacy notifier timer" systemctl disable --now zypper-notify.timer || true
-execute_guarded "Stop legacy notifier service" systemctl stop zypper-notify.service || true
-execute_guarded "Disable legacy smart-updater timer" systemctl disable --now zypper-smart-updater.timer || true
-execute_guarded "Stop legacy smart-updater service" systemctl stop zypper-smart-updater.service || true
+
+# These legacy units may or may not exist depending on which older build was
+# previously installed. Treat missing units as normal.
+if __znh_unit_file_exists_system zypper-autodownload.timer; then
+    execute_optional "Disable legacy downloader timer" systemctl disable --now zypper-autodownload.timer
+else
+    log_debug "Legacy unit not present (skipping): zypper-autodownload.timer"
+fi
+if __znh_unit_file_exists_system zypper-autodownload.service; then
+    execute_optional "Stop legacy downloader service" systemctl stop zypper-autodownload.service
+else
+    log_debug "Legacy unit not present (skipping): zypper-autodownload.service"
+fi
+
+if __znh_unit_file_exists_system zypper-notify.timer; then
+    execute_optional "Disable legacy notifier timer" systemctl disable --now zypper-notify.timer
+else
+    log_debug "Legacy unit not present (skipping): zypper-notify.timer"
+fi
+if __znh_unit_file_exists_system zypper-notify.service; then
+    execute_optional "Stop legacy notifier service" systemctl stop zypper-notify.service
+else
+    log_debug "Legacy unit not present (skipping): zypper-notify.service"
+fi
+
+if __znh_unit_file_exists_system zypper-smart-updater.timer; then
+    execute_optional "Disable legacy smart-updater timer" systemctl disable --now zypper-smart-updater.timer
+else
+    log_debug "Legacy unit not present (skipping): zypper-smart-updater.timer"
+fi
+if __znh_unit_file_exists_system zypper-smart-updater.service; then
+    execute_optional "Stop legacy smart-updater service" systemctl stop zypper-smart-updater.service
+else
+    log_debug "Legacy unit not present (skipping): zypper-smart-updater.service"
+fi
 
 log_debug "Removing old system binaries..."
 execute_guarded "Remove legacy system binaries" rm -f \
@@ -8347,13 +8454,22 @@ update_status "Removing old user services..."
 SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 log_debug "Disabling user timer..."
 USER_BUS_PATH="$(get_user_bus "$SUDO_USER")"
-execute_guarded "Disable legacy user notifier timer" \
-    sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" systemctl --user disable --now zypper-notify-user.timer || true
+if __znh_unit_file_exists_user "${SUDO_USER}" zypper-notify-user.timer; then
+    execute_optional "Disable legacy user notifier timer" \
+        sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+        systemctl --user disable --now zypper-notify-user.timer
+else
+    log_debug "Legacy user unit not present (skipping): zypper-notify-user.timer"
+fi
 
 # Force kill any running Python notifier processes
 log_debug "Force-killing any running Python notifier processes..."
-execute_guarded "Kill any running legacy notifier processes" pkill -9 -f "zypper-notify-updater.py" || true
-sleep 1
+if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
+    execute_optional "Kill any running legacy notifier processes" pkill -9 -f "zypper-notify-updater.py"
+    sleep 1
+else
+    log_debug "No legacy notifier processes found (skipping pkill)"
+fi
 
 # Clear Python bytecode cache
 log_debug "Clearing Python bytecode cache..."
@@ -11997,6 +12113,15 @@ EOF
 chown "$SUDO_USER:$SUDO_USER" "${NOTIFY_SCRIPT_PATH}"
 chmod +x "${NOTIFY_SCRIPT_PATH}"
 log_success "Python notifier script created and made executable"
+
+# Hard fail early if the generated notifier script is syntactically invalid.
+# This avoids later noisy verification failures in diagnostics logs.
+log_debug "Validating generated notifier script syntax via py_compile"
+if ! execute_guarded "Python syntax check for generated notifier" python3 -B -m py_compile "${NOTIFY_SCRIPT_PATH}"; then
+    log_error "Generated notifier script failed syntax validation: ${NOTIFY_SCRIPT_PATH}"
+    update_status "FAILED: Generated notifier Python syntax check failed"
+    exit 1
+fi
 
 # If there were any configuration warnings collected during load_config,
 # surface them clearly in the status/log so the user can fix them.

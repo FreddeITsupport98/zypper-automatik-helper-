@@ -1123,6 +1123,12 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
+- **Unreleased (next build):**
+  - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
+  - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
+  - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
+  - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
+
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
   - 🧾 **NEW: Dashboard live logs + log view switching** – dashboard can follow `dashboard-live.log` and switch Recent Activity views (Live / Logs tail / Diagnostics / journalctl).
