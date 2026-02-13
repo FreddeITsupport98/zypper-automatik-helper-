@@ -48,7 +48,7 @@ if [[ $# -gt 0 ]]; then
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
-        --analyze|--health)
+        --analyze|--health|--debug)
             # Known commands/options; continue into main logic
             :
             ;;
@@ -3281,6 +3281,19 @@ open_folder_in_desktop_session() {
         session_name="$(__znh_env_from_dump DESKTOP_SESSION)"; session_name="${session_name:-${DESKTOP_SESSION:-}}"
         dbus="$(__znh_env_from_dump DBUS_SESSION_BUS_ADDRESS)"; dbus="${dbus:-${bus:-${DBUS_SESSION_BUS_ADDRESS:-}}}"
 
+        # Heuristics: when invoked from a pure root/sudo context, DISPLAY/WAYLAND_DISPLAY
+        # might be missing even though a desktop session is active.
+        # Try safe defaults based on common socket locations.
+        if [ -z "${disp:-}" ] && [ -z "${wayland:-}" ]; then
+            if [ -S "${run_dir}/wayland-0" ]; then
+                wayland="wayland-0"
+                session="${session:-wayland}"
+            elif [ -S "/tmp/.X11-unix/X0" ]; then
+                disp=":0"
+                session="${session:-x11}"
+            fi
+        fi
+
         # 0) KDE-native openers (often more reliable than xdg-open on Plasma)
         local kio
         for kio in kioclient5 kioclient kde-open5 kde-open; do
@@ -3310,12 +3323,60 @@ open_folder_in_desktop_session() {
                     XDG_RUNTIME_DIR="${run_dir}" \
                     DBUS_SESSION_BUS_ADDRESS="${dbus}" \
                     "${kio_bin}" "${kio_args[@]}" >/dev/null 2>&1; then
+                    log_debug "[folder-open] opener=${kio} rc=0 (success)"
                     return 0
                 else
                     open_rc=$?
+                    log_debug "[folder-open] opener=${kio} rc=${open_rc} (failed)"
                 fi
             fi
         done
+
+        # 0b) XFCE openers (common on openSUSE XFCE)
+        local exo_bin xfce_open_bin
+        exo_bin=$(command -v exo-open 2>/dev/null || true)
+        if [ -n "${exo_bin}" ]; then
+            log_debug "[folder-open] attempting exo-open as ${user}: folder=${folder}"
+            if sudo -u "${user}" env \
+                PATH="${base_path}" \
+                DISPLAY="${disp}" \
+                WAYLAND_DISPLAY="${wayland}" \
+                XDG_SESSION_TYPE="${session}" \
+                XAUTHORITY="${xauth}" \
+                XDG_CURRENT_DESKTOP="${desktop}" \
+                DESKTOP_SESSION="${session_name}" \
+                XDG_RUNTIME_DIR="${run_dir}" \
+                DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                "${exo_bin}" "${folder}" >/dev/null 2>&1; then
+                log_debug "[folder-open] opener=exo-open rc=0 (success)"
+                return 0
+            else
+                open_rc=$?
+                log_debug "[folder-open] opener=exo-open rc=${open_rc} (failed)"
+            fi
+        fi
+
+        xfce_open_bin=$(command -v xfce4-open 2>/dev/null || true)
+        if [ -n "${xfce_open_bin}" ]; then
+            log_debug "[folder-open] attempting xfce4-open as ${user}: folder=${folder}"
+            if sudo -u "${user}" env \
+                PATH="${base_path}" \
+                DISPLAY="${disp}" \
+                WAYLAND_DISPLAY="${wayland}" \
+                XDG_SESSION_TYPE="${session}" \
+                XAUTHORITY="${xauth}" \
+                XDG_CURRENT_DESKTOP="${desktop}" \
+                DESKTOP_SESSION="${session_name}" \
+                XDG_RUNTIME_DIR="${run_dir}" \
+                DBUS_SESSION_BUS_ADDRESS="${dbus}" \
+                "${xfce_open_bin}" "${folder}" >/dev/null 2>&1; then
+                log_debug "[folder-open] opener=xfce4-open rc=0 (success)"
+                return 0
+            else
+                open_rc=$?
+                log_debug "[folder-open] opener=xfce4-open rc=${open_rc} (failed)"
+            fi
+        fi
 
         # 1) Direct xdg-open as the user (absolute path so sudo PATH quirks don't break)
         local xdg_open_bin
@@ -3333,9 +3394,11 @@ open_folder_in_desktop_session() {
                 XDG_RUNTIME_DIR="${run_dir}" \
                 DBUS_SESSION_BUS_ADDRESS="${dbus}" \
                 "${xdg_open_bin}" "${folder}" >/dev/null 2>&1; then
+                log_debug "[folder-open] opener=xdg-open rc=0 (success)"
                 return 0
             else
                 open_rc=$?
+                log_debug "[folder-open] opener=xdg-open rc=${open_rc} (failed)"
             fi
         fi
 
@@ -3356,9 +3419,11 @@ open_folder_in_desktop_session() {
                 --setenv="XDG_CURRENT_DESKTOP=${desktop}" \
                 --setenv="DESKTOP_SESSION=${session_name}" \
                 "${xdg_open_bin}" "${folder}" >/dev/null 2>&1; then
+                log_debug "[folder-open] opener=systemd-run+xdg-open rc=0 (success)"
                 return 0
             else
                 open_rc=$?
+                log_debug "[folder-open] opener=systemd-run+xdg-open rc=${open_rc} (failed)"
             fi
         fi
 
@@ -3378,9 +3443,11 @@ open_folder_in_desktop_session() {
                 XDG_RUNTIME_DIR="${run_dir}" \
                 DBUS_SESSION_BUS_ADDRESS="${dbus}" \
                 "${gio_bin}" open "${folder}" >/dev/null 2>&1; then
+                log_debug "[folder-open] opener=gio-open rc=0 (success)"
                 return 0
             else
                 open_rc=$?
+                log_debug "[folder-open] opener=gio-open rc=${open_rc} (failed)"
             fi
         fi
 
@@ -3397,9 +3464,11 @@ open_folder_in_desktop_session() {
                         XDG_RUNTIME_DIR="${run_dir}" \
                         DBUS_SESSION_BUS_ADDRESS="${dbus}" \
                         "${systemd_run_bin}" --user --scope "${fm_bin}" "${folder}" >/dev/null 2>&1; then
+                        log_debug "[folder-open] opener=${fm}(systemd-run) rc=0 (success)"
                         return 0
                     else
                         open_rc=$?
+                        log_debug "[folder-open] opener=${fm}(systemd-run) rc=${open_rc} (failed)"
                     fi
                 else
                     if sudo -u "${user}" env \
@@ -3413,9 +3482,11 @@ open_folder_in_desktop_session() {
                         XDG_RUNTIME_DIR="${run_dir}" \
                         DBUS_SESSION_BUS_ADDRESS="${dbus}" \
                         "${fm_bin}" "${folder}" >/dev/null 2>&1; then
+                        log_debug "[folder-open] opener=${fm} rc=0 (success)"
                         return 0
                     else
                         open_rc=$?
+                        log_debug "[folder-open] opener=${fm} rc=${open_rc} (failed)"
                     fi
                 fi
             fi
@@ -6538,7 +6609,7 @@ run_debug_menu_only() {
                 if [ -n "${LOG_FOLDER_OPENER:-}" ]; then
                     candidates="${LOG_FOLDER_OPENER}"
                 fi
-                candidates="${candidates} kioclient5 kioclient kde-open5 kde-open gio xdg-open dolphin nautilus nemo thunar pcmanfm caja konqueror"
+                candidates="${candidates} kioclient5 kioclient kde-open5 kde-open exo-open xfce4-open gio xdg-open dolphin nautilus nemo thunar pcmanfm caja konqueror"
 
                 for tool in ${candidates}; do
                     # Skip duplicates in the candidates list
@@ -10079,7 +10150,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-    ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --help -h help"
+    ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -10169,6 +10240,7 @@ _znh_cmds=(
   --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner
   --show-logs --show-loggs
   --uninstall-zypper --uninstall-zypper-helper
+  --debug
   --help -h help
 )
 
@@ -10222,7 +10294,7 @@ EOF
 complete -c zypper-auto-helper -f -a "install debug snapper"
 
 # common option-like commands
-complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check"
+complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --debug"
 complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
 complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
 complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
