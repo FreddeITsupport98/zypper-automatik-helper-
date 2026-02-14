@@ -292,6 +292,18 @@ Key options include:
   - The installer converts these into appropriate `OnCalendar` values, e.g.
     `*:0/10` for every 10 minutes or `hourly` for 60.
 
+- **Snapper safety (retention optimizer caps)**
+  - `SNAP_RETENTION_OPTIMIZER_ENABLED` – when `true` (default), running
+    `zypper-auto-helper snapper auto` will *also* apply preventative tuning to
+    `/etc/snapper/configs/*` so Snapper doesn’t fill your disk.
+  - The `SNAP_RETENTION_MAX_*` values are **maximum caps** (safe maxima). The
+    helper will **only lower** config values that exceed these caps; it never
+    increases your retention.
+    - Example: if your Snapper config has `NUMBER_LIMIT="2-50"` and your cap is
+      `SNAP_RETENTION_MAX_NUMBER_LIMIT=15`, it becomes `NUMBER_LIMIT="2-15"`.
+    - Setting a cap higher effectively disables capping for that key.
+    - `SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0` means “keep no yearly snapshots”.
+
 - **Caching / snooze**
   - `CACHE_EXPIRY_MINUTES` – how long a cached `zypper dup --dry-run` result
     is considered valid before forcing a fresh check.
@@ -1129,6 +1141,7 @@ systemctl status zypper-autodownload.service
   - 🎛️ **IMPROVED:** debug menu option **5** always prints a clickable `file://...` link even when auto-open succeeds/fails, so you can open the folder manually.
   - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to XFCE openers (`exo-open`, `xfce4-open`), `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
   - 🧹 **IMPROVED:** Snapper menu cleanup now runs a full cleanup (`number`, `timeline`, `empty-pre-post`) across all snapper configs (root/home/etc.). Auto-timers now sync Snapper config files so timeline/boot timers actually create snapshots.
+  - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
   - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
   - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.

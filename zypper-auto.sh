@@ -853,6 +853,43 @@ NT_TIMER_INTERVAL_MINUTES=1
 VERIFY_TIMER_INTERVAL_MINUTES=60
 
 # ---------------------------------------------------------------------
+# Snapper safety: retention optimizer caps (prevent disk filling)
+# ---------------------------------------------------------------------
+
+# SNAP_RETENTION_OPTIMIZER_ENABLED
+# When true, enabling Snapper timers via:
+#   zypper-auto-helper snapper auto
+# (or the Snapper menu "AUTO enable" option) will also apply a best-effort
+# preventative safety tune to /etc/snapper/configs/*:
+#   - It will ONLY LOWER overly-high retention limits (never increases).
+#   - It will NOT touch values that are already below the caps.
+#   - It supports both formats: KEY="50" and KEY="2-50" (range upper bound).
+#
+# This helps avoid the classic failure mode where Snapper creates too many
+# snapshots and fills / before cleanup has a chance to catch up.
+#
+# Valid values: true / false. Default: true.
+SNAP_RETENTION_OPTIMIZER_ENABLED=true
+
+# The following values are MAXIMUM caps ("desktop safe maxima").
+# If your snapper config has a higher value, the helper will lower it to the cap.
+#
+# Notes:
+# - Set a cap to a high number if you do NOT want the helper to lower it.
+# - TIMELINE_LIMIT_YEARLY can be 0 to disable yearly retention.
+
+# Numeric cleanup caps
+SNAP_RETENTION_MAX_NUMBER_LIMIT=15
+SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT=5
+
+# Timeline cleanup caps
+SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY=10
+SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY=7
+SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY=2
+SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY=2
+SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0
+
+# ---------------------------------------------------------------------
 # Installer log retention
 # ---------------------------------------------------------------------
 
@@ -1062,6 +1099,23 @@ EOF
         esac
     }
 
+    # Optional integer validation that allows 0 (non-negative).
+    # If the key is missing entirely, we silently set a default (like validate_bool_flag).
+    validate_nonneg_int_optional() {
+        local name="$1" default="$2" value
+        value="${!name-}"
+        if [ -z "${value}" ]; then
+            printf -v "$name" '%s' "$default"
+            return
+        fi
+        if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 0 ] 2>/dev/null; then
+            local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            printf -v "$name" '%s' "$default"
+        fi
+    }
+
     validate_int MAX_LOG_FILES 10
     validate_int MAX_LOG_SIZE_MB 50
     validate_int CACHE_EXPIRY_MINUTES 10
@@ -1141,6 +1195,16 @@ EOF
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
+
+    # Snapper retention optimizer (optional, used by snapper auto-timers)
+    validate_bool_flag SNAP_RETENTION_OPTIMIZER_ENABLED true
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_NUMBER_LIMIT 15
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT 5
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY 10
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY 7
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY 2
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY 2
+    validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY 0
     # DASHBOARD_BROWSER is an optional command name; keep empty by default.
     DASHBOARD_BROWSER="${DASHBOARD_BROWSER:-}"
 
@@ -1167,6 +1231,14 @@ EOF
     log_debug "  DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-true}"
     log_debug "  DASHBOARD_BROWSER=${DASHBOARD_BROWSER:-<default>}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    log_debug "  SNAP_RETENTION_OPTIMIZER_ENABLED=${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}"
+    log_debug "  SNAP_RETENTION_MAX_NUMBER_LIMIT=${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}"
+    log_debug "  SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT=${SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT:-5}"
+    log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY:-10}"
+    log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY:-7}"
+    log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY:-2}"
+    log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY:-2}"
+    log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}"
     if [ -n "${WEBHOOK_URL:-}" ]; then
         log_debug "  WEBHOOK_URL=<configured>"
     else
@@ -1217,6 +1289,16 @@ EOF
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
 
+    # Snapper retention optimizer knobs
+    _mark_missing_key "SNAP_RETENTION_OPTIMIZER_ENABLED"
+    _mark_missing_key "SNAP_RETENTION_MAX_NUMBER_LIMIT"
+    _mark_missing_key "SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT"
+    _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY"
+    _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY"
+    _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY"
+    _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY"
+    _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY"
+
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
         keys_joined="${missing_keys[*]}"
@@ -1263,6 +1345,30 @@ EOF
                 DASHBOARD_BROWSER)
                     log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
                     ;;
+                SNAP_RETENTION_OPTIMIZER_ENABLED)
+                    log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
+                    ;;
+                SNAP_RETENTION_MAX_NUMBER_LIMIT)
+                    log_info "  - SNAP_RETENTION_MAX_NUMBER_LIMIT: maximum allowed NUMBER_LIMIT upper bound (only lowers values when enabling snapper timers)."
+                    ;;
+                SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT)
+                    log_info "  - SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT: maximum allowed NUMBER_LIMIT_IMPORTANT upper bound (only lowers values when enabling snapper timers)."
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY)
+                    log_info "  - SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY: maximum TIMELINE_LIMIT_HOURLY (only lowers values when enabling snapper timers)."
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY)
+                    log_info "  - SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY: maximum TIMELINE_LIMIT_DAILY (only lowers values when enabling snapper timers)."
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY)
+                    log_info "  - SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY: maximum TIMELINE_LIMIT_WEEKLY (only lowers values when enabling snapper timers)."
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY)
+                    log_info "  - SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY: maximum TIMELINE_LIMIT_MONTHLY (only lowers values when enabling snapper timers)."
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY)
+                    log_info "  - SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY: maximum TIMELINE_LIMIT_YEARLY (0 disables yearly retention; only lowers values when enabling snapper timers)."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -1308,6 +1414,30 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     DASHBOARD_BROWSER=""
+                    ;;
+                SNAP_RETENTION_OPTIMIZER_ENABLED)
+                    SNAP_RETENTION_OPTIMIZER_ENABLED="true"
+                    ;;
+                SNAP_RETENTION_MAX_NUMBER_LIMIT)
+                    SNAP_RETENTION_MAX_NUMBER_LIMIT=15
+                    ;;
+                SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT)
+                    SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT=5
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY)
+                    SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY=10
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY)
+                    SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY=7
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY)
+                    SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY=2
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY)
+                    SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY=2
+                    ;;
+                SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY)
+                    SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0
                     ;;
             esac
         done
@@ -6448,115 +6578,203 @@ run_snapper_menu_only() {
         echo ""
         echo "Snapper timer management (${action})"
 
-        # Helper: set a key inside /etc/snapper/configs/<conf> safely.
-        # Only flips yes<->no when a matching line exists; otherwise appends.
-        __znh_snapper_config_set_yesno() {
-            local cfg_file="$1" key="$2" val="$3"
-            [ -f "${cfg_file}" ] || return 1
-
-            local ts bak mode uid gid tmp
-            ts="$(date +%Y%m%d-%H%M%S)"
-            bak="${cfg_file}.bak-${ts}"
-
-            mode=$(stat -c %a "${cfg_file}" 2>/dev/null || echo 644)
-            uid=$(stat -c %u "${cfg_file}" 2>/dev/null || echo 0)
-            gid=$(stat -c %g "${cfg_file}" 2>/dev/null || echo 0)
-
-            tmp="$(mktemp)"
-
-            if grep -qE "^${key}=" "${cfg_file}" 2>/dev/null; then
-                # Replace any existing assignment form with KEY="val".
-                sed -E "s|^${key}=.*|${key}=\"${val}\"|" "${cfg_file}" >"${tmp}" 2>/dev/null || {
-                    rm -f "${tmp}" 2>/dev/null || true
-                    return 1
-                }
-            else
-                cat "${cfg_file}" >"${tmp}" 2>/dev/null || {
-                    rm -f "${tmp}" 2>/dev/null || true
-                    return 1
-                }
-                printf '\n%s="%s"\n' "${key}" "${val}" >>"${tmp}" 2>/dev/null || true
-            fi
-
-            execute_guarded "Backup snapper config (${cfg_file})" cp -a "${cfg_file}" "${bak}" || true
-            mv -f "${tmp}" "${cfg_file}" 2>/dev/null || {
-                rm -f "${tmp}" 2>/dev/null || true
-                return 1
-            }
-            chmod "${mode}" "${cfg_file}" 2>/dev/null || true
-            chown "${uid}:${gid}" "${cfg_file}" 2>/dev/null || true
-            return 0
-        }
-
-        # 1) systemd unit management
+        # 1) systemd unit management (self-healing)
         local u
         for u in "${units[@]}"; do
             if __znh_snapper_timer_exists "${u}"; then
                 if [ "${action}" = "enable" ]; then
-                    # Safety: unmask first in case the user previously masked them
+                    # SMART: reset failed state (otherwise enable/start can be confusing)
+                    if systemctl is-failed --quiet "${u}" 2>/dev/null; then
+                        echo "  [fix] Resetting failed state: ${u}"
+                        execute_guarded "Reset failed state for ${u}" systemctl reset-failed "${u}" || true
+                    fi
+
+                    # SMART: unmask if user masked it
                     if systemctl is-enabled "${u}" 2>/dev/null | grep -q "masked"; then
+                        echo "  [fix] Unmasking: ${u}"
                         execute_guarded "Unmask ${u}" systemctl unmask "${u}" || true
                     fi
+
                     execute_guarded "Enable + start ${u}" systemctl enable --now "${u}" || true
                 else
                     execute_guarded "Disable + stop ${u}" systemctl disable --now "${u}" || true
                 fi
             else
-                echo "- Timer not found (skipping): ${u}"
+                echo "  [skip] Timer not found: ${u}"
             fi
         done
 
-        # 2) Config sync: make sure snapper configs match the timer state so timers actually do work.
-        # - timeline timer needs TIMELINE_CREATE="yes"
-        # - boot timer needs BOOT_CREATE="yes"
+        # 2) Smart config sync + preventative optimization
+        # - Ensures TIMELINE_CREATE/BOOT_CREATE match the chosen timer state.
+        # - When enabling, caps dangerous retention values to "desktop safe" maxima
+        #   to reduce the risk of filling the disk before cleanup runs.
         if command -v snapper >/dev/null 2>&1; then
-            local conf cfg_file target_val
+            local target_val
             if [ "${action}" = "enable" ]; then
                 target_val="yes"
             else
                 target_val="no"
             fi
 
+            __znh_cfg_tmp_get() {
+                local file="$1" key="$2" line val
+                line=$(grep -E "^${key}=" "${file}" 2>/dev/null | head -n 1 || true)
+                [ -n "${line:-}" ] || return 1
+                val="${line#*=}"
+                val="${val%\"}"
+                val="${val#\"}"
+                printf '%s' "$val"
+                return 0
+            }
+
+            __znh_cfg_tmp_set() {
+                local file="$1" key="$2" val="$3"
+
+                if grep -qE "^${key}=" "${file}" 2>/dev/null; then
+                    # Replace any existing assignment form with KEY="val".
+                    local tmp2
+                    tmp2="$(mktemp)"
+                    sed -E "s|^${key}=.*|${key}=\"${val}\"|" "${file}" >"${tmp2}" 2>/dev/null || {
+                        rm -f "${tmp2}" 2>/dev/null || true
+                        return 1
+                    }
+                    mv -f "${tmp2}" "${file}" 2>/dev/null || {
+                        rm -f "${tmp2}" 2>/dev/null || true
+                        return 1
+                    }
+                else
+                    printf '\n%s="%s"\n' "${key}" "${val}" >>"${file}" 2>/dev/null || return 1
+                fi
+                return 0
+            }
+
+            __znh_cfg_tmp_cap_limit() {
+                # Lowers KEY only if it is higher than safe_max.
+                # Supports values like:
+                #   KEY="50"      -> cap to 15
+                #   KEY="2-50"    -> cap to 2-15
+                local file="$1" key="$2" safe_max="$3"
+
+                # If safe_max is not numeric, do nothing.
+                if ! [[ "${safe_max}" =~ ^[0-9]+$ ]]; then
+                    return 0
+                fi
+
+                local cur
+                cur=$(__znh_cfg_tmp_get "${file}" "${key}" 2>/dev/null) || return 0
+
+                local min max new_min new_max new_val
+                min=""
+                max=""
+
+                if [[ "${cur}" =~ ^[0-9]+$ ]]; then
+                    max="$cur"
+                elif [[ "${cur}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    min="${BASH_REMATCH[1]}"
+                    max="${BASH_REMATCH[2]}"
+                else
+                    # Unrecognized format -> do not touch.
+                    return 0
+                fi
+
+                if ! [[ "${max}" =~ ^[0-9]+$ ]]; then
+                    return 0
+                fi
+
+                if [ "${max}" -le "${safe_max}" ] 2>/dev/null; then
+                    return 0
+                fi
+
+                new_max="${safe_max}"
+                if [ -n "${min}" ]; then
+                    new_min="${min}"
+                    if ! [[ "${new_min}" =~ ^[0-9]+$ ]]; then
+                        new_min="${new_max}"
+                    fi
+                    if [ "${new_min}" -gt "${new_max}" ] 2>/dev/null; then
+                        new_min="${new_max}"
+                    fi
+                    new_val="${new_min}-${new_max}"
+                else
+                    new_val="${new_max}"
+                fi
+
+                log_info "Smart-Opt: Capping ${key} in $(basename "${file}") (${cur} -> ${new_val})"
+                echo "  [tuned] ${key}: ${cur} -> ${new_val}"
+                __znh_cfg_tmp_set "${file}" "${key}" "${new_val}" || return 1
+                return 0
+            }
+
+            local conf cfg_file
             while read -r conf; do
                 [ -n "${conf:-}" ] || continue
                 cfg_file="/etc/snapper/configs/${conf}"
-                if [ ! -f "${cfg_file}" ]; then
+                [ -f "${cfg_file}" ] || continue
+
+                local ts bak mode uid gid tmp changed
+                ts="$(date +%Y%m%d-%H%M%S)"
+                bak="${cfg_file}.bak-${ts}"
+
+                mode=$(stat -c %a "${cfg_file}" 2>/dev/null || echo 644)
+                uid=$(stat -c %u "${cfg_file}" 2>/dev/null || echo 0)
+                gid=$(stat -c %g "${cfg_file}" 2>/dev/null || echo 0)
+
+                tmp="$(mktemp)"
+                changed=0
+
+                # Work on a temp copy so we only need ONE backup per config file.
+                cat "${cfg_file}" >"${tmp}" 2>/dev/null || {
+                    rm -f "${tmp}" 2>/dev/null || true
                     continue
-                fi
+                }
 
-                # TIMELINE_CREATE
-                if grep -qE '^TIMELINE_CREATE="(yes|no)"' "${cfg_file}" 2>/dev/null; then
-                    cur=$(sed -n 's/^TIMELINE_CREATE="\(yes\|no\)".*/\1/p' "${cfg_file}" | head -n 1)
-                    if [ "${cur:-}" != "${target_val}" ]; then
-                        log_info "Auto-fixing snapper config: ${cfg_file} (TIMELINE_CREATE=${target_val})"
-                        if __znh_snapper_config_set_yesno "${cfg_file}" TIMELINE_CREATE "${target_val}"; then
-                            echo "  [config:${conf}] TIMELINE_CREATE -> ${target_val}"
-                        fi
+                # Ensure flags match the timer state.
+                # When disabling, don't append missing keys (avoid surprising users).
+                if [ "${action}" = "enable" ]; then
+                    if __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "${target_val}"; then
+                        changed=1
+                    fi
+                    if __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "${target_val}"; then
+                        changed=1
+                    fi
+
+                    # Preventative tuning: cap overly aggressive defaults.
+                    # These are maxima; we never increase values.
+                    if [ "${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}" = "true" ]; then
+                        __znh_cfg_tmp_cap_limit "${tmp}" NUMBER_LIMIT "${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}" || true
+                        __znh_cfg_tmp_cap_limit "${tmp}" NUMBER_LIMIT_IMPORTANT "${SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT:-5}" || true
+
+                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_HOURLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY:-10}" || true
+                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_DAILY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY:-7}" || true
+                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_WEEKLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY:-2}" || true
+                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_MONTHLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY:-2}" || true
+                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_YEARLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}" || true
+                    else
+                        log_info "[snapper][config] Retention optimizer disabled (SNAP_RETENTION_OPTIMIZER_ENABLED=false); skipping retention caps"
                     fi
                 else
-                    # If missing, append it when enabling.
-                    if [ "${target_val}" = "yes" ]; then
-                        log_info "Auto-fixing snapper config: ${cfg_file} (adding TIMELINE_CREATE=\"yes\")"
-                        __znh_snapper_config_set_yesno "${cfg_file}" TIMELINE_CREATE "${target_val}" || true
-                        echo "  [config:${conf}] TIMELINE_CREATE -> ${target_val}"
+                    if grep -qE '^TIMELINE_CREATE=' "${tmp}" 2>/dev/null; then
+                        __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "${target_val}" && changed=1
+                    fi
+                    if grep -qE '^BOOT_CREATE=' "${tmp}" 2>/dev/null; then
+                        __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "${target_val}" && changed=1
                     fi
                 fi
 
-                # BOOT_CREATE
-                if grep -qE '^BOOT_CREATE="(yes|no)"' "${cfg_file}" 2>/dev/null; then
-                    cur=$(sed -n 's/^BOOT_CREATE="\(yes\|no\)".*/\1/p' "${cfg_file}" | head -n 1)
-                    if [ "${cur:-}" != "${target_val}" ]; then
-                        log_info "Auto-fixing snapper config: ${cfg_file} (BOOT_CREATE=${target_val})"
-                        if __znh_snapper_config_set_yesno "${cfg_file}" BOOT_CREATE "${target_val}"; then
-                            echo "  [config:${conf}] BOOT_CREATE -> ${target_val}"
-                        fi
-                    fi
+                # Only write if content actually changed.
+                if ! cmp -s "${cfg_file}" "${tmp}" 2>/dev/null; then
+                    log_info "[snapper][config] Updating: ${cfg_file}"
+                    execute_guarded "Backup snapper config (${cfg_file})" cp -a "${cfg_file}" "${bak}" || true
+                    mv -f "${tmp}" "${cfg_file}" 2>/dev/null || {
+                        rm -f "${tmp}" 2>/dev/null || true
+                        continue
+                    }
+                    chmod "${mode}" "${cfg_file}" 2>/dev/null || true
+                    chown "${uid}:${gid}" "${cfg_file}" 2>/dev/null || true
+
+                    echo "  [config:${conf}] synced (TIMELINE_CREATE/BOOT_CREATE=${target_val})"
                 else
-                    if [ "${target_val}" = "yes" ]; then
-                        log_info "Auto-fixing snapper config: ${cfg_file} (adding BOOT_CREATE=\"yes\")"
-                        __znh_snapper_config_set_yesno "${cfg_file}" BOOT_CREATE "${target_val}" || true
-                        echo "  [config:${conf}] BOOT_CREATE -> ${target_val}"
-                    fi
+                    rm -f "${tmp}" 2>/dev/null || true
                 fi
             done < <(__znh_snapper_list_config_names || true)
         fi
