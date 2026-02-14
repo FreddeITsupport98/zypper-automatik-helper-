@@ -1017,6 +1017,27 @@ USER_THUMBNAILS_CLEAN_DAYS=0
 USER_THUMBNAILS_CLEAN_CONFIRM=true
 
 # ---------------------------------------------------------------------
+# Option 4: Cleanup audit reports
+# ---------------------------------------------------------------------
+
+# CLEANUP_REPORT_ENABLED
+# When true (default), Snapper "Full Cleanup" writes an additional audit report
+# under CLEANUP_REPORT_DIR so you can review what happened later.
+CLEANUP_REPORT_ENABLED=true
+
+# CLEANUP_REPORT_DIR
+# Directory for cleanup reports (text and/or JSON).
+CLEANUP_REPORT_DIR="/var/log/zypper-auto/cleanup-reports"
+
+# CLEANUP_REPORT_FORMAT
+# Allowed: text | json | both
+CLEANUP_REPORT_FORMAT="both"
+
+# CLEANUP_REPORT_MAX_FILES
+# Keep only the newest N cleanup reports in CLEANUP_REPORT_DIR (best-effort).
+CLEANUP_REPORT_MAX_FILES=30
+
+# ---------------------------------------------------------------------
 # System Health Automator (Option 5): btrfs maintenance timers
 # ---------------------------------------------------------------------
 
@@ -1488,6 +1509,12 @@ EOF
     validate_nonneg_int_optional USER_THUMBNAILS_CLEAN_DAYS 0
     validate_bool_flag USER_THUMBNAILS_CLEAN_CONFIRM true
 
+    # Cleanup audit reports (Option 4)
+    validate_bool_flag CLEANUP_REPORT_ENABLED true
+    CLEANUP_REPORT_DIR="${CLEANUP_REPORT_DIR:-/var/log/zypper-auto/cleanup-reports}"
+    validate_mode CLEANUP_REPORT_FORMAT both "text|json|both"
+    validate_pos_int_optional CLEANUP_REPORT_MAX_FILES 30
+
     # System Health Automator (Option 5)
     validate_bool_flag BTRFS_MAINTENANCE_TIMERS_ENABLED true
     validate_bool_flag BTRFS_MAINTENANCE_TIMERS_CONFIRM true
@@ -1570,6 +1597,10 @@ EOF
     log_debug "  USER_THUMBNAILS_CLEAN_ENABLED=${USER_THUMBNAILS_CLEAN_ENABLED:-false}"
     log_debug "  USER_THUMBNAILS_CLEAN_DAYS=${USER_THUMBNAILS_CLEAN_DAYS:-0}"
     log_debug "  USER_THUMBNAILS_CLEAN_CONFIRM=${USER_THUMBNAILS_CLEAN_CONFIRM:-true}"
+    log_debug "  CLEANUP_REPORT_ENABLED=${CLEANUP_REPORT_ENABLED:-true}"
+    log_debug "  CLEANUP_REPORT_DIR=${CLEANUP_REPORT_DIR:-/var/log/zypper-auto/cleanup-reports}"
+    log_debug "  CLEANUP_REPORT_FORMAT=${CLEANUP_REPORT_FORMAT:-both}"
+    log_debug "  CLEANUP_REPORT_MAX_FILES=${CLEANUP_REPORT_MAX_FILES:-30}"
     log_debug "  BTRFS_MAINTENANCE_TIMERS_ENABLED=${BTRFS_MAINTENANCE_TIMERS_ENABLED:-true}"
     log_debug "  BTRFS_MAINTENANCE_TIMERS_CONFIRM=${BTRFS_MAINTENANCE_TIMERS_CONFIRM:-true}"
     log_debug "  FSTRIM_TIMER_ENABLED=${FSTRIM_TIMER_ENABLED:-true}"
@@ -1674,6 +1705,12 @@ EOF
     _mark_missing_key "USER_THUMBNAILS_CLEAN_ENABLED"
     _mark_missing_key "USER_THUMBNAILS_CLEAN_DAYS"
     _mark_missing_key "USER_THUMBNAILS_CLEAN_CONFIRM"
+
+    # Cleanup audit reports (Option 4)
+    _mark_missing_key "CLEANUP_REPORT_ENABLED"
+    _mark_missing_key "CLEANUP_REPORT_DIR"
+    _mark_missing_key "CLEANUP_REPORT_FORMAT"
+    _mark_missing_key "CLEANUP_REPORT_MAX_FILES"
 
     # System Health Automator (Option 5)
     _mark_missing_key "BTRFS_MAINTENANCE_TIMERS_ENABLED"
@@ -1833,6 +1870,18 @@ EOF
                     ;;
                 USER_THUMBNAILS_CLEAN_CONFIRM)
                     log_info "  - USER_THUMBNAILS_CLEAN_CONFIRM: when true, asks once before deleting thumbnails."
+                    ;;
+                CLEANUP_REPORT_ENABLED)
+                    log_info "  - CLEANUP_REPORT_ENABLED: when true, Snapper Full Cleanup writes an extra audit report under CLEANUP_REPORT_DIR (text/JSON)."
+                    ;;
+                CLEANUP_REPORT_DIR)
+                    log_info "  - CLEANUP_REPORT_DIR: directory where cleanup audit reports are written."
+                    ;;
+                CLEANUP_REPORT_FORMAT)
+                    log_info "  - CLEANUP_REPORT_FORMAT: choose report format (text, json, or both)."
+                    ;;
+                CLEANUP_REPORT_MAX_FILES)
+                    log_info "  - CLEANUP_REPORT_MAX_FILES: keep only the newest N cleanup reports (best-effort)."
                     ;;
                 BTRFS_MAINTENANCE_TIMERS_ENABLED)
                     log_info "  - BTRFS_MAINTENANCE_TIMERS_ENABLED: when true, Snapper AUTO enable also enables btrfs maintenance timers (scrub/balance/trim/defrag) when available."
@@ -2020,6 +2069,18 @@ EOF
                     ;;
                 USER_THUMBNAILS_CLEAN_CONFIRM)
                     USER_THUMBNAILS_CLEAN_CONFIRM="true"
+                    ;;
+                CLEANUP_REPORT_ENABLED)
+                    CLEANUP_REPORT_ENABLED="true"
+                    ;;
+                CLEANUP_REPORT_DIR)
+                    CLEANUP_REPORT_DIR="/var/log/zypper-auto/cleanup-reports"
+                    ;;
+                CLEANUP_REPORT_FORMAT)
+                    CLEANUP_REPORT_FORMAT="both"
+                    ;;
+                CLEANUP_REPORT_MAX_FILES)
+                    CLEANUP_REPORT_MAX_FILES=30
                     ;;
                 BTRFS_MAINTENANCE_TIMERS_ENABLED)
                     BTRFS_MAINTENANCE_TIMERS_ENABLED="true"
@@ -7347,6 +7408,176 @@ run_snapper_menu_only() {
         #   __znh_snapper_cleanup_now empty-pre-post
         local mode="${1:-all}"
 
+        # --- Professional Edition: audit report (text + JSON) ---
+        local report_enabled report_dir report_format report_max
+        report_enabled="${CLEANUP_REPORT_ENABLED:-true}"
+        report_dir="${CLEANUP_REPORT_DIR:-/var/log/zypper-auto/cleanup-reports}"
+        report_format="${CLEANUP_REPORT_FORMAT:-both}"
+        report_max="${CLEANUP_REPORT_MAX_FILES:-30}"
+
+        local __audit_ts __audit_log __audit_json
+        __audit_ts="$(date +%Y%m%d-%H%M%S)"
+        __audit_log="${report_dir}/cleanup-${__audit_ts}.log"
+        __audit_json="${report_dir}/cleanup-${__audit_ts}.json"
+
+        # Dynamic-scope data collectors (visible inside nested helpers)
+        local -a __audit_actions=()
+        local __audit_status="started"
+        local __audit_start_time __audit_end_time
+        __audit_start_time="$(date '+%Y-%m-%d %H:%M:%S')"
+
+        __znh_audit_record() {
+            # Record key actions in a compact, parseable form.
+            local msg="$*"
+            __audit_actions+=("${msg}")
+            return 0
+        }
+
+        __znh_cleanup_report_init() {
+            if [ "${report_enabled}" != "true" ]; then
+                return 0
+            fi
+
+            # Ensure directory exists (best-effort)
+            execute_optional "Ensure cleanup report dir exists (${report_dir})" mkdir -p -- "${report_dir}" || true
+
+            # Best-effort retention on older runs
+            if [[ "${report_max}" =~ ^[0-9]+$ ]] && [ "${report_max}" -gt 0 ] 2>/dev/null; then
+                local -a logs
+                mapfile -t logs < <(ls -1t "${report_dir}"/cleanup-*.log 2>/dev/null || true)
+                if [ "${#logs[@]}" -gt "${report_max}" ] 2>/dev/null; then
+                    local i f
+                    for ((i=report_max; i<${#logs[@]}; i++)); do
+                        f="${logs[$i]}"
+                        rm -f -- "${f}" "${f%.log}.json" 2>/dev/null || true
+                    done
+                fi
+            fi
+
+            # Write header immediately so cancelled runs still leave a trace.
+            {
+                echo "=============================================="
+                echo " SYSTEM CLEANUP AUDIT REPORT"
+                echo "=============================================="
+                echo "Start time: ${__audit_start_time}"
+                echo "Mode: ${mode}"
+                echo "Report: ${report_format}"
+                echo "=============================================="
+                echo ""
+            } >>"${__audit_log}" 2>/dev/null || true
+
+            return 0
+        }
+
+        __znh_cleanup_report_write_final() {
+            # Args: start_kb end_kb freed_kb removed_csv_path removed_count
+            local start_kb="$1" end_kb="$2" freed_kb="$3" removed_csv_path="$4" removed_count="$5"
+
+            if [ "${report_enabled}" != "true" ]; then
+                return 0
+            fi
+
+            __audit_end_time="$(date '+%Y-%m-%d %H:%M:%S')"
+
+            # --- Text report ---
+            if [ "${report_format}" = "text" ] || [ "${report_format}" = "both" ]; then
+                {
+                    echo "=============================================="
+                    echo "RESULT SUMMARY"
+                    echo "=============================================="
+                    if [[ "${start_kb}" =~ ^[0-9]+$ ]]; then
+                        echo "Start free: $((start_kb / 1024)) MB"
+                    else
+                        echo "Start free: (unknown)"
+                    fi
+                    if [[ "${end_kb}" =~ ^[0-9]+$ ]]; then
+                        echo "End free:   $((end_kb / 1024)) MB"
+                    else
+                        echo "End free:   (unknown)"
+                    fi
+                    if [[ "${freed_kb}" =~ ^-?[0-9]+$ ]]; then
+                        echo "Freed:      $((freed_kb / 1024)) MB"
+                    else
+                        echo "Freed:      (unknown)"
+                    fi
+                    echo "Status: ${__audit_status}"
+                    echo "End time: ${__audit_end_time:-}"
+                    echo ""
+                    echo "Removed snapshots: ${removed_count}"
+                    if [ -f "${removed_csv_path}" ] && [ "${removed_count}" -gt 0 ] 2>/dev/null; then
+                        echo "-- Removed snapshot list (conf, id, type, description) --"
+                        awk -F'\t' '{printf("%s\t#%s\t[%s]\t%s\n", $1, $2, $3, $4)}' "${removed_csv_path}" 2>/dev/null || true
+                    fi
+                    echo ""
+                    echo "-- Actions taken --"
+                    local a
+                    for a in "${__audit_actions[@]}"; do
+                        printf '  - %s\n' "${a}"
+                    done
+                    echo ""
+                } >>"${__audit_log}" 2>/dev/null || true
+            fi
+
+            # --- JSON report ---
+            if [ "${report_format}" = "json" ] || [ "${report_format}" = "both" ]; then
+                {
+                    echo "{" 
+                    echo "  \"start_time\": \"$(_json_escape "${__audit_start_time}")\","
+                    echo "  \"end_time\": \"$(_json_escape "${__audit_end_time}")\","
+                    echo "  \"mode\": \"$(_json_escape "${mode}")\","
+                    echo "  \"status\": \"$(_json_escape "${__audit_status}")\","
+                    echo "  \"space_kb\": {\"start\": ${start_kb:-0}, \"end\": ${end_kb:-0}, \"freed\": ${freed_kb:-0}},"
+                    echo "  \"removed_snapshots_count\": ${removed_count:-0},"
+                    echo "  \"removed_snapshots\": ["
+
+                    if [ -f "${removed_csv_path}" ] && [ "${removed_count}" -gt 0 ] 2>/dev/null; then
+                        awk -F'\t' '
+                            BEGIN{first=1}
+                            {
+                                conf=$1; id=$2; type=$3; desc=$4;
+                                gsub(/\\/,"\\\\",conf); gsub(/\"/,"\\\"",conf);
+                                gsub(/\\/,"\\\\",type); gsub(/\"/,"\\\"",type);
+                                gsub(/\\/,"\\\\",desc); gsub(/\"/,"\\\"",desc);
+                                if (!first) printf(",\n");
+                                first=0;
+                                printf("    {\"config\": \"%s\", \"id\": %s, \"type\": \"%s\", \"description\": \"%s\"}", conf, id, type, desc);
+                            }
+                            END{ if(!first) printf("\n"); }
+                        ' "${removed_csv_path}" 2>/dev/null || true
+                    fi
+
+                    echo "  ],"
+                    echo "  \"actions\": ["
+
+                    local i
+                    for ((i=0; i<${#__audit_actions[@]}; i++)); do
+                        local esc
+                        esc="$(_json_escape "${__audit_actions[$i]}")"
+                        if [ "$i" -gt 0 ] 2>/dev/null; then
+                            echo ","
+                        fi
+                        printf '    "%s"' "${esc}"
+                    done
+                    echo ""
+                    echo "  ]"
+                    echo "}"
+                } >"${__audit_json}" 2>/dev/null || true
+            fi
+
+            echo ""
+            echo "Audit report saved to: ${__audit_log}"
+            if [ "${report_format}" = "json" ] || [ "${report_format}" = "both" ]; then
+                echo "Audit JSON saved to:   ${__audit_json}"
+            fi
+
+            # Best-effort cleanup (removed snapshot list temp file)
+            rm -f -- "${removed_csv_path}" 2>/dev/null || true
+
+            return 0
+        }
+
+        __znh_cleanup_report_init || true
+
         echo ""
         echo "=============================================="
         echo " Smart Snapper Cleanup"
@@ -7395,10 +7626,11 @@ run_snapper_menu_only() {
         # Uses snapper's CSV output for robust parsing.
         local __snap_sep
         __snap_sep=$'\t'
-        local before_csv after_csv removed_csv
+        local before_csv after_csv removed_csv removed_csv_report
         before_csv="$(mktemp)"
         after_csv="$(mktemp)"
         removed_csv="$(mktemp)"
+        removed_csv_report=""
 
         # Safety: clean up temp files when we exit early.
         __znh_cleanup_snapshot_tmpfiles() {
@@ -7647,16 +7879,24 @@ run_snapper_menu_only() {
 
             if [ "${cleanup_busy}" -eq 1 ] 2>/dev/null; then
                 echo "WARNING: Snapper appears to be busy (background cleanup/timer or another snapper command)."
+                __znh_audit_record "snapper:busy-detected"
                 if [ -t 0 ]; then
                     read -p "Force another cleanup run anyway? [y/N]: " -r ans_busy
                     if [[ ! "${ans_busy:-}" =~ ^[Yy]$ ]]; then
                         echo "Cleanup cancelled (snapper busy)."
+                        __audit_status="cancelled"
+                        __znh_audit_record "cleanup:cancelled:snapper-busy"
                         __znh_cleanup_snapshot_tmpfiles
+                        __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
                         return 0
                     fi
+                    __znh_audit_record "snapper:busy-override:true"
                 else
                     log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while snapper appears busy"
+                    __audit_status="refused"
+                    __znh_audit_record "cleanup:refused:no-tty:snapper-busy"
                     __znh_cleanup_snapshot_tmpfiles
+                    __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
                     return 1
                 fi
             fi
@@ -7664,16 +7904,24 @@ run_snapper_menu_only() {
 
         # If critically low, ask once more before proceeding.
         if [ "${critical_low}" -eq 1 ] 2>/dev/null; then
+            __znh_audit_record "disk:critical-low"
             if [ -t 0 ]; then
                 read -p "Are you ABSOLUTELY sure you want to continue? [y/N]: " -r ans_full
                 if [[ ! "${ans_full:-}" =~ ^[Yy]$ ]]; then
                     echo "Cleanup cancelled (low disk space)."
+                    __audit_status="cancelled"
+                    __znh_audit_record "cleanup:cancelled:critical-low"
                     __znh_cleanup_snapshot_tmpfiles
+                    __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
                     return 1
                 fi
+                __znh_audit_record "critical-low-override:true"
             else
                 log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while free space is critically low"
+                __audit_status="refused"
+                __znh_audit_record "cleanup:refused:no-tty:critical-low"
                 __znh_cleanup_snapshot_tmpfiles
+                __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
                 return 1
             fi
         fi
@@ -7682,9 +7930,13 @@ run_snapper_menu_only() {
         read -p "Proceed with cleanup now? [y/N]: " -r ans
         if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
             echo "Cleanup cancelled."
+            __audit_status="cancelled"
+            __znh_audit_record "cleanup:cancelled:user"
             __znh_cleanup_snapshot_tmpfiles
+            __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
             return 0
         fi
+        __znh_audit_record "cleanup:confirmed:true"
 
         # Smart pre-step: keep snapper configs sane (same spirit as option 5).
         # We only do this when a TTY is available.
@@ -7699,6 +7951,7 @@ run_snapper_menu_only() {
         echo "Analyzing disk usage before cleanup..."
         local start_space end_space freed_kb
         start_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
+        __znh_audit_record "space:start_kb=${start_space:-unknown}"
 
         local conf alg
         for conf in "${configs[@]}"; do
@@ -7730,6 +7983,7 @@ run_snapper_menu_only() {
                         ;;
                 esac
 
+                __znh_audit_record "snapper:cleanup:${conf}:${alg}:start"
                 if command -v timeout >/dev/null 2>&1; then
                     execute_guarded "Snapper cleanup (${conf}): ${alg}" \
                         timeout 180 "${SNAPPER_CMD[@]}" -c "${conf}" cleanup "${alg}" || true
@@ -7737,6 +7991,7 @@ run_snapper_menu_only() {
                     execute_guarded "Snapper cleanup (${conf}): ${alg}" \
                         "${SNAPPER_CMD[@]}" -c "${conf}" cleanup "${alg}" || true
                 fi
+                __znh_audit_record "snapper:cleanup:${conf}:${alg}:done"
             done
         done
 
@@ -8183,7 +8438,9 @@ run_snapper_menu_only() {
             return 0
         }
 
+        __znh_audit_record "deep-scrub:start"
         __znh_system_deep_scrub || true
+        __znh_audit_record "deep-scrub:done"
 
         # Optional: purge old kernel *packages* using openSUSE's official
         # `purge-kernels` (via zypper). This respects:
@@ -8341,7 +8598,9 @@ run_snapper_menu_only() {
             return 0
         }
 
+        __znh_audit_record "kernel-purge:maybe"
         __znh_kernel_purge_old_kernels || true
+        __znh_audit_record "kernel-purge:done"
 
         # Optional: prune old boot menu entry files (BLS/systemd-boot) so the boot
         # menu doesn't fill up with many older kernels.
@@ -8581,7 +8840,9 @@ run_snapper_menu_only() {
             return 0
         }
 
+        __znh_audit_record "boot-entries:cleanup:maybe"
         __znh_prune_old_kernel_boot_entries || true
+        __znh_audit_record "boot-entries:cleanup:done"
 
         # --- SMART: Space tracking end ---
         end_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
@@ -8634,6 +8895,10 @@ run_snapper_menu_only() {
             fi
         fi
 
+        # Preserve removed snapshot list for audit report (cleanup tmpfiles below will delete removed_csv).
+        removed_csv_report="$(mktemp)"
+        cp -f -- "${removed_csv}" "${removed_csv_report}" 2>/dev/null || true
+
         # Cleanup temp files
         __znh_cleanup_snapshot_tmpfiles
 
@@ -8651,6 +8916,9 @@ run_snapper_menu_only() {
         else
             echo "NOTE: No net free-space reclaimed (already clean or snapshots too young)."
         fi
+
+        __audit_status="completed"
+        __znh_cleanup_report_write_final "${start_space:-}" "${end_space:-}" "${freed_kb:-0}" "${removed_csv_report:-${removed_csv}}" "${removed_count:-0}" || true
 
         echo ""
         echo "Current filesystem usage:"
@@ -8684,8 +8952,117 @@ run_snapper_menu_only() {
         local action="${1:-enable}"
         local units=(snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer)
 
+        # --- Professional Edition: system health score (0-100) ---
+        local __hs_score=100
+        local -a __hs_issues=()
+
+        __znh_hs_add_issue() {
+            local penalty="$1" msg="$2"
+            if ! [[ "${penalty}" =~ ^[0-9]+$ ]]; then
+                penalty=0
+            fi
+            __hs_score=$((__hs_score - penalty))
+            if [ "${__hs_score}" -lt 0 ] 2>/dev/null; then
+                __hs_score=0
+            fi
+            __hs_issues+=("${msg}")
+        }
+
+        __znh_hs_unit_active_check() {
+            # Args: unit penalty label
+            local unit="$1" penalty="$2" label="$3"
+
+            # If unit file is missing, don't hard-fail; just report.
+            if ! __znh_unit_file_exists_system "${unit}"; then
+                __znh_hs_add_issue 0 "${label}: timer not found (${unit})"
+                return 0
+            fi
+
+            if ! systemctl is-active --quiet "${unit}" 2>/dev/null; then
+                __znh_hs_add_issue "${penalty}" "${label}: inactive (${unit})"
+            fi
+
+            return 0
+        }
+
+        __znh_hs_snapper_config_check() {
+            # Best-effort: detect dangerous snapper retention values.
+            # IMPORTANT: only check active snapper configs (ignore backup files).
+            if [ ! -d /etc/snapper/configs ]; then
+                return 0
+            fi
+
+            local conf f
+            while read -r conf; do
+                [ -n "${conf}" ] || continue
+                f="/etc/snapper/configs/${conf}"
+                [ -f "${f}" ] || continue
+
+                # NUMBER_LIMIT can be "50" or "2-50". We look at upper bound.
+                local nl upper
+                nl=$(grep -E '^NUMBER_LIMIT=' "${f}" 2>/dev/null | head -n 1 | cut -d'"' -f2)
+                if [ -n "${nl:-}" ]; then
+                    upper="${nl##*-}"
+                    if [[ "${upper}" =~ ^[0-9]+$ ]] && [ "${upper}" -gt 20 ] 2>/dev/null; then
+                        __znh_hs_add_issue 20 "Dangerous NUMBER_LIMIT upper bound (>20) in ${conf}: ${nl}"
+                    fi
+                fi
+
+                # Timeline disabled in config while automation exists -> warn.
+                if grep -q '^TIMELINE_CREATE="no"' "${f}" 2>/dev/null; then
+                    __znh_hs_add_issue 10 "TIMELINE_CREATE is disabled in ${conf}"
+                fi
+            done < <(__znh_snapper_list_config_names 2>/dev/null || printf '%s\n' root)
+
+            return 0
+        }
+
+        __znh_hs_compute_and_print() {
+            local title="$1"
+
+            __hs_score=100
+            __hs_issues=()
+
+            # Snapper timers (core)
+            __znh_hs_unit_active_check snapper-cleanup.timer 20 "Snapper cleanup"
+            __znh_hs_unit_active_check snapper-timeline.timer 20 "Snapper timeline"
+            __znh_hs_unit_active_check snapper-boot.timer 10 "Snapper boot"
+
+            # Btrfs maintenance (optional)
+            __znh_hs_unit_active_check btrfs-scrub.timer 10 "Btrfs scrub"
+            __znh_hs_unit_active_check btrfs-balance.timer 10 "Btrfs balance"
+            __znh_hs_unit_active_check btrfs-trim.timer 5 "Btrfs trim"
+
+            # SSD health (trim)
+            __znh_hs_unit_active_check fstrim.timer 10 "SSD trim"
+
+            __znh_hs_snapper_config_check
+
+            echo ""
+            echo "=============================================="
+            echo " System Health Score: ${title}"
+            echo "=============================================="
+            echo "Score: ${__hs_score}/100"
+            if [ "${#__hs_issues[@]}" -gt 0 ] 2>/dev/null; then
+                echo "Issues detected:"
+                local it
+                for it in "${__hs_issues[@]}"; do
+                    echo "  - ${it}"
+                done
+            else
+                echo "No obvious issues detected."
+            fi
+
+            return 0
+        }
+
         echo ""
         echo "Snapper timer management (${action})"
+
+        local pre_score
+        pre_score=0
+        __znh_hs_compute_and_print "before (${action})" || true
+        pre_score="${__hs_score}"
 
         # 1) systemd unit management (self-healing)
         local u
@@ -8903,6 +9280,15 @@ run_snapper_menu_only() {
         echo ""
         echo "Current trim timers (if any):"
         systemctl --no-pager list-timers 'fstrim.timer' 2>/dev/null || true
+
+        local post_score
+        post_score=0
+        __znh_hs_compute_and_print "after (${action})" || true
+        post_score="${__hs_score}"
+
+        echo ""
+        echo "Health score delta: ${pre_score}/100 -> ${post_score}/100"
+
         return 0
     }
 

@@ -332,6 +332,10 @@ Key options include:
     suggesting a btrfs balance command (it does not run balance automatically).
 
 - **System Deep Scrub (Option 4 extras: caches, logs, apps)**
+  - **Audit reports:** Option 4 can write an additional “what happened” report under
+    `CLEANUP_REPORT_DIR` so you can review what was deleted later.
+    - `CLEANUP_REPORT_ENABLED` / `CLEANUP_REPORT_DIR` / `CLEANUP_REPORT_FORMAT` /
+      `CLEANUP_REPORT_MAX_FILES`
   - `ZYPPER_CACHE_CLEAN_ENABLED` / `ZYPPER_CACHE_CLEAN_CONFIRM` – optionally run
     `zypper clean --all` after Snapper cleanup to clear cached RPMs/metadata.
   - `JOURNAL_VACUUM_ENABLED` / `JOURNAL_VACUUM_DAYS` / `JOURNAL_VACUUM_SIZE_MB` /
@@ -349,6 +353,8 @@ Key options include:
     desktop user. When days is set, only removes files not accessed recently.
 
 - **System Health Automator (Option 5 extras: btrfs maintenance + SSD health)**
+  - **Health Score diagnostics:** Option 5 prints a best-effort “System Health Score” (0–100)
+    before and after applying changes, listing any detected issues.
   - `BTRFS_MAINTENANCE_TIMERS_ENABLED` / `BTRFS_MAINTENANCE_TIMERS_CONFIRM` – when Snapper
     AUTO enable is used, optionally enable btrfs maintenance timers if available
     (scrub/balance/trim/defrag), to reduce long-term btrfs “metadata full” issues.
