@@ -315,6 +315,21 @@ Key options include:
       in `/etc/snapper/configs/*` so the timers actually create snapshots.
     - If `SNAP_RETENTION_OPTIMIZER_ENABLED=true`, apply the configured retention caps
       (only lowers; never increases) before cleanup runs.
+  - **Before/after reporting:** Snapper menu cleanup prints a compact snapshot list
+    *before* and *after* the cleanup, and highlights snapshots that were removed.
+    Kernel purge and boot-entry pruning also show KEEP/REMOVE plans in color when
+    run interactively.
+
+- **Snapper cleanup Deep Clean (Emergency Space Recovery)**
+  - `SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED` – when `true`, Snapper menu cleanup can run an
+    extra “broken snapshot hunter” step to find and delete snapshots whose descriptions
+    match a keyword regex (best‑effort).
+  - `SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX` – regex used to match descriptions (default:
+    `aborted|failed`).
+  - `SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM` – ask once before deleting anything (default:
+    `true`).
+  - When btrfs is available and cleanup reclaimed >~1GB, the helper prints a **tip**
+    suggesting a btrfs balance command (it does not run balance automatically).
 
 - **Boot menu hygiene (auto-clean old kernel entries)**
   - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
@@ -1180,6 +1195,7 @@ systemctl status zypper-autodownload.service
   - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
   - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
   - 🧠 **IMPROVED:** Snapper menu "Full Cleanup" now also does the same smart config sync + retention-cap tuning used by the AUTO timers option (best-effort, interactive-only).
+  - 🧯 **NEW:** optional Snapper cleanup Deep Clean step (broken snapshot hunter) + btrfs balance tip for emergency space recovery.
   - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
   - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.

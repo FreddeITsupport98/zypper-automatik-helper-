@@ -906,6 +906,29 @@ SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED=true
 SNAP_CLEANUP_CRITICAL_FREE_MB=300
 
 # ---------------------------------------------------------------------
+# Snapper cleanup: Deep Clean (emergency space recovery)
+# ---------------------------------------------------------------------
+
+# SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED
+# When true, Snapper "Full Cleanup" (menu option 4) can also run an extra
+# emergency step to hunt for and delete obviously broken/aborted snapshots.
+#
+# Safety notes:
+# - This step is interactive-only (requires a TTY) unless you disable confirmation.
+# - It uses a keyword regex match against snapshot descriptions.
+# - Default: false (disabled).
+SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED=false
+
+# SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX
+# Case-insensitive ERE regex used to detect junk snapshots by description.
+# Default: aborted|failed
+SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX="aborted|failed"
+
+# SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM
+# When true (default), ask once before deleting any snapshots found by the hunter.
+SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM=true
+
+# ---------------------------------------------------------------------
 # Boot menu hygiene: auto-clean old kernel entries (systemd-boot / BLS)
 # ---------------------------------------------------------------------
 
@@ -1313,6 +1336,11 @@ EOF
     validate_bool_flag SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED true
     validate_nonneg_int_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300
 
+    # Snapper cleanup Deep Clean (broken snapshot hunter)
+    validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED false
+    SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX="${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
+    validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM true
+
     # Boot entry cleanup (boot menu hygiene)
     validate_bool_flag BOOT_ENTRY_CLEANUP_ENABLED true
     validate_nonneg_int_optional BOOT_ENTRY_CLEANUP_KEEP_LATEST 2
@@ -1367,6 +1395,9 @@ EOF
     log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}"
     log_debug "  SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED=${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}"
     log_debug "  SNAP_CLEANUP_CRITICAL_FREE_MB=${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
+    log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED=${SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED:-false}"
+    log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX=${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
+    log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM=${SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM:-true}"
     log_debug "  BOOT_ENTRY_CLEANUP_ENABLED=${BOOT_ENTRY_CLEANUP_ENABLED:-true}"
     log_debug "  BOOT_ENTRY_CLEANUP_KEEP_LATEST=${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}"
     log_debug "  BOOT_ENTRY_CLEANUP_MODE=${BOOT_ENTRY_CLEANUP_MODE:-backup}"
@@ -1441,6 +1472,11 @@ EOF
     # Snapper cleanup safety knobs
     _mark_missing_key "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED"
     _mark_missing_key "SNAP_CLEANUP_CRITICAL_FREE_MB"
+
+    # Snapper cleanup Deep Clean (broken snapshot hunter)
+    _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED"
+    _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX"
+    _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM"
 
     # Boot entry cleanup (boot menu hygiene)
     _mark_missing_key "BOOT_ENTRY_CLEANUP_ENABLED"
@@ -1532,6 +1568,15 @@ EOF
                     ;;
                 SNAP_CLEANUP_CRITICAL_FREE_MB)
                     log_info "  - SNAP_CLEANUP_CRITICAL_FREE_MB: minimum recommended free space on / before running snapper cleanup (btrfs metadata safety)."
+                    ;;
+                SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED)
+                    log_info "  - SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED: enables an optional Deep Clean step in Snapper menu cleanup to hunt for and delete obviously aborted/failed snapshots by description."
+                    ;;
+                SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX)
+                    log_info "  - SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX: regex used to detect junk snapshots in the Deep Clean step (default: aborted|failed)."
+                    ;;
+                SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM)
+                    log_info "  - SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM: when true, asks once before deleting snapshots found by the Deep Clean hunter."
                     ;;
                 BOOT_ENTRY_CLEANUP_ENABLED)
                     log_info "  - BOOT_ENTRY_CLEANUP_ENABLED: when true, snapper cleanup also prunes old kernel boot-menu entry files (BLS) to reduce clutter." 
@@ -1641,6 +1686,15 @@ EOF
                     ;;
                 SNAP_CLEANUP_CRITICAL_FREE_MB)
                     SNAP_CLEANUP_CRITICAL_FREE_MB=300
+                    ;;
+                SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED)
+                    SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED="false"
+                    ;;
+                SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX)
+                    SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX="aborted|failed"
+                    ;;
+                SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM)
+                    SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM="true"
                     ;;
                 BOOT_ENTRY_CLEANUP_ENABLED)
                     BOOT_ENTRY_CLEANUP_ENABLED="true"
@@ -7000,6 +7054,7 @@ run_snapper_menu_only() {
         # --- SAFETY 2: Critical free space check ---
         # Deleting btrfs snapshots can require metadata headroom.
         local free_kb critical_kb critical_mb
+        local critical_low=0
         free_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
         critical_mb="${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
         if ! [[ "${critical_mb}" =~ ^[0-9]+$ ]]; then
@@ -7008,6 +7063,7 @@ run_snapper_menu_only() {
         critical_kb=$((critical_mb * 1024))
 
         if [[ "${free_kb:-}" =~ ^[0-9]+$ ]] && [ "${free_kb}" -lt "${critical_kb}" ] 2>/dev/null; then
+            critical_low=1
             echo "CRITICAL WARNING: Disk is extremely full (<${critical_mb}MB free)."
             echo "Deleting btrfs snapshots may require free space for metadata and can hang the system."
             if [ -t 0 ]; then
@@ -7029,20 +7085,6 @@ run_snapper_menu_only() {
             return 0
         fi
 
-        # Smart pre-step: keep snapper configs sane (same spirit as option 5).
-        # We only do this when a TTY is available.
-        if [ -t 0 ]; then
-            __znh_snapper_optimize_configs cleanup || true
-        else
-            log_info "[snapper][cleanup] No TTY; skipping snapper config self-heal"
-        fi
-
-        # --- SMART: Space tracking start ---
-        echo ""
-        echo "Analyzing disk usage before cleanup..."
-        local start_space end_space freed_kb
-        start_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
-
         # Priority order (safest first): empty-pre-post -> timeline -> number
         local algs=(empty-pre-post timeline number)
         if [ "${mode}" != "all" ]; then
@@ -7060,6 +7102,107 @@ run_snapper_menu_only() {
         if [ "${#configs[@]}" -eq 0 ] 2>/dev/null; then
             configs=(root)
         fi
+
+        # Smart pre-step: keep snapper configs sane (same spirit as option 5).
+        # We only do this when a TTY is available.
+        if [ -t 0 ]; then
+            __znh_snapper_optimize_configs cleanup || true
+        else
+            log_info "[snapper][cleanup] No TTY; skipping snapper config self-heal"
+        fi
+
+        # Snapshot inventory: show BEFORE/AFTER + removed IDs (best-effort).
+        # Uses snapper's CSV output for robust parsing.
+        local __snap_sep
+        __snap_sep=$'\t'
+        local before_csv after_csv removed_csv
+        before_csv="$(mktemp)"
+        after_csv="$(mktemp)"
+        removed_csv="$(mktemp)"
+
+        __znh_snapper_dump_snapshot_csv() {
+            local out rc conf line
+            : >"$1"
+
+            for conf in "${configs[@]}"; do
+                out=""
+                rc=0
+                if command -v timeout >/dev/null 2>&1; then
+                    out=$(timeout 25 "${SNAPPER_CMD[@]}" --csvout --separator "${__snap_sep}" --no-headers -c "${conf}" list --columns number,type,description 2>/dev/null)
+                    rc=$?
+                else
+                    out=$("${SNAPPER_CMD[@]}" --csvout --separator "${__snap_sep}" --no-headers -c "${conf}" list --columns number,type,description 2>/dev/null)
+                    rc=$?
+                fi
+
+                if [ "${rc}" -ne 0 ] 2>/dev/null || [ -z "${out:-}" ]; then
+                    continue
+                fi
+
+                # Format:
+                #   conf<TAB>id<TAB>type<TAB>description
+                while IFS=$'\t' read -r n t d_rest; do
+                    [ -n "${n:-}" ] || continue
+                    if [[ "${n}" =~ ^[0-9]+$ ]]; then
+                        printf '%s\t%s\t%s\t%s\n' "${conf}" "${n}" "${t:-}" "${d_rest:-}" >>"$1"
+                    fi
+                done <<<"${out}"
+            done
+
+            return 0
+        }
+
+        __znh_print_snapper_snapshot_list() {
+            # Usage: __znh_print_snapper_snapshot_list <title> <csv_file> [label] [label_color]
+            # Shows up to the last 20 snapshots per config.
+            local title="$1" csv_file="$2" label="${3:-}" label_color="${4:-}"
+            local limit_per_cfg=20
+
+            echo ""
+            if [ -n "${title}" ]; then
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b%s%b\n" "${C_CYAN}" "${title}" "${C_RESET}"
+                else
+                    echo "${title}"
+                fi
+            fi
+
+            local conf
+            for conf in "${configs[@]}"; do
+                local total
+                total=$(awk -F'\t' -v c="${conf}" '$1==c {n++} END{print n+0}' "${csv_file}" 2>/dev/null)
+
+                echo "- Config: ${conf} (snapshots: ${total})"
+
+                # Print last N snapshots by number
+                awk -F'\t' -v c="${conf}" '$1==c {print $0}' "${csv_file}" 2>/dev/null \
+                    | sort -t $'\t' -k2,2n \
+                    | tail -n "${limit_per_cfg}" \
+                    | while IFS=$'\t' read -r _c _n _t _d; do
+                        if [ -n "${label}" ]; then
+                            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null && [ -n "${label_color}" ]; then
+                                printf '    %b[%s]%b #%s [%s] %s\n' "${label_color}" "${label}" "${C_RESET}" "${_n}" "${_t}" "${_d}"
+                            else
+                                printf '    [%s] #%s [%s] %s\n' "${label}" "${_n}" "${_t}" "${_d}"
+                            fi
+                        else
+                            printf '    #%s [%s] %s\n' "${_n}" "${_t}" "${_d}"
+                        fi
+                    done
+            done
+
+            return 0
+        }
+
+        # Capture BEFORE snapshot state
+        __znh_snapper_dump_snapshot_csv "${before_csv}" || true
+        __znh_print_snapper_snapshot_list "Snapshots BEFORE cleanup (showing last 20 per config)" "${before_csv}" "BEFORE" "${C_CYAN}" || true
+
+        # --- SMART: Space tracking start ---
+        echo ""
+        echo "Analyzing disk usage before cleanup..."
+        local start_space end_space freed_kb
+        start_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
 
         local conf alg
         for conf in "${configs[@]}"; do
@@ -7101,6 +7244,99 @@ run_snapper_menu_only() {
             done
         done
 
+        # Optional Deep Clean: hunt for obviously aborted/failed snapshots that may
+        # not be removed by standard algorithms (best-effort emergency recovery).
+        __znh_snapper_broken_snapshot_hunter() {
+            # Run if enabled OR if disk is in critical-low mode.
+            if [ "${SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED:-false}" != "true" ] && [ "${critical_low:-0}" -ne 1 ] 2>/dev/null; then
+                return 0
+            fi
+
+            if [ ! -t 0 ] && [ "${SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM:-true}" = "true" ]; then
+                log_warn "[snapper][deep-clean] No TTY; skipping broken snapshot hunter while confirmation is required"
+                return 0
+            fi
+
+            local rx
+            rx="${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
+            if [ -z "${rx}" ]; then
+                rx="aborted|failed"
+            fi
+
+            echo ""
+            echo "== Deep Clean (broken snapshot hunter) =="
+            echo "This will scan snapshot descriptions for keywords (regex): ${rx}"
+            echo "It will only consider snapshot types: single / pre"
+
+            if [ "${SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM:-true}" = "true" ] && [ -t 0 ]; then
+                local ans_dc
+                if [ "${critical_low:-0}" -eq 1 ] 2>/dev/null; then
+                    read -p "Disk is critical-low. Run Deep Clean snapshot hunter now? [Y/n]: " -r ans_dc
+                    if [[ "${ans_dc:-y}" =~ ^[Nn]$ ]]; then
+                        echo "Skipping Deep Clean."
+                        return 0
+                    fi
+                else
+                    read -p "Run Deep Clean snapshot hunter now? [y/N]: " -r ans_dc
+                    if [[ ! "${ans_dc:-}" =~ ^[Yy]$ ]]; then
+                        echo "Skipping Deep Clean."
+                        return 0
+                    fi
+                fi
+            fi
+
+            local any_found=0
+            local conf out ids
+            for conf in "${configs[@]}"; do
+                out=""
+                if command -v timeout >/dev/null 2>&1; then
+                    out=$(timeout 25 "${SNAPPER_CMD[@]}" --csvout --separator "${__snap_sep}" --no-headers -c "${conf}" list --columns number,type,description 2>/dev/null || true)
+                else
+                    out=$("${SNAPPER_CMD[@]}" --csvout --separator "${__snap_sep}" --no-headers -c "${conf}" list --columns number,type,description 2>/dev/null || true)
+                fi
+
+                if [ -z "${out:-}" ]; then
+                    continue
+                fi
+
+                ids=$(printf '%s\n' "${out}" \
+                    | awk -F'\t' -v rx="${rx}" '
+                        BEGIN {IGNORECASE=1}
+                        {
+                            n=$1; t=$2; d=$3;
+                            gsub(/^[[:space:]]+|[[:space:]]+$/, "", n);
+                            gsub(/^[[:space:]]+|[[:space:]]+$/, "", t);
+                            gsub(/^[[:space:]]+|[[:space:]]+$/, "", d);
+                            if (n ~ /^[0-9]+$/ && n != "0" && (t=="single" || t=="pre") && d ~ rx) {
+                                print n
+                            }
+                        }
+                    ' | sort -uV | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+                if [ -n "${ids:-}" ]; then
+                    any_found=1
+                    if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                        printf "%b[deep-clean]%b %s: found potential junk snapshot IDs: %b%s%b\n" "${C_YELLOW}" "${C_RESET}" "${conf}" "${C_RED}" "${ids}" "${C_RESET}"
+                    else
+                        echo "[deep-clean] ${conf}: found potential junk snapshot IDs: ${ids}"
+                    fi
+                    if command -v timeout >/dev/null 2>&1; then
+                        execute_guarded "Delete suspected junk snapshots (${conf})" timeout 300 "${SNAPPER_CMD[@]}" -c "${conf}" delete ${ids} || true
+                    else
+                        execute_guarded "Delete suspected junk snapshots (${conf})" "${SNAPPER_CMD[@]}" -c "${conf}" delete ${ids} || true
+                    fi
+                fi
+            done
+
+            if [ "${any_found}" -eq 0 ] 2>/dev/null; then
+                echo "[deep-clean] No obvious broken snapshots found."
+            fi
+
+            return 0
+        }
+
+        __znh_snapper_broken_snapshot_hunter || true
+
         # Optional: purge old kernel *packages* using openSUSE's official
         # `purge-kernels` (via zypper). This respects:
         #   /etc/zypp/zypp.conf:multiversion.kernels
@@ -7128,15 +7364,6 @@ run_snapper_menu_only() {
                 policy_line=$(grep -E '^[[:space:]]*multiversion\.kernels' /etc/zypp/zypp.conf 2>/dev/null | tail -n 1 | tr -d '\r' || true)
             fi
 
-            local -a zcmd
-            zcmd=(zypper -n purge-kernels)
-            if [ "${KERNEL_PURGE_DRY_RUN:-false}" = "true" ]; then
-                zcmd+=(--dry-run)
-            fi
-            if [ "${KERNEL_PURGE_DETAILS:-false}" = "true" ]; then
-                zcmd+=(--details)
-            fi
-
             local mode timeout_s
             mode="${KERNEL_PURGE_MODE:-auto}"
             timeout_s="${KERNEL_PURGE_TIMEOUT_SECONDS:-900}"
@@ -7152,7 +7379,62 @@ run_snapper_menu_only() {
                 echo "Policy (from /etc/zypp/zypp.conf): (multiversion.kernels not found; zypper default will apply)"
             fi
             echo "Mode: ${mode}"
-            echo "Command: ${zcmd[*]}"
+
+            __znh_kernel_purge_preview() {
+                local out rc
+                out=""
+                rc=0
+
+                if command -v timeout >/dev/null 2>&1; then
+                    out=$(timeout "${timeout_s}" zypper -n purge-kernels --dry-run --details 2>&1)
+                    rc=$?
+                else
+                    out=$(zypper -n purge-kernels --dry-run --details 2>&1)
+                    rc=$?
+                fi
+
+                echo ""
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b%s%b\n" "${C_CYAN}" "[kernel-purge] Preview (dry-run):" "${C_RESET}"
+                else
+                    echo "[kernel-purge] Preview (dry-run):"
+                fi
+
+                if [ "${rc}" -ne 0 ] 2>/dev/null; then
+                    printf '%s\n' "$out"
+                    return 1
+                fi
+
+                # Highlight key lines for readability.
+                while IFS= read -r line; do
+                    if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                        if printf '%s\n' "$line" | grep -qi "nothing to do"; then
+                            printf "%b%s%b\n" "${C_GREEN}" "$line" "${C_RESET}"
+                        elif printf '%s\n' "$line" | grep -Eq "REMOV|remove"; then
+                            printf "%b%s%b\n" "${C_RED}" "$line" "${C_RESET}"
+                        elif printf '%s\n' "$line" | grep -Eq "^Configuration:|^Running kernel"; then
+                            printf "%b%s%b\n" "${C_YELLOW}" "$line" "${C_RESET}"
+                        else
+                            printf '%s\n' "$line"
+                        fi
+                    else
+                        printf '%s\n' "$line"
+                    fi
+                done <<<"${out}"
+
+                return 0
+            }
+
+            # Always show a preview in interactive runs so the user can see what
+            # would be removed/kept.
+            if [ -t 0 ]; then
+                __znh_kernel_purge_preview || true
+            fi
+
+            if [ "${KERNEL_PURGE_DRY_RUN:-false}" = "true" ]; then
+                echo "[kernel-purge] KERNEL_PURGE_DRY_RUN=true: preview only (no changes)."
+                return 0
+            fi
 
             if [ "${KERNEL_PURGE_CONFIRM:-true}" = "true" ]; then
                 if [ -t 0 ]; then
@@ -7170,9 +7452,9 @@ run_snapper_menu_only() {
             case "${mode}" in
                 zypper)
                     if command -v timeout >/dev/null 2>&1; then
-                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" "${zcmd[@]}" || true
+                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" zypper -n purge-kernels || true
                     else
-                        execute_guarded "Kernel purge (zypper purge-kernels)" "${zcmd[@]}" || true
+                        execute_guarded "Kernel purge (zypper purge-kernels)" zypper -n purge-kernels || true
                     fi
                     ;;
                 systemd)
@@ -7187,21 +7469,26 @@ run_snapper_menu_only() {
                     else
                         log_warn "[kernel-purge] purge-kernels.service not found; falling back to direct zypper purge-kernels"
                         if command -v timeout >/dev/null 2>&1; then
-                            execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" "${zcmd[@]}" || true
+                            execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" zypper -n purge-kernels || true
                         else
-                            execute_guarded "Kernel purge (zypper purge-kernels)" "${zcmd[@]}" || true
+                            execute_guarded "Kernel purge (zypper purge-kernels)" zypper -n purge-kernels || true
                         fi
                     fi
                     ;;
                 auto|*)
                     # Prefer direct zypper invocation; it's the most portable.
                     if command -v timeout >/dev/null 2>&1; then
-                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" "${zcmd[@]}" || true
+                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" zypper -n purge-kernels || true
                     else
-                        execute_guarded "Kernel purge (zypper purge-kernels)" "${zcmd[@]}" || true
+                        execute_guarded "Kernel purge (zypper purge-kernels)" zypper -n purge-kernels || true
                     fi
                     ;;
             esac
+
+            # Show AFTER state (dry-run should now say Nothing to do)
+            if [ -t 0 ]; then
+                __znh_kernel_purge_preview || true
+            fi
 
             return 0
         }
@@ -7256,24 +7543,6 @@ run_snapper_menu_only() {
 
             log_info "[boot-entry-clean] entries_dir=${entries_dir} running=${running_kver:-unknown} keep_latest=${keep_n} keep_list='${keep_list}'"
 
-            if [ "${BOOT_ENTRY_CLEANUP_CONFIRM:-true}" = "true" ]; then
-                if [ -t 0 ]; then
-                    echo ""
-                    echo "Boot menu cleanup (BLS entries) will keep:"
-                    echo "  - running kernel: ${running_kver:-unknown}"
-                    echo "  - latest ${keep_n} installed kernels: ${keep_list:-<none>}"
-                    echo "Mode: ${BOOT_ENTRY_CLEANUP_MODE:-backup}"
-                    read -p "Also prune older boot entry files now? [y/N]: " -r ans_be
-                    if [[ ! "${ans_be:-}" =~ ^[Yy]$ ]]; then
-                        echo "Skipping boot menu cleanup."
-                        return 0
-                    fi
-                else
-                    log_warn "[boot-entry-clean] Refusing to prune boot entries without a TTY while BOOT_ENTRY_CLEANUP_CONFIRM=true"
-                    return 0
-                fi
-            fi
-
             local mode
             mode="${BOOT_ENTRY_CLEANUP_MODE:-backup}"
             case "${mode}" in
@@ -7286,6 +7555,9 @@ run_snapper_menu_only() {
             backup_dir="/var/backups/zypper-auto/boot-entries-${ts}"
 
             local removed=0 kept=0 unknown=0
+
+            # Build plan first so we can show KEEP/REMOVE before doing anything.
+            local -a plan_keep plan_remove plan_unknown remove_items
 
             __znh_bls_get_linux_path() {
                 # Extract linux/linuxefi path from a BLS entry file (best-effort)
@@ -7336,37 +7608,115 @@ run_snapper_menu_only() {
                 local linux_path kver
                 linux_path=$(__znh_bls_get_linux_path "$f")
                 if [ -z "${linux_path:-}" ]; then
-                    unknown=$((unknown + 1))
+                    plan_unknown+=("$(basename "$f") [unparsed]")
                     continue
                 fi
 
                 kver=$(__znh_kernel_ver_from_linux_path "$linux_path" 2>/dev/null || true)
                 if [ -z "${kver:-}" ]; then
-                    unknown=$((unknown + 1))
+                    plan_unknown+=("$(basename "$f") [kver-unknown]")
                     continue
                 fi
 
                 if [ -n "${running_kver:-}" ] && [ "${kver}" = "${running_kver}" ]; then
-                    kept=$((kept + 1))
+                    plan_keep+=("$(basename "$f") (kver=${kver}) [running]")
                     continue
                 fi
 
                 if [ -n "${keep_list:-}" ] && printf '%s\n' "$keep_list" | tr ' ' '\n' | grep -Fxq "${kver}"; then
-                    kept=$((kept + 1))
+                    plan_keep+=("$(basename "$f") (kver=${kver}) [keep-latest]")
                     continue
                 fi
 
+                plan_remove+=("$(basename "$f") (kver=${kver})")
+                remove_items+=("${f}|${kver}")
+            done
+            shopt -u nullglob
+
+            echo ""
+            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                printf "%b%s%b\n" "${C_CYAN}" "Boot entry cleanup plan:" "${C_RESET}"
+            else
+                echo "Boot entry cleanup plan:"
+            fi
+            echo "  - Entries dir: ${entries_dir}"
+            echo "  - Mode: ${mode}"
+            echo "  - Will keep: ${#plan_keep[@]}"
+            echo "  - Will remove: ${#plan_remove[@]}"
+            echo "  - Unknown/unparsed: ${#plan_unknown[@]}"
+
+            local item
+            if [ "${#plan_keep[@]}" -gt 0 ] 2>/dev/null; then
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%bKEEP%b\n" "${C_GREEN}" "${C_RESET}"
+                else
+                    echo "KEEP"
+                fi
+                for item in "${plan_keep[@]}"; do
+                    printf '  - %s\n' "$item"
+                done
+            fi
+
+            if [ "${#plan_remove[@]}" -gt 0 ] 2>/dev/null; then
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%bREMOVE%b\n" "${C_RED}" "${C_RESET}"
+                else
+                    echo "REMOVE"
+                fi
+                for item in "${plan_remove[@]}"; do
+                    printf '  - %s\n' "$item"
+                done
+            fi
+
+            if [ "${#plan_unknown[@]}" -gt 0 ] 2>/dev/null; then
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%bUNKNOWN%b\n" "${C_YELLOW}" "${C_RESET}"
+                else
+                    echo "UNKNOWN"
+                fi
+                for item in "${plan_unknown[@]}"; do
+                    printf '  - %s\n' "$item"
+                done
+            fi
+
+            if [ "${BOOT_ENTRY_CLEANUP_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ]; then
+                    echo ""
+                    echo "Boot menu cleanup (BLS entries) will keep:"
+                    echo "  - running kernel: ${running_kver:-unknown}"
+                    echo "  - latest ${keep_n} installed kernels: ${keep_list:-<none>}"
+                    echo "Mode: ${mode}"
+                    read -p "Also prune older boot entry files now? [y/N]: " -r ans_be
+                    if [[ ! "${ans_be:-}" =~ ^[Yy]$ ]]; then
+                        echo "Skipping boot menu cleanup."
+                        return 0
+                    fi
+                else
+                    log_warn "[boot-entry-clean] Refusing to prune boot entries without a TTY while BOOT_ENTRY_CLEANUP_CONFIRM=true"
+                    return 0
+                fi
+            fi
+
+            # Execute plan
+            local entry
+            for entry in "${remove_items[@]}"; do
+                local path kver
+                path="${entry%%|*}"
+                kver="${entry#*|}"
+
                 if [ "$mode" = "delete" ]; then
-                    log_warn "[boot-entry-clean] Deleting old boot entry: $(basename "$f") (kver=${kver})"
-                    rm -f -- "$f" 2>/dev/null || true
+                    log_warn "[boot-entry-clean] Deleting old boot entry: $(basename "$path") (kver=${kver})"
+                    rm -f -- "$path" 2>/dev/null || true
                 else
                     mkdir -p "$backup_dir" 2>/dev/null || true
-                    log_info "[boot-entry-clean] Moving old boot entry: $(basename "$f") (kver=${kver}) -> ${backup_dir}/"
-                    mv -f -- "$f" "$backup_dir/" 2>/dev/null || true
+                    log_info "[boot-entry-clean] Moving old boot entry: $(basename "$path") (kver=${kver}) -> ${backup_dir}/"
+                    mv -f -- "$path" "$backup_dir/" 2>/dev/null || true
                 fi
                 removed=$((removed + 1))
             done
-            shopt -u nullglob
+
+            kept=${#plan_keep[@]}
+            unknown=${#plan_unknown[@]}
 
             echo ""
             echo "Boot entry cleanup summary:"
@@ -7390,6 +7740,53 @@ run_snapper_menu_only() {
             freed_kb=$((end_space - start_space))
         fi
 
+        # Capture AFTER snapshot state and compute removed items
+        __znh_snapper_dump_snapshot_csv "${after_csv}" || true
+
+        # removed = BEFORE - AFTER
+        awk -F'\t' 'NR==FNR {k=$1"\t"$2; a[k]=$0; next} {k=$1"\t"$2; b[k]=1} END {for (k in a) if (!(k in b)) print a[k]}' \
+            "${before_csv}" "${after_csv}" \
+            | sort -t $'\t' -k1,1 -k2,2n \
+            >"${removed_csv}" 2>/dev/null || true
+
+        echo ""
+        if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+            printf "%b%s%b\n" "${C_CYAN}" "Snapshots AFTER cleanup (showing last 20 per config)" "${C_RESET}"
+        else
+            echo "Snapshots AFTER cleanup (showing last 20 per config)"
+        fi
+        __znh_print_snapper_snapshot_list "" "${after_csv}" "KEEP" "${C_GREEN}" || true
+
+        local removed_count
+        removed_count=$(wc -l <"${removed_csv}" 2>/dev/null | tr -dc '0-9')
+        removed_count="${removed_count:-0}"
+
+        echo ""
+        if [ "${removed_count}" -gt 0 ] 2>/dev/null; then
+            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                printf "%bRemoved snapshots:%b\n" "${C_RED}" "${C_RESET}"
+            else
+                echo "Removed snapshots:"
+            fi
+            while IFS=$'\t' read -r conf n t d; do
+                [ -n "${conf:-}" ] || continue
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "  %b[REMOVE]%b %s #%s [%s] %s\n" "${C_RED}" "${C_RESET}" "${conf}" "${n}" "${t}" "${d}"
+                else
+                    printf "  [REMOVE] %s #%s [%s] %s\n" "${conf}" "${n}" "${t}" "${d}"
+                fi
+            done <"${removed_csv}"
+        else
+            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                printf "%bNo snapshots were removed in this run.%b\n" "${C_GREEN}" "${C_RESET}"
+            else
+                echo "No snapshots were removed in this run."
+            fi
+        fi
+
+        # Cleanup temp files
+        rm -f "${before_csv}" "${after_csv}" "${removed_csv}" 2>/dev/null || true
+
         echo ""
         echo "=============================================="
         echo " Cleanup Summary"
@@ -7409,6 +7806,15 @@ run_snapper_menu_only() {
         echo "Current filesystem usage:"
         if command -v btrfs >/dev/null 2>&1; then
             btrfs filesystem df / 2>/dev/null || df -h / 2>/dev/null || true
+
+            # Tip only (do not run balance automatically): if you reclaimed a lot
+            # of space, btrfs metadata may still be fragmented.
+            if [ "${freed_kb}" -gt 1048576 ] 2>/dev/null; then
+                echo ""
+                echo "TIP: You reclaimed over ~1GB. If the system still feels 'full' due to btrfs metadata, consider:"
+                echo "  sudo btrfs balance start -dusage=5 /"
+                echo "(This can take a long time on slow disks; run it when idle.)"
+            fi
         else
             df -h / 2>/dev/null || true
         fi
@@ -9516,8 +9922,15 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
 elif [[ "${1:-}" == "snapper" ]]; then
     log_info "Snapper tools menu requested"
     shift || true
+    # Snapper submenu is best-effort and can legitimately return non-zero
+    # (safety refusal, snapper/zypper issues, etc.). Disable the global ERR trap
+    # so these are not treated as "critical crashes".
+    trap - ERR
+    set +e
     run_snapper_menu_only "$@"
-    exit $?
+    rc=$?
+    set -e
+    exit ${rc}
 elif [[ "${1:-}" == "debug" || "${1:-}" == "--debug-menu" ]]; then
     log_info "Interactive debug/diagnostics menu requested"
     run_debug_menu_only
