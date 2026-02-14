@@ -304,6 +304,22 @@ Key options include:
     - Setting a cap higher effectively disables capping for that key.
     - `SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0` means “keep no yearly snapshots”.
 
+- **Snapper cleanup safety**
+  - `SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED` – when `true` (default), Snapper cleanup
+    warns if background cleanup appears to already be running.
+  - `SNAP_CLEANUP_CRITICAL_FREE_MB` – if free space on `/` is below this threshold,
+    the helper will warn and require confirmation before running Snapper cleanup.
+
+- **Boot menu hygiene (auto-clean old kernel entries)**
+  - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
+    old kernel *boot menu entry files* (BLS entries) so the boot menu stays clean.
+  - `BOOT_ENTRY_CLEANUP_KEEP_LATEST` – keep the latest N installed kernels in the menu
+    (the running kernel is always kept).
+  - `BOOT_ENTRY_CLEANUP_MODE` – `backup` (default; moves old entries to a backup dir)
+    or `delete` (permanent; not recommended).
+  - `BOOT_ENTRY_CLEANUP_ENTRIES_DIR` – optional override of the BLS entries directory.
+  - `BOOT_ENTRY_CLEANUP_CONFIRM` – ask once for confirmation before pruning entries.
+
 - **Caching / snooze**
   - `CACHE_EXPIRY_MINUTES` – how long a cached `zypper dup --dry-run` result
     is considered valid before forcing a fresh check.
@@ -1142,6 +1158,7 @@ systemctl status zypper-autodownload.service
   - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to XFCE openers (`exo-open`, `xfce4-open`), `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
   - 🧹 **IMPROVED:** Snapper menu cleanup now runs a full cleanup (`number`, `timeline`, `empty-pre-post`) across all snapper configs (root/home/etc.). Auto-timers now sync Snapper config files so timeline/boot timers actually create snapshots.
   - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
+  - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
   - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
   - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.

@@ -890,6 +890,55 @@ SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY=2
 SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0
 
 # ---------------------------------------------------------------------
+# Snapper cleanup safety
+# ---------------------------------------------------------------------
+
+# SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED
+# When true (default), the Snapper cleanup command checks whether a background
+# snapper cleanup process appears to be running (timer/service) and warns before
+# starting another cleanup.
+SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED=true
+
+# SNAP_CLEANUP_CRITICAL_FREE_MB
+# If free space on / is below this threshold, Snapper cleanup may be risky on
+# btrfs because deleting snapshots requires metadata updates.
+# Default: 300 (MB)
+SNAP_CLEANUP_CRITICAL_FREE_MB=300
+
+# ---------------------------------------------------------------------
+# Boot menu hygiene: auto-clean old kernel entries (systemd-boot / BLS)
+# ---------------------------------------------------------------------
+
+# BOOT_ENTRY_CLEANUP_ENABLED
+# When true (default), Snapper cleanup will also try to prune *boot menu entries*
+# for old kernels by moving old BLS entry files out of the active entries dir.
+# This does NOT delete kernel images; it only reduces clutter in the boot menu.
+BOOT_ENTRY_CLEANUP_ENABLED=true
+
+# BOOT_ENTRY_CLEANUP_KEEP_LATEST
+# How many latest installed kernels to keep in the boot menu (in addition to the
+# currently running kernel, which is always kept). Minimum: 1. Default: 2.
+BOOT_ENTRY_CLEANUP_KEEP_LATEST=2
+
+# BOOT_ENTRY_CLEANUP_MODE
+#   backup - (default) move old entry files into a timestamped backup folder
+#   delete - permanently delete old entry files (not recommended)
+BOOT_ENTRY_CLEANUP_MODE="backup"
+
+# BOOT_ENTRY_CLEANUP_ENTRIES_DIR
+# Optional override for the BLS entries directory. Leave empty for auto-detect.
+# Common locations:
+#   - /boot/loader/entries
+#   - /boot/efi/loader/entries
+#   - /efi/loader/entries
+BOOT_ENTRY_CLEANUP_ENTRIES_DIR=""
+
+# BOOT_ENTRY_CLEANUP_CONFIRM
+# When true (default), boot-entry cleanup asks once for confirmation.
+# When false, it runs automatically after you confirm Snapper cleanup.
+BOOT_ENTRY_CLEANUP_CONFIRM=true
+
+# ---------------------------------------------------------------------
 # Installer log retention
 # ---------------------------------------------------------------------
 
@@ -1205,6 +1254,20 @@ EOF
     validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY 2
     validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY 2
     validate_nonneg_int_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY 0
+
+    # Snapper cleanup safety
+    validate_bool_flag SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED true
+    validate_nonneg_int_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300
+
+    # Boot entry cleanup (boot menu hygiene)
+    validate_bool_flag BOOT_ENTRY_CLEANUP_ENABLED true
+    validate_nonneg_int_optional BOOT_ENTRY_CLEANUP_KEEP_LATEST 2
+    if [ "${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}" -lt 1 ] 2>/dev/null; then
+        BOOT_ENTRY_CLEANUP_KEEP_LATEST=1
+    fi
+    validate_mode BOOT_ENTRY_CLEANUP_MODE backup "backup|delete"
+    BOOT_ENTRY_CLEANUP_ENTRIES_DIR="${BOOT_ENTRY_CLEANUP_ENTRIES_DIR:-}"
+    validate_bool_flag BOOT_ENTRY_CLEANUP_CONFIRM true
     # DASHBOARD_BROWSER is an optional command name; keep empty by default.
     DASHBOARD_BROWSER="${DASHBOARD_BROWSER:-}"
 
@@ -1239,6 +1302,13 @@ EOF
     log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY:-2}"
     log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY:-2}"
     log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}"
+    log_debug "  SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED=${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}"
+    log_debug "  SNAP_CLEANUP_CRITICAL_FREE_MB=${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
+    log_debug "  BOOT_ENTRY_CLEANUP_ENABLED=${BOOT_ENTRY_CLEANUP_ENABLED:-true}"
+    log_debug "  BOOT_ENTRY_CLEANUP_KEEP_LATEST=${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}"
+    log_debug "  BOOT_ENTRY_CLEANUP_MODE=${BOOT_ENTRY_CLEANUP_MODE:-backup}"
+    log_debug "  BOOT_ENTRY_CLEANUP_ENTRIES_DIR=${BOOT_ENTRY_CLEANUP_ENTRIES_DIR:-<auto>}"
+    log_debug "  BOOT_ENTRY_CLEANUP_CONFIRM=${BOOT_ENTRY_CLEANUP_CONFIRM:-true}"
     if [ -n "${WEBHOOK_URL:-}" ]; then
         log_debug "  WEBHOOK_URL=<configured>"
     else
@@ -1298,6 +1368,17 @@ EOF
     _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY"
     _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY"
     _mark_missing_key "SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY"
+
+    # Snapper cleanup safety knobs
+    _mark_missing_key "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED"
+    _mark_missing_key "SNAP_CLEANUP_CRITICAL_FREE_MB"
+
+    # Boot entry cleanup (boot menu hygiene)
+    _mark_missing_key "BOOT_ENTRY_CLEANUP_ENABLED"
+    _mark_missing_key "BOOT_ENTRY_CLEANUP_KEEP_LATEST"
+    _mark_missing_key "BOOT_ENTRY_CLEANUP_MODE"
+    _mark_missing_key "BOOT_ENTRY_CLEANUP_ENTRIES_DIR"
+    _mark_missing_key "BOOT_ENTRY_CLEANUP_CONFIRM"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -1369,6 +1450,27 @@ EOF
                 SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY)
                     log_info "  - SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY: maximum TIMELINE_LIMIT_YEARLY (0 disables yearly retention; only lowers values when enabling snapper timers)."
                     ;;
+                SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED)
+                    log_info "  - SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED: when true, snapper cleanup warns if background cleanup appears to already be running (timer/service/process)."
+                    ;;
+                SNAP_CLEANUP_CRITICAL_FREE_MB)
+                    log_info "  - SNAP_CLEANUP_CRITICAL_FREE_MB: minimum recommended free space on / before running snapper cleanup (btrfs metadata safety)."
+                    ;;
+                BOOT_ENTRY_CLEANUP_ENABLED)
+                    log_info "  - BOOT_ENTRY_CLEANUP_ENABLED: when true, snapper cleanup also prunes old kernel boot-menu entry files (BLS) to reduce clutter." 
+                    ;;
+                BOOT_ENTRY_CLEANUP_KEEP_LATEST)
+                    log_info "  - BOOT_ENTRY_CLEANUP_KEEP_LATEST: number of latest installed kernels to keep in the boot menu (running kernel is always kept)."
+                    ;;
+                BOOT_ENTRY_CLEANUP_MODE)
+                    log_info "  - BOOT_ENTRY_CLEANUP_MODE: backup (move old entries to a backup folder) or delete (permanent; not recommended)."
+                    ;;
+                BOOT_ENTRY_CLEANUP_ENTRIES_DIR)
+                    log_info "  - BOOT_ENTRY_CLEANUP_ENTRIES_DIR: optional override for the BLS entries directory (leave empty for auto-detect)."
+                    ;;
+                BOOT_ENTRY_CLEANUP_CONFIRM)
+                    log_info "  - BOOT_ENTRY_CLEANUP_CONFIRM: when true, asks once for confirmation before pruning boot entries."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -1438,6 +1540,27 @@ EOF
                     ;;
                 SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY)
                     SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0
+                    ;;
+                SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED)
+                    SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED="true"
+                    ;;
+                SNAP_CLEANUP_CRITICAL_FREE_MB)
+                    SNAP_CLEANUP_CRITICAL_FREE_MB=300
+                    ;;
+                BOOT_ENTRY_CLEANUP_ENABLED)
+                    BOOT_ENTRY_CLEANUP_ENABLED="true"
+                    ;;
+                BOOT_ENTRY_CLEANUP_KEEP_LATEST)
+                    BOOT_ENTRY_CLEANUP_KEEP_LATEST=2
+                    ;;
+                BOOT_ENTRY_CLEANUP_MODE)
+                    BOOT_ENTRY_CLEANUP_MODE="backup"
+                    ;;
+                BOOT_ENTRY_CLEANUP_ENTRIES_DIR)
+                    BOOT_ENTRY_CLEANUP_ENTRIES_DIR=""
+                    ;;
+                BOOT_ENTRY_CLEANUP_CONFIRM)
+                    BOOT_ENTRY_CLEANUP_CONFIRM="true"
                     ;;
             esac
         done
@@ -6493,34 +6616,97 @@ run_snapper_menu_only() {
         local mode="${1:-all}"
 
         echo ""
-        echo "About to run COMPREHENSIVE Snapper cleanup."
-        echo "This is best-effort and uses your Snapper retention rules."
+        echo "=============================================="
+        echo " Smart Snapper Cleanup"
+        echo "=============================================="
+
+        echo "About to run Snapper cleanup (best-effort)."
+        echo "This uses your Snapper retention rules (and any caps you configured in /etc/zypper-auto.conf)."
         echo "Algorithms:"
-        echo "  - number         (deletes snapshots exceeding numeric limits)"
-        echo "  - timeline       (deletes old hourly/daily snapshots)"
-        echo "  - empty-pre-post (deletes orphaned 'pre' snapshots without a matching 'post')"
+        echo "  1) empty-pre-post (orphaned pre snapshots)"
+        echo "  2) timeline       (expired hourly/daily snapshots)"
+        echo "  3) number         (enforce numeric limits)"
         echo ""
 
         if [ "${mode}" = "all" ]; then
-            echo "Mode: ALL algorithms"
+            echo "Mode: ALL algorithms (empty-pre-post -> timeline -> number)"
         else
             echo "Mode: single algorithm '${mode}'"
         fi
 
+        # --- SAFETY 1: Concurrency guard ---
+        # Avoid fighting an already-running timer/service/process.
+        local cleanup_busy=0
+        if [ "${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}" = "true" ]; then
+            if systemctl is-active --quiet snapper-cleanup.service 2>/dev/null; then
+                cleanup_busy=1
+            elif pgrep -a -f 'snapper[[:space:]].*cleanup' >/dev/null 2>&1; then
+                cleanup_busy=1
+            elif pgrep -x snapper >/dev/null 2>&1; then
+                # Broader guard: snapper running at all (could be timeline or manual)
+                cleanup_busy=1
+            fi
+
+            if [ "${cleanup_busy}" -eq 1 ] 2>/dev/null; then
+                echo "WARNING: Snapper appears to be busy (background cleanup/timer or another snapper command)."
+                if [ -t 0 ]; then
+                    read -p "Force another cleanup run anyway? [y/N]: " -r ans_busy
+                    if [[ ! "${ans_busy:-}" =~ ^[Yy]$ ]]; then
+                        echo "Cleanup cancelled (snapper busy)."
+                        return 0
+                    fi
+                else
+                    log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while snapper appears busy"
+                    return 1
+                fi
+            fi
+        fi
+
+        # --- SAFETY 2: Critical free space check ---
+        # Deleting btrfs snapshots can require metadata headroom.
+        local free_kb critical_kb critical_mb
+        free_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
+        critical_mb="${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
+        if ! [[ "${critical_mb}" =~ ^[0-9]+$ ]]; then
+            critical_mb=300
+        fi
+        critical_kb=$((critical_mb * 1024))
+
+        if [[ "${free_kb:-}" =~ ^[0-9]+$ ]] && [ "${free_kb}" -lt "${critical_kb}" ] 2>/dev/null; then
+            echo "CRITICAL WARNING: Disk is extremely full (<${critical_mb}MB free)."
+            echo "Deleting btrfs snapshots may require free space for metadata and can hang the system."
+            if [ -t 0 ]; then
+                read -p "Are you ABSOLUTELY sure you want to continue? [y/N]: " -r ans_full
+                if [[ ! "${ans_full:-}" =~ ^[Yy]$ ]]; then
+                    echo "Cleanup cancelled (low disk space)."
+                    return 1
+                fi
+            else
+                log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while free space is critically low"
+                return 1
+            fi
+        fi
+
         echo ""
-        read -p "Proceed? [y/N]: " -r ans
+        read -p "Proceed with cleanup now? [y/N]: " -r ans
         if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
             echo "Cleanup cancelled."
             return 0
         fi
 
-        local algs=(number timeline empty-pre-post)
+        # --- SMART: Space tracking start ---
+        echo ""
+        echo "Analyzing disk usage before cleanup..."
+        local start_space end_space freed_kb
+        start_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
+
+        # Priority order (safest first): empty-pre-post -> timeline -> number
+        local algs=(empty-pre-post timeline number)
         if [ "${mode}" != "all" ]; then
             algs=("${mode}")
         fi
 
         # Prefer to run cleanup for every configured snapper config (root/home/etc.).
-        # This better matches how snapper is actually used on many systems.
         local configs=()
         local cfg
         while read -r cfg; do
@@ -6536,14 +6722,29 @@ run_snapper_menu_only() {
         for conf in "${configs[@]}"; do
             echo ""
             echo "== Snapper config: ${conf} =="
+
+            local step=0
             for alg in "${algs[@]}"; do
+                step=$((step + 1))
                 case "${alg}" in
-                    number|timeline|empty-pre-post)
+                    empty-pre-post|timeline|number)
                         :
                         ;;
                     *)
                         echo "Skipping unknown cleanup algorithm: ${alg}"
                         continue
+                        ;;
+                esac
+
+                case "${alg}" in
+                    empty-pre-post)
+                        echo "${step}. Scanning for orphaned/broken snapshots (empty-pre-post)..."
+                        ;;
+                    timeline)
+                        echo "${step}. Cleaning expired timeline snapshots (timeline)..."
+                        ;;
+                    number)
+                        echo "${step}. Enforcing snapshot limits (number)..."
                         ;;
                 esac
 
@@ -6557,9 +6758,206 @@ run_snapper_menu_only() {
             done
         done
 
+        # Optional: prune old boot menu entry files (BLS/systemd-boot) so the boot
+        # menu doesn't fill up with many older kernels.
+        __znh_prune_old_kernel_boot_entries() {
+            if [ "${BOOT_ENTRY_CLEANUP_ENABLED:-true}" != "true" ]; then
+                return 0
+            fi
+
+            # Detect entries dir
+            local entries_dir
+            entries_dir="${BOOT_ENTRY_CLEANUP_ENTRIES_DIR:-}"
+            if [ -n "${entries_dir}" ] && [ ! -d "${entries_dir}" ]; then
+                log_warn "[boot-entry-clean] Configured BOOT_ENTRY_CLEANUP_ENTRIES_DIR not found: ${entries_dir}"
+                entries_dir=""
+            fi
+
+            if [ -z "${entries_dir}" ]; then
+                for d in /boot/loader/entries /boot/efi/loader/entries /efi/loader/entries; do
+                    if [ -d "$d" ]; then
+                        entries_dir="$d"
+                        break
+                    fi
+                done
+            fi
+
+            if [ -z "${entries_dir}" ]; then
+                log_info "[boot-entry-clean] No BLS entries directory found; skipping boot menu cleanup"
+                return 0
+            fi
+
+            # Determine keep kernels: running kernel + latest N installed kernels.
+            local running_kver keep_n
+            running_kver=$(uname -r 2>/dev/null || true)
+            keep_n="${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}"
+            if ! [[ "${keep_n}" =~ ^[0-9]+$ ]] || [ "${keep_n}" -lt 1 ] 2>/dev/null; then
+                keep_n=1
+            fi
+
+            # Collect installed kernels from module directories.
+            local installed
+            installed=$(ls -1 /lib/modules /usr/lib/modules 2>/dev/null | sort -uV || true)
+
+            local keep_list=""
+            if [ -n "${installed}" ]; then
+                keep_list=$(printf '%s\n' "$installed" | tail -n "${keep_n}" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+            fi
+
+            log_info "[boot-entry-clean] entries_dir=${entries_dir} running=${running_kver:-unknown} keep_latest=${keep_n} keep_list='${keep_list}'"
+
+            if [ "${BOOT_ENTRY_CLEANUP_CONFIRM:-true}" = "true" ] && [ -t 0 ]; then
+                echo ""
+                echo "Boot menu cleanup (BLS entries) will keep:"
+                echo "  - running kernel: ${running_kver:-unknown}"
+                echo "  - latest ${keep_n} installed kernels: ${keep_list:-<none>}"
+                echo "Mode: ${BOOT_ENTRY_CLEANUP_MODE:-backup}"
+                read -p "Also prune older boot entry files now? [y/N]: " -r ans_be
+                if [[ ! "${ans_be:-}" =~ ^[Yy]$ ]]; then
+                    echo "Skipping boot menu cleanup."
+                    return 0
+                fi
+            fi
+
+            local mode
+            mode="${BOOT_ENTRY_CLEANUP_MODE:-backup}"
+            case "${mode}" in
+                backup|delete) : ;;
+                *) mode="backup" ;;
+            esac
+
+            local ts backup_dir
+            ts="$(date +%Y%m%d-%H%M%S)"
+            backup_dir="/var/backups/zypper-auto/boot-entries-${ts}"
+
+            local removed=0 kept=0 unknown=0
+
+            __znh_bls_get_linux_path() {
+                # Extract linux/linuxefi path from a BLS entry file (best-effort)
+                local f="$1"
+                awk '
+                    /^[[:space:]]*#/ {next}
+                    NF < 2 {next}
+                    tolower($1) ~ /^linux(efi)?$/ {
+                      $1="";
+                      sub(/^[[:space:]]+/, "");
+                      # strip simple surrounding quotes
+                      gsub(/^"|"$/, "");
+                      gsub(/^\x27|\x27$/, "");
+                      split($0, a, /[[:space:]]+/);
+                      print a[1];
+                      exit
+                    }
+                ' "$f" 2>/dev/null || true
+            }
+
+            __znh_kernel_ver_from_linux_path() {
+                local p="$1"
+                p="${p#/}"
+
+                # sd-boot style: /<distro>/<kver>/linux-...
+                local rest="${p#*/}"
+                if [ "${rest}" != "${p}" ]; then
+                    local kver="${rest%%/*}"
+                    if [ -n "${kver}" ] && [ "${kver}" != "${rest}" ]; then
+                        printf '%s\n' "$kver"
+                        return 0
+                    fi
+                fi
+
+                # flat: vmlinuz-<kver>
+                local base="${p##*/}"
+                case "$base" in
+                    vmlinuz-*) printf '%s\n' "${base#vmlinuz-}"; return 0 ;;
+                    linux-*)   printf '%s\n' "${base#linux-}"; return 0 ;;
+                esac
+
+                return 1
+            }
+
+            local f
+            shopt -s nullglob
+            for f in "${entries_dir}"/*.conf; do
+                local linux_path kver
+                linux_path=$(__znh_bls_get_linux_path "$f")
+                if [ -z "${linux_path:-}" ]; then
+                    unknown=$((unknown + 1))
+                    continue
+                fi
+
+                kver=$(__znh_kernel_ver_from_linux_path "$linux_path" 2>/dev/null || true)
+                if [ -z "${kver:-}" ]; then
+                    unknown=$((unknown + 1))
+                    continue
+                fi
+
+                if [ -n "${running_kver:-}" ] && [ "${kver}" = "${running_kver}" ]; then
+                    kept=$((kept + 1))
+                    continue
+                fi
+
+                if [ -n "${keep_list:-}" ] && printf '%s\n' "$keep_list" | tr ' ' '\n' | grep -Fxq "${kver}"; then
+                    kept=$((kept + 1))
+                    continue
+                fi
+
+                if [ "$mode" = "delete" ]; then
+                    log_warn "[boot-entry-clean] Deleting old boot entry: $(basename "$f") (kver=${kver})"
+                    rm -f -- "$f" 2>/dev/null || true
+                else
+                    mkdir -p "$backup_dir" 2>/dev/null || true
+                    log_info "[boot-entry-clean] Moving old boot entry: $(basename "$f") (kver=${kver}) -> ${backup_dir}/"
+                    mv -f -- "$f" "$backup_dir/" 2>/dev/null || true
+                fi
+                removed=$((removed + 1))
+            done
+            shopt -u nullglob
+
+            echo ""
+            echo "Boot entry cleanup summary:"
+            echo "  - Entries dir: ${entries_dir}"
+            echo "  - Kept entries: ${kept}"
+            echo "  - Removed entries: ${removed}"
+            echo "  - Unknown/unparsed entries: ${unknown}"
+            if [ "$removed" -gt 0 ] 2>/dev/null && [ "$mode" = "backup" ]; then
+                echo "  - Backup dir: ${backup_dir}"
+            fi
+
+            return 0
+        }
+
+        __znh_prune_old_kernel_boot_entries || true
+
+        # --- SMART: Space tracking end ---
+        end_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
+        freed_kb=0
+        if [[ "${start_space:-}" =~ ^[0-9]+$ ]] && [[ "${end_space:-}" =~ ^[0-9]+$ ]]; then
+            freed_kb=$((end_space - start_space))
+        fi
+
         echo ""
-        echo "Cleanup complete."
-        echo "Tip: check free space with: df -h /  (or: btrfs filesystem df /)"
+        echo "=============================================="
+        echo " Cleanup Summary"
+        echo "=============================================="
+
+        if [ "${freed_kb}" -gt 0 ] 2>/dev/null; then
+            local freed_mb
+            freed_mb=$((freed_kb / 1024))
+            echo "SUCCESS: Reclaimed approx. ${freed_mb} MB of free space."
+        elif [ "${freed_kb}" -lt 0 ] 2>/dev/null; then
+            echo "NOTE: Free space decreased (new data written or metadata expanded)."
+        else
+            echo "NOTE: No net free-space reclaimed (already clean or snapshots too young)."
+        fi
+
+        echo ""
+        echo "Current filesystem usage:"
+        if command -v btrfs >/dev/null 2>&1; then
+            btrfs filesystem df / 2>/dev/null || df -h / 2>/dev/null || true
+        else
+            df -h / 2>/dev/null || true
+        fi
+
         return 0
     }
 
