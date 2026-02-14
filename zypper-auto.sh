@@ -5188,6 +5188,66 @@ run_smart_verification() {
     return $rc
 }
 
+# --- Helper: Snapper invocation (prefer --no-dbus when supported) ---
+# Inspired by scrub-ghost: avoid D-Bus hangs by preferring `snapper --no-dbus`
+# when available, and allow callers to wrap snapper commands in timeout.
+ZNH_SNAPPER_NO_DBUS_SUPPORTED="${ZNH_SNAPPER_NO_DBUS_SUPPORTED:-}"
+
+__znh_snapper_supports_no_dbus() {
+    # Cache result to avoid repeatedly running `snapper --help`.
+    if [ -n "${ZNH_SNAPPER_NO_DBUS_SUPPORTED:-}" ]; then
+        [ "${ZNH_SNAPPER_NO_DBUS_SUPPORTED}" -eq 1 ] 2>/dev/null
+        return $?
+    fi
+
+    local had_errexit=0
+    [[ "$-" == *e* ]] && had_errexit=1
+
+    local help_out rc
+    help_out=""
+    rc=1
+
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        help_out=$(timeout 2 snapper --help 2>&1)
+        rc=$?
+    else
+        help_out=$(snapper --help 2>&1)
+        rc=$?
+    fi
+    [ "$had_errexit" -eq 1 ] 2>/dev/null && set -e
+
+    if [ "$rc" -eq 0 ] 2>/dev/null && printf '%s\n' "$help_out" | grep -q -- '--no-dbus'; then
+        ZNH_SNAPPER_NO_DBUS_SUPPORTED=1
+    else
+        ZNH_SNAPPER_NO_DBUS_SUPPORTED=0
+    fi
+
+    [ "${ZNH_SNAPPER_NO_DBUS_SUPPORTED}" -eq 1 ] 2>/dev/null
+}
+
+__znh_snapper_cmd_timeout() {
+    # Usage:
+    #   __znh_snapper_cmd_timeout 10 -c root list
+    #   __znh_snapper_cmd_timeout 90 create --type pre ...
+    local t="$1"
+    shift || true
+
+    if command -v timeout >/dev/null 2>&1 && [[ "${t:-}" =~ ^[0-9]+$ ]] && [ "${t}" -gt 0 ] 2>/dev/null; then
+        if __znh_snapper_supports_no_dbus; then
+            timeout "${t}" snapper --no-dbus "$@"
+        else
+            timeout "${t}" snapper "$@"
+        fi
+    else
+        if __znh_snapper_supports_no_dbus; then
+            snapper --no-dbus "$@"
+        else
+            snapper "$@"
+        fi
+    fi
+}
+
 # --- Safety Net: pre/post Snapper snapshot for verification/repair ---
 __znh_start_repair_safety_snapshot() {
     # Only snapshot once per invocation.
@@ -5226,13 +5286,8 @@ __znh_start_repair_safety_snapshot() {
     snap_count=""
     rc_count=0
     set +e
-    if command -v timeout >/dev/null 2>&1; then
-        snapper_list=$(timeout 10 snapper -c root list 2>/dev/null)
-        rc_count=$?
-    else
-        snapper_list=$(snapper -c root list 2>/dev/null)
-        rc_count=$?
-    fi
+    snapper_list=$(__znh_snapper_cmd_timeout 10 -c root list 2>/dev/null)
+    rc_count=$?
     set -e
 
     if [ "$rc_count" -eq 0 ] 2>/dev/null && [ -n "${snapper_list:-}" ]; then
@@ -5245,22 +5300,16 @@ __znh_start_repair_safety_snapshot() {
 
     local out rc
     set +e
-    if command -v timeout >/dev/null 2>&1; then
-        out=$(timeout "${snap_timeout}" snapper create --type pre --cleanup-algorithm number \
-            --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
-        rc=$?
-        if [ "$rc" -eq 124 ] 2>/dev/null || [ "$rc" -eq 137 ] 2>/dev/null; then
-            set -e
-            log_warn "📸 Pre-Repair Safety Snapshot timed out after ${snap_timeout}s; proceeding without snapshot"
-            if [ -n "${out:-}" ]; then
-                printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
-            fi
-            return 0
+    out=$(__znh_snapper_cmd_timeout "${snap_timeout}" create --type pre --cleanup-algorithm number \
+        --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
+    rc=$?
+    if [ "$rc" -eq 124 ] 2>/dev/null || [ "$rc" -eq 137 ] 2>/dev/null; then
+        set -e
+        log_warn "📸 Pre-Repair Safety Snapshot timed out after ${snap_timeout}s; proceeding without snapshot"
+        if [ -n "${out:-}" ]; then
+            printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
         fi
-    else
-        out=$(snapper create --type pre --cleanup-algorithm number \
-            --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
-        rc=$?
+        return 0
     fi
     set -e
 
@@ -5318,23 +5367,17 @@ __znh_finalize_repair_safety_snapshot() {
 
     local out post_rc
     set +e
-    if command -v timeout >/dev/null 2>&1; then
-        out=$(timeout "${snap_timeout}" snapper create --type post --cleanup-algorithm number \
-            --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
-        post_rc=$?
-        if [ "$post_rc" -eq 124 ] 2>/dev/null || [ "$post_rc" -eq 137 ] 2>/dev/null; then
-            set -e
-            log_warn "📸 Post snapshot timed out after ${snap_timeout}s; pre snapshot ${REPAIR_SAFETY_PRE_SNAP_ID} is still available"
-            if [ -n "${out:-}" ]; then
-                printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
-            fi
-            REPAIR_SAFETY_SNAPSHOT_FINALIZED=1
-            return 0
+    out=$(__znh_snapper_cmd_timeout "${snap_timeout}" create --type post --cleanup-algorithm number \
+        --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
+    post_rc=$?
+    if [ "$post_rc" -eq 124 ] 2>/dev/null || [ "$post_rc" -eq 137 ] 2>/dev/null; then
+        set -e
+        log_warn "📸 Post snapshot timed out after ${snap_timeout}s; pre snapshot ${REPAIR_SAFETY_PRE_SNAP_ID} is still available"
+        if [ -n "${out:-}" ]; then
+            printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
         fi
-    else
-        out=$(snapper create --type post --cleanup-algorithm number \
-            --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
-        post_rc=$?
+        REPAIR_SAFETY_SNAPSHOT_FINALIZED=1
+        return 0
     fi
     set -e
 
@@ -6173,6 +6216,43 @@ run_snapper_menu_only() {
         return 1
     fi
 
+    # Prefer `snapper --no-dbus` when supported to reduce the risk of D-Bus / snapperd hangs.
+    local -a SNAPPER_CMD
+    SNAPPER_CMD=(snapper)
+    if __znh_snapper_supports_no_dbus; then
+        SNAPPER_CMD=(snapper --no-dbus)
+    fi
+
+    __znh_snapper_list_config_names() {
+        # Prints config names, one per line (best-effort).
+        # snapper output is a table; we skip header/separator lines.
+        local out rc
+        out=""
+        rc=0
+
+        if command -v timeout >/dev/null 2>&1; then
+            out=$(timeout 10 "${SNAPPER_CMD[@]}" list-configs 2>/dev/null)
+            rc=$?
+        else
+            out=$("${SNAPPER_CMD[@]}" list-configs 2>/dev/null)
+            rc=$?
+        fi
+
+        if [ "$rc" -ne 0 ] 2>/dev/null || [ -z "${out:-}" ]; then
+            printf '%s\n' root
+            return 0
+        fi
+
+        printf '%s\n' "$out" | awk '
+            /^[[:space:]]*$/ {next}
+            tolower($1)=="config" {next}
+            $0 ~ /─|┼/ {next}
+            $1 ~ /^-+$/ {next}
+            {print $1}
+        '
+        return 0
+    }
+
     __znh_snapper_list_last_root() {
         local n="${1:-10}"
         if [[ ! "${n}" =~ ^[0-9]+$ ]]; then
@@ -6183,11 +6263,21 @@ run_snapper_menu_only() {
         echo ""
         echo "-- Root snapshots (last ${n}) --"
 
-        out=$(snapper -c root list --last "${n}" 2>&1)
-        rc=$?
-        if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "Unknown option '--last'"; then
-            out=$(snapper -c root list 2>&1)
+        if command -v timeout >/dev/null 2>&1; then
+            out=$(timeout 20 "${SNAPPER_CMD[@]}" -c root list --last "${n}" 2>&1)
             rc=$?
+        else
+            out=$("${SNAPPER_CMD[@]}" -c root list --last "${n}" 2>&1)
+            rc=$?
+        fi
+        if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q "Unknown option '--last'"; then
+            if command -v timeout >/dev/null 2>&1; then
+                out=$(timeout 20 "${SNAPPER_CMD[@]}" -c root list 2>&1)
+                rc=$?
+            else
+                out=$("${SNAPPER_CMD[@]}" -c root list 2>&1)
+                rc=$?
+            fi
             if [ "$rc" -eq 0 ]; then
                 # Best-effort tail when --last is unsupported.
                 printf '%s\n' "$out" | tail -n $((n + 6))
@@ -6207,7 +6297,11 @@ run_snapper_menu_only() {
 
         echo ""
         echo "-- snapper list-configs --"
-        snapper list-configs 2>&1 || true
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 10 "${SNAPPER_CMD[@]}" list-configs 2>&1 || true
+        else
+            "${SNAPPER_CMD[@]}" list-configs 2>&1 || true
+        fi
 
         __znh_snapper_list_last_root 1 || true
 
@@ -6232,8 +6326,23 @@ run_snapper_menu_only() {
 
         echo ""
         echo "Creating Snapper snapshot (single): ${desc}"
-        snapper -c root create --type single --cleanup-algorithm number --description "${desc}" --print-number
-        return $?
+
+        local snap_timeout out rc
+        snap_timeout="${ZNH_SAFETY_SNAPSHOT_TIMEOUT_SECONDS:-90}"
+        if ! [[ "${snap_timeout}" =~ ^[0-9]+$ ]] || [ "${snap_timeout}" -lt 10 ] 2>/dev/null; then
+            snap_timeout=90
+        fi
+
+        if command -v timeout >/dev/null 2>&1; then
+            out=$(timeout "${snap_timeout}" "${SNAPPER_CMD[@]}" -c root create --type single --cleanup-algorithm number --description "${desc}" --print-number 2>&1)
+            rc=$?
+        else
+            out=$("${SNAPPER_CMD[@]}" -c root create --type single --cleanup-algorithm number --description "${desc}" --print-number 2>&1)
+            rc=$?
+        fi
+
+        printf '%s\n' "$out"
+        return "$rc"
     }
 
     __znh_snapper_cleanup_now() {
@@ -6279,7 +6388,7 @@ run_snapper_menu_only() {
         while read -r cfg; do
             [ -n "${cfg}" ] || continue
             configs+=("${cfg}")
-        done < <(snapper list-configs 2>/dev/null | awk 'NR>2 && $1!="" {print $1}' || true)
+        done < <(__znh_snapper_list_config_names || true)
 
         if [ "${#configs[@]}" -eq 0 ] 2>/dev/null; then
             configs=(root)
@@ -6302,10 +6411,10 @@ run_snapper_menu_only() {
 
                 if command -v timeout >/dev/null 2>&1; then
                     execute_guarded "Snapper cleanup (${conf}): ${alg}" \
-                        timeout 180 snapper -c "${conf}" cleanup "${alg}" || true
+                        timeout 180 "${SNAPPER_CMD[@]}" -c "${conf}" cleanup "${alg}" || true
                 else
                     execute_guarded "Snapper cleanup (${conf}): ${alg}" \
-                        snapper -c "${conf}" cleanup "${alg}" || true
+                        "${SNAPPER_CMD[@]}" -c "${conf}" cleanup "${alg}" || true
                 fi
             done
         done
@@ -6400,7 +6509,8 @@ run_snapper_menu_only() {
                 target_val="no"
             fi
 
-            for conf in $(snapper list-configs 2>/dev/null | awk 'NR>2 && $1!="" {print $1}' || true); do
+            while read -r conf; do
+                [ -n "${conf:-}" ] || continue
                 cfg_file="/etc/snapper/configs/${conf}"
                 if [ ! -f "${cfg_file}" ]; then
                     continue
@@ -6440,7 +6550,7 @@ run_snapper_menu_only() {
                         echo "  [config:${conf}] BOOT_CREATE -> ${target_val}"
                     fi
                 fi
-            done
+            done < <(__znh_snapper_list_config_names || true)
         fi
 
         echo ""
@@ -7218,12 +7328,18 @@ run_rm_conflict_only() {
                 snap_timeout=90
             fi
 
+            local -a _snapper_cmd
+            _snapper_cmd=(snapper)
+            if __znh_snapper_supports_no_dbus; then
+                _snapper_cmd=(snapper --no-dbus)
+            fi
+
             set +e
             if command -v timeout >/dev/null 2>&1; then
-                timeout "${snap_timeout}" snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1
+                timeout "${snap_timeout}" "${_snapper_cmd[@]}" create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1
                 snap_rc=$?
             else
-                snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1
+                "${_snapper_cmd[@]}" create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1
                 snap_rc=$?
             fi
             set -e
