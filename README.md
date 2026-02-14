@@ -320,6 +320,18 @@ Key options include:
   - `BOOT_ENTRY_CLEANUP_ENTRIES_DIR` – optional override of the BLS entries directory.
   - `BOOT_ENTRY_CLEANUP_CONFIRM` – ask once for confirmation before pruning entries.
 
+- **Kernel package cleanup (purge old kernels via zypper purge-kernels)**
+  - `KERNEL_PURGE_ENABLED` – when `true`, Snapper cleanup also runs
+    `zypper purge-kernels` to remove old kernel *packages*.
+  - This respects your retention policy in:
+    `/etc/zypp/zypp.conf` → `multiversion.kernels`.
+  - `KERNEL_PURGE_MODE` – `auto` (default), `zypper` (direct), or `systemd` (touches
+    `/boot/do_purge_kernels` then starts `purge-kernels.service`).
+  - `KERNEL_PURGE_CONFIRM` – ask once for confirmation before purging kernels.
+  - `KERNEL_PURGE_DRY_RUN` – when `true`, uses `--dry-run` (prints what would be removed).
+  - `KERNEL_PURGE_DETAILS` – when `true`, adds `--details` for a more verbose summary.
+  - `KERNEL_PURGE_TIMEOUT_SECONDS` – best-effort timeout for the purge step.
+
 - **Caching / snooze**
   - `CACHE_EXPIRY_MINUTES` – how long a cached `zypper dup --dry-run` result
     is considered valid before forcing a fresh check.
@@ -1153,6 +1165,8 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
+  - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
+  - 🥾 **NEW:** boot-menu hygiene: Snapper cleanup can prune old systemd-boot/BLS entry files to keep the boot menu clean (backup/delete modes).
   - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path (highlighted in color when supported) and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
   - 🎛️ **IMPROVED:** debug menu option **5** always prints a clickable `file://...` link even when auto-open succeeds/fails, so you can open the folder manually.
   - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to XFCE openers (`exo-open`, `xfce4-open`), `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
