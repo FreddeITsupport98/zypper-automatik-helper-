@@ -7163,68 +7163,6 @@ run_snapper_menu_only() {
             echo "Mode: single algorithm '${mode}'"
         fi
 
-        # --- SAFETY 1: Concurrency guard ---
-        # Avoid fighting an already-running timer/service/process.
-        local cleanup_busy=0
-        if [ "${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}" = "true" ]; then
-            if systemctl is-active --quiet snapper-cleanup.service 2>/dev/null; then
-                cleanup_busy=1
-            elif pgrep -a -f 'snapper[[:space:]].*cleanup' >/dev/null 2>&1; then
-                cleanup_busy=1
-            elif pgrep -x snapper >/dev/null 2>&1; then
-                # Broader guard: snapper running at all (could be timeline or manual)
-                cleanup_busy=1
-            fi
-
-            if [ "${cleanup_busy}" -eq 1 ] 2>/dev/null; then
-                echo "WARNING: Snapper appears to be busy (background cleanup/timer or another snapper command)."
-                if [ -t 0 ]; then
-                    read -p "Force another cleanup run anyway? [y/N]: " -r ans_busy
-                    if [[ ! "${ans_busy:-}" =~ ^[Yy]$ ]]; then
-                        echo "Cleanup cancelled (snapper busy)."
-                        return 0
-                    fi
-                else
-                    log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while snapper appears busy"
-                    return 1
-                fi
-            fi
-        fi
-
-        # --- SAFETY 2: Critical free space check ---
-        # Deleting btrfs snapshots can require metadata headroom.
-        local free_kb critical_kb critical_mb
-        local critical_low=0
-        free_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
-        critical_mb="${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
-        if ! [[ "${critical_mb}" =~ ^[0-9]+$ ]]; then
-            critical_mb=300
-        fi
-        critical_kb=$((critical_mb * 1024))
-
-        if [[ "${free_kb:-}" =~ ^[0-9]+$ ]] && [ "${free_kb}" -lt "${critical_kb}" ] 2>/dev/null; then
-            critical_low=1
-            echo "CRITICAL WARNING: Disk is extremely full (<${critical_mb}MB free)."
-            echo "Deleting btrfs snapshots may require free space for metadata and can hang the system."
-            if [ -t 0 ]; then
-                read -p "Are you ABSOLUTELY sure you want to continue? [y/N]: " -r ans_full
-                if [[ ! "${ans_full:-}" =~ ^[Yy]$ ]]; then
-                    echo "Cleanup cancelled (low disk space)."
-                    return 1
-                fi
-            else
-                log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while free space is critically low"
-                return 1
-            fi
-        fi
-
-        echo ""
-        read -p "Proceed with cleanup now? [y/N]: " -r ans
-        if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
-            echo "Cleanup cancelled."
-            return 0
-        fi
-
         # Priority order (safest first): empty-pre-post -> timeline -> number
         local algs=(empty-pre-post timeline number)
         if [ "${mode}" != "all" ]; then
@@ -7243,14 +7181,6 @@ run_snapper_menu_only() {
             configs=(root)
         fi
 
-        # Smart pre-step: keep snapper configs sane (same spirit as option 5).
-        # We only do this when a TTY is available.
-        if [ -t 0 ]; then
-            __znh_snapper_optimize_configs cleanup || true
-        else
-            log_info "[snapper][cleanup] No TTY; skipping snapper config self-heal"
-        fi
-
         # Snapshot inventory: show BEFORE/AFTER + removed IDs (best-effort).
         # Uses snapper's CSV output for robust parsing.
         local __snap_sep
@@ -7259,6 +7189,28 @@ run_snapper_menu_only() {
         before_csv="$(mktemp)"
         after_csv="$(mktemp)"
         removed_csv="$(mktemp)"
+
+        # Safety: clean up temp files when we exit early.
+        __znh_cleanup_snapshot_tmpfiles() {
+            rm -f "${before_csv}" "${after_csv}" "${removed_csv}" 2>/dev/null || true
+        }
+
+        # --- SAFETY 2: Critical free space check ---
+        # Deleting btrfs snapshots can require metadata headroom.
+        local free_kb critical_kb critical_mb
+        local critical_low=0
+        free_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
+        critical_mb="${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
+        if ! [[ "${critical_mb}" =~ ^[0-9]+$ ]]; then
+            critical_mb=300
+        fi
+        critical_kb=$((critical_mb * 1024))
+
+        if [[ "${free_kb:-}" =~ ^[0-9]+$ ]] && [ "${free_kb}" -lt "${critical_kb}" ] 2>/dev/null; then
+            critical_low=1
+            echo "CRITICAL WARNING: Disk is extremely full (<${critical_mb}MB free)."
+            echo "Deleting btrfs snapshots may require free space for metadata and can hang the system."
+        fi
 
         __znh_snapper_dump_snapshot_csv() {
             local out rc conf line
@@ -7287,6 +7239,136 @@ run_snapper_menu_only() {
                         printf '%s\t%s\t%s\t%s\n' "${conf}" "${n}" "${t:-}" "${d_rest:-}" >>"$1"
                     fi
                 done <<<"${out}"
+            done
+
+            return 0
+        }
+
+        __znh_snapper_preview_candidates() {
+            # Best-effort preview of what may be removed/kept.
+            # NOTE: Snapper has no reliable dry-run for cleanup algorithms.
+            local rx
+            rx="${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
+            if [ -z "${rx}" ]; then
+                rx="aborted|failed"
+            fi
+
+            echo ""
+            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                printf "%b%s%b\n" "${C_CYAN}" "Removal Preview (best-effort)" "${C_RESET}"
+            else
+                echo "Removal Preview (best-effort)"
+            fi
+            echo "NOTE: Snapper cleanup has no true dry-run; the final removed list will be shown AFTER cleanup."
+
+            __znh_get_number_limit_max() {
+                local conf="$1" cfg_file val
+                cfg_file="/etc/snapper/configs/${conf}"
+                [ -f "${cfg_file}" ] || return 1
+                val=$(grep -E '^NUMBER_LIMIT=' "${cfg_file}" 2>/dev/null | head -n 1 | cut -d= -f2- | tr -d '"' | tr -d '\r' | tr -d ' ')
+                [ -n "${val:-}" ] || return 1
+                if [[ "${val}" =~ ^[0-9]+$ ]]; then
+                    printf '%s\n' "${val}"
+                    return 0
+                fi
+                if [[ "${val}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    printf '%s\n' "${BASH_REMATCH[2]}"
+                    return 0
+                fi
+                return 1
+            }
+
+            local conf out
+            for conf in "${configs[@]}"; do
+                echo ""
+                echo "-- Preview for config: ${conf} --"
+
+                out=""
+                if command -v timeout >/dev/null 2>&1; then
+                    out=$(timeout 25 "${SNAPPER_CMD[@]}" --csvout --separator "${__snap_sep}" --no-headers -c "${conf}" list --columns number,type,pre-number,cleanup,date,description 2>/dev/null || true)
+                else
+                    out=$("${SNAPPER_CMD[@]}" --csvout --separator "${__snap_sep}" --no-headers -c "${conf}" list --columns number,type,pre-number,cleanup,date,description 2>/dev/null || true)
+                fi
+
+                if [ -z "${out:-}" ]; then
+                    echo "  (could not read snapshot list)"
+                    continue
+                fi
+
+                # 1) Orphan pre snapshots (empty-pre-post candidates)
+                local orphan
+                orphan=$(printf '%s\n' "${out}" | awk -F'\t' '
+                    $2=="post" && $3 ~ /^[0-9]+$/ {ref[$3]=1}
+                    $2=="pre" && $1 ~ /^[0-9]+$/ {pre[$1]=1}
+                    END {for (p in pre) if (!(p in ref)) print p}
+                ' | sort -n | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+                if [ -n "${orphan:-}" ]; then
+                    if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                        printf "  %b[CANDIDATE empty-pre-post]%b orphan pre snapshot IDs: %b%s%b\n" "${C_YELLOW}" "${C_RESET}" "${C_RED}" "${orphan}" "${C_RESET}"
+                    else
+                        echo "  [CANDIDATE empty-pre-post] orphan pre snapshot IDs: ${orphan}"
+                    fi
+                else
+                    echo "  [empty-pre-post] no obvious orphan pre snapshots detected."
+                fi
+
+                # 2) Broken snapshot hunter candidates (regex match)
+                local broken
+                broken=$(printf '%s\n' "${out}" | awk -F'\t' -v rx="${rx}" '
+                    BEGIN{IGNORECASE=1}
+                    ($2=="single" || $2=="pre") && $6 ~ rx && $1 ~ /^[0-9]+$/ && $1 != "0" {print $1}
+                ' | sort -n | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+                if [ -n "${broken:-}" ]; then
+                    if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                        printf "  %b[CANDIDATE deep-clean]%b regex '%s' matched snapshot IDs: %b%s%b\n" "${C_YELLOW}" "${C_RESET}" "${rx}" "${C_RED}" "${broken}" "${C_RESET}"
+                    else
+                        echo "  [CANDIDATE deep-clean] regex '${rx}' matched snapshot IDs: ${broken}"
+                    fi
+                else
+                    echo "  [deep-clean] no obvious aborted/failed snapshots detected by regex."
+                fi
+
+                # 3) Number cleanup candidates (very rough)
+                local limit
+                limit=$(__znh_get_number_limit_max "${conf}" 2>/dev/null || true)
+                if [[ "${limit:-}" =~ ^[0-9]+$ ]] && [ "${limit}" -gt 0 ] 2>/dev/null; then
+                    local num_lines num_count remove_n
+                    num_lines=$(printf '%s\n' "${out}" | awk -F'\t' '$4=="number" && $1 ~ /^[0-9]+$/ && $1 != "0" {print $1"\t"$2"\t"$5"\t"$6}' | sort -t $'\t' -k1,1n)
+                    num_count=$(printf '%s\n' "${num_lines}" | awk 'NF{n++} END{print n+0}')
+                    if [ "${num_count}" -gt "${limit}" ] 2>/dev/null; then
+                        remove_n=$((num_count - limit))
+                        if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                            printf "  %b[number]%b snapshots with cleanup=number: %s (limit max=%s)\n" "${C_CYAN}" "${C_RESET}" "${num_count}" "${limit}"
+                            printf "    %b[CANDIDATE number]%b oldest %s snapshot(s) may be removed:\n" "${C_YELLOW}" "${C_RESET}" "${remove_n}"
+                        else
+                            echo "  [number] snapshots with cleanup=number: ${num_count} (limit max=${limit})"
+                            echo "    [CANDIDATE number] oldest ${remove_n} snapshot(s) may be removed:"
+                        fi
+
+                        printf '%s\n' "${num_lines}" | head -n "${remove_n}" | head -n 20 | while IFS=$'\t' read -r n t dt d; do
+                            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                                printf "      %b[REMOVE?]%b #%s [%s] %s %s\n" "${C_RED}" "${C_RESET}" "${n}" "${t}" "${dt}" "${d}"
+                            else
+                                printf "      [REMOVE?] #%s [%s] %s %s\n" "${n}" "${t}" "${dt}" "${d}"
+                            fi
+                        done
+
+                        if [ "${num_count}" -gt $((limit + 20)) ] 2>/dev/null; then
+                            echo "      ... (truncated preview)"
+                        fi
+                    else
+                        echo "  [number] cleanup=number snapshots (${num_count}) are within NUMBER_LIMIT max (${limit})."
+                    fi
+                else
+                    echo "  [number] could not read NUMBER_LIMIT for config ${conf}; skipping number preview."
+                fi
+
+                # Timeline cleanup preview (informational)
+                local tl_count
+                tl_count=$(printf '%s\n' "${out}" | awk -F'\t' '$4=="timeline" && $1 ~ /^[0-9]+$/ && $1 != "0" {n++} END{print n+0}')
+                echo "  [timeline] snapshots with cleanup=timeline: ${tl_count} (Snapper will prune per TIMELINE_LIMIT_* rules)."
             done
 
             return 0
@@ -7337,6 +7419,70 @@ run_snapper_menu_only() {
         # Capture BEFORE snapshot state
         __znh_snapper_dump_snapshot_csv "${before_csv}" || true
         __znh_print_snapper_snapshot_list "Snapshots BEFORE cleanup (showing last 20 per config)" "${before_csv}" "BEFORE" "${C_CYAN}" || true
+
+        __znh_snapper_preview_candidates || true
+
+        # --- SAFETY 1: Concurrency guard ---
+        # Avoid fighting an already-running timer/service/process.
+        local cleanup_busy=0
+        if [ "${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}" = "true" ]; then
+            if systemctl is-active --quiet snapper-cleanup.service 2>/dev/null; then
+                cleanup_busy=1
+            elif pgrep -a -f 'snapper[[:space:]].*cleanup' >/dev/null 2>&1; then
+                cleanup_busy=1
+            elif pgrep -x snapper >/dev/null 2>&1; then
+                # Broader guard: snapper running at all (could be timeline or manual)
+                cleanup_busy=1
+            fi
+
+            if [ "${cleanup_busy}" -eq 1 ] 2>/dev/null; then
+                echo "WARNING: Snapper appears to be busy (background cleanup/timer or another snapper command)."
+                if [ -t 0 ]; then
+                    read -p "Force another cleanup run anyway? [y/N]: " -r ans_busy
+                    if [[ ! "${ans_busy:-}" =~ ^[Yy]$ ]]; then
+                        echo "Cleanup cancelled (snapper busy)."
+                        __znh_cleanup_snapshot_tmpfiles
+                        return 0
+                    fi
+                else
+                    log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while snapper appears busy"
+                    __znh_cleanup_snapshot_tmpfiles
+                    return 1
+                fi
+            fi
+        fi
+
+        # If critically low, ask once more before proceeding.
+        if [ "${critical_low}" -eq 1 ] 2>/dev/null; then
+            if [ -t 0 ]; then
+                read -p "Are you ABSOLUTELY sure you want to continue? [y/N]: " -r ans_full
+                if [[ ! "${ans_full:-}" =~ ^[Yy]$ ]]; then
+                    echo "Cleanup cancelled (low disk space)."
+                    __znh_cleanup_snapshot_tmpfiles
+                    return 1
+                fi
+            else
+                log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while free space is critically low"
+                __znh_cleanup_snapshot_tmpfiles
+                return 1
+            fi
+        fi
+
+        echo ""
+        read -p "Proceed with cleanup now? [y/N]: " -r ans
+        if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
+            echo "Cleanup cancelled."
+            __znh_cleanup_snapshot_tmpfiles
+            return 0
+        fi
+
+        # Smart pre-step: keep snapper configs sane (same spirit as option 5).
+        # We only do this when a TTY is available.
+        if [ -t 0 ]; then
+            __znh_snapper_optimize_configs cleanup || true
+        else
+            log_info "[snapper][cleanup] No TTY; skipping snapper config self-heal"
+        fi
 
         # --- SMART: Space tracking start ---
         echo ""
@@ -8131,7 +8277,7 @@ run_snapper_menu_only() {
         fi
 
         # Cleanup temp files
-        rm -f "${before_csv}" "${after_csv}" "${removed_csv}" 2>/dev/null || true
+        __znh_cleanup_snapshot_tmpfiles
 
         echo ""
         echo "=============================================="
