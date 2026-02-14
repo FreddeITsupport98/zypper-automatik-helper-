@@ -6217,11 +6217,18 @@ run_snapper_menu_only() {
     fi
 
     # Prefer `snapper --no-dbus` when supported to reduce the risk of D-Bus / snapperd hangs.
+    local snapper_mode
+    snapper_mode="dbus"
+
     local -a SNAPPER_CMD
     SNAPPER_CMD=(snapper)
     if __znh_snapper_supports_no_dbus; then
         SNAPPER_CMD=(snapper --no-dbus)
+        snapper_mode="no-dbus"
     fi
+
+    # Print mode so users can see what we're doing (useful when troubleshooting hangs).
+    log_info "[snapper-menu] Snapper invocation mode: ${snapper_mode} (cmd: ${SNAPPER_CMD[*]})"
 
     __znh_snapper_list_config_names() {
         # Prints config names, one per line (best-effort).
@@ -6294,6 +6301,7 @@ run_snapper_menu_only() {
         echo "=============================================="
         echo "  Zypper Auto-Helper: Snapper Status"
         echo "=============================================="
+        echo "Snapper mode: ${snapper_mode}"
 
         echo ""
         echo "-- snapper list-configs --"
@@ -6622,6 +6630,7 @@ run_snapper_menu_only() {
         echo "=============================================="
         echo "  Zypper Auto-Helper Snapper Menu"
         echo "=============================================="
+        echo "  (Snapper mode: ${snapper_mode})"
         echo "  1) Status (configs + snapshot detection + timers)"
         echo "  2) List recent snapshots (root)"
         echo "  3) Create snapshot (single)"
