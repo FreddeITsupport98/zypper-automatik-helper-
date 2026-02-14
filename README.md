@@ -347,6 +347,8 @@ Key options include:
 - **Boot menu hygiene (auto-clean old kernel entries)**
   - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
     old kernel *boot menu entry files* (BLS entries) so the boot menu stays clean.
+  - The helper prints a KEEP/REMOVE/UNKNOWN plan first; this output is safe even when
+    the UNKNOWN list is empty (no crashes under `set -u`).
   - `BOOT_ENTRY_CLEANUP_KEEP_LATEST` – keep the latest N installed kernels in the menu
     (the running kernel is always kept).
   - `BOOT_ENTRY_CLEANUP_MODE` – `backup` (default; moves old entries to a backup dir)

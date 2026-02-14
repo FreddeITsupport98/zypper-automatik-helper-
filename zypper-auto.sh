@@ -8049,7 +8049,9 @@ run_snapper_menu_only() {
             local removed=0 kept=0 unknown=0
 
             # Build plan first so we can show KEEP/REMOVE before doing anything.
-            local -a plan_keep plan_remove plan_unknown remove_items
+            # NOTE: With 'set -u' (nounset), empty arrays that were never assigned can still
+            # behave as "unbound" in some Bash versions/contexts. Initialize all arrays.
+            local -a plan_keep=() plan_remove=() plan_unknown=() remove_items=()
 
             __znh_bls_get_linux_path() {
                 # Extract linux/linuxefi path from a BLS entry file (best-effort)
