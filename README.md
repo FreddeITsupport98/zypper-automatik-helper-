@@ -331,18 +331,32 @@ Key options include:
   - When btrfs is available and cleanup reclaimed >~1GB, the helper prints a **tip**
     suggesting a btrfs balance command (it does not run balance automatically).
 
-- **System Deep Scrub (Option 4 extras: caches & logs)**
+- **System Deep Scrub (Option 4 extras: caches, logs, apps)**
   - `ZYPPER_CACHE_CLEAN_ENABLED` / `ZYPPER_CACHE_CLEAN_CONFIRM` – optionally run
     `zypper clean --all` after Snapper cleanup to clear cached RPMs/metadata.
-  - `JOURNAL_VACUUM_ENABLED` / `JOURNAL_VACUUM_DAYS` / `JOURNAL_VACUUM_CONFIRM` –
-    optionally vacuum systemd journals (default keeps last 7 days).
-  - `USER_THUMBNAILS_CLEAN_ENABLED` / `USER_THUMBNAILS_CLEAN_CONFIRM` – optionally delete
-    cached thumbnails for the desktop user (`~/.cache/thumbnails/*`, `~/.thumbnails/*`).
+  - `JOURNAL_VACUUM_ENABLED` / `JOURNAL_VACUUM_DAYS` / `JOURNAL_VACUUM_SIZE_MB` /
+    `JOURNAL_VACUUM_CONFIRM` – optionally vacuum systemd journals (keep last N days,
+    or keep under N MB when size is set).
+  - `COREDUMP_VACUUM_ENABLED` / `COREDUMP_VACUUM_MAX_SIZE_MB` / `COREDUMP_VACUUM_CONFIRM` –
+    optionally vacuum systemd coredumps (crash dumps) via `coredumpctl`.
+  - `FLATPAK_UNUSED_CLEAN_ENABLED` / `FLATPAK_UNUSED_CLEAN_CONFIRM` – optionally prune
+    unused Flatpak runtimes (`flatpak uninstall --unused`).
+  - `SNAP_REFRESH_RETAIN_TUNE_ENABLED` / `SNAP_REFRESH_RETAIN_VALUE` /
+    `SNAP_REFRESH_RETAIN_TUNE_CONFIRM` – optionally tune snapd revision retention
+    (`snap set system refresh.retain=2` is a common desktop space saver).
+  - `USER_THUMBNAILS_CLEAN_ENABLED` / `USER_THUMBNAILS_CLEAN_DAYS` /
+    `USER_THUMBNAILS_CLEAN_CONFIRM` – optionally delete cached thumbnails for the
+    desktop user. When days is set, only removes files not accessed recently.
 
-- **System Health Automator (Option 5 extras: btrfs maintenance)**
+- **System Health Automator (Option 5 extras: btrfs maintenance + SSD health)**
   - `BTRFS_MAINTENANCE_TIMERS_ENABLED` / `BTRFS_MAINTENANCE_TIMERS_CONFIRM` – when Snapper
     AUTO enable is used, optionally enable btrfs maintenance timers if available
     (scrub/balance/trim/defrag), to reduce long-term btrfs “metadata full” issues.
+  - `FSTRIM_TIMER_ENABLED` / `FSTRIM_TIMER_CONFIRM` – optionally enable `fstrim.timer`
+    (recommended for SSDs; safe no-op on unsupported setups).
+  - `BTRFS_MAINTENANCE_TUNE_ENABLED` / `BTRFS_MAINTENANCE_TUNE_CONFIRM` – optionally tune
+    `/etc/sysconfig/btrfsmaintenance` (best-effort) to reduce desktop slowdowns from
+    overly-frequent balance/scrub schedules.
 
 - **Boot menu hygiene (auto-clean old kernel entries)**
   - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes

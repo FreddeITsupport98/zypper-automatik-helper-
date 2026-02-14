@@ -929,7 +929,7 @@ SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX="aborted|failed"
 SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM=true
 
 # ---------------------------------------------------------------------
-# System Deep Scrub (Option 4): caches & logs
+# System Deep Scrub (Option 4): caches, logs, applications
 # ---------------------------------------------------------------------
 
 # ZYPPER_CACHE_CLEAN_ENABLED
@@ -951,15 +951,66 @@ JOURNAL_VACUUM_ENABLED=false
 # Default: 7
 JOURNAL_VACUUM_DAYS=7
 
+# JOURNAL_VACUUM_SIZE_MB
+# Optional: when set to a positive number, uses journalctl --vacuum-size=<Nm>
+# instead of vacuum-time. Leave empty/0 to use JOURNAL_VACUUM_DAYS.
+# Default: 0 (disabled)
+JOURNAL_VACUUM_SIZE_MB=0
+
 # JOURNAL_VACUUM_CONFIRM
 # When true (default), ask once before vacuuming journals.
 JOURNAL_VACUUM_CONFIRM=true
+
+# COREDUMP_VACUUM_ENABLED
+# When true, Snapper Full Cleanup can also vacuum systemd coredumps
+# (crash dumps) via coredumpctl.
+COREDUMP_VACUUM_ENABLED=false
+
+# COREDUMP_VACUUM_MAX_SIZE_MB
+# Keep coredumps under this total size (coredumpctl --vacuum-size=<Nm>).
+# Default: 200
+COREDUMP_VACUUM_MAX_SIZE_MB=200
+
+# COREDUMP_VACUUM_CONFIRM
+# When true (default), ask once before vacuuming coredumps.
+COREDUMP_VACUUM_CONFIRM=true
+
+# FLATPAK_UNUSED_CLEAN_ENABLED
+# When true, Snapper Full Cleanup can also prune unused Flatpak runtimes:
+#   flatpak uninstall --unused
+# This is often a large space saver.
+FLATPAK_UNUSED_CLEAN_ENABLED=false
+
+# FLATPAK_UNUSED_CLEAN_CONFIRM
+# When true (default), ask once before pruning unused flatpaks.
+FLATPAK_UNUSED_CLEAN_CONFIRM=true
+
+# SNAP_REFRESH_RETAIN_TUNE_ENABLED
+# When true, Snapper Full Cleanup can also tune snapd to keep fewer old
+# revisions (space saver):
+#   snap set system refresh.retain=<N>
+SNAP_REFRESH_RETAIN_TUNE_ENABLED=false
+
+# SNAP_REFRESH_RETAIN_VALUE
+# Desired refresh.retain value (recommended: 2 = active + 1 rollback).
+# Minimum: 2. Default: 2
+SNAP_REFRESH_RETAIN_VALUE=2
+
+# SNAP_REFRESH_RETAIN_TUNE_CONFIRM
+# When true (default), ask once before tuning snap refresh retention.
+SNAP_REFRESH_RETAIN_TUNE_CONFIRM=true
 
 # USER_THUMBNAILS_CLEAN_ENABLED
 # When true, Snapper Full Cleanup will also remove cached thumbnails for the
 # desktop user (best-effort) to reclaim space:
 #   ~/.cache/thumbnails/* and ~/.thumbnails/*
 USER_THUMBNAILS_CLEAN_ENABLED=false
+
+# USER_THUMBNAILS_CLEAN_DAYS
+# Optional: when set to a positive number, only delete thumbnail files not
+# accessed in N days (find -atime +N). When 0, delete all cached thumbnails.
+# Default: 0
+USER_THUMBNAILS_CLEAN_DAYS=0
 
 # USER_THUMBNAILS_CLEAN_CONFIRM
 # When true (default), ask once before deleting thumbnails.
@@ -978,6 +1029,25 @@ BTRFS_MAINTENANCE_TIMERS_ENABLED=true
 # BTRFS_MAINTENANCE_TIMERS_CONFIRM
 # When true (default), ask once before enabling btrfs maintenance timers.
 BTRFS_MAINTENANCE_TIMERS_CONFIRM=true
+
+# FSTRIM_TIMER_ENABLED
+# When true (default), Snapper AUTO enable will also attempt to enable fstrim.timer
+# (SSD health; safe no-op on unsupported filesystems).
+FSTRIM_TIMER_ENABLED=true
+
+# FSTRIM_TIMER_CONFIRM
+# When true (default), ask once before enabling fstrim.timer.
+FSTRIM_TIMER_CONFIRM=true
+
+# BTRFS_MAINTENANCE_TUNE_ENABLED
+# When true, Snapper AUTO enable can also tune /etc/sysconfig/btrfsmaintenance
+# to reduce performance slowdowns from overly-frequent balances/scrubs.
+# Default: false (disabled)
+BTRFS_MAINTENANCE_TUNE_ENABLED=false
+
+# BTRFS_MAINTENANCE_TUNE_CONFIRM
+# When true (default), ask once before editing /etc/sysconfig/btrfsmaintenance.
+BTRFS_MAINTENANCE_TUNE_CONFIRM=true
 
 # ---------------------------------------------------------------------
 # Boot menu hygiene: auto-clean old kernel entries (systemd-boot / BLS)
@@ -1397,13 +1467,34 @@ EOF
     validate_bool_flag ZYPPER_CACHE_CLEAN_CONFIRM true
     validate_bool_flag JOURNAL_VACUUM_ENABLED false
     validate_pos_int_optional JOURNAL_VACUUM_DAYS 7
+    validate_nonneg_int_optional JOURNAL_VACUUM_SIZE_MB 0
     validate_bool_flag JOURNAL_VACUUM_CONFIRM true
+
+    validate_bool_flag COREDUMP_VACUUM_ENABLED false
+    validate_nonneg_int_optional COREDUMP_VACUUM_MAX_SIZE_MB 200
+    validate_bool_flag COREDUMP_VACUUM_CONFIRM true
+
+    validate_bool_flag FLATPAK_UNUSED_CLEAN_ENABLED false
+    validate_bool_flag FLATPAK_UNUSED_CLEAN_CONFIRM true
+
+    validate_bool_flag SNAP_REFRESH_RETAIN_TUNE_ENABLED false
+    validate_pos_int_optional SNAP_REFRESH_RETAIN_VALUE 2
+    if [ "${SNAP_REFRESH_RETAIN_VALUE:-2}" -lt 2 ] 2>/dev/null; then
+        SNAP_REFRESH_RETAIN_VALUE=2
+    fi
+    validate_bool_flag SNAP_REFRESH_RETAIN_TUNE_CONFIRM true
+
     validate_bool_flag USER_THUMBNAILS_CLEAN_ENABLED false
+    validate_nonneg_int_optional USER_THUMBNAILS_CLEAN_DAYS 0
     validate_bool_flag USER_THUMBNAILS_CLEAN_CONFIRM true
 
     # System Health Automator (Option 5)
     validate_bool_flag BTRFS_MAINTENANCE_TIMERS_ENABLED true
     validate_bool_flag BTRFS_MAINTENANCE_TIMERS_CONFIRM true
+    validate_bool_flag FSTRIM_TIMER_ENABLED true
+    validate_bool_flag FSTRIM_TIMER_CONFIRM true
+    validate_bool_flag BTRFS_MAINTENANCE_TUNE_ENABLED false
+    validate_bool_flag BTRFS_MAINTENANCE_TUNE_CONFIRM true
 
     # Boot entry cleanup (boot menu hygiene)
     validate_bool_flag BOOT_ENTRY_CLEANUP_ENABLED true
@@ -1466,11 +1557,25 @@ EOF
     log_debug "  ZYPPER_CACHE_CLEAN_CONFIRM=${ZYPPER_CACHE_CLEAN_CONFIRM:-true}"
     log_debug "  JOURNAL_VACUUM_ENABLED=${JOURNAL_VACUUM_ENABLED:-false}"
     log_debug "  JOURNAL_VACUUM_DAYS=${JOURNAL_VACUUM_DAYS:-7}"
+    log_debug "  JOURNAL_VACUUM_SIZE_MB=${JOURNAL_VACUUM_SIZE_MB:-0}"
     log_debug "  JOURNAL_VACUUM_CONFIRM=${JOURNAL_VACUUM_CONFIRM:-true}"
+    log_debug "  COREDUMP_VACUUM_ENABLED=${COREDUMP_VACUUM_ENABLED:-false}"
+    log_debug "  COREDUMP_VACUUM_MAX_SIZE_MB=${COREDUMP_VACUUM_MAX_SIZE_MB:-200}"
+    log_debug "  COREDUMP_VACUUM_CONFIRM=${COREDUMP_VACUUM_CONFIRM:-true}"
+    log_debug "  FLATPAK_UNUSED_CLEAN_ENABLED=${FLATPAK_UNUSED_CLEAN_ENABLED:-false}"
+    log_debug "  FLATPAK_UNUSED_CLEAN_CONFIRM=${FLATPAK_UNUSED_CLEAN_CONFIRM:-true}"
+    log_debug "  SNAP_REFRESH_RETAIN_TUNE_ENABLED=${SNAP_REFRESH_RETAIN_TUNE_ENABLED:-false}"
+    log_debug "  SNAP_REFRESH_RETAIN_VALUE=${SNAP_REFRESH_RETAIN_VALUE:-2}"
+    log_debug "  SNAP_REFRESH_RETAIN_TUNE_CONFIRM=${SNAP_REFRESH_RETAIN_TUNE_CONFIRM:-true}"
     log_debug "  USER_THUMBNAILS_CLEAN_ENABLED=${USER_THUMBNAILS_CLEAN_ENABLED:-false}"
+    log_debug "  USER_THUMBNAILS_CLEAN_DAYS=${USER_THUMBNAILS_CLEAN_DAYS:-0}"
     log_debug "  USER_THUMBNAILS_CLEAN_CONFIRM=${USER_THUMBNAILS_CLEAN_CONFIRM:-true}"
     log_debug "  BTRFS_MAINTENANCE_TIMERS_ENABLED=${BTRFS_MAINTENANCE_TIMERS_ENABLED:-true}"
     log_debug "  BTRFS_MAINTENANCE_TIMERS_CONFIRM=${BTRFS_MAINTENANCE_TIMERS_CONFIRM:-true}"
+    log_debug "  FSTRIM_TIMER_ENABLED=${FSTRIM_TIMER_ENABLED:-true}"
+    log_debug "  FSTRIM_TIMER_CONFIRM=${FSTRIM_TIMER_CONFIRM:-true}"
+    log_debug "  BTRFS_MAINTENANCE_TUNE_ENABLED=${BTRFS_MAINTENANCE_TUNE_ENABLED:-false}"
+    log_debug "  BTRFS_MAINTENANCE_TUNE_CONFIRM=${BTRFS_MAINTENANCE_TUNE_CONFIRM:-true}"
     log_debug "  BOOT_ENTRY_CLEANUP_ENABLED=${BOOT_ENTRY_CLEANUP_ENABLED:-true}"
     log_debug "  BOOT_ENTRY_CLEANUP_KEEP_LATEST=${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}"
     log_debug "  BOOT_ENTRY_CLEANUP_MODE=${BOOT_ENTRY_CLEANUP_MODE:-backup}"
@@ -1556,13 +1661,27 @@ EOF
     _mark_missing_key "ZYPPER_CACHE_CLEAN_CONFIRM"
     _mark_missing_key "JOURNAL_VACUUM_ENABLED"
     _mark_missing_key "JOURNAL_VACUUM_DAYS"
+    _mark_missing_key "JOURNAL_VACUUM_SIZE_MB"
     _mark_missing_key "JOURNAL_VACUUM_CONFIRM"
+    _mark_missing_key "COREDUMP_VACUUM_ENABLED"
+    _mark_missing_key "COREDUMP_VACUUM_MAX_SIZE_MB"
+    _mark_missing_key "COREDUMP_VACUUM_CONFIRM"
+    _mark_missing_key "FLATPAK_UNUSED_CLEAN_ENABLED"
+    _mark_missing_key "FLATPAK_UNUSED_CLEAN_CONFIRM"
+    _mark_missing_key "SNAP_REFRESH_RETAIN_TUNE_ENABLED"
+    _mark_missing_key "SNAP_REFRESH_RETAIN_VALUE"
+    _mark_missing_key "SNAP_REFRESH_RETAIN_TUNE_CONFIRM"
     _mark_missing_key "USER_THUMBNAILS_CLEAN_ENABLED"
+    _mark_missing_key "USER_THUMBNAILS_CLEAN_DAYS"
     _mark_missing_key "USER_THUMBNAILS_CLEAN_CONFIRM"
 
     # System Health Automator (Option 5)
     _mark_missing_key "BTRFS_MAINTENANCE_TIMERS_ENABLED"
     _mark_missing_key "BTRFS_MAINTENANCE_TIMERS_CONFIRM"
+    _mark_missing_key "FSTRIM_TIMER_ENABLED"
+    _mark_missing_key "FSTRIM_TIMER_CONFIRM"
+    _mark_missing_key "BTRFS_MAINTENANCE_TUNE_ENABLED"
+    _mark_missing_key "BTRFS_MAINTENANCE_TUNE_CONFIRM"
 
     # Boot entry cleanup (boot menu hygiene)
     _mark_missing_key "BOOT_ENTRY_CLEANUP_ENABLED"
@@ -1671,25 +1790,67 @@ EOF
                     log_info "  - ZYPPER_CACHE_CLEAN_CONFIRM: when true, asks once before running zypper cache cleaning."
                     ;;
                 JOURNAL_VACUUM_ENABLED)
-                    log_info "  - JOURNAL_VACUUM_ENABLED: when true, Snapper menu cleanup also vacuums systemd journals (journalctl --vacuum-time)."
+                    log_info "  - JOURNAL_VACUUM_ENABLED: when true, Snapper menu cleanup also vacuums systemd journals (journalctl vacuum)."
                     ;;
                 JOURNAL_VACUUM_DAYS)
-                    log_info "  - JOURNAL_VACUUM_DAYS: number of days of journals to keep when vacuuming (default: 7)."
+                    log_info "  - JOURNAL_VACUUM_DAYS: number of days of journals to keep when vacuuming by time (default: 7)."
+                    ;;
+                JOURNAL_VACUUM_SIZE_MB)
+                    log_info "  - JOURNAL_VACUUM_SIZE_MB: when set >0, vacuum journals by size (MB) instead of time."
                     ;;
                 JOURNAL_VACUUM_CONFIRM)
                     log_info "  - JOURNAL_VACUUM_CONFIRM: when true, asks once before vacuuming journals."
                     ;;
+                COREDUMP_VACUUM_ENABLED)
+                    log_info "  - COREDUMP_VACUUM_ENABLED: when true, Snapper menu cleanup also vacuums systemd coredumps (crash dumps) via coredumpctl."
+                    ;;
+                COREDUMP_VACUUM_MAX_SIZE_MB)
+                    log_info "  - COREDUMP_VACUUM_MAX_SIZE_MB: maximum total coredump size (MB) to keep after vacuum."
+                    ;;
+                COREDUMP_VACUUM_CONFIRM)
+                    log_info "  - COREDUMP_VACUUM_CONFIRM: when true, asks once before vacuuming coredumps."
+                    ;;
+                FLATPAK_UNUSED_CLEAN_ENABLED)
+                    log_info "  - FLATPAK_UNUSED_CLEAN_ENABLED: when true, Snapper menu cleanup also prunes unused Flatpak runtimes (flatpak uninstall --unused)."
+                    ;;
+                FLATPAK_UNUSED_CLEAN_CONFIRM)
+                    log_info "  - FLATPAK_UNUSED_CLEAN_CONFIRM: when true, asks once before pruning unused Flatpaks."
+                    ;;
+                SNAP_REFRESH_RETAIN_TUNE_ENABLED)
+                    log_info "  - SNAP_REFRESH_RETAIN_TUNE_ENABLED: when true, Snapper menu cleanup can tune snapd refresh.retain to keep fewer old revisions (space saver)."
+                    ;;
+                SNAP_REFRESH_RETAIN_VALUE)
+                    log_info "  - SNAP_REFRESH_RETAIN_VALUE: desired snapd refresh.retain value (min 2)."
+                    ;;
+                SNAP_REFRESH_RETAIN_TUNE_CONFIRM)
+                    log_info "  - SNAP_REFRESH_RETAIN_TUNE_CONFIRM: when true, asks once before tuning snap refresh retention."
+                    ;;
                 USER_THUMBNAILS_CLEAN_ENABLED)
                     log_info "  - USER_THUMBNAILS_CLEAN_ENABLED: when true, Snapper menu cleanup also deletes cached thumbnails for the desktop user (best-effort)."
+                    ;;
+                USER_THUMBNAILS_CLEAN_DAYS)
+                    log_info "  - USER_THUMBNAILS_CLEAN_DAYS: when set >0, only deletes thumbnail files not accessed in N days; when 0, clears the whole thumbnail cache."
                     ;;
                 USER_THUMBNAILS_CLEAN_CONFIRM)
                     log_info "  - USER_THUMBNAILS_CLEAN_CONFIRM: when true, asks once before deleting thumbnails."
                     ;;
                 BTRFS_MAINTENANCE_TIMERS_ENABLED)
-                    log_info "  - BTRFS_MAINTENANCE_TIMERS_ENABLED: when true, Snapper AUTO enable also enables btrfs maintenance timers (scrub/balance/trim) when available."
+                    log_info "  - BTRFS_MAINTENANCE_TIMERS_ENABLED: when true, Snapper AUTO enable also enables btrfs maintenance timers (scrub/balance/trim/defrag) when available."
                     ;;
                 BTRFS_MAINTENANCE_TIMERS_CONFIRM)
                     log_info "  - BTRFS_MAINTENANCE_TIMERS_CONFIRM: when true, asks once before enabling btrfs maintenance timers."
+                    ;;
+                FSTRIM_TIMER_ENABLED)
+                    log_info "  - FSTRIM_TIMER_ENABLED: when true, Snapper AUTO enable also enables fstrim.timer for SSD health (safe)."
+                    ;;
+                FSTRIM_TIMER_CONFIRM)
+                    log_info "  - FSTRIM_TIMER_CONFIRM: when true, asks once before enabling fstrim.timer."
+                    ;;
+                BTRFS_MAINTENANCE_TUNE_ENABLED)
+                    log_info "  - BTRFS_MAINTENANCE_TUNE_ENABLED: when true, Snapper AUTO enable can tune /etc/sysconfig/btrfsmaintenance to reduce slowdowns (best-effort)."
+                    ;;
+                BTRFS_MAINTENANCE_TUNE_CONFIRM)
+                    log_info "  - BTRFS_MAINTENANCE_TUNE_CONFIRM: when true, asks once before editing /etc/sysconfig/btrfsmaintenance."
                     ;;
                 BOOT_ENTRY_CLEANUP_ENABLED)
                     log_info "  - BOOT_ENTRY_CLEANUP_ENABLED: when true, snapper cleanup also prunes old kernel boot-menu entry files (BLS) to reduce clutter." 
@@ -1821,11 +1982,41 @@ EOF
                 JOURNAL_VACUUM_DAYS)
                     JOURNAL_VACUUM_DAYS=7
                     ;;
+                JOURNAL_VACUUM_SIZE_MB)
+                    JOURNAL_VACUUM_SIZE_MB=0
+                    ;;
                 JOURNAL_VACUUM_CONFIRM)
                     JOURNAL_VACUUM_CONFIRM="true"
                     ;;
+                COREDUMP_VACUUM_ENABLED)
+                    COREDUMP_VACUUM_ENABLED="false"
+                    ;;
+                COREDUMP_VACUUM_MAX_SIZE_MB)
+                    COREDUMP_VACUUM_MAX_SIZE_MB=200
+                    ;;
+                COREDUMP_VACUUM_CONFIRM)
+                    COREDUMP_VACUUM_CONFIRM="true"
+                    ;;
+                FLATPAK_UNUSED_CLEAN_ENABLED)
+                    FLATPAK_UNUSED_CLEAN_ENABLED="false"
+                    ;;
+                FLATPAK_UNUSED_CLEAN_CONFIRM)
+                    FLATPAK_UNUSED_CLEAN_CONFIRM="true"
+                    ;;
+                SNAP_REFRESH_RETAIN_TUNE_ENABLED)
+                    SNAP_REFRESH_RETAIN_TUNE_ENABLED="false"
+                    ;;
+                SNAP_REFRESH_RETAIN_VALUE)
+                    SNAP_REFRESH_RETAIN_VALUE=2
+                    ;;
+                SNAP_REFRESH_RETAIN_TUNE_CONFIRM)
+                    SNAP_REFRESH_RETAIN_TUNE_CONFIRM="true"
+                    ;;
                 USER_THUMBNAILS_CLEAN_ENABLED)
                     USER_THUMBNAILS_CLEAN_ENABLED="false"
+                    ;;
+                USER_THUMBNAILS_CLEAN_DAYS)
+                    USER_THUMBNAILS_CLEAN_DAYS=0
                     ;;
                 USER_THUMBNAILS_CLEAN_CONFIRM)
                     USER_THUMBNAILS_CLEAN_CONFIRM="true"
@@ -1835,6 +2026,18 @@ EOF
                     ;;
                 BTRFS_MAINTENANCE_TIMERS_CONFIRM)
                     BTRFS_MAINTENANCE_TIMERS_CONFIRM="true"
+                    ;;
+                FSTRIM_TIMER_ENABLED)
+                    FSTRIM_TIMER_ENABLED="true"
+                    ;;
+                FSTRIM_TIMER_CONFIRM)
+                    FSTRIM_TIMER_CONFIRM="true"
+                    ;;
+                BTRFS_MAINTENANCE_TUNE_ENABLED)
+                    BTRFS_MAINTENANCE_TUNE_ENABLED="false"
+                    ;;
+                BTRFS_MAINTENANCE_TUNE_CONFIRM)
+                    BTRFS_MAINTENANCE_TUNE_CONFIRM="true"
                     ;;
                 BOOT_ENTRY_CLEANUP_ENABLED)
                     BOOT_ENTRY_CLEANUP_ENABLED="true"
@@ -7642,6 +7845,118 @@ run_snapper_menu_only() {
                 fi
             }
 
+            # 0) Flatpak unused runtimes cleanup (space saver)
+            if [ "${FLATPAK_UNUSED_CLEAN_ENABLED:-false}" = "true" ] && command -v flatpak >/dev/null 2>&1; then
+                ran_any=1
+                __znh_print_stage "== System Deep Scrub: Flatpak unused runtimes =="
+
+                local do_fp=0
+                if [ "${FLATPAK_UNUSED_CLEAN_CONFIRM:-true}" = "true" ]; then
+                    if [ -t 0 ]; then
+                        local ans_fp
+                        read -p "Prune unused Flatpak runtimes now? (flatpak uninstall --unused) [y/N]: " -r ans_fp
+                        if [[ "${ans_fp:-}" =~ ^[Yy]$ ]]; then
+                            do_fp=1
+                        else
+                            echo "Skipping Flatpak prune."
+                        fi
+                    else
+                        log_warn "[deep-scrub] Refusing Flatpak prune without a TTY while FLATPAK_UNUSED_CLEAN_CONFIRM=true"
+                    fi
+                else
+                    do_fp=1
+                fi
+
+                if [ "${do_fp}" -eq 1 ] 2>/dev/null; then
+                    execute_guarded "Flatpak prune (unused)" flatpak uninstall --unused --noninteractive || true
+                fi
+            fi
+
+            # 0.5) Snap revision retention tuning (space saver)
+            if [ "${SNAP_REFRESH_RETAIN_TUNE_ENABLED:-false}" = "true" ] && command -v snap >/dev/null 2>&1; then
+                ran_any=1
+                __znh_print_stage "== System Deep Scrub: Snap revision retention =="
+
+                local retain
+                retain="${SNAP_REFRESH_RETAIN_VALUE:-2}"
+                if ! [[ "${retain}" =~ ^[0-9]+$ ]] || [ "${retain}" -lt 2 ] 2>/dev/null; then
+                    retain=2
+                fi
+
+                local cur_retain
+                cur_retain=$(snap get system refresh.retain 2>/dev/null | tr -d '\r' | head -n 1 || true)
+                echo "Current snap refresh.retain: ${cur_retain:-unknown}"
+                echo "Target snap refresh.retain: ${retain}"
+
+                local do_sr=0
+                if [ "${SNAP_REFRESH_RETAIN_TUNE_CONFIRM:-true}" = "true" ]; then
+                    if [ -t 0 ]; then
+                        local ans_sr
+                        read -p "Apply snap refresh.retain=${retain} now? [y/N]: " -r ans_sr
+                        if [[ "${ans_sr:-}" =~ ^[Yy]$ ]]; then
+                            do_sr=1
+                        else
+                            echo "Skipping snap retention tuning."
+                        fi
+                    else
+                        log_warn "[deep-scrub] Refusing snap retention tuning without a TTY while SNAP_REFRESH_RETAIN_TUNE_CONFIRM=true"
+                    fi
+                else
+                    do_sr=1
+                fi
+
+                if [ "${do_sr}" -eq 1 ] 2>/dev/null; then
+                    execute_guarded "Tune snap refresh retention" snap set system "refresh.retain=${retain}" || true
+                fi
+            fi
+
+            # 0.75) Coredump vacuum (crash dumps)
+            if [ "${COREDUMP_VACUUM_ENABLED:-false}" = "true" ] && command -v coredumpctl >/dev/null 2>&1; then
+                ran_any=1
+                __znh_print_stage "== System Deep Scrub: coredumps (crash dumps) =="
+
+                local before_cd after_cd max_mb
+                before_cd=$(coredumpctl --disk-usage 2>/dev/null | tr -d '\r' || true)
+                max_mb="${COREDUMP_VACUUM_MAX_SIZE_MB:-200}"
+                if ! [[ "${max_mb}" =~ ^[0-9]+$ ]] || [ "${max_mb}" -lt 0 ] 2>/dev/null; then
+                    max_mb=200
+                fi
+
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[BEFORE]%b %s\n" "${C_YELLOW}" "${C_RESET}" "${before_cd:-coredumpctl --disk-usage unavailable}"
+                else
+                    echo "[BEFORE] ${before_cd:-coredumpctl --disk-usage unavailable}"
+                fi
+
+                local do_cd=0
+                if [ "${COREDUMP_VACUUM_CONFIRM:-true}" = "true" ]; then
+                    if [ -t 0 ]; then
+                        local ans_cd
+                        read -p "Vacuum coredumps to keep under ${max_mb}MB? [y/N]: " -r ans_cd
+                        if [[ "${ans_cd:-}" =~ ^[Yy]$ ]]; then
+                            do_cd=1
+                        else
+                            echo "Skipping coredump vacuum."
+                        fi
+                    else
+                        log_warn "[deep-scrub] Refusing coredump vacuum without a TTY while COREDUMP_VACUUM_CONFIRM=true"
+                    fi
+                else
+                    do_cd=1
+                fi
+
+                if [ "${do_cd}" -eq 1 ] 2>/dev/null; then
+                    execute_guarded "Coredump vacuum" coredumpctl --vacuum-size="${max_mb}M" || true
+                fi
+
+                after_cd=$(coredumpctl --disk-usage 2>/dev/null | tr -d '\r' || true)
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[AFTER]%b  %s\n" "${C_GREEN}" "${C_RESET}" "${after_cd:-coredumpctl --disk-usage unavailable}"
+                else
+                    echo "[AFTER] ${after_cd:-coredumpctl --disk-usage unavailable}"
+                fi
+            fi
+
             # 1) Zypper cache cleanup
             if [ "${ZYPPER_CACHE_CLEAN_ENABLED:-false}" = "true" ] && command -v zypper >/dev/null 2>&1; then
                 ran_any=1
@@ -7702,11 +8017,15 @@ run_snapper_menu_only() {
                 ran_any=1
                 __znh_print_stage "== System Deep Scrub: systemd journal =="
 
-                local before_usage after_usage days
+                local before_usage after_usage days size_mb
                 before_usage=$(journalctl --disk-usage 2>/dev/null | tr -d '\r' || true)
                 days="${JOURNAL_VACUUM_DAYS:-7}"
+                size_mb="${JOURNAL_VACUUM_SIZE_MB:-0}"
                 if ! [[ "${days}" =~ ^[0-9]+$ ]] || [ "${days}" -lt 1 ] 2>/dev/null; then
                     days=7
+                fi
+                if ! [[ "${size_mb}" =~ ^[0-9]+$ ]] || [ "${size_mb}" -lt 0 ] 2>/dev/null; then
+                    size_mb=0
                 fi
 
                 if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
@@ -7715,29 +8034,41 @@ run_snapper_menu_only() {
                     echo "[BEFORE] ${before_usage:-journalctl --disk-usage unavailable}"
                 fi
 
+                __znh_run_journal_vacuum() {
+                    if [ "${size_mb}" -gt 0 ] 2>/dev/null; then
+                        execute_guarded "Journal vacuum" journalctl --vacuum-size="${size_mb}M" || true
+                    else
+                        execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
+                    fi
+                }
+
                 if [ "${JOURNAL_VACUUM_CONFIRM:-true}" = "true" ]; then
                     if [ -t 0 ]; then
                         local ans_jv
-                        if [ "${critical_low:-0}" -eq 1 ] 2>/dev/null; then
-                            read -p "Disk is critical-low. Vacuum journals to keep last ${days}d? [Y/n]: " -r ans_jv
-                            if [[ "${ans_jv:-y}" =~ ^[Nn]$ ]]; then
-                                echo "Skipping journal vacuum."
-                            else
-                                execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
-                            fi
+                        if [ "${size_mb}" -gt 0 ] 2>/dev/null; then
+                            read -p "Also vacuum systemd journal (keep under ${size_mb}M)? [y/N]: " -r ans_jv
                         else
-                            read -p "Also vacuum systemd journal (keep last ${days}d)? [y/N]: " -r ans_jv
-                            if [[ "${ans_jv:-}" =~ ^[Yy]$ ]]; then
-                                execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
+                            if [ "${critical_low:-0}" -eq 1 ] 2>/dev/null; then
+                                read -p "Disk is critical-low. Vacuum journals to keep last ${days}d? [Y/n]: " -r ans_jv
+                                if [[ "${ans_jv:-y}" =~ ^[Nn]$ ]]; then
+                                    echo "Skipping journal vacuum."
+                                    ans_jv=""
+                                fi
                             else
-                                echo "Skipping journal vacuum."
+                                read -p "Also vacuum systemd journal (keep last ${days}d)? [y/N]: " -r ans_jv
                             fi
+                        fi
+
+                        if [ -n "${ans_jv:-}" ] && [[ "${ans_jv:-}" =~ ^[Yy]$ ]]; then
+                            __znh_run_journal_vacuum
+                        elif [ "${size_mb}" -gt 0 ] 2>/dev/null && [[ ! "${ans_jv:-}" =~ ^[Yy]$ ]]; then
+                            echo "Skipping journal vacuum."
                         fi
                     else
                         log_warn "[deep-scrub] Refusing journal vacuum without a TTY while JOURNAL_VACUUM_CONFIRM=true"
                     fi
                 else
-                    execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
+                    __znh_run_journal_vacuum
                 fi
 
                 after_usage=$(journalctl --disk-usage 2>/dev/null | tr -d '\r' || true)
@@ -7793,12 +8124,23 @@ run_snapper_menu_only() {
                 fi
 
                 if [ "${do_it}" -eq 1 ] 2>/dev/null; then
+                    local days
+                    days="${USER_THUMBNAILS_CLEAN_DAYS:-0}"
+                    if ! [[ "${days}" =~ ^[0-9]+$ ]] || [ "${days}" -lt 0 ] 2>/dev/null; then
+                        days=0
+                    fi
+
                     for d in "${tdirs[@]}"; do
                         if [ -d "${d}" ]; then
-                            # Remove contents only (keep dir). Use find to avoid glob
-                            # expansion errors when the directory is empty.
-                            execute_optional "Clear thumbnails in ${d}" \
-                                find "${d}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || true
+                            if [ "${days}" -gt 0 ] 2>/dev/null; then
+                                execute_optional "Clear thumbnails older than ${days}d in ${d}" \
+                                    find "${d}" -type f -atime +"${days}" -delete 2>/dev/null || true
+                            else
+                                # Remove contents only (keep dir). Use find to avoid glob
+                                # expansion errors when the directory is empty.
+                                execute_optional "Clear thumbnails in ${d}" \
+                                    find "${d}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || true
+                            fi
                             chown -R "${SUDO_USER}:${SUDO_USER}" "${d}" 2>/dev/null || true
                         fi
                     done
@@ -8425,12 +8767,128 @@ run_snapper_menu_only() {
 
         __znh_enable_btrfs_maintenance_timers || true
 
+        # 4) SSD health: enable fstrim.timer (safe)
+        __znh_enable_fstrim_timer() {
+            if [ "${action}" != "enable" ]; then
+                return 0
+            fi
+            if [ "${FSTRIM_TIMER_ENABLED:-true}" != "true" ]; then
+                return 0
+            fi
+
+            if [ "${FSTRIM_TIMER_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ]; then
+                    local ans_ft
+                    read -p "Also enable fstrim.timer (SSD trim) if available? [Y/n]: " -r ans_ft
+                    if [[ "${ans_ft:-y}" =~ ^[Nn]$ ]]; then
+                        log_info "[fstrim] User declined enabling fstrim.timer"
+                        return 0
+                    fi
+                else
+                    log_warn "[fstrim] No TTY; skipping fstrim.timer while confirmation is required"
+                    return 0
+                fi
+            fi
+
+            echo ""
+            echo "SSD trim timer (fstrim.timer):"
+            if __znh_unit_file_exists_system fstrim.timer; then
+                if systemctl is-failed --quiet fstrim.timer 2>/dev/null; then
+                    execute_guarded "Reset failed state for fstrim.timer" systemctl reset-failed fstrim.timer || true
+                fi
+                if systemctl is-enabled fstrim.timer 2>/dev/null | grep -q "masked"; then
+                    execute_guarded "Unmask fstrim.timer" systemctl unmask fstrim.timer || true
+                fi
+                execute_guarded "Enable + start fstrim.timer" systemctl enable --now fstrim.timer || true
+            else
+                echo "  [skip] Timer not found: fstrim.timer"
+            fi
+            return 0
+        }
+
+        __znh_enable_fstrim_timer || true
+
+        # 5) Optional: tune btrfsmaintenance scheduling (reduce slowdowns)
+        __znh_tune_btrfsmaintenance_sysconfig() {
+            if [ "${action}" != "enable" ]; then
+                return 0
+            fi
+            if [ "${BTRFS_MAINTENANCE_TUNE_ENABLED:-false}" != "true" ]; then
+                return 0
+            fi
+
+            local cfg
+            cfg="/etc/sysconfig/btrfsmaintenance"
+            if [ ! -f "${cfg}" ]; then
+                log_info "[btrfs][tune] ${cfg} not found; skipping tuning"
+                return 0
+            fi
+
+            if [ "${BTRFS_MAINTENANCE_TUNE_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ]; then
+                    local ans_bmt
+                    read -p "Also tune btrfsmaintenance periods to monthly (balance/scrub) to reduce slowdowns? [y/N]: " -r ans_bmt
+                    if [[ ! "${ans_bmt:-}" =~ ^[Yy]$ ]]; then
+                        log_info "[btrfs][tune] User declined btrfsmaintenance sysconfig tuning"
+                        return 0
+                    fi
+                else
+                    log_warn "[btrfs][tune] No TTY; skipping btrfsmaintenance tuning while confirmation is required"
+                    return 0
+                fi
+            fi
+
+            echo ""
+            echo "Btrfs maintenance tuning (best-effort):"
+            echo "  - File: ${cfg}"
+
+            local ts backup_dir backup
+            ts="$(date +%Y%m%d-%H%M%S)"
+            backup_dir="/var/backups/zypper-auto"
+            backup="${backup_dir}/btrfsmaintenance-${ts}.bak"
+            execute_optional "Ensure backup dir exists (${backup_dir})" mkdir -p "${backup_dir}" || true
+            execute_guarded "Backup ${cfg} -> ${backup}" cp -a -- "${cfg}" "${backup}" || true
+
+            local changed=0
+            if grep -qE '^BTRFS_BALANCE_PERIOD="(daily|weekly)"' "${cfg}" 2>/dev/null; then
+                execute_guarded "Tune BTRFS_BALANCE_PERIOD -> monthly" \
+                    sed -i -E 's/^BTRFS_BALANCE_PERIOD="(daily|weekly)"/BTRFS_BALANCE_PERIOD="monthly"/' "${cfg}" || true
+                changed=1
+            fi
+            if grep -qE '^BTRFS_SCRUB_PERIOD="(daily|weekly)"' "${cfg}" 2>/dev/null; then
+                execute_guarded "Tune BTRFS_SCRUB_PERIOD -> monthly" \
+                    sed -i -E 's/^BTRFS_SCRUB_PERIOD="(daily|weekly)"/BTRFS_SCRUB_PERIOD="monthly"/' "${cfg}" || true
+                changed=1
+            fi
+
+            if [ "${changed}" -eq 1 ] 2>/dev/null; then
+                echo "  [tuned] Balance/Scrub periods adjusted to monthly"
+
+                # Reload/refresh units if present (unit name differs across distros/versions)
+                local unit
+                for unit in btrfsmaintenance-refresh.service btrfs-maintenance-refresh.service; do
+                    if __znh_unit_file_exists_system "${unit}"; then
+                        execute_guarded "Restart ${unit}" systemctl restart "${unit}" || true
+                    fi
+                done
+            else
+                echo "  [ok] No tuning needed (already monthly or configured differently)"
+            fi
+
+            return 0
+        }
+
+        __znh_tune_btrfsmaintenance_sysconfig || true
+
         echo ""
         echo "Current snapper timers (if any):"
         systemctl --no-pager list-timers 'snapper-*.timer' 2>/dev/null || true
         echo ""
         echo "Current btrfs timers (if any):"
         systemctl --no-pager list-timers 'btrfs-*.timer' 2>/dev/null || true
+        echo ""
+        echo "Current trim timers (if any):"
+        systemctl --no-pager list-timers 'fstrim.timer' 2>/dev/null || true
         return 0
     }
 
