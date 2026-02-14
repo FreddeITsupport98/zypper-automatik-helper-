@@ -939,6 +939,43 @@ BOOT_ENTRY_CLEANUP_ENTRIES_DIR=""
 BOOT_ENTRY_CLEANUP_CONFIRM=true
 
 # ---------------------------------------------------------------------
+# Kernel package cleanup: purge old kernels (zypper purge-kernels)
+# ---------------------------------------------------------------------
+
+# KERNEL_PURGE_ENABLED
+# When true, Snapper cleanup will also run `zypper purge-kernels` to remove old
+# kernel *packages*.
+#
+# IMPORTANT:
+# - This can change what kernels are available in the bootloader.
+# - It respects /etc/zypp/zypp.conf:multiversion.kernels.
+# - Disabled by default for safety.
+KERNEL_PURGE_ENABLED=false
+
+# KERNEL_PURGE_MODE
+# How to run purge-kernels:
+#   auto    - prefer direct `zypper purge-kernels`, fallback to systemd unit
+#   zypper  - run `zypper purge-kernels` directly
+#   systemd - `touch /boot/do_purge_kernels` then `systemctl start purge-kernels.service`
+KERNEL_PURGE_MODE="auto"
+
+# KERNEL_PURGE_CONFIRM
+# When true (default), ask once for confirmation before purging kernels.
+KERNEL_PURGE_CONFIRM=true
+
+# KERNEL_PURGE_DRY_RUN
+# When true, run `zypper purge-kernels --dry-run` (no changes; prints plan).
+KERNEL_PURGE_DRY_RUN=false
+
+# KERNEL_PURGE_DETAILS
+# When true, add `--details` to show a more detailed summary.
+KERNEL_PURGE_DETAILS=false
+
+# KERNEL_PURGE_TIMEOUT_SECONDS
+# Best-effort timeout for the purge-kernels run. Default: 900 seconds.
+KERNEL_PURGE_TIMEOUT_SECONDS=900
+
+# ---------------------------------------------------------------------
 # Installer log retention
 # ---------------------------------------------------------------------
 
@@ -1165,6 +1202,23 @@ EOF
         fi
     }
 
+    # Optional integer validation that requires a positive integer (>=1).
+    # If the key is missing entirely, we silently set a default.
+    validate_pos_int_optional() {
+        local name="$1" default="$2" value
+        value="${!name-}"
+        if [ -z "${value}" ]; then
+            printf -v "$name" '%s' "$default"
+            return
+        fi
+        if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ] 2>/dev/null; then
+            local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            printf -v "$name" '%s' "$default"
+        fi
+    }
+
     validate_int MAX_LOG_FILES 10
     validate_int MAX_LOG_SIZE_MB 50
     validate_int CACHE_EXPIRY_MINUTES 10
@@ -1268,6 +1322,15 @@ EOF
     validate_mode BOOT_ENTRY_CLEANUP_MODE backup "backup|delete"
     BOOT_ENTRY_CLEANUP_ENTRIES_DIR="${BOOT_ENTRY_CLEANUP_ENTRIES_DIR:-}"
     validate_bool_flag BOOT_ENTRY_CLEANUP_CONFIRM true
+
+    # Kernel package cleanup (purge-kernels)
+    validate_bool_flag KERNEL_PURGE_ENABLED false
+    validate_mode KERNEL_PURGE_MODE auto "auto|zypper|systemd"
+    validate_bool_flag KERNEL_PURGE_CONFIRM true
+    validate_bool_flag KERNEL_PURGE_DRY_RUN false
+    validate_bool_flag KERNEL_PURGE_DETAILS false
+    validate_pos_int_optional KERNEL_PURGE_TIMEOUT_SECONDS 900
+
     # DASHBOARD_BROWSER is an optional command name; keep empty by default.
     DASHBOARD_BROWSER="${DASHBOARD_BROWSER:-}"
 
@@ -1309,6 +1372,12 @@ EOF
     log_debug "  BOOT_ENTRY_CLEANUP_MODE=${BOOT_ENTRY_CLEANUP_MODE:-backup}"
     log_debug "  BOOT_ENTRY_CLEANUP_ENTRIES_DIR=${BOOT_ENTRY_CLEANUP_ENTRIES_DIR:-<auto>}"
     log_debug "  BOOT_ENTRY_CLEANUP_CONFIRM=${BOOT_ENTRY_CLEANUP_CONFIRM:-true}"
+    log_debug "  KERNEL_PURGE_ENABLED=${KERNEL_PURGE_ENABLED:-false}"
+    log_debug "  KERNEL_PURGE_MODE=${KERNEL_PURGE_MODE:-auto}"
+    log_debug "  KERNEL_PURGE_CONFIRM=${KERNEL_PURGE_CONFIRM:-true}"
+    log_debug "  KERNEL_PURGE_DRY_RUN=${KERNEL_PURGE_DRY_RUN:-false}"
+    log_debug "  KERNEL_PURGE_DETAILS=${KERNEL_PURGE_DETAILS:-false}"
+    log_debug "  KERNEL_PURGE_TIMEOUT_SECONDS=${KERNEL_PURGE_TIMEOUT_SECONDS:-900}"
     if [ -n "${WEBHOOK_URL:-}" ]; then
         log_debug "  WEBHOOK_URL=<configured>"
     else
@@ -1379,6 +1448,14 @@ EOF
     _mark_missing_key "BOOT_ENTRY_CLEANUP_MODE"
     _mark_missing_key "BOOT_ENTRY_CLEANUP_ENTRIES_DIR"
     _mark_missing_key "BOOT_ENTRY_CLEANUP_CONFIRM"
+
+    # Kernel package cleanup (purge-kernels)
+    _mark_missing_key "KERNEL_PURGE_ENABLED"
+    _mark_missing_key "KERNEL_PURGE_MODE"
+    _mark_missing_key "KERNEL_PURGE_CONFIRM"
+    _mark_missing_key "KERNEL_PURGE_DRY_RUN"
+    _mark_missing_key "KERNEL_PURGE_DETAILS"
+    _mark_missing_key "KERNEL_PURGE_TIMEOUT_SECONDS"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -1471,6 +1548,24 @@ EOF
                 BOOT_ENTRY_CLEANUP_CONFIRM)
                     log_info "  - BOOT_ENTRY_CLEANUP_CONFIRM: when true, asks once for confirmation before pruning boot entries."
                     ;;
+                KERNEL_PURGE_ENABLED)
+                    log_info "  - KERNEL_PURGE_ENABLED: when true, snapper cleanup also runs 'zypper purge-kernels' to auto-remove old kernel packages (respects /etc/zypp/zypp.conf:multiversion.kernels)."
+                    ;;
+                KERNEL_PURGE_MODE)
+                    log_info "  - KERNEL_PURGE_MODE: selects how to run purge-kernels (direct zypper vs systemd service)."
+                    ;;
+                KERNEL_PURGE_CONFIRM)
+                    log_info "  - KERNEL_PURGE_CONFIRM: when true, asks once for confirmation before purging kernel packages."
+                    ;;
+                KERNEL_PURGE_DRY_RUN)
+                    log_info "  - KERNEL_PURGE_DRY_RUN: when true, runs purge-kernels in --dry-run mode (no changes; prints plan)."
+                    ;;
+                KERNEL_PURGE_DETAILS)
+                    log_info "  - KERNEL_PURGE_DETAILS: when true, adds --details for a more detailed purge-kernels summary."
+                    ;;
+                KERNEL_PURGE_TIMEOUT_SECONDS)
+                    log_info "  - KERNEL_PURGE_TIMEOUT_SECONDS: best-effort timeout for purge-kernels (seconds)."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -1561,6 +1656,24 @@ EOF
                     ;;
                 BOOT_ENTRY_CLEANUP_CONFIRM)
                     BOOT_ENTRY_CLEANUP_CONFIRM="true"
+                    ;;
+                KERNEL_PURGE_ENABLED)
+                    KERNEL_PURGE_ENABLED="false"
+                    ;;
+                KERNEL_PURGE_MODE)
+                    KERNEL_PURGE_MODE="auto"
+                    ;;
+                KERNEL_PURGE_CONFIRM)
+                    KERNEL_PURGE_CONFIRM="true"
+                    ;;
+                KERNEL_PURGE_DRY_RUN)
+                    KERNEL_PURGE_DRY_RUN="false"
+                    ;;
+                KERNEL_PURGE_DETAILS)
+                    KERNEL_PURGE_DETAILS="false"
+                    ;;
+                KERNEL_PURGE_TIMEOUT_SECONDS)
+                    KERNEL_PURGE_TIMEOUT_SECONDS=900
                     ;;
             esac
         done
@@ -6757,6 +6870,108 @@ run_snapper_menu_only() {
                 fi
             done
         done
+
+        # Optional: purge old kernel *packages* using openSUSE's official
+        # `purge-kernels` (via zypper). This respects:
+        #   /etc/zypp/zypp.conf:multiversion.kernels
+        # and is disabled by default (see /etc/zypper-auto.conf).
+        __znh_kernel_purge_old_kernels() {
+            if [ "${KERNEL_PURGE_ENABLED:-false}" != "true" ]; then
+                return 0
+            fi
+
+            if ! command -v zypper >/dev/null 2>&1; then
+                log_warn "[kernel-purge] zypper not found; cannot run purge-kernels"
+                return 0
+            fi
+
+            # Guard: don't run while zypper appears active (package manager lock).
+            # NOTE: best-effort; we keep it simple to avoid false positives.
+            if pgrep -x zypper >/dev/null 2>&1; then
+                log_warn "[kernel-purge] zypper appears to be running already; skipping purge-kernels to avoid lock conflicts"
+                return 0
+            fi
+
+            local policy_line
+            policy_line=""
+            if [ -f /etc/zypp/zypp.conf ]; then
+                policy_line=$(grep -E '^[[:space:]]*multiversion\.kernels' /etc/zypp/zypp.conf 2>/dev/null | tail -n 1 | tr -d '\r' || true)
+            fi
+
+            local -a zcmd
+            zcmd=(zypper -n purge-kernels)
+            if [ "${KERNEL_PURGE_DRY_RUN:-false}" = "true" ]; then
+                zcmd+=(--dry-run)
+            fi
+            if [ "${KERNEL_PURGE_DETAILS:-false}" = "true" ]; then
+                zcmd+=(--details)
+            fi
+
+            local mode timeout_s
+            mode="${KERNEL_PURGE_MODE:-auto}"
+            timeout_s="${KERNEL_PURGE_TIMEOUT_SECONDS:-900}"
+            if ! [[ "${timeout_s}" =~ ^[0-9]+$ ]] || [ "${timeout_s}" -le 0 ] 2>/dev/null; then
+                timeout_s=900
+            fi
+
+            echo ""
+            echo "== Kernel package cleanup (purge-kernels) =="
+            if [ -n "${policy_line:-}" ]; then
+                echo "Policy (from /etc/zypp/zypp.conf): ${policy_line}"
+            else
+                echo "Policy (from /etc/zypp/zypp.conf): (multiversion.kernels not found; zypper default will apply)"
+            fi
+            echo "Mode: ${mode}"
+            echo "Command: ${zcmd[*]}"
+
+            if [ "${KERNEL_PURGE_CONFIRM:-true}" = "true" ] && [ -t 0 ]; then
+                read -p "Purge old kernel packages now? [y/N]: " -r ans_kp
+                if [[ ! "${ans_kp:-}" =~ ^[Yy]$ ]]; then
+                    echo "Skipping kernel package cleanup."
+                    return 0
+                fi
+            fi
+
+            case "${mode}" in
+                zypper)
+                    if command -v timeout >/dev/null 2>&1; then
+                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" "${zcmd[@]}" || true
+                    else
+                        execute_guarded "Kernel purge (zypper purge-kernels)" "${zcmd[@]}" || true
+                    fi
+                    ;;
+                systemd)
+                    if __znh_unit_file_exists_system purge-kernels.service; then
+                        # The unit is gated by /boot/do_purge_kernels; create the marker and start it.
+                        execute_guarded "Create /boot/do_purge_kernels marker" touch /boot/do_purge_kernels || true
+                        if command -v timeout >/dev/null 2>&1; then
+                            execute_guarded "Kernel purge (purge-kernels.service)" timeout "${timeout_s}" systemctl start purge-kernels.service || true
+                        else
+                            execute_guarded "Kernel purge (purge-kernels.service)" systemctl start purge-kernels.service || true
+                        fi
+                    else
+                        log_warn "[kernel-purge] purge-kernels.service not found; falling back to direct zypper purge-kernels"
+                        if command -v timeout >/dev/null 2>&1; then
+                            execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" "${zcmd[@]}" || true
+                        else
+                            execute_guarded "Kernel purge (zypper purge-kernels)" "${zcmd[@]}" || true
+                        fi
+                    fi
+                    ;;
+                auto|*)
+                    # Prefer direct zypper invocation; it's the most portable.
+                    if command -v timeout >/dev/null 2>&1; then
+                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" "${zcmd[@]}" || true
+                    else
+                        execute_guarded "Kernel purge (zypper purge-kernels)" "${zcmd[@]}" || true
+                    fi
+                    ;;
+            esac
+
+            return 0
+        }
+
+        __znh_kernel_purge_old_kernels || true
 
         # Optional: prune old boot menu entry files (BLS/systemd-boot) so the boot
         # menu doesn't fill up with many older kernels.
