@@ -929,6 +929,57 @@ SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX="aborted|failed"
 SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM=true
 
 # ---------------------------------------------------------------------
+# System Deep Scrub (Option 4): caches & logs
+# ---------------------------------------------------------------------
+
+# ZYPPER_CACHE_CLEAN_ENABLED
+# When true, Snapper Full Cleanup will also run:
+#   zypper clean --all
+# This removes cached metadata and downloaded RPMs (safe; they can be re-downloaded).
+ZYPPER_CACHE_CLEAN_ENABLED=false
+
+# ZYPPER_CACHE_CLEAN_CONFIRM
+# When true (default), ask once before cleaning zypper caches.
+ZYPPER_CACHE_CLEAN_CONFIRM=true
+
+# JOURNAL_VACUUM_ENABLED
+# When true, Snapper Full Cleanup will also vacuum systemd journals.
+JOURNAL_VACUUM_ENABLED=false
+
+# JOURNAL_VACUUM_DAYS
+# How many days of journals to keep (journalctl --vacuum-time=<Nd>).
+# Default: 7
+JOURNAL_VACUUM_DAYS=7
+
+# JOURNAL_VACUUM_CONFIRM
+# When true (default), ask once before vacuuming journals.
+JOURNAL_VACUUM_CONFIRM=true
+
+# USER_THUMBNAILS_CLEAN_ENABLED
+# When true, Snapper Full Cleanup will also remove cached thumbnails for the
+# desktop user (best-effort) to reclaim space:
+#   ~/.cache/thumbnails/* and ~/.thumbnails/*
+USER_THUMBNAILS_CLEAN_ENABLED=false
+
+# USER_THUMBNAILS_CLEAN_CONFIRM
+# When true (default), ask once before deleting thumbnails.
+USER_THUMBNAILS_CLEAN_CONFIRM=true
+
+# ---------------------------------------------------------------------
+# System Health Automator (Option 5): btrfs maintenance timers
+# ---------------------------------------------------------------------
+
+# BTRFS_MAINTENANCE_TIMERS_ENABLED
+# When true (default), Snapper AUTO enable will also attempt to enable btrfs
+# maintenance timers if they exist (from btrfsmaintenance package), e.g.:
+#   btrfs-scrub.timer, btrfs-balance.timer, btrfs-trim.timer
+BTRFS_MAINTENANCE_TIMERS_ENABLED=true
+
+# BTRFS_MAINTENANCE_TIMERS_CONFIRM
+# When true (default), ask once before enabling btrfs maintenance timers.
+BTRFS_MAINTENANCE_TIMERS_CONFIRM=true
+
+# ---------------------------------------------------------------------
 # Boot menu hygiene: auto-clean old kernel entries (systemd-boot / BLS)
 # ---------------------------------------------------------------------
 
@@ -1341,6 +1392,19 @@ EOF
     SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX="${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
     validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM true
 
+    # System Deep Scrub (Option 4)
+    validate_bool_flag ZYPPER_CACHE_CLEAN_ENABLED false
+    validate_bool_flag ZYPPER_CACHE_CLEAN_CONFIRM true
+    validate_bool_flag JOURNAL_VACUUM_ENABLED false
+    validate_pos_int_optional JOURNAL_VACUUM_DAYS 7
+    validate_bool_flag JOURNAL_VACUUM_CONFIRM true
+    validate_bool_flag USER_THUMBNAILS_CLEAN_ENABLED false
+    validate_bool_flag USER_THUMBNAILS_CLEAN_CONFIRM true
+
+    # System Health Automator (Option 5)
+    validate_bool_flag BTRFS_MAINTENANCE_TIMERS_ENABLED true
+    validate_bool_flag BTRFS_MAINTENANCE_TIMERS_CONFIRM true
+
     # Boot entry cleanup (boot menu hygiene)
     validate_bool_flag BOOT_ENTRY_CLEANUP_ENABLED true
     validate_nonneg_int_optional BOOT_ENTRY_CLEANUP_KEEP_LATEST 2
@@ -1398,6 +1462,15 @@ EOF
     log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED=${SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED:-false}"
     log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX=${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
     log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM=${SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM:-true}"
+    log_debug "  ZYPPER_CACHE_CLEAN_ENABLED=${ZYPPER_CACHE_CLEAN_ENABLED:-false}"
+    log_debug "  ZYPPER_CACHE_CLEAN_CONFIRM=${ZYPPER_CACHE_CLEAN_CONFIRM:-true}"
+    log_debug "  JOURNAL_VACUUM_ENABLED=${JOURNAL_VACUUM_ENABLED:-false}"
+    log_debug "  JOURNAL_VACUUM_DAYS=${JOURNAL_VACUUM_DAYS:-7}"
+    log_debug "  JOURNAL_VACUUM_CONFIRM=${JOURNAL_VACUUM_CONFIRM:-true}"
+    log_debug "  USER_THUMBNAILS_CLEAN_ENABLED=${USER_THUMBNAILS_CLEAN_ENABLED:-false}"
+    log_debug "  USER_THUMBNAILS_CLEAN_CONFIRM=${USER_THUMBNAILS_CLEAN_CONFIRM:-true}"
+    log_debug "  BTRFS_MAINTENANCE_TIMERS_ENABLED=${BTRFS_MAINTENANCE_TIMERS_ENABLED:-true}"
+    log_debug "  BTRFS_MAINTENANCE_TIMERS_CONFIRM=${BTRFS_MAINTENANCE_TIMERS_CONFIRM:-true}"
     log_debug "  BOOT_ENTRY_CLEANUP_ENABLED=${BOOT_ENTRY_CLEANUP_ENABLED:-true}"
     log_debug "  BOOT_ENTRY_CLEANUP_KEEP_LATEST=${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}"
     log_debug "  BOOT_ENTRY_CLEANUP_MODE=${BOOT_ENTRY_CLEANUP_MODE:-backup}"
@@ -1477,6 +1550,19 @@ EOF
     _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED"
     _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX"
     _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM"
+
+    # System Deep Scrub (Option 4)
+    _mark_missing_key "ZYPPER_CACHE_CLEAN_ENABLED"
+    _mark_missing_key "ZYPPER_CACHE_CLEAN_CONFIRM"
+    _mark_missing_key "JOURNAL_VACUUM_ENABLED"
+    _mark_missing_key "JOURNAL_VACUUM_DAYS"
+    _mark_missing_key "JOURNAL_VACUUM_CONFIRM"
+    _mark_missing_key "USER_THUMBNAILS_CLEAN_ENABLED"
+    _mark_missing_key "USER_THUMBNAILS_CLEAN_CONFIRM"
+
+    # System Health Automator (Option 5)
+    _mark_missing_key "BTRFS_MAINTENANCE_TIMERS_ENABLED"
+    _mark_missing_key "BTRFS_MAINTENANCE_TIMERS_CONFIRM"
 
     # Boot entry cleanup (boot menu hygiene)
     _mark_missing_key "BOOT_ENTRY_CLEANUP_ENABLED"
@@ -1577,6 +1663,33 @@ EOF
                     ;;
                 SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM)
                     log_info "  - SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM: when true, asks once before deleting snapshots found by the Deep Clean hunter."
+                    ;;
+                ZYPPER_CACHE_CLEAN_ENABLED)
+                    log_info "  - ZYPPER_CACHE_CLEAN_ENABLED: when true, Snapper menu cleanup also runs 'zypper clean --all' to clear cached metadata and downloaded RPMs."
+                    ;;
+                ZYPPER_CACHE_CLEAN_CONFIRM)
+                    log_info "  - ZYPPER_CACHE_CLEAN_CONFIRM: when true, asks once before running zypper cache cleaning."
+                    ;;
+                JOURNAL_VACUUM_ENABLED)
+                    log_info "  - JOURNAL_VACUUM_ENABLED: when true, Snapper menu cleanup also vacuums systemd journals (journalctl --vacuum-time)."
+                    ;;
+                JOURNAL_VACUUM_DAYS)
+                    log_info "  - JOURNAL_VACUUM_DAYS: number of days of journals to keep when vacuuming (default: 7)."
+                    ;;
+                JOURNAL_VACUUM_CONFIRM)
+                    log_info "  - JOURNAL_VACUUM_CONFIRM: when true, asks once before vacuuming journals."
+                    ;;
+                USER_THUMBNAILS_CLEAN_ENABLED)
+                    log_info "  - USER_THUMBNAILS_CLEAN_ENABLED: when true, Snapper menu cleanup also deletes cached thumbnails for the desktop user (best-effort)."
+                    ;;
+                USER_THUMBNAILS_CLEAN_CONFIRM)
+                    log_info "  - USER_THUMBNAILS_CLEAN_CONFIRM: when true, asks once before deleting thumbnails."
+                    ;;
+                BTRFS_MAINTENANCE_TIMERS_ENABLED)
+                    log_info "  - BTRFS_MAINTENANCE_TIMERS_ENABLED: when true, Snapper AUTO enable also enables btrfs maintenance timers (scrub/balance/trim) when available."
+                    ;;
+                BTRFS_MAINTENANCE_TIMERS_CONFIRM)
+                    log_info "  - BTRFS_MAINTENANCE_TIMERS_CONFIRM: when true, asks once before enabling btrfs maintenance timers."
                     ;;
                 BOOT_ENTRY_CLEANUP_ENABLED)
                     log_info "  - BOOT_ENTRY_CLEANUP_ENABLED: when true, snapper cleanup also prunes old kernel boot-menu entry files (BLS) to reduce clutter." 
@@ -1695,6 +1808,33 @@ EOF
                     ;;
                 SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM)
                     SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM="true"
+                    ;;
+                ZYPPER_CACHE_CLEAN_ENABLED)
+                    ZYPPER_CACHE_CLEAN_ENABLED="false"
+                    ;;
+                ZYPPER_CACHE_CLEAN_CONFIRM)
+                    ZYPPER_CACHE_CLEAN_CONFIRM="true"
+                    ;;
+                JOURNAL_VACUUM_ENABLED)
+                    JOURNAL_VACUUM_ENABLED="false"
+                    ;;
+                JOURNAL_VACUUM_DAYS)
+                    JOURNAL_VACUUM_DAYS=7
+                    ;;
+                JOURNAL_VACUUM_CONFIRM)
+                    JOURNAL_VACUUM_CONFIRM="true"
+                    ;;
+                USER_THUMBNAILS_CLEAN_ENABLED)
+                    USER_THUMBNAILS_CLEAN_ENABLED="false"
+                    ;;
+                USER_THUMBNAILS_CLEAN_CONFIRM)
+                    USER_THUMBNAILS_CLEAN_CONFIRM="true"
+                    ;;
+                BTRFS_MAINTENANCE_TIMERS_ENABLED)
+                    BTRFS_MAINTENANCE_TIMERS_ENABLED="true"
+                    ;;
+                BTRFS_MAINTENANCE_TIMERS_CONFIRM)
+                    BTRFS_MAINTENANCE_TIMERS_CONFIRM="true"
                     ;;
                 BOOT_ENTRY_CLEANUP_ENABLED)
                     BOOT_ENTRY_CLEANUP_ENABLED="true"
@@ -7337,6 +7477,212 @@ run_snapper_menu_only() {
 
         __znh_snapper_broken_snapshot_hunter || true
 
+        # Optional: deep scrub system caches & logs (beyond snapper).
+        __znh_system_deep_scrub() {
+            local ran_any=0
+
+            __znh_du_sh() {
+                local p="$1"
+                du -sh -- "$p" 2>/dev/null | awk '{print $1}'
+            }
+
+            __znh_print_stage() {
+                local title="$1"
+                echo ""
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b%s%b\n" "${C_CYAN}" "${title}" "${C_RESET}"
+                else
+                    echo "${title}"
+                fi
+            }
+
+            # 1) Zypper cache cleanup
+            if [ "${ZYPPER_CACHE_CLEAN_ENABLED:-false}" = "true" ] && command -v zypper >/dev/null 2>&1; then
+                ran_any=1
+                __znh_print_stage "== System Deep Scrub: Zypper cache =="
+
+                local zypp_dir zypp_before zypp_after
+                zypp_dir="/var/cache/zypp"
+                zypp_before=""
+                zypp_after=""
+                if [ -d "${zypp_dir}" ]; then
+                    zypp_before="$(__znh_du_sh "${zypp_dir}")"
+                fi
+
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[BEFORE]%b %s size: %s\n" "${C_YELLOW}" "${C_RESET}" "${zypp_dir}" "${zypp_before:-unknown}"
+                else
+                    echo "[BEFORE] ${zypp_dir} size: ${zypp_before:-unknown}"
+                fi
+
+                if [ "${ZYPPER_CACHE_CLEAN_CONFIRM:-true}" = "true" ]; then
+                    if [ -t 0 ]; then
+                        local ans_zc
+                        if [ "${critical_low:-0}" -eq 1 ] 2>/dev/null; then
+                            read -p "Disk is critical-low. Run 'zypper clean --all' now? [Y/n]: " -r ans_zc
+                            if [[ "${ans_zc:-y}" =~ ^[Nn]$ ]]; then
+                                echo "Skipping zypper cache clean."
+                            else
+                                execute_guarded "Zypper cache clean" zypper clean --all || true
+                            fi
+                        else
+                            read -p "Also run 'zypper clean --all' (clears cached RPMs/metadata)? [y/N]: " -r ans_zc
+                            if [[ "${ans_zc:-}" =~ ^[Yy]$ ]]; then
+                                execute_guarded "Zypper cache clean" zypper clean --all || true
+                            else
+                                echo "Skipping zypper cache clean."
+                            fi
+                        fi
+                    else
+                        log_warn "[deep-scrub] Refusing zypper cache clean without a TTY while ZYPPER_CACHE_CLEAN_CONFIRM=true"
+                    fi
+                else
+                    execute_guarded "Zypper cache clean" zypper clean --all || true
+                fi
+
+                if [ -d "${zypp_dir}" ]; then
+                    zypp_after="$(__znh_du_sh "${zypp_dir}")"
+                fi
+
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[AFTER]%b  %s size: %s\n" "${C_GREEN}" "${C_RESET}" "${zypp_dir}" "${zypp_after:-unknown}"
+                else
+                    echo "[AFTER] ${zypp_dir} size: ${zypp_after:-unknown}"
+                fi
+            fi
+
+            # 2) Journald vacuum
+            if [ "${JOURNAL_VACUUM_ENABLED:-false}" = "true" ] && command -v journalctl >/dev/null 2>&1; then
+                ran_any=1
+                __znh_print_stage "== System Deep Scrub: systemd journal =="
+
+                local before_usage after_usage days
+                before_usage=$(journalctl --disk-usage 2>/dev/null | tr -d '\r' || true)
+                days="${JOURNAL_VACUUM_DAYS:-7}"
+                if ! [[ "${days}" =~ ^[0-9]+$ ]] || [ "${days}" -lt 1 ] 2>/dev/null; then
+                    days=7
+                fi
+
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[BEFORE]%b %s\n" "${C_YELLOW}" "${C_RESET}" "${before_usage:-journalctl --disk-usage unavailable}"
+                else
+                    echo "[BEFORE] ${before_usage:-journalctl --disk-usage unavailable}"
+                fi
+
+                if [ "${JOURNAL_VACUUM_CONFIRM:-true}" = "true" ]; then
+                    if [ -t 0 ]; then
+                        local ans_jv
+                        if [ "${critical_low:-0}" -eq 1 ] 2>/dev/null; then
+                            read -p "Disk is critical-low. Vacuum journals to keep last ${days}d? [Y/n]: " -r ans_jv
+                            if [[ "${ans_jv:-y}" =~ ^[Nn]$ ]]; then
+                                echo "Skipping journal vacuum."
+                            else
+                                execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
+                            fi
+                        else
+                            read -p "Also vacuum systemd journal (keep last ${days}d)? [y/N]: " -r ans_jv
+                            if [[ "${ans_jv:-}" =~ ^[Yy]$ ]]; then
+                                execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
+                            else
+                                echo "Skipping journal vacuum."
+                            fi
+                        fi
+                    else
+                        log_warn "[deep-scrub] Refusing journal vacuum without a TTY while JOURNAL_VACUUM_CONFIRM=true"
+                    fi
+                else
+                    execute_guarded "Journal vacuum" journalctl --vacuum-time="${days}d" || true
+                fi
+
+                after_usage=$(journalctl --disk-usage 2>/dev/null | tr -d '\r' || true)
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[AFTER]%b  %s\n" "${C_GREEN}" "${C_RESET}" "${after_usage:-journalctl --disk-usage unavailable}"
+                else
+                    echo "[AFTER] ${after_usage:-journalctl --disk-usage unavailable}"
+                fi
+            fi
+
+            # 3) User thumbnails cleanup (best-effort)
+            if [ "${USER_THUMBNAILS_CLEAN_ENABLED:-false}" = "true" ] && [ -n "${SUDO_USER_HOME:-}" ] && [ -n "${SUDO_USER:-}" ]; then
+                ran_any=1
+                __znh_print_stage "== System Deep Scrub: user thumbnails =="
+
+                local -a tdirs
+                tdirs=("${SUDO_USER_HOME}/.cache/thumbnails" "${SUDO_USER_HOME}/.thumbnails")
+
+                local before_sz after_sz
+                before_sz=""
+                after_sz=""
+
+                local d
+                for d in "${tdirs[@]}"; do
+                    if [ -d "${d}" ]; then
+                        local s
+                        s="$(__znh_du_sh "${d}")"
+                        before_sz+="${d}:${s} "
+                    fi
+                done
+
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[BEFORE]%b %s\n" "${C_YELLOW}" "${C_RESET}" "${before_sz:-no thumbnail dirs found}"
+                else
+                    echo "[BEFORE] ${before_sz:-no thumbnail dirs found}"
+                fi
+
+                local do_it=0
+                if [ "${USER_THUMBNAILS_CLEAN_CONFIRM:-true}" = "true" ]; then
+                    if [ -t 0 ]; then
+                        local ans_tc
+                        read -p "Delete cached thumbnails for user '${SUDO_USER}'? [y/N]: " -r ans_tc
+                        if [[ "${ans_tc:-}" =~ ^[Yy]$ ]]; then
+                            do_it=1
+                        else
+                            echo "Skipping thumbnails cleanup."
+                        fi
+                    else
+                        log_warn "[deep-scrub] Refusing thumbnails cleanup without a TTY while USER_THUMBNAILS_CLEAN_CONFIRM=true"
+                    fi
+                else
+                    do_it=1
+                fi
+
+                if [ "${do_it}" -eq 1 ] 2>/dev/null; then
+                    for d in "${tdirs[@]}"; do
+                        if [ -d "${d}" ]; then
+                            # Remove contents only (keep dir). Use find to avoid glob
+                            # expansion errors when the directory is empty.
+                            execute_optional "Clear thumbnails in ${d}" \
+                                find "${d}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || true
+                            chown -R "${SUDO_USER}:${SUDO_USER}" "${d}" 2>/dev/null || true
+                        fi
+                    done
+                fi
+
+                for d in "${tdirs[@]}"; do
+                    if [ -d "${d}" ]; then
+                        local s
+                        s="$(__znh_du_sh "${d}")"
+                        after_sz+="${d}:${s} "
+                    fi
+                done
+
+                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                    printf "%b[AFTER]%b  %s\n" "${C_GREEN}" "${C_RESET}" "${after_sz:-no thumbnail dirs found}"
+                else
+                    echo "[AFTER] ${after_sz:-no thumbnail dirs found}"
+                fi
+            fi
+
+            if [ "${ran_any}" -eq 1 ] 2>/dev/null; then
+                echo ""
+                echo "[deep-scrub] Completed selected system hygiene steps."
+            fi
+
+            return 0
+        }
+
+        __znh_system_deep_scrub || true
+
         # Optional: purge old kernel *packages* using openSUSE's official
         # `purge-kernels` (via zypper). This respects:
         #   /etc/zypp/zypp.conf:multiversion.kernels
@@ -7869,9 +8215,74 @@ run_snapper_menu_only() {
             __znh_snapper_optimize_configs "${action}" || true
         fi
 
+        # 3) Optional: btrfs maintenance timers (system health)
+        __znh_enable_btrfs_maintenance_timers() {
+            if [ "${BTRFS_MAINTENANCE_TIMERS_ENABLED:-true}" != "true" ]; then
+                return 0
+            fi
+
+            local units=(btrfs-scrub.timer btrfs-balance.timer btrfs-trim.timer btrfs-defrag.timer)
+            local found=0
+
+            # Only meaningful when enabling automation.
+            if [ "${action}" != "enable" ]; then
+                return 0
+            fi
+
+            # Ask once (interactive) before enabling.
+            if [ "${BTRFS_MAINTENANCE_TIMERS_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ]; then
+                    local ans_bt
+                    read -p "Also enable btrfs maintenance timers (scrub/balance/trim) if available? [Y/n]: " -r ans_bt
+                    if [[ "${ans_bt:-y}" =~ ^[Nn]$ ]]; then
+                        log_info "[btrfs][maint] User declined enabling btrfs maintenance timers"
+                        return 0
+                    fi
+                else
+                    log_warn "[btrfs][maint] No TTY; skipping btrfs maintenance timers while confirmation is required"
+                    return 0
+                fi
+            fi
+
+            echo ""
+            echo "Btrfs maintenance timers:"
+
+            local u
+            for u in "${units[@]}"; do
+                if __znh_unit_file_exists_system "${u}"; then
+                    found=1
+                    # Reset failed state if needed
+                    if systemctl is-failed --quiet "${u}" 2>/dev/null; then
+                        execute_guarded "Reset failed state for ${u}" systemctl reset-failed "${u}" || true
+                    fi
+                    # Unmask if masked
+                    if systemctl is-enabled "${u}" 2>/dev/null | grep -q "masked"; then
+                        execute_guarded "Unmask ${u}" systemctl unmask "${u}" || true
+                    fi
+                    execute_guarded "Enable + start ${u}" systemctl enable --now "${u}" || true
+                else
+                    echo "  [skip] Timer not found: ${u}"
+                fi
+            done
+
+            if [ "${found}" -eq 0 ] 2>/dev/null; then
+                echo "  (No btrfsmaintenance timers found. If desired, install: btrfsmaintenance)"
+            fi
+
+            echo ""
+            echo "Current btrfs timers (if any):"
+            systemctl --no-pager list-unit-files --no-legend 'btrfs-*.timer' 2>/dev/null || true
+            return 0
+        }
+
+        __znh_enable_btrfs_maintenance_timers || true
+
         echo ""
         echo "Current snapper timers (if any):"
         systemctl --no-pager list-timers 'snapper-*.timer' 2>/dev/null || true
+        echo ""
+        echo "Current btrfs timers (if any):"
+        systemctl --no-pager list-timers 'btrfs-*.timer' 2>/dev/null || true
         return 0
     }
 

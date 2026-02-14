@@ -331,6 +331,19 @@ Key options include:
   - When btrfs is available and cleanup reclaimed >~1GB, the helper prints a **tip**
     suggesting a btrfs balance command (it does not run balance automatically).
 
+- **System Deep Scrub (Option 4 extras: caches & logs)**
+  - `ZYPPER_CACHE_CLEAN_ENABLED` / `ZYPPER_CACHE_CLEAN_CONFIRM` – optionally run
+    `zypper clean --all` after Snapper cleanup to clear cached RPMs/metadata.
+  - `JOURNAL_VACUUM_ENABLED` / `JOURNAL_VACUUM_DAYS` / `JOURNAL_VACUUM_CONFIRM` –
+    optionally vacuum systemd journals (default keeps last 7 days).
+  - `USER_THUMBNAILS_CLEAN_ENABLED` / `USER_THUMBNAILS_CLEAN_CONFIRM` – optionally delete
+    cached thumbnails for the desktop user (`~/.cache/thumbnails/*`, `~/.thumbnails/*`).
+
+- **System Health Automator (Option 5 extras: btrfs maintenance)**
+  - `BTRFS_MAINTENANCE_TIMERS_ENABLED` / `BTRFS_MAINTENANCE_TIMERS_CONFIRM` – when Snapper
+    AUTO enable is used, optionally enable btrfs maintenance timers if available
+    (scrub/balance/trim/defrag), to reduce long-term btrfs “metadata full” issues.
+
 - **Boot menu hygiene (auto-clean old kernel entries)**
   - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
     old kernel *boot menu entry files* (BLS entries) so the boot menu stays clean.
@@ -1196,6 +1209,8 @@ systemctl status zypper-autodownload.service
   - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
   - 🧠 **IMPROVED:** Snapper menu "Full Cleanup" now also does the same smart config sync + retention-cap tuning used by the AUTO timers option (best-effort, interactive-only).
   - 🧯 **NEW:** optional Snapper cleanup Deep Clean step (broken snapshot hunter) + btrfs balance tip for emergency space recovery.
+  - 🧽 **NEW:** optional “System Deep Scrub” extras after Snapper cleanup: zypper cache clean, journal vacuum, and user thumbnail cache cleanup.
+  - 🧰 **NEW:** optional btrfs maintenance timer auto-enable (scrub/balance/trim) when using Snapper AUTO enable.
   - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
   - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
