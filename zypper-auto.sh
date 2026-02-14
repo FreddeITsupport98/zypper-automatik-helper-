@@ -5211,11 +5211,57 @@ __znh_start_repair_safety_snapshot() {
 
     log_info "📸 Creating Pre-Repair Safety Snapshot (Safety Net)..."
 
+    # Safety: snapper create can occasionally block for a long time (e.g. very
+    # large snapshot lists, btrfs contention, or snapperd/dbus weirdness). Guard
+    # it with a timeout so the helper never hangs indefinitely.
+    local snap_timeout
+    snap_timeout="${ZNH_SAFETY_SNAPSHOT_TIMEOUT_SECONDS:-90}"
+    if ! [[ "${snap_timeout}" =~ ^[0-9]+$ ]] || [ "${snap_timeout}" -lt 10 ] 2>/dev/null; then
+        snap_timeout=90
+    fi
+
+    # Best-effort hint: if there are *many* snapshots, warn the user that safety
+    # snapshot creation may be slow.
+    local snap_count snapper_list rc_count
+    snap_count=""
+    rc_count=0
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        snapper_list=$(timeout 10 snapper -c root list 2>/dev/null)
+        rc_count=$?
+    else
+        snapper_list=$(snapper -c root list 2>/dev/null)
+        rc_count=$?
+    fi
+    set -e
+
+    if [ "$rc_count" -eq 0 ] 2>/dev/null && [ -n "${snapper_list:-}" ]; then
+        snap_count=$(printf '%s\n' "$snapper_list" | awk '/^[[:space:]]*[0-9]+\*?[[:space:]]*[|│]/ {c++} END {print c+0}')
+        if [[ "${snap_count:-}" =~ ^[0-9]+$ ]] && [ "${snap_count}" -gt 200 ] 2>/dev/null; then
+            log_warn "📸 Snapper has many snapshots (${snap_count}); snapshot creation can be slow."
+            log_info "  → Consider: sudo zypper-auto-helper snapper cleanup all"
+        fi
+    fi
+
     local out rc
     set +e
-    out=$(snapper create --type pre --cleanup-algorithm number \
-        --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
-    rc=$?
+    if command -v timeout >/dev/null 2>&1; then
+        out=$(timeout "${snap_timeout}" snapper create --type pre --cleanup-algorithm number \
+            --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
+        rc=$?
+        if [ "$rc" -eq 124 ] 2>/dev/null || [ "$rc" -eq 137 ] 2>/dev/null; then
+            set -e
+            log_warn "📸 Pre-Repair Safety Snapshot timed out after ${snap_timeout}s; proceeding without snapshot"
+            if [ -n "${out:-}" ]; then
+                printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
+            fi
+            return 0
+        fi
+    else
+        out=$(snapper create --type pre --cleanup-algorithm number \
+            --description "Zypper-Auto Repair Safety Net" --print-number 2>&1)
+        rc=$?
+    fi
     set -e
 
     if [ "$rc" -eq 0 ] 2>/dev/null; then
@@ -5264,11 +5310,32 @@ __znh_finalize_repair_safety_snapshot() {
 
     log_info "📸 Finalizing Safety Snapshot (post)..."
 
+    local snap_timeout
+    snap_timeout="${ZNH_SAFETY_SNAPSHOT_TIMEOUT_SECONDS:-90}"
+    if ! [[ "${snap_timeout}" =~ ^[0-9]+$ ]] || [ "${snap_timeout}" -lt 10 ] 2>/dev/null; then
+        snap_timeout=90
+    fi
+
     local out post_rc
     set +e
-    out=$(snapper create --type post --cleanup-algorithm number \
-        --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
-    post_rc=$?
+    if command -v timeout >/dev/null 2>&1; then
+        out=$(timeout "${snap_timeout}" snapper create --type post --cleanup-algorithm number \
+            --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
+        post_rc=$?
+        if [ "$post_rc" -eq 124 ] 2>/dev/null || [ "$post_rc" -eq 137 ] 2>/dev/null; then
+            set -e
+            log_warn "📸 Post snapshot timed out after ${snap_timeout}s; pre snapshot ${REPAIR_SAFETY_PRE_SNAP_ID} is still available"
+            if [ -n "${out:-}" ]; then
+                printf '%s\n' "$out" | head -n 10 | sed 's/^/  [snapper] /' | tee -a "${LOG_FILE}" || true
+            fi
+            REPAIR_SAFETY_SNAPSHOT_FINALIZED=1
+            return 0
+        fi
+    else
+        out=$(snapper create --type post --cleanup-algorithm number \
+            --pre-number "${REPAIR_SAFETY_PRE_SNAP_ID}" --description "${desc}" --print-number 2>&1)
+        post_rc=$?
+    fi
     set -e
 
     if [ "$post_rc" -eq 0 ] 2>/dev/null; then
@@ -6170,18 +6237,83 @@ run_snapper_menu_only() {
     }
 
     __znh_snapper_cleanup_now() {
-        local alg="${1:-number}"
+        # Usage:
+        #   __znh_snapper_cleanup_now            # default: all algorithms
+        #   __znh_snapper_cleanup_now all        # same as default
+        #   __znh_snapper_cleanup_now number     # single algorithm
+        #   __znh_snapper_cleanup_now timeline
+        #   __znh_snapper_cleanup_now empty-pre-post
+        local mode="${1:-all}"
+
         echo ""
-        echo "About to run: snapper cleanup ${alg}"
-        echo "This deletes old snapshots according to your Snapper config retention rules."
+        echo "About to run COMPREHENSIVE Snapper cleanup."
+        echo "This is best-effort and uses your Snapper retention rules."
+        echo "Algorithms:"
+        echo "  - number         (deletes snapshots exceeding numeric limits)"
+        echo "  - timeline       (deletes old hourly/daily snapshots)"
+        echo "  - empty-pre-post (deletes orphaned 'pre' snapshots without a matching 'post')"
+        echo ""
+
+        if [ "${mode}" = "all" ]; then
+            echo "Mode: ALL algorithms"
+        else
+            echo "Mode: single algorithm '${mode}'"
+        fi
+
+        echo ""
         read -p "Proceed? [y/N]: " -r ans
         if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
             echo "Cleanup cancelled."
             return 0
         fi
 
-        snapper cleanup "${alg}"
-        return $?
+        local algs=(number timeline empty-pre-post)
+        if [ "${mode}" != "all" ]; then
+            algs=("${mode}")
+        fi
+
+        # Prefer to run cleanup for every configured snapper config (root/home/etc.).
+        # This better matches how snapper is actually used on many systems.
+        local configs=()
+        local cfg
+        while read -r cfg; do
+            [ -n "${cfg}" ] || continue
+            configs+=("${cfg}")
+        done < <(snapper list-configs 2>/dev/null | awk 'NR>2 && $1!="" {print $1}' || true)
+
+        if [ "${#configs[@]}" -eq 0 ] 2>/dev/null; then
+            configs=(root)
+        fi
+
+        local conf alg
+        for conf in "${configs[@]}"; do
+            echo ""
+            echo "== Snapper config: ${conf} =="
+            for alg in "${algs[@]}"; do
+                case "${alg}" in
+                    number|timeline|empty-pre-post)
+                        :
+                        ;;
+                    *)
+                        echo "Skipping unknown cleanup algorithm: ${alg}"
+                        continue
+                        ;;
+                esac
+
+                if command -v timeout >/dev/null 2>&1; then
+                    execute_guarded "Snapper cleanup (${conf}): ${alg}" \
+                        timeout 180 snapper -c "${conf}" cleanup "${alg}" || true
+                else
+                    execute_guarded "Snapper cleanup (${conf}): ${alg}" \
+                        snapper -c "${conf}" cleanup "${alg}" || true
+                fi
+            done
+        done
+
+        echo ""
+        echo "Cleanup complete."
+        echo "Tip: check free space with: df -h /  (or: btrfs filesystem df /)"
+        return 0
     }
 
     __znh_snapper_timer_exists() {
@@ -6199,9 +6331,55 @@ run_snapper_menu_only() {
         echo ""
         echo "Snapper timer management (${action})"
 
+        # Helper: set a key inside /etc/snapper/configs/<conf> safely.
+        # Only flips yes<->no when a matching line exists; otherwise appends.
+        __znh_snapper_config_set_yesno() {
+            local cfg_file="$1" key="$2" val="$3"
+            [ -f "${cfg_file}" ] || return 1
+
+            local ts bak mode uid gid tmp
+            ts="$(date +%Y%m%d-%H%M%S)"
+            bak="${cfg_file}.bak-${ts}"
+
+            mode=$(stat -c %a "${cfg_file}" 2>/dev/null || echo 644)
+            uid=$(stat -c %u "${cfg_file}" 2>/dev/null || echo 0)
+            gid=$(stat -c %g "${cfg_file}" 2>/dev/null || echo 0)
+
+            tmp="$(mktemp)"
+
+            if grep -qE "^${key}=" "${cfg_file}" 2>/dev/null; then
+                # Replace any existing assignment form with KEY="val".
+                sed -E "s|^${key}=.*|${key}=\"${val}\"|" "${cfg_file}" >"${tmp}" 2>/dev/null || {
+                    rm -f "${tmp}" 2>/dev/null || true
+                    return 1
+                }
+            else
+                cat "${cfg_file}" >"${tmp}" 2>/dev/null || {
+                    rm -f "${tmp}" 2>/dev/null || true
+                    return 1
+                }
+                printf '\n%s="%s"\n' "${key}" "${val}" >>"${tmp}" 2>/dev/null || true
+            fi
+
+            execute_guarded "Backup snapper config (${cfg_file})" cp -a "${cfg_file}" "${bak}" || true
+            mv -f "${tmp}" "${cfg_file}" 2>/dev/null || {
+                rm -f "${tmp}" 2>/dev/null || true
+                return 1
+            }
+            chmod "${mode}" "${cfg_file}" 2>/dev/null || true
+            chown "${uid}:${gid}" "${cfg_file}" 2>/dev/null || true
+            return 0
+        }
+
+        # 1) systemd unit management
+        local u
         for u in "${units[@]}"; do
             if __znh_snapper_timer_exists "${u}"; then
                 if [ "${action}" = "enable" ]; then
+                    # Safety: unmask first in case the user previously masked them
+                    if systemctl is-enabled "${u}" 2>/dev/null | grep -q "masked"; then
+                        execute_guarded "Unmask ${u}" systemctl unmask "${u}" || true
+                    fi
                     execute_guarded "Enable + start ${u}" systemctl enable --now "${u}" || true
                 else
                     execute_guarded "Disable + stop ${u}" systemctl disable --now "${u}" || true
@@ -6210,6 +6388,60 @@ run_snapper_menu_only() {
                 echo "- Timer not found (skipping): ${u}"
             fi
         done
+
+        # 2) Config sync: make sure snapper configs match the timer state so timers actually do work.
+        # - timeline timer needs TIMELINE_CREATE="yes"
+        # - boot timer needs BOOT_CREATE="yes"
+        if command -v snapper >/dev/null 2>&1; then
+            local conf cfg_file target_val
+            if [ "${action}" = "enable" ]; then
+                target_val="yes"
+            else
+                target_val="no"
+            fi
+
+            for conf in $(snapper list-configs 2>/dev/null | awk 'NR>2 && $1!="" {print $1}' || true); do
+                cfg_file="/etc/snapper/configs/${conf}"
+                if [ ! -f "${cfg_file}" ]; then
+                    continue
+                fi
+
+                # TIMELINE_CREATE
+                if grep -qE '^TIMELINE_CREATE="(yes|no)"' "${cfg_file}" 2>/dev/null; then
+                    cur=$(sed -n 's/^TIMELINE_CREATE="\(yes\|no\)".*/\1/p' "${cfg_file}" | head -n 1)
+                    if [ "${cur:-}" != "${target_val}" ]; then
+                        log_info "Auto-fixing snapper config: ${cfg_file} (TIMELINE_CREATE=${target_val})"
+                        if __znh_snapper_config_set_yesno "${cfg_file}" TIMELINE_CREATE "${target_val}"; then
+                            echo "  [config:${conf}] TIMELINE_CREATE -> ${target_val}"
+                        fi
+                    fi
+                else
+                    # If missing, append it when enabling.
+                    if [ "${target_val}" = "yes" ]; then
+                        log_info "Auto-fixing snapper config: ${cfg_file} (adding TIMELINE_CREATE=\"yes\")"
+                        __znh_snapper_config_set_yesno "${cfg_file}" TIMELINE_CREATE "${target_val}" || true
+                        echo "  [config:${conf}] TIMELINE_CREATE -> ${target_val}"
+                    fi
+                fi
+
+                # BOOT_CREATE
+                if grep -qE '^BOOT_CREATE="(yes|no)"' "${cfg_file}" 2>/dev/null; then
+                    cur=$(sed -n 's/^BOOT_CREATE="\(yes\|no\)".*/\1/p' "${cfg_file}" | head -n 1)
+                    if [ "${cur:-}" != "${target_val}" ]; then
+                        log_info "Auto-fixing snapper config: ${cfg_file} (BOOT_CREATE=${target_val})"
+                        if __znh_snapper_config_set_yesno "${cfg_file}" BOOT_CREATE "${target_val}"; then
+                            echo "  [config:${conf}] BOOT_CREATE -> ${target_val}"
+                        fi
+                    fi
+                else
+                    if [ "${target_val}" = "yes" ]; then
+                        log_info "Auto-fixing snapper config: ${cfg_file} (adding BOOT_CREATE=\"yes\")"
+                        __znh_snapper_config_set_yesno "${cfg_file}" BOOT_CREATE "${target_val}" || true
+                        echo "  [config:${conf}] BOOT_CREATE -> ${target_val}"
+                    fi
+                fi
+            done
+        fi
 
         echo ""
         echo "Current snapper timers (if any):"
@@ -6221,7 +6453,7 @@ run_snapper_menu_only() {
     #   zypper-auto-helper snapper status
     #   zypper-auto-helper snapper list [N]
     #   zypper-auto-helper snapper create [DESCRIPTION]
-    #   zypper-auto-helper snapper cleanup [number|timeline|empty-pre-post]
+    #   zypper-auto-helper snapper cleanup [all|number|timeline|empty-pre-post]
     #   zypper-auto-helper snapper auto   (enable timers)
     #   zypper-auto-helper snapper auto-off (disable timers)
     local sub="${1:-}"
@@ -6247,7 +6479,7 @@ run_snapper_menu_only() {
             ;;
         cleanup)
             shift
-            __znh_snapper_cleanup_now "${1:-number}"
+            __znh_snapper_cleanup_now "${1:-all}"
             local rc=$?
             set -e
             return $rc
@@ -6283,8 +6515,8 @@ run_snapper_menu_only() {
         echo "  1) Status (configs + snapshot detection + timers)"
         echo "  2) List recent snapshots (root)"
         echo "  3) Create snapshot (single)"
-        echo "  4) Cleanup old snapshots now (snapper cleanup number)"
-        echo "  5) AUTO: Enable snapper timers (timeline + cleanup + boot)"
+        echo "  4) Full Cleanup (number + timeline + orphaned)"
+        echo "  5) AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs"
         echo "  6) AUTO: Disable snapper timers"
         echo "  7) Exit (7 / E / Q)"
         echo ""
@@ -6302,7 +6534,7 @@ run_snapper_menu_only() {
                 __znh_snapper_create_snapshot
                 ;;
             4)
-                __znh_snapper_cleanup_now number
+                __znh_snapper_cleanup_now
                 ;;
             5)
                 __znh_snapper_auto_timers enable
@@ -6979,10 +7211,30 @@ run_rm_conflict_only() {
         else
             local SNAP_DESC="zypper-auto: duplicate RPM cleanup (--rm-conflict)"
             log_info "[rm-conflict][snapshot] Creating snapper single snapshot: '$SNAP_DESC'"
-            if snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1; then
+
+            local snap_timeout snap_rc
+            snap_timeout="${ZNH_SAFETY_SNAPSHOT_TIMEOUT_SECONDS:-90}"
+            if ! [[ "${snap_timeout}" =~ ^[0-9]+$ ]] || [ "${snap_timeout}" -lt 10 ] 2>/dev/null; then
+                snap_timeout=90
+            fi
+
+            set +e
+            if command -v timeout >/dev/null 2>&1; then
+                timeout "${snap_timeout}" snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1
+                snap_rc=$?
+            else
+                snapper create -t single -p -d "$SNAP_DESC" >/dev/null 2>&1
+                snap_rc=$?
+            fi
+            set -e
+
+            if [ "${snap_rc:-1}" -eq 0 ] 2>/dev/null; then
                 SNAPSHOT_DONE=1
                 printf '%b\n' "${GREEN}   Created snapper snapshot before manual duplicate cleanup.${RESET}"
                 log_success "[rm-conflict][snapshot] Snapshot created successfully"
+            elif [ "${snap_rc:-1}" -eq 124 ] 2>/dev/null || [ "${snap_rc:-1}" -eq 137 ] 2>/dev/null; then
+                printf '%b\n' "${YELLOW}   WARNING: Snapper snapshot timed out after ${snap_timeout}s; proceeding without snapshot.${RESET}"
+                log_warn "[rm-conflict][snapshot] Snapshot creation timed out after ${snap_timeout}s; proceeding without snapshot"
             else
                 printf '%b\n' "${YELLOW}   WARNING: Failed to create snapper snapshot; proceeding without snapshot.${RESET}"
                 log_error "[rm-conflict][snapshot] FAILED to create snapshot; proceeding without snapshot"
@@ -10155,8 +10407,8 @@ install_shell_completions() {
     # Snapper submenu
     local ZNH_SNAPPER_SUB
     ZNH_SNAPPER_SUB="status list create cleanup auto auto-off"
-    local ZNH_SNAPPER_CLEANUP_ALGOS
-    ZNH_SNAPPER_CLEANUP_ALGOS="number timeline empty-pre-post"
+        local ZNH_SNAPPER_CLEANUP_ALGOS
+        ZNH_SNAPPER_CLEANUP_ALGOS="all number timeline empty-pre-post"
 
     # --- bash completion (system-wide) ---
     local bash_dir bash_file
@@ -10248,7 +10500,7 @@ local -a _znh_snapper_sub
 _znh_snapper_sub=(status list create cleanup auto auto-off)
 
 local -a _znh_snapper_cleanup
-_znh_snapper_cleanup=(number timeline empty-pre-post)
+_znh_snapper_cleanup=(all number timeline empty-pre-post)
 
 _arguments -C \
   '1:command:->cmds' \
@@ -10308,7 +10560,7 @@ complete -c zypper-auto-helper -f -a "--help -h help"
 
 # snapper submenu
 complete -c zypper-auto-helper -n '__fish_seen_subcommand_from snapper' -f -a "status list create cleanup auto auto-off"
-complete -c zypper-auto-helper -n '__fish_seen_subcommand_from snapper; and __fish_seen_subcommand_from cleanup' -f -a "number timeline empty-pre-post"
+complete -c zypper-auto-helper -n '__fish_seen_subcommand_from snapper; and __fish_seen_subcommand_from cleanup' -f -a "all number timeline empty-pre-post"
 EOF
         chown "$SUDO_USER:$SUDO_USER" "${fish_comp_file}" 2>/dev/null || true
         chmod 644 "${fish_comp_file}" 2>/dev/null || true
