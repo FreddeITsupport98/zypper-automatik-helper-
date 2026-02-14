@@ -340,7 +340,7 @@ Key options include:
   - `COREDUMP_VACUUM_ENABLED` / `COREDUMP_VACUUM_MAX_SIZE_MB` / `COREDUMP_VACUUM_CONFIRM` –
     optionally vacuum systemd coredumps (crash dumps) via `coredumpctl`.
   - `FLATPAK_UNUSED_CLEAN_ENABLED` / `FLATPAK_UNUSED_CLEAN_CONFIRM` – optionally prune
-    unused Flatpak runtimes (`flatpak uninstall --unused`).
+    unused Flatpak runtimes (best-effort for both system and the desktop user).
   - `SNAP_REFRESH_RETAIN_TUNE_ENABLED` / `SNAP_REFRESH_RETAIN_VALUE` /
     `SNAP_REFRESH_RETAIN_TUNE_CONFIRM` – optionally tune snapd revision retention
     (`snap set system refresh.retain=2` is a common desktop space saver).

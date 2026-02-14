@@ -7359,6 +7359,13 @@ run_snapper_menu_only() {
         echo "  2) timeline       (expired hourly/daily snapshots)"
         echo "  3) number         (enforce numeric limits)"
         echo ""
+        echo "Optional extras (if enabled in /etc/zypper-auto.conf):"
+        echo "  - Flatpak unused runtimes prune"
+        echo "  - Snap revision retention tuning (refresh.retain)"
+        echo "  - Coredump vacuum (crash dumps)"
+        echo "  - Journal vacuum, zypper cache clean, thumbnails cleanup"
+        echo "  - Kernel package purge + boot entry pruning"
+        echo ""
 
         if [ "${mode}" = "all" ]; then
             echo "Mode: ALL algorithms (empty-pre-post -> timeline -> number)"
@@ -7868,7 +7875,14 @@ run_snapper_menu_only() {
                 fi
 
                 if [ "${do_fp}" -eq 1 ] 2>/dev/null; then
-                    execute_guarded "Flatpak prune (unused)" flatpak uninstall --unused --noninteractive || true
+                    # Prune system installation (root)
+                    execute_guarded "Flatpak prune (unused) [system]" flatpak uninstall --unused --noninteractive --system || true
+
+                    # Prune user installation (SUDO_USER) when available
+                    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+                        execute_optional "Flatpak prune (unused) [user:${SUDO_USER}]" \
+                            sudo -u "${SUDO_USER}" flatpak uninstall --unused --noninteractive --user || true
+                    fi
                 fi
             fi
 
