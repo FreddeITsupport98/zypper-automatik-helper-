@@ -6626,6 +6626,228 @@ run_snapper_menu_only() {
         return 0
     }
 
+    __znh_snapper_optimize_configs() {
+        # Best-effort Snapper config self-heal (shared by option 4 and option 5).
+        # Modes:
+        #   enable  - set TIMELINE_CREATE/BOOT_CREATE=yes and apply retention caps
+        #   disable - set TIMELINE_CREATE/BOOT_CREATE=no but ONLY if keys already exist
+        #   cleanup - if systemd timers are enabled, ensure corresponding *_CREATE=yes; apply retention caps
+        local action="${1:-cleanup}"
+
+        if [ ! -d /etc/snapper/configs ]; then
+            return 0
+        fi
+
+        local timeline_enabled boot_enabled
+        timeline_enabled=0
+        boot_enabled=0
+
+        # Determine timer states (used by cleanup mode; harmless elsewhere)
+        if systemctl is-enabled --quiet snapper-timeline.timer 2>/dev/null; then
+            timeline_enabled=1
+        fi
+        if systemctl is-enabled --quiet snapper-boot.timer 2>/dev/null; then
+            boot_enabled=1
+        fi
+
+        local target_val
+        if [ "${action}" = "disable" ]; then
+            target_val="no"
+        else
+            target_val="yes"
+        fi
+
+        __znh_cfg_tmp_get() {
+            local file="$1" key="$2" line val
+            line=$(grep -E "^${key}=" "${file}" 2>/dev/null | head -n 1 || true)
+            [ -n "${line:-}" ] || return 1
+            val="${line#*=}"
+            val="${val%\"}"
+            val="${val#\"}"
+            printf '%s' "$val"
+            return 0
+        }
+
+        __znh_cfg_tmp_set() {
+            local file="$1" key="$2" val="$3"
+
+            if grep -qE "^${key}=" "${file}" 2>/dev/null; then
+                # Replace any existing assignment form with KEY="val".
+                local tmp2
+                tmp2="$(mktemp)"
+                sed -E "s|^${key}=.*|${key}=\"${val}\"|" "${file}" >"${tmp2}" 2>/dev/null || {
+                    rm -f "${tmp2}" 2>/dev/null || true
+                    return 1
+                }
+                mv -f "${tmp2}" "${file}" 2>/dev/null || {
+                    rm -f "${tmp2}" 2>/dev/null || true
+                    return 1
+                }
+            else
+                printf '\n%s="%s"\n' "${key}" "${val}" >>"${file}" 2>/dev/null || return 1
+            fi
+            return 0
+        }
+
+        __znh_cfg_tmp_cap_limit() {
+            # Lowers KEY only if it is higher than safe_max.
+            # Supports values like:
+            #   KEY="50"      -> cap to 15
+            #   KEY="2-50"    -> cap to 2-15
+            local file="$1" key="$2" safe_max="$3"
+
+            # If safe_max is not numeric, do nothing.
+            if ! [[ "${safe_max}" =~ ^[0-9]+$ ]]; then
+                return 0
+            fi
+
+            local cur
+            cur=$(__znh_cfg_tmp_get "${file}" "${key}" 2>/dev/null) || return 0
+
+            local min max new_min new_max new_val
+            min=""
+            max=""
+
+            if [[ "${cur}" =~ ^[0-9]+$ ]]; then
+                max="$cur"
+            elif [[ "${cur}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                min="${BASH_REMATCH[1]}"
+                max="${BASH_REMATCH[2]}"
+            else
+                # Unrecognized format -> do not touch.
+                return 0
+            fi
+
+            if ! [[ "${max}" =~ ^[0-9]+$ ]]; then
+                return 0
+            fi
+
+            if [ "${max}" -le "${safe_max}" ] 2>/dev/null; then
+                return 0
+            fi
+
+            new_max="${safe_max}"
+            if [ -n "${min}" ]; then
+                new_min="${min}"
+                if ! [[ "${new_min}" =~ ^[0-9]+$ ]]; then
+                    new_min="${new_max}"
+                fi
+                if [ "${new_min}" -gt "${new_max}" ] 2>/dev/null; then
+                    new_min="${new_max}"
+                fi
+                new_val="${new_min}-${new_max}"
+            else
+                new_val="${new_max}"
+            fi
+
+            log_info "Smart-Opt: Capping ${key} in $(basename "${file}") (${cur} -> ${new_val})"
+            echo "  [tuned] ${key}: ${cur} -> ${new_val}"
+            __znh_cfg_tmp_set "${file}" "${key}" "${new_val}" || return 1
+            return 0
+        }
+
+        local configs=()
+        local conf cfg_file
+        while read -r conf; do
+            [ -n "${conf:-}" ] || continue
+            configs+=("${conf}")
+        done < <(__znh_snapper_list_config_names || true)
+
+        if [ "${#configs[@]}" -eq 0 ] 2>/dev/null; then
+            configs=(root)
+        fi
+
+        local _action_hint
+        case "${action}" in
+            enable)  _action_hint="enable" ;;
+            disable) _action_hint="disable" ;;
+            cleanup) _action_hint="cleanup" ;;
+            *)       _action_hint="${action}" ;;
+        esac
+
+        echo ""
+        echo "[snapper][config] Smart config sync (${_action_hint})"
+        if [ "${action}" = "cleanup" ]; then
+            echo "  - Detected timers enabled: timeline=${timeline_enabled} boot=${boot_enabled}"
+        fi
+
+        for conf in "${configs[@]}"; do
+            cfg_file="/etc/snapper/configs/${conf}"
+            [ -f "${cfg_file}" ] || continue
+
+            local ts bak mode uid gid tmp
+            ts="$(date +%Y%m%d-%H%M%S)"
+            bak="${cfg_file}.bak-${ts}"
+
+            mode=$(stat -c %a "${cfg_file}" 2>/dev/null || echo 644)
+            uid=$(stat -c %u "${cfg_file}" 2>/dev/null || echo 0)
+            gid=$(stat -c %g "${cfg_file}" 2>/dev/null || echo 0)
+
+            tmp="$(mktemp)"
+
+            # Work on a temp copy so we only need ONE backup per config file.
+            cat "${cfg_file}" >"${tmp}" 2>/dev/null || {
+                rm -f "${tmp}" 2>/dev/null || true
+                continue
+            }
+
+            if [ "${action}" = "disable" ]; then
+                # Don't append missing keys (avoid surprising users).
+                if grep -qE '^TIMELINE_CREATE=' "${tmp}" 2>/dev/null; then
+                    __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "${target_val}" || true
+                fi
+                if grep -qE '^BOOT_CREATE=' "${tmp}" 2>/dev/null; then
+                    __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "${target_val}" || true
+                fi
+            elif [ "${action}" = "cleanup" ]; then
+                # Only force yes when the corresponding timer is enabled.
+                if [ "${timeline_enabled}" -eq 1 ] 2>/dev/null; then
+                    __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "yes" || true
+                fi
+                if [ "${boot_enabled}" -eq 1 ] 2>/dev/null; then
+                    __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "yes" || true
+                fi
+            else
+                # enable (or any other) -> force yes
+                __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "${target_val}" || true
+                __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "${target_val}" || true
+            fi
+
+            # Preventative tuning: cap overly aggressive defaults.
+            # These are maxima; we never increase values.
+            if [ "${action}" != "disable" ] && [ "${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}" = "true" ]; then
+                __znh_cfg_tmp_cap_limit "${tmp}" NUMBER_LIMIT "${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}" || true
+                __znh_cfg_tmp_cap_limit "${tmp}" NUMBER_LIMIT_IMPORTANT "${SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT:-5}" || true
+
+                __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_HOURLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY:-10}" || true
+                __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_DAILY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY:-7}" || true
+                __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_WEEKLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY:-2}" || true
+                __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_MONTHLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY:-2}" || true
+                __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_YEARLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}" || true
+            elif [ "${action}" != "disable" ]; then
+                log_info "[snapper][config] Retention optimizer disabled (SNAP_RETENTION_OPTIMIZER_ENABLED=false); skipping retention caps"
+            fi
+
+            # Only write if content actually changed.
+            if ! cmp -s "${cfg_file}" "${tmp}" 2>/dev/null; then
+                log_info "[snapper][config] Updating: ${cfg_file}"
+                execute_guarded "Backup snapper config (${cfg_file})" cp -a "${cfg_file}" "${bak}" || true
+                mv -f "${tmp}" "${cfg_file}" 2>/dev/null || {
+                    rm -f "${tmp}" 2>/dev/null || true
+                    continue
+                }
+                chmod "${mode}" "${cfg_file}" 2>/dev/null || true
+                chown "${uid}:${gid}" "${cfg_file}" 2>/dev/null || true
+
+                echo "  [config:${conf}] synced/tuned"
+            else
+                rm -f "${tmp}" 2>/dev/null || true
+            fi
+        done
+
+        return 0
+    }
+
     __znh_snapper_list_last_root() {
         local n="${1:-10}"
         if [[ ! "${n}" =~ ^[0-9]+$ ]]; then
@@ -6807,6 +7029,14 @@ run_snapper_menu_only() {
             return 0
         fi
 
+        # Smart pre-step: keep snapper configs sane (same spirit as option 5).
+        # We only do this when a TTY is available.
+        if [ -t 0 ]; then
+            __znh_snapper_optimize_configs cleanup || true
+        else
+            log_info "[snapper][cleanup] No TTY; skipping snapper config self-heal"
+        fi
+
         # --- SMART: Space tracking start ---
         echo ""
         echo "Analyzing disk usage before cleanup..."
@@ -6924,10 +7154,15 @@ run_snapper_menu_only() {
             echo "Mode: ${mode}"
             echo "Command: ${zcmd[*]}"
 
-            if [ "${KERNEL_PURGE_CONFIRM:-true}" = "true" ] && [ -t 0 ]; then
-                read -p "Purge old kernel packages now? [y/N]: " -r ans_kp
-                if [[ ! "${ans_kp:-}" =~ ^[Yy]$ ]]; then
-                    echo "Skipping kernel package cleanup."
+            if [ "${KERNEL_PURGE_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ]; then
+                    read -p "Purge old kernel packages now? [y/N]: " -r ans_kp
+                    if [[ ! "${ans_kp:-}" =~ ^[Yy]$ ]]; then
+                        echo "Skipping kernel package cleanup."
+                        return 0
+                    fi
+                else
+                    log_warn "[kernel-purge] Refusing to purge kernels without a TTY while KERNEL_PURGE_CONFIRM=true"
                     return 0
                 fi
             fi
@@ -7021,15 +7256,20 @@ run_snapper_menu_only() {
 
             log_info "[boot-entry-clean] entries_dir=${entries_dir} running=${running_kver:-unknown} keep_latest=${keep_n} keep_list='${keep_list}'"
 
-            if [ "${BOOT_ENTRY_CLEANUP_CONFIRM:-true}" = "true" ] && [ -t 0 ]; then
-                echo ""
-                echo "Boot menu cleanup (BLS entries) will keep:"
-                echo "  - running kernel: ${running_kver:-unknown}"
-                echo "  - latest ${keep_n} installed kernels: ${keep_list:-<none>}"
-                echo "Mode: ${BOOT_ENTRY_CLEANUP_MODE:-backup}"
-                read -p "Also prune older boot entry files now? [y/N]: " -r ans_be
-                if [[ ! "${ans_be:-}" =~ ^[Yy]$ ]]; then
-                    echo "Skipping boot menu cleanup."
+            if [ "${BOOT_ENTRY_CLEANUP_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ]; then
+                    echo ""
+                    echo "Boot menu cleanup (BLS entries) will keep:"
+                    echo "  - running kernel: ${running_kver:-unknown}"
+                    echo "  - latest ${keep_n} installed kernels: ${keep_list:-<none>}"
+                    echo "Mode: ${BOOT_ENTRY_CLEANUP_MODE:-backup}"
+                    read -p "Also prune older boot entry files now? [y/N]: " -r ans_be
+                    if [[ ! "${ans_be:-}" =~ ^[Yy]$ ]]; then
+                        echo "Skipping boot menu cleanup."
+                        return 0
+                    fi
+                else
+                    log_warn "[boot-entry-clean] Refusing to prune boot entries without a TTY while BOOT_ENTRY_CLEANUP_CONFIRM=true"
                     return 0
                 fi
             fi
@@ -7218,178 +7458,9 @@ run_snapper_menu_only() {
         done
 
         # 2) Smart config sync + preventative optimization
-        # - Ensures TIMELINE_CREATE/BOOT_CREATE match the chosen timer state.
-        # - When enabling, caps dangerous retention values to "desktop safe" maxima
-        #   to reduce the risk of filling the disk before cleanup runs.
+        # Shared helper also used by option 4 cleanup.
         if command -v snapper >/dev/null 2>&1; then
-            local target_val
-            if [ "${action}" = "enable" ]; then
-                target_val="yes"
-            else
-                target_val="no"
-            fi
-
-            __znh_cfg_tmp_get() {
-                local file="$1" key="$2" line val
-                line=$(grep -E "^${key}=" "${file}" 2>/dev/null | head -n 1 || true)
-                [ -n "${line:-}" ] || return 1
-                val="${line#*=}"
-                val="${val%\"}"
-                val="${val#\"}"
-                printf '%s' "$val"
-                return 0
-            }
-
-            __znh_cfg_tmp_set() {
-                local file="$1" key="$2" val="$3"
-
-                if grep -qE "^${key}=" "${file}" 2>/dev/null; then
-                    # Replace any existing assignment form with KEY="val".
-                    local tmp2
-                    tmp2="$(mktemp)"
-                    sed -E "s|^${key}=.*|${key}=\"${val}\"|" "${file}" >"${tmp2}" 2>/dev/null || {
-                        rm -f "${tmp2}" 2>/dev/null || true
-                        return 1
-                    }
-                    mv -f "${tmp2}" "${file}" 2>/dev/null || {
-                        rm -f "${tmp2}" 2>/dev/null || true
-                        return 1
-                    }
-                else
-                    printf '\n%s="%s"\n' "${key}" "${val}" >>"${file}" 2>/dev/null || return 1
-                fi
-                return 0
-            }
-
-            __znh_cfg_tmp_cap_limit() {
-                # Lowers KEY only if it is higher than safe_max.
-                # Supports values like:
-                #   KEY="50"      -> cap to 15
-                #   KEY="2-50"    -> cap to 2-15
-                local file="$1" key="$2" safe_max="$3"
-
-                # If safe_max is not numeric, do nothing.
-                if ! [[ "${safe_max}" =~ ^[0-9]+$ ]]; then
-                    return 0
-                fi
-
-                local cur
-                cur=$(__znh_cfg_tmp_get "${file}" "${key}" 2>/dev/null) || return 0
-
-                local min max new_min new_max new_val
-                min=""
-                max=""
-
-                if [[ "${cur}" =~ ^[0-9]+$ ]]; then
-                    max="$cur"
-                elif [[ "${cur}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                    min="${BASH_REMATCH[1]}"
-                    max="${BASH_REMATCH[2]}"
-                else
-                    # Unrecognized format -> do not touch.
-                    return 0
-                fi
-
-                if ! [[ "${max}" =~ ^[0-9]+$ ]]; then
-                    return 0
-                fi
-
-                if [ "${max}" -le "${safe_max}" ] 2>/dev/null; then
-                    return 0
-                fi
-
-                new_max="${safe_max}"
-                if [ -n "${min}" ]; then
-                    new_min="${min}"
-                    if ! [[ "${new_min}" =~ ^[0-9]+$ ]]; then
-                        new_min="${new_max}"
-                    fi
-                    if [ "${new_min}" -gt "${new_max}" ] 2>/dev/null; then
-                        new_min="${new_max}"
-                    fi
-                    new_val="${new_min}-${new_max}"
-                else
-                    new_val="${new_max}"
-                fi
-
-                log_info "Smart-Opt: Capping ${key} in $(basename "${file}") (${cur} -> ${new_val})"
-                echo "  [tuned] ${key}: ${cur} -> ${new_val}"
-                __znh_cfg_tmp_set "${file}" "${key}" "${new_val}" || return 1
-                return 0
-            }
-
-            local conf cfg_file
-            while read -r conf; do
-                [ -n "${conf:-}" ] || continue
-                cfg_file="/etc/snapper/configs/${conf}"
-                [ -f "${cfg_file}" ] || continue
-
-                local ts bak mode uid gid tmp changed
-                ts="$(date +%Y%m%d-%H%M%S)"
-                bak="${cfg_file}.bak-${ts}"
-
-                mode=$(stat -c %a "${cfg_file}" 2>/dev/null || echo 644)
-                uid=$(stat -c %u "${cfg_file}" 2>/dev/null || echo 0)
-                gid=$(stat -c %g "${cfg_file}" 2>/dev/null || echo 0)
-
-                tmp="$(mktemp)"
-                changed=0
-
-                # Work on a temp copy so we only need ONE backup per config file.
-                cat "${cfg_file}" >"${tmp}" 2>/dev/null || {
-                    rm -f "${tmp}" 2>/dev/null || true
-                    continue
-                }
-
-                # Ensure flags match the timer state.
-                # When disabling, don't append missing keys (avoid surprising users).
-                if [ "${action}" = "enable" ]; then
-                    if __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "${target_val}"; then
-                        changed=1
-                    fi
-                    if __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "${target_val}"; then
-                        changed=1
-                    fi
-
-                    # Preventative tuning: cap overly aggressive defaults.
-                    # These are maxima; we never increase values.
-                    if [ "${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}" = "true" ]; then
-                        __znh_cfg_tmp_cap_limit "${tmp}" NUMBER_LIMIT "${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}" || true
-                        __znh_cfg_tmp_cap_limit "${tmp}" NUMBER_LIMIT_IMPORTANT "${SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT:-5}" || true
-
-                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_HOURLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY:-10}" || true
-                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_DAILY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY:-7}" || true
-                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_WEEKLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY:-2}" || true
-                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_MONTHLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY:-2}" || true
-                        __znh_cfg_tmp_cap_limit "${tmp}" TIMELINE_LIMIT_YEARLY "${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}" || true
-                    else
-                        log_info "[snapper][config] Retention optimizer disabled (SNAP_RETENTION_OPTIMIZER_ENABLED=false); skipping retention caps"
-                    fi
-                else
-                    if grep -qE '^TIMELINE_CREATE=' "${tmp}" 2>/dev/null; then
-                        __znh_cfg_tmp_set "${tmp}" TIMELINE_CREATE "${target_val}" && changed=1
-                    fi
-                    if grep -qE '^BOOT_CREATE=' "${tmp}" 2>/dev/null; then
-                        __znh_cfg_tmp_set "${tmp}" BOOT_CREATE "${target_val}" && changed=1
-                    fi
-                fi
-
-                # Only write if content actually changed.
-                if ! cmp -s "${cfg_file}" "${tmp}" 2>/dev/null; then
-                    log_info "[snapper][config] Updating: ${cfg_file}"
-                    execute_guarded "Backup snapper config (${cfg_file})" cp -a "${cfg_file}" "${bak}" || true
-                    mv -f "${tmp}" "${cfg_file}" 2>/dev/null || {
-                        rm -f "${tmp}" 2>/dev/null || true
-                        continue
-                    }
-                    chmod "${mode}" "${cfg_file}" 2>/dev/null || true
-                    chown "${uid}:${gid}" "${cfg_file}" 2>/dev/null || true
-
-                    echo "  [config:${conf}] synced (TIMELINE_CREATE/BOOT_CREATE=${target_val})"
-                else
-                    rm -f "${tmp}" 2>/dev/null || true
-                fi
-            done < <(__znh_snapper_list_config_names || true)
+            __znh_snapper_optimize_configs "${action}" || true
         fi
 
         echo ""

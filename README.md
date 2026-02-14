@@ -309,6 +309,12 @@ Key options include:
     warns if background cleanup appears to already be running.
   - `SNAP_CLEANUP_CRITICAL_FREE_MB` – if free space on `/` is below this threshold,
     the helper will warn and require confirmation before running Snapper cleanup.
+  - **Smart behavior:** when you run Snapper cleanup from the helper menu, it also
+    does a best‑effort config self‑heal:
+    - If snapper timers are enabled, ensure `TIMELINE_CREATE=yes` / `BOOT_CREATE=yes`
+      in `/etc/snapper/configs/*` so the timers actually create snapshots.
+    - If `SNAP_RETENTION_OPTIMIZER_ENABLED=true`, apply the configured retention caps
+      (only lowers; never increases) before cleanup runs.
 
 - **Boot menu hygiene (auto-clean old kernel entries)**
   - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
@@ -1173,6 +1179,7 @@ systemctl status zypper-autodownload.service
   - 🧹 **IMPROVED:** Snapper menu cleanup now runs a full cleanup (`number`, `timeline`, `empty-pre-post`) across all snapper configs (root/home/etc.). Auto-timers now sync Snapper config files so timeline/boot timers actually create snapshots.
   - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
   - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
+  - 🧠 **IMPROVED:** Snapper menu "Full Cleanup" now also does the same smart config sync + retention-cap tuning used by the AUTO timers option (best-effort, interactive-only).
   - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
   - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
