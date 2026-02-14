@@ -10379,6 +10379,8 @@ run_uninstall_helper_only() {
     log_info ">>> Uninstalling zypper-auto-helper core components..."
 
     local hooks_dir="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
+    local cleanup_report_dir="${CLEANUP_REPORT_DIR:-${LOG_DIR}/cleanup-reports}"
+    local helper_backup_dir="/var/backups/zypper-auto"
 
     echo "" | tee -a "${LOG_FILE}"
     echo "==============================================" | tee -a "${LOG_FILE}"
@@ -10390,6 +10392,12 @@ run_uninstall_helper_only() {
     echo "will be left untouched. It also does NOT remove snapd, Flatpak, Soar," | tee -a "${LOG_FILE}"
     echo "Homebrew itself, or any zypper configuration such as /etc/zypp/zypper.conf." | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
+    echo "NOTE: Snapper/btrfs/fstrim timers are OS features and are NOT disabled by" | tee -a "${LOG_FILE}"
+    echo "default. If you want the uninstaller to also disable those timers (Option 5" | tee -a "${LOG_FILE}"
+    echo "automation), run the uninstaller with: --disable-maintenance-timers" | tee -a "${LOG_FILE}"
+    echo "This uninstaller NEVER deletes OS unit files under /usr/lib/systemd/system" | tee -a "${LOG_FILE}"
+    echo "(it only removes zypper-auto-helper's own units under /etc/systemd/system)." | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
 
     # Handle dry-run and non-interactive flags from the CLI dispatcher.
     if [ "${UNINSTALL_DRY_RUN:-0}" -eq 1 ]; then
@@ -10400,6 +10408,16 @@ run_uninstall_helper_only() {
         echo "    zypper-cache-cleanup.service, zypper-cache-cleanup.timer" | tee -a "${LOG_FILE}"
         echo "    zypper-auto-verify.service, zypper-auto-verify.timer" | tee -a "${LOG_FILE}"
         echo "    zypper-auto-diag-logs.service (diagnostics follower)" | tee -a "${LOG_FILE}"
+        echo "  - Cleanup audit reports: ${cleanup_report_dir}" | tee -a "${LOG_FILE}"
+        echo "  - Helper backups: ${helper_backup_dir}/boot-entries-* and ${helper_backup_dir}/btrfsmaintenance-*.bak" | tee -a "${LOG_FILE}"
+        echo "  - /boot/do_purge_kernels marker (if present)" | tee -a "${LOG_FILE}"
+        if [ "${UNINSTALL_DISABLE_MAINT_TIMERS:-0}" -eq 1 ]; then
+            echo "  - ALSO disable OS timers (requested): snapper-*.timer, btrfs-*.timer, fstrim.timer" | tee -a "${LOG_FILE}"
+            echo "    (NOTE: this only disables timers; it does NOT delete OS unit files)" | tee -a "${LOG_FILE}"
+        else
+            echo "  - OS timers (snapper/btrfs/fstrim) would NOT be disabled (default)." | tee -a "${LOG_FILE}"
+            echo "    (OS unit files are never deleted by this uninstaller)" | tee -a "${LOG_FILE}"
+        fi
         echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-diag-follow (diagnostics follower helper)" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
@@ -10413,9 +10431,12 @@ run_uninstall_helper_only() {
         fi
 
         if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
-            echo "  - Logs under $LOG_DIR (including service logs, diagnostics logs, and status.html dashboard) would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+            echo "  - Logs under $LOG_DIR (including service logs, diagnostics logs, cleanup reports, and status.html dashboard) would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+            echo "  - Cleanup reports under ${cleanup_report_dir} would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
+            echo "  - Helper backups under ${helper_backup_dir} (boot-entry backups, btrfsmaintenance backups) would be LEFT IN PLACE (--keep-logs)" | tee -a "${LOG_FILE}"
         else
-            echo "  - Logs under $LOG_DIR (other than the current log), service logs, diagnostics logs, and status.html dashboard" | tee -a "${LOG_FILE}"
+            echo "  - Logs under $LOG_DIR (other than the current log), service logs, diagnostics logs, cleanup reports, and status.html dashboard" | tee -a "${LOG_FILE}"
+            echo "  - Helper backups under ${helper_backup_dir} (boot-entry backups, btrfsmaintenance backups)" | tee -a "${LOG_FILE}"
         fi
 
         if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -10448,6 +10469,16 @@ run_uninstall_helper_only() {
     execute_guarded "Disable root downloader timer" systemctl disable --now zypper-autodownload.timer || true
     execute_guarded "Disable cache cleanup timer" systemctl disable --now zypper-cache-cleanup.timer || true
     execute_guarded "Disable verification timer" systemctl disable --now zypper-auto-verify.timer || true
+
+    # Optional: disable OS-provided maintenance timers (Option 5 automation)
+    # IMPORTANT: We only disable them; we never delete the unit files.
+    if [ "${UNINSTALL_DISABLE_MAINT_TIMERS:-0}" -eq 1 ]; then
+        log_info "[uninstall] Disabling maintenance timers (requested): snapper/btrfs/fstrim"
+        execute_guarded "Disable snapper timers" systemctl disable --now snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer 2>/dev/null || true
+        execute_guarded "Disable btrfs timers" systemctl disable --now btrfs-scrub.timer btrfs-balance.timer btrfs-trim.timer btrfs-defrag.timer 2>/dev/null || true
+        execute_guarded "Disable fstrim timer" systemctl disable --now fstrim.timer 2>/dev/null || true
+        log_info "[uninstall] Maintenance timers disabled (unit files preserved under /usr/lib/systemd/system)"
+    fi
     execute_guarded "Stop downloader service" systemctl stop zypper-autodownload.service || true
     execute_guarded "Stop cache cleanup service" systemctl stop zypper-cache-cleanup.service || true
     execute_guarded "Stop verification service" systemctl stop zypper-auto-verify.service || true
@@ -10544,6 +10575,26 @@ run_uninstall_helper_only() {
             execute_guarded "Remove service logs directory" rm -rf "$LOG_DIR/service-logs" || true
             # Remove diagnostics logs directory completely
             execute_guarded "Remove diagnostics logs directory" rm -rf "$LOG_DIR/diagnostics" || true
+        fi
+
+        # Remove cleanup audit reports (may be inside LOG_DIR or custom)
+        if [ -z "${cleanup_report_dir:-}" ] || [ "${cleanup_report_dir}" = "/" ] || [ "${cleanup_report_dir}" = "/var" ] || [ "${cleanup_report_dir}" = "/var/log" ]; then
+            log_error "Refusing to remove cleanup report directory due to suspicious path: '${cleanup_report_dir}'"
+        elif [ -d "${cleanup_report_dir}" ]; then
+            execute_guarded "Remove cleanup report directory (${cleanup_report_dir})" rm -rf -- "${cleanup_report_dir}" || true
+        fi
+
+        # Remove helper-created backups (boot entries + btrfsmaintenance)
+        if [ -d "${helper_backup_dir}" ]; then
+            execute_guarded "Remove boot-entry backup folders" rm -rf -- "${helper_backup_dir}"/boot-entries-* 2>/dev/null || true
+            execute_guarded "Remove btrfsmaintenance backups" rm -f -- "${helper_backup_dir}"/btrfsmaintenance-*.bak 2>/dev/null || true
+            # Remove the directory itself only if it is now empty
+            rmdir "${helper_backup_dir}" 2>/dev/null || true
+        fi
+
+        # If we created the purge-kernels marker in /boot, remove it as well.
+        if [ -f /boot/do_purge_kernels ]; then
+            execute_guarded "Remove /boot/do_purge_kernels marker" rm -f -- /boot/do_purge_kernels || true
         fi
     fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -11449,10 +11500,12 @@ elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-help
     #   --dry-run                      : show what would be removed, no changes
     #   --keep-logs                    : do not delete any log files under $LOG_DIR
     #   --keep-hooks                   : do not delete /etc/zypper-auto/hooks (custom scripts)
+    #   --disable-maintenance-timers    : ALSO disable snapper/btrfs/fstrim timers enabled via Snapper Option 5
     UNINSTALL_ASSUME_YES=0
     UNINSTALL_DRY_RUN=0
     UNINSTALL_KEEP_LOGS=0
     UNINSTALL_KEEP_HOOKS=0
+    UNINSTALL_DISABLE_MAINT_TIMERS=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|-y|--non-interactive)
@@ -11466,6 +11519,9 @@ elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-help
                 ;;
             --keep-hooks)
                 UNINSTALL_KEEP_HOOKS=1
+                ;;
+            --disable-maintenance-timers)
+                UNINSTALL_DISABLE_MAINT_TIMERS=1
                 ;;
             *)
                 log_error "Unknown option for --uninstall-zypper-helper: $1"

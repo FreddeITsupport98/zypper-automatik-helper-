@@ -1348,7 +1348,9 @@ By default this will:
 - Remove all helper systemd unit files and helper binaries
 - Remove user helper scripts, shell aliases, and Fish config snippets
 - Remove custom hook scripts under `/etc/zypper-auto/hooks` (if present)
-- Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto` (this includes the generated `status.html` dashboard)
+- Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto` (including cleanup audit reports under `cleanup-reports/` and the generated `status.html` dashboard)
+- Remove helper-created backups under `/var/backups/zypper-auto` (boot-entry backups, btrfsmaintenance config backups)
+- Remove `/boot/do_purge_kernels` marker (if it was created by the helper)
 - Reload both system and user systemd daemons and clear any "failed" states
 
 #### Advanced Uninstall Flags
@@ -1369,6 +1371,10 @@ sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-logs
 
 # Keep hook scripts under /etc/zypper-auto/hooks
 sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-hooks
+
+# Also disable OS maintenance timers enabled via Snapper Option 5
+# NOTE: this only disables timers; it does NOT delete OS unit files.
+sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --disable-maintenance-timers
 
 # Flags can be combined as needed
 sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run --keep-logs --keep-hooks
