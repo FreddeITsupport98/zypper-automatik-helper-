@@ -4518,6 +4518,9 @@ generate_dashboard() {
             headers: headers
         })
             .then(function(r) {
+                // Accept 206 (partial content) and 200. If the file is empty and Range is used,
+                // some servers reply 416; treat that as empty content.
+                if (r.status === 416) return '';
                 if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
                 return r.text();
             })
@@ -4630,10 +4633,11 @@ JSON_EOF
     chmod 644 "${out_json_root}" 2>/dev/null || true
 
     # Extra pre-rendered log views for the dashboard toggles
-    local out_install_tail_root out_diag_tail_root out_journal_tail_root
+    local out_install_tail_root out_diag_tail_root out_journal_tail_root out_api_tail_root
     out_install_tail_root="${LOG_DIR}/dashboard-install-tail.log"
     out_diag_tail_root="${LOG_DIR}/dashboard-diag-tail.log"
     out_journal_tail_root="${LOG_DIR}/dashboard-journal-tail.log"
+    out_api_tail_root="${LOG_DIR}/dashboard-api.log"
 
     printf '%s\n' "${last_install_tail}" >"${out_install_tail_root}" 2>/dev/null || true
     chmod 644 "${out_install_tail_root}" 2>/dev/null || true
@@ -4658,6 +4662,17 @@ JSON_EOF
     fi
     chmod 644 "${out_journal_tail_root}" 2>/dev/null || true
 
+    # Settings API log (tail) for the dashboard 'View: API' tab.
+    # Prefer the root service log so the UI always has data even if mirror logging isn't enabled.
+    local api_root_log
+    api_root_log="${LOG_DIR}/service-logs/dashboard-api.log"
+    if [ -f "${api_root_log}" ]; then
+        tail -n 260 "${api_root_log}" >"${out_api_tail_root}" 2>/dev/null || true
+    else
+        printf '%s\n' "Settings API log not found yet at ${api_root_log}." >"${out_api_tail_root}" 2>/dev/null || true
+    fi
+    chmod 644 "${out_api_tail_root}" 2>/dev/null || true
+
     chmod 644 "${out_root}" 2>/dev/null || true
 
     if [ -n "${out_user}" ]; then
@@ -4671,16 +4686,19 @@ JSON_EOF
         cp -f "${out_install_tail_root}" "${out_user_dir}/dashboard-install-tail.log" 2>/dev/null || true
         cp -f "${out_diag_tail_root}" "${out_user_dir}/dashboard-diag-tail.log" 2>/dev/null || true
         cp -f "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
+        cp -f "${out_api_tail_root}" "${out_user_dir}/dashboard-api.log" 2>/dev/null || true
         chown "${SUDO_USER}:${SUDO_USER}" \
             "${out_user}" "${out_user_json}" \
             "${out_user_dir}/dashboard-install-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
+            "${out_user_dir}/dashboard-api.log" \
             2>/dev/null || true
         chmod 644 "${out_user}" "${out_user_json}" \
             "${out_user_dir}/dashboard-install-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
+            "${out_user_dir}/dashboard-api.log" \
             2>/dev/null || true
     fi
 
