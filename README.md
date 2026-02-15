@@ -238,6 +238,8 @@ zypper-auto-helper --pip-package    # Install/guide pipx and manage Python CLI t
 zypper-auto-helper snapper          # Snapper submenu (status/list/create/cleanup/timers)
 zypper-auto-helper snapper status   # Show snapper configs, snapshot detection, and timer state
 zypper-auto-helper snapper auto     # Enable common snapper timers (timeline + cleanup + boot)
+# (Interactive snapper menu: AUTO enable option is color-coded: red=disabled, yellow=partial, green=enabled)
+# snapper auto-off disables the same snapper timers and also disables optional option-5 maintenance timers (btrfsmaintenance + fstrim) when present.
 
 # Diagnostics & debugging
 zypper-auto-helper debug            # Interactive debug/diagnostics tools menu

@@ -10243,6 +10243,13 @@ run_snapper_menu_only() {
         local action="${1:-enable}"
         local units=(snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer)
 
+        # When disabling, also disable the optional maintenance timers that option 5
+        # may have enabled (btrfsmaintenance + fstrim) so the user gets a true
+        # "undo" for the AUTO enable option.
+        if [ "${action}" = "disable" ]; then
+            units+=(btrfs-scrub.timer btrfs-balance.timer btrfs-trim.timer btrfs-defrag.timer fstrim.timer)
+        fi
+
         # --- Professional Edition: system health score (0-100) ---
         local __hs_score=100
         local -a __hs_issues=()
@@ -10651,8 +10658,37 @@ run_snapper_menu_only() {
         echo "  2) List recent snapshots (root)"
         echo "  3) Create snapshot (single)"
         echo "  4) Full Cleanup (number + timeline + orphaned)"
-        echo "  5) AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs"
-        echo "  6) AUTO: Disable snapper timers"
+
+        # Colorize option 5 based on whether snapper timers are enabled.
+        local _s_total _s_on _s_color _s_prefix _s_suffix
+        _s_total=0
+        _s_on=0
+        for _u in snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer; do
+            if __znh_unit_file_exists_system "${_u}"; then
+                _s_total=$((_s_total + 1))
+                if systemctl is-enabled --quiet "${_u}" 2>/dev/null; then
+                    _s_on=$((_s_on + 1))
+                fi
+            fi
+        done
+
+        _s_color=""
+        _s_prefix=""
+        _s_suffix=""
+        if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+            if [ "${_s_total}" -gt 0 ] 2>/dev/null && [ "${_s_on}" -eq "${_s_total}" ] 2>/dev/null; then
+                _s_color="${C_GREEN}"
+            elif [ "${_s_on}" -gt 0 ] 2>/dev/null; then
+                _s_color="${C_YELLOW}"
+            else
+                _s_color="${C_RED}"
+            fi
+            _s_prefix="${_s_color}"
+            _s_suffix="${C_RESET}"
+        fi
+
+        echo "  5) ${_s_prefix}AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs${_s_suffix}"
+        echo "  6) AUTO: Disable option-5 timers (snapper + btrfsmaintenance + fstrim)"
         echo "  7) Exit (7 / E / Q)"
         echo ""
         read -p "Select an option [1-7, E, Q]: " -r choice
