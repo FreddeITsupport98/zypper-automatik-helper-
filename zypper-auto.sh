@@ -160,6 +160,8 @@ exec -a znh-dashboard-sync bash -lc '
     cp -u "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log" 2>/dev/null || true
     cp -u "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log" 2>/dev/null || true
     cp -u "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log" 2>/dev/null || true
+    # Live mode polls download-status.txt; keep it synced too.
+    cp -u "${src_root}/download-status.txt" "${dash_dir}/download-status.txt" 2>/dev/null || true
     # status.html is larger; only update if it changed.
     cp -u "${src_root}/status.html" "${dash_dir}/status.html" 2>/dev/null || true
     sleep 10
@@ -2965,9 +2967,31 @@ generate_dashboard() {
     # System metrics for quick scanning.
     local kernel_ver uptime_info disk_used disk_total disk_percent disk_usage_display mem_usage
     kernel_ver=$(uname -r 2>/dev/null || echo "Unknown")
-    if command -v uptime >/dev/null 2>&1; then
-        uptime_info=$(uptime -p 2>/dev/null | sed 's/^up //' || echo "Unknown")
-    else
+    # Uptime: prefer `uptime -p` but don't depend on PATH (systemd units can have a minimal PATH).
+    # Fallback to /proc/uptime parsing so the dashboard never shows Unknown on normal systems.
+    uptime_info=""
+    if [ -x /usr/bin/uptime ]; then
+        uptime_info=$(/usr/bin/uptime -p 2>/dev/null | sed 's/^up //' || true)
+    elif command -v uptime >/dev/null 2>&1; then
+        uptime_info=$(uptime -p 2>/dev/null | sed 's/^up //' || true)
+    fi
+    if [ -z "${uptime_info}" ] && [ -r /proc/uptime ]; then
+        # /proc/uptime: "<seconds> <idle_seconds>"
+        up_s=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo "")
+        if [[ "${up_s:-}" =~ ^[0-9]+$ ]]; then
+            d=$((up_s/86400))
+            h=$(((up_s%86400)/3600))
+            m=$(((up_s%3600)/60))
+            if [ "$d" -gt 0 ]; then
+                uptime_info="${d} days, ${h} hours, ${m} minutes"
+            elif [ "$h" -gt 0 ]; then
+                uptime_info="${h} hours, ${m} minutes"
+            else
+                uptime_info="${m} minutes"
+            fi
+        fi
+    fi
+    if [ -z "${uptime_info}" ]; then
         uptime_info="Unknown"
     fi
 
@@ -4950,18 +4974,28 @@ JSON_EOF
         cp -f "${out_diag_tail_root}" "${out_user_dir}/dashboard-diag-tail.log" 2>/dev/null || true
         cp -f "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
         cp -f "${out_api_tail_root}" "${out_user_dir}/dashboard-api.log" 2>/dev/null || true
+
+        # Live mode polls download-status.txt; ensure it exists in the served user dir.
+        if [ -f "${LOG_DIR}/download-status.txt" ]; then
+            cp -f "${LOG_DIR}/download-status.txt" "${out_user_dir}/download-status.txt" 2>/dev/null || true
+        else
+            printf '%s\n' "idle" >"${out_user_dir}/download-status.txt" 2>/dev/null || true
+        fi
+
         chown "${SUDO_USER}:${SUDO_USER}" \
             "${out_user}" "${out_user_json}" \
             "${out_user_dir}/dashboard-install-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
             "${out_user_dir}/dashboard-api.log" \
+            "${out_user_dir}/download-status.txt" \
             2>/dev/null || true
         chmod 644 "${out_user}" "${out_user_json}" \
             "${out_user_dir}/dashboard-install-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
             "${out_user_dir}/dashboard-api.log" \
+            "${out_user_dir}/download-status.txt" \
             2>/dev/null || true
     fi
 
