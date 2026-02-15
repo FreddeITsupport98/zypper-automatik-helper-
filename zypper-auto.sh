@@ -1402,10 +1402,8 @@ EOF
         # This file may contain secrets (e.g. WEBHOOK_URL), so keep it root-only.
         chmod 600 "${CONFIG_FILE}" || true
 
-        # The dashboard Settings API uses a sandboxed systemd unit with ProtectSystem=strict.
-        # It writes atomically via a sibling temp file; ensure it exists so ReadWritePaths can be set safely.
-        touch "${CONFIG_FILE}.tmp" 2>/dev/null || true
-        chmod 600 "${CONFIG_FILE}.tmp" 2>/dev/null || true
+        # The dashboard Settings API runs sandboxed (ProtectSystem=strict) and writes directly to ${CONFIG_FILE}.
+        # No extra temp file is required.
 # NOTE: The downloader, notifier, and verification timer schedules are
 # derived from DL_TIMER_INTERVAL_MINUTES, NT_TIMER_INTERVAL_MINUTES, and
 # VERIFY_TIMER_INTERVAL_MINUTES in this file. After changing these values,
@@ -17661,11 +17659,14 @@ def _write_managed_block(conf_path: str, values: dict) -> None:
 
     new_txt = txt.rstrip() + "\n\n" + "\n".join(lines) + "\n"
 
-    tmp = conf_path + ".tmp"
+    # NOTE: We intentionally write directly to conf_path (truncate + rewrite)
+    # instead of using os.replace(temp, conf_path) because the systemd unit runs
+    # with ProtectSystem=strict and a per-file ReadWritePaths sandbox. Renaming
+    # across directory protections can fail even when the target file itself is
+    # writable.
     os.makedirs(os.path.dirname(conf_path), exist_ok=True)
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open(conf_path, "w", encoding="utf-8") as f:
         f.write(new_txt)
-    os.replace(tmp, conf_path)
     os.chmod(conf_path, 0o600)
 
 
@@ -17897,7 +17898,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=${CONFIG_FILE} ${CONFIG_FILE}.tmp ${DASH_API_TOKEN_DIR} /var/log/zypper-auto/service-logs
+ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto/service-logs
 
 [Install]
 WantedBy=multi-user.target
