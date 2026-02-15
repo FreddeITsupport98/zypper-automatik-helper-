@@ -1105,6 +1105,7 @@ This starts a background local server on `127.0.0.1:8765` serving `~/.local/shar
 Safeguards (applies to `--dash-open`):
 - The local web server always binds to `127.0.0.1` (localhost only).
 - If port `8765` is already in use, the helper will pick the next free port in the range `8765-8790`.
+- The Settings API CORS allowlist supports that same port range (`8765-8790`) so Settings won’t break when the dashboard uses a fallback port.
 - Startup errors for the local web server (if any) are written to: `~/.local/share/zypper-notify/dashboard-http.err`
 - The web server and browser launch are started detached (best-effort `nohup` / `setsid`) so closing the terminal won’t kill the dashboard.
 - Requires `python3` (`sudo zypper install python3`).

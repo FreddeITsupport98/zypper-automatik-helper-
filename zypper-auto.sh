@@ -109,7 +109,10 @@ __znh_pid_is_dashboard_http_server() {
         printf '%s' "${args}" | grep -q " ${port}\b" || return 1
         return 0
     fi
-    return 0
+
+    # If we cannot inspect the process args (no ps), fail closed.
+    # This prevents PID reuse / zombie masquerade causing a false "server running" state.
+    return 1
 }
 
 __znh_pick_free_port() {
@@ -219,30 +222,49 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
 
         url="http://127.0.0.1:${port}/status.html?live=1"
 
+        mkdir -p "${dash_dir}" 2>/dev/null || true
+
         # Dashboard Settings API (localhost)
         # The Settings drawer in the dashboard talks to a root-only API on:
         #   http://127.0.0.1:8766
         # Auth is done via a random token stored in the dashboard directory.
+        #
+        # Token safety: only update dashboard-token.txt after the root API has
+        # successfully restarted with that token (prevents token desync).
         token_file="${dash_dir}/dashboard-token.txt"
-        token=""
+        old_token=""
+        if [ -f "${token_file}" ]; then
+            old_token=$(cat "${token_file}" 2>/dev/null || echo "")
+        fi
+
+        new_token=""
         if command -v python3 >/dev/null 2>&1; then
-            token=$(python3 - <<'PY'
+            new_token=$(python3 - <<'PY'
 import secrets
 print(secrets.token_urlsafe(24))
 PY
 )
         else
-            token="$(date +%s%N)"
+            new_token="$(date +%s%N)"
         fi
-        printf '%s' "${token}" >"${token_file}" 2>/dev/null || true
-        chmod 600 "${token_file}" 2>/dev/null || true
 
-        # Start/refresh the dashboard API service (requires sudo). Best-effort.
+        api_ok=0
         if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
-            sudo /usr/local/bin/zypper-auto-helper --dash-api-on "${token}" >/dev/null 2>&1 || true
+            if sudo /usr/local/bin/zypper-auto-helper --dash-api-on "${new_token}" >/dev/null 2>&1; then
+                api_ok=1
+            fi
         fi
 
-        mkdir -p "${dash_dir}" 2>/dev/null || true
+        if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
+            printf '%s' "${new_token}" >"${token_file}" 2>/dev/null || true
+            chmod 600 "${token_file}" 2>/dev/null || true
+        else
+            # Keep the existing token file untouched on failure.
+            # (If there wasn't one, Settings will remain unavailable until API starts.)
+            if [ -n "${old_token}" ]; then
+                chmod 600 "${token_file}" 2>/dev/null || true
+            fi
+        fi
 
         server_running=0
         if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
@@ -7553,6 +7575,42 @@ run_dash_open_only() {
 
         url="http://127.0.0.1:${port}/status.html?live=1"
 
+        # Dashboard Settings API token: keep user token file in sync with the root API.
+        local token_file old_token new_token api_ok
+        token_file="${dash_dir}/dashboard-token.txt"
+        old_token=""
+        if [ -f "${token_file}" ]; then
+            old_token=$(cat "${token_file}" 2>/dev/null || echo "")
+        fi
+        new_token=""
+        if command -v python3 >/dev/null 2>&1; then
+            new_token=$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)
+        else
+            new_token="$(date +%s%N)"
+        fi
+
+        api_ok=0
+        if run_dash_api_on_only "${new_token}" >/dev/null 2>&1; then
+            api_ok=1
+        fi
+
+        if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
+            printf '%s' "${new_token}" >"${token_file}" 2>/dev/null || true
+            chmod 600 "${token_file}" 2>/dev/null || true
+            if [ -n "${SUDO_USER:-}" ]; then
+                chown "${SUDO_USER}:${SUDO_USER}" "${token_file}" 2>/dev/null || true
+            fi
+        else
+            # Keep existing token file untouched if API restart failed.
+            if [ -n "${old_token}" ]; then
+                chmod 600 "${token_file}" 2>/dev/null || true
+            fi
+        fi
+
         local server_running
         server_running=0
         if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
@@ -12597,7 +12655,8 @@ elif [[ "${1:-}" == "--dash-stop" ]]; then
 elif [[ "${1:-}" == "--dash-open" ]]; then
     log_info "Dashboard open requested"
     shift || true
-    run_dash_open_only "${1:-}"
+    # Pass through optional browser override argument(s)
+    run_dash_open_only "$@"
     exit $?
 elif [[ "${1:-}" == "--dash-install" ]]; then
     log_info "Enterprise quickstart requested"
@@ -17947,9 +18006,25 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict:
 def _allowed_origin(origin: str | None) -> str | None:
     if not origin:
         return None
-    # Allow the local dashboard server
-    if origin in ("http://127.0.0.1:8765", "http://localhost:8765"):
-        return origin
+
+    # Allow the local dashboard server (dynamic port range).
+    # This prevents CORS lockout when :8765 is busy and the dashboard binds
+    # to a nearby free port (e.g. :8766).
+    try:
+        p = urlparse(origin)
+        if p.scheme != "http":
+            return None
+        host = (p.hostname or "").lower()
+        port = p.port
+        if host not in ("127.0.0.1", "localhost"):
+            return None
+        if port is None:
+            return None
+        if 8765 <= int(port) <= 8790:
+            return origin
+    except Exception:
+        return None
+
     return None
 
 
