@@ -6867,6 +6867,12 @@ if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null && [ "$PROBLE
     fi
 fi
 
+    # Keep the live dashboard data fresh (best-effort): periodic verification
+    # runs in the background, so it's a good place to refresh status-data.json.
+    if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
+        generate_dashboard || true
+    fi
+
     # Return exit code based on verification results
     return $VERIFICATION_FAILED
 }
@@ -13372,6 +13378,12 @@ if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
 elif [ $ZYP_RET -ne 0 ]; then
     write_status "error:solver:$ZYP_RET"
     derr "Download-only returned rc=${ZYP_RET} (solver/manual intervention may be required)"
+fi
+
+# Keep the live dashboard data fresh (best-effort): regenerate status.html + status-data.json
+# at the end of downloader runs so long-lived dashboard tabs don't go stale.
+if [ "${DASHBOARD_ENABLED:-true}" = "true" ] && [ -x /usr/local/bin/zypper-auto-helper ]; then
+    /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
 fi
 
 DLSCRIPT
