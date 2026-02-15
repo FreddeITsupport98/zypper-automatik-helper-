@@ -1110,6 +1110,17 @@ Predefined allowed values (enums/intervals/min-max ranges) are served from a roo
 Authentication is done via a random token written to:
 - `~/.local/share/zypper-notify/dashboard-token.txt` (served locally to the browser)
 
+##### Settings change logging (audit trail)
+Settings loads/saves (including auto-save) are logged with the same structured levels as the rest of the project.
+- Root log: `/var/log/zypper-auto/service-logs/dashboard-api.log`
+- UI mirror: `~/.local/share/zypper-notify/dashboard-api.log`
+
+The API logs include:
+- endpoint calls (`GET /api/config`, `POST /api/config`)
+- which keys were patched (debug)
+- invalid keys that were auto-healed back to defaults (warn)
+- UI-side “save ok / save failed” events, including from→to diffs for the keys changed (best-effort)
+
 To stop the Settings API:
 
 ```bash

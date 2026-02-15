@@ -3424,6 +3424,7 @@ generate_dashboard() {
     var _settingsSchema = null;
     var _settingsConfig = null;
     var _settingsDirty = false;
+    var _settingsLastConfig = null;
     var _settingsDirtyToastShown = false;
     var _settingsAutosaveTimer = null;
     var _settingsAutosaveInFlight = false;
@@ -3567,6 +3568,8 @@ generate_dashboard() {
         if (!form) return;
         form.innerHTML = '';
         _settingsSetDirty(false);
+        // Keep a copy so we can log diffs on save/autosave.
+        try { _settingsLastConfig = JSON.parse(JSON.stringify(cfg || {})); } catch (e) { _settingsLastConfig = cfg || {}; }
 
         SETTINGS_FIELDS.forEach(function(f) {
             if (!schema || !schema[f.key]) return;
@@ -3808,12 +3811,31 @@ generate_dashboard() {
         });
     }
 
+    function _diffForKeys(oldCfg, newCfg, keys) {
+        var out = {};
+        (keys || []).forEach(function(k) {
+            var a = (oldCfg && oldCfg[k] != null) ? String(oldCfg[k]) : '';
+            var b = (newCfg && newCfg[k] != null) ? String(newCfg[k]) : '';
+            if (a !== b) out[k] = { from: a, to: b };
+        });
+        return out;
+    }
+
     function settingsSave() {
         if (!_settingsSchema) return settingsLoad(true);
         var patch = _collectSettingsPatch(_settingsSchema);
+        var keys = Object.keys(patch || {});
         return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
             toast('Settings saved', 'Applied to /etc/zypper-auto.conf', 'ok');
-            _settingsClientLog('info', 'settingsSave ok', { keys: Object.keys(patch || {}) });
+
+            var changed = _diffForKeys(_settingsLastConfig || _settingsConfig || {}, (r && r.config) ? r.config : {}, keys);
+            _settingsClientLog('info', 'settingsSave ok', {
+                keys: keys,
+                changed: changed,
+                invalid_keys: (r && r.invalid_keys) ? r.invalid_keys : [],
+                warnings: (r && r.warnings) ? r.warnings.slice(0, 6) : []
+            });
+
             _settingsSetDirty(false);
             return settingsLoad(false);
         }).catch(function(e) {
@@ -3839,9 +3861,18 @@ generate_dashboard() {
 
         _settingsAutosaveInFlight = true;
         var patch = _collectSettingsPatch(_settingsSchema);
+        var keys = Object.keys(patch || {});
         return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
             toast('Settings auto-saved', 'Applied to /etc/zypper-auto.conf', 'ok');
-            _settingsClientLog('info', 'settingsAutoSave ok', { keys: Object.keys(patch || {}) });
+
+            var changed = _diffForKeys(_settingsLastConfig || _settingsConfig || {}, (r && r.config) ? r.config : {}, keys);
+            _settingsClientLog('debug', 'settingsAutoSave ok', {
+                keys: keys,
+                changed: changed,
+                invalid_keys: (r && r.invalid_keys) ? r.invalid_keys : [],
+                warnings: (r && r.warnings) ? r.warnings.slice(0, 6) : []
+            });
+
             _settingsSetDirty(false);
             return settingsLoad(false);
         }).catch(function(e) {
@@ -17787,12 +17818,25 @@ class Handler(BaseHTTPRequestHandler):
             eff, warnings, invalid = _read_conf(self.server.conf_path)
 
             # Apply patch to effective config (only known keys)
+            applied = {}
             for k, v in patch.items():
                 if k not in SCHEMA:
                     continue
+                applied[k] = str(v)
                 eff[k] = str(v)
 
+            try:
+                getattr(self.server, "_znh_log", lambda *_: None)("debug", f"Patch keys={list(applied.keys())} values={json.dumps(applied, ensure_ascii=False)[:400]}")
+            except Exception:
+                pass
+
             eff2, warnings2, invalid2 = _validate(eff)
+            if invalid2:
+                try:
+                    getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Invalid keys auto-healed: {invalid2}")
+                except Exception:
+                    pass
+
             # Write corrected values back so invalid inputs auto-heal to defaults.
             try:
                 _write_managed_block(self.server.conf_path, eff2)
