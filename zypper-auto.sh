@@ -3424,6 +3424,7 @@ generate_dashboard() {
     var _settingsDirtyToastShown = false;
     var _settingsAutosaveTimer = null;
     var _settingsAutosaveInFlight = false;
+    var _settingsAutosavePendingToast = false;
     var SETTINGS_AUTOSAVE_ENABLED = true;
     var SETTINGS_AUTOSAVE_DEBOUNCE_MS = 900;
 
@@ -3438,6 +3439,7 @@ generate_dashboard() {
             saveBtn.textContent = 'Save';
             saveBtn.style.borderColor = 'rgba(255,255,255,0.10)';
             _settingsDirtyToastShown = false;
+            _settingsAutosavePendingToast = false;
         }
     }
 
@@ -3451,7 +3453,10 @@ generate_dashboard() {
             _settingsAutosaveTimer = setTimeout(function() {
                 settingsAutoSave();
             }, SETTINGS_AUTOSAVE_DEBOUNCE_MS);
-            toast('Auto-save pending', 'Applying changes…', 'ok');
+            if (!_settingsAutosavePendingToast) {
+                _settingsAutosavePendingToast = true;
+                toast('Auto-save pending', 'Applying changes…', 'ok');
+            }
         } else {
             if (!_settingsDirtyToastShown) {
                 _settingsDirtyToastShown = true;
@@ -3812,10 +3817,7 @@ generate_dashboard() {
             try { console && console.warn && console.warn('settingsSave failed', e); } catch (ee) {}
             toast('Save failed', (e && e.message) ? e.message : 'unknown error', 'err');
             _settingsClientLog('warn', 'settingsSave failed', { error: (e && e.message) ? e.message : 'unknown' });
-            // Offer a safe recovery path
-            if (confirm('Save failed. Do you want to Factory Reset settings to safe defaults?')) {
-                return settingsReset();
-            }
+            _settingsBanner('Save failed. You can click Factory reset to restore safe defaults.', true);
             return settingsLoad(false);
         });
     }
@@ -3843,14 +3845,13 @@ generate_dashboard() {
             try { console && console.warn && console.warn('settingsAutoSave failed', e); } catch (ee) {}
             toast('Auto-save failed', (e && e.message) ? e.message : 'unknown error', 'err');
             _settingsClientLog('warn', 'settingsAutoSave failed', { error: (e && e.message) ? e.message : 'unknown' });
-            _settingsBanner('Auto-save failed. You can click Factory reset to restore safe defaults.', true);
-            // Offer a reset prompt without forcing it.
-            if (confirm('Auto-save failed. Factory Reset settings to safe defaults?')) {
-                return settingsReset();
-            }
+            _settingsBanner('Auto-save failed (API may be restarting). Try again or click Factory reset to restore safe defaults.', true);
+            // Keep dirty so user can retry (or click Save/Reset).
+            _settingsSetDirty(true);
             return null;
         }).finally(function() {
             _settingsAutosaveInFlight = false;
+            _settingsAutosavePendingToast = false;
         });
     }
 
