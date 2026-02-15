@@ -17788,7 +17788,15 @@ class Handler(BaseHTTPRequestHandler):
 
             eff2, warnings2, invalid2 = _validate(eff)
             # Write corrected values back so invalid inputs auto-heal to defaults.
-            _write_managed_block(self.server.conf_path, eff2)
+            try:
+                _write_managed_block(self.server.conf_path, eff2)
+            except Exception as e:
+                try:
+                    getattr(self.server, "_znh_log", lambda *_: None)("error", f"Write failed for {self.server.conf_path}: {e}")
+                except Exception:
+                    pass
+                return _json_response(self, 500, {"error": f"write failed: {e}"}, origin)
+
             eff3, warnings3, invalid3 = _read_conf(self.server.conf_path)
             return _json_response(self, 200, {"config": eff3, "warnings": warnings2 + warnings3, "invalid_keys": invalid2 + invalid3}, origin)
 
@@ -17884,7 +17892,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto/service-logs
+ReadWritePaths=${CONFIG_FILE} ${CONFIG_FILE}.tmp ${DASH_API_TOKEN_DIR} /var/log/zypper-auto/service-logs
 
 [Install]
 WantedBy=multi-user.target
