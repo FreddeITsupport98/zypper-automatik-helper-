@@ -239,6 +239,7 @@ zypper-auto-helper snapper          # Snapper submenu (status/list/create/cleanu
 zypper-auto-helper snapper status   # Show snapper configs, snapshot detection, and timer state
 zypper-auto-helper snapper auto     # Enable common snapper timers (timeline + cleanup + boot)
 # (Interactive snapper menu: AUTO enable option is color-coded: red=disabled, yellow=partial, green=enabled)
+# It also shows a text suffix: (disabled|partial|enabled) so it’s readable even when colors are off.
 # snapper auto-off disables the same snapper timers and also disables optional option-5 maintenance timers (btrfsmaintenance + fstrim) when present.
 
 # Diagnostics & debugging

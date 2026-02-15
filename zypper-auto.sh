@@ -10672,13 +10672,22 @@ run_snapper_menu_only() {
             fi
         done
 
+        # Always show a short status suffix so it's clear even without colors.
+        local _s_state
+        _s_state="disabled"
+        if [ "${_s_total}" -gt 0 ] 2>/dev/null && [ "${_s_on}" -eq "${_s_total}" ] 2>/dev/null; then
+            _s_state="enabled"
+        elif [ "${_s_on}" -gt 0 ] 2>/dev/null; then
+            _s_state="partial"
+        fi
+
         _s_color=""
         _s_prefix=""
         _s_suffix=""
         if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
-            if [ "${_s_total}" -gt 0 ] 2>/dev/null && [ "${_s_on}" -eq "${_s_total}" ] 2>/dev/null; then
+            if [ "${_s_state}" = "enabled" ]; then
                 _s_color="${C_GREEN}"
-            elif [ "${_s_on}" -gt 0 ] 2>/dev/null; then
+            elif [ "${_s_state}" = "partial" ]; then
                 _s_color="${C_YELLOW}"
             else
                 _s_color="${C_RED}"
@@ -10687,7 +10696,7 @@ run_snapper_menu_only() {
             _s_suffix="${C_RESET}"
         fi
 
-        echo "  5) ${_s_prefix}AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs${_s_suffix}"
+        echo "  5) ${_s_prefix}AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs${_s_suffix} (${_s_state})"
         echo "  6) AUTO: Disable option-5 timers (snapper + btrfsmaintenance + fstrim)"
         echo "  7) Exit (7 / E / Q)"
         echo ""
