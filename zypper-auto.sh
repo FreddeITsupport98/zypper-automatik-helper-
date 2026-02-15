@@ -17861,7 +17861,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=-/var/lib/zypper-auto/dashboard-api.env
-ExecStart=${DASH_API_BIN} --listen 127.0.0.1 --port 8766 --token-file ${DASH_API_TOKEN_FILE} --config ${CONFIG_FILE} --schema-file /var/lib/zypper-auto/dashboard-schema.json --log-file /var/log/zypper-auto/service-logs/dashboard-api.log --mirror-file ${DASH_API_MIRROR_FILE:-} --log-level ${DASH_API_LOG_LEVEL:-info}
+ExecStart=${DASH_API_BIN} --listen 127.0.0.1 --port 8766 --token-file ${DASH_API_TOKEN_FILE} --config ${CONFIG_FILE} --schema-file /var/lib/zypper-auto/dashboard-schema.json --log-file /var/log/zypper-auto/service-logs/dashboard-api.log --mirror-file=${DASH_API_MIRROR_FILE:-} --log-level ${DASH_API_LOG_LEVEL:-info}
 Restart=on-failure
 RestartSec=2
 
