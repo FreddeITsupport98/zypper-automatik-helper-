@@ -72,6 +72,30 @@ fi
 # Optional browser override (best-effort):
 #   zypper-auto-helper --dash-open firefox
 #   ZYPPER_AUTO_DASHBOARD_BROWSER=firefox zypper-auto-helper --dash-open
+
+__znh_port_listen_in_use() {
+    # best-effort: return 0 if TCP port appears to have a LISTEN socket
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"
+        return $?
+    fi
+    # if ss isn't available, we cannot reliably detect -> assume free
+    return 1
+}
+
+__znh_pick_free_port() {
+    # Pick the first free port in a range. Echo the port, or empty on failure.
+    local start="$1" end="$2" p
+    for p in $(seq "${start}" "${end}"); do
+        if ! __znh_port_listen_in_use "${p}"; then
+            echo "${p}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
     pid_file="${dash_dir}/dashboard-http.pid"
@@ -111,9 +135,36 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         # Live dashboard: serve the user dashboard dir over a local HTTP server.
         # This avoids browser restrictions around fetch() on file:// URLs and
         # enables realtime polling (status-data.json, download-status.txt, dashboard-live.log).
+        #
+        # Safeguards:
+        # - detect port conflicts (pid file is not enough)
+        # - capture server startup errors into a log file
+        # - verify the server is actually responding before opening browser
         port=8765
-        url="http://127.0.0.1:${port}/status.html?live=1"
         pid_file="${dash_dir}/dashboard-http.pid"
+        port_file="${dash_dir}/dashboard-http.port"
+        err_file="${dash_dir}/dashboard-http.err"
+
+        # If a previous server is already running, reuse its port.
+        if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
+            old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+            old_port=$(cat "${port_file}" 2>/dev/null || echo "")
+            if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null && [[ "${old_port:-}" =~ ^[0-9]+$ ]]; then
+                port="${old_port}"
+            fi
+        fi
+
+        # If requested/default port is busy, pick a nearby free port.
+        if __znh_port_listen_in_use "${port}"; then
+            # If it's our own server, the pid logic above would have caught it.
+            # Otherwise, avoid broken UX by selecting another port.
+            port_pick="$(__znh_pick_free_port 8765 8790 2>/dev/null || true)"
+            if [[ "${port_pick:-}" =~ ^[0-9]+$ ]]; then
+                port="${port_pick}"
+            fi
+        fi
+
+        url="http://127.0.0.1:${port}/status.html?live=1"
 
         # Dashboard Settings API (localhost)
         # The Settings drawer in the dashboard talks to a root-only API on:
@@ -149,10 +200,26 @@ PY
         fi
 
         if [ "${server_running}" -ne 1 ] 2>/dev/null; then
-            # Start server in the background; keep stdout/stderr quiet.
+            # Start server in the background; capture stderr so startup failures aren't silent.
             if command -v python3 >/dev/null 2>&1; then
-                ( python3 -m http.server --directory "${dash_dir}" "${port}" >/dev/null 2>&1 & echo $! >"${pid_file}" ) || true
-                sleep 0.2
+                rm -f "${err_file}" 2>/dev/null || true
+                ( python3 -m http.server --bind 127.0.0.1 --directory "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
+                sleep 0.25
+            else
+                echo "python3 not found; cannot start live dashboard server." >&2
+            fi
+        fi
+
+        # Verify server responds before opening browser (best-effort)
+        if command -v curl >/dev/null 2>&1; then
+            if ! curl -fsS --max-time 1 "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+                echo "WARNING: dashboard server did not respond on port ${port}." >&2
+                if [ -s "${err_file}" ]; then
+                    echo "--- dashboard server error (last 20 lines):" >&2
+                    tail -n 20 "${err_file}" >&2 || true
+                else
+                    echo "(no server error output captured)" >&2
+                fi
             fi
         fi
 
