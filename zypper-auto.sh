@@ -1315,8 +1315,9 @@ LOG_FOLDER_OPENER=""
 #
 #FORCE_FORM_FACTOR=
 EOF
-        # Ensure config file has safe permissions (root-writable only)
-        chmod 644 "${CONFIG_FILE}" || true
+        # Ensure config file has safe permissions.
+        # This file may contain secrets (e.g. WEBHOOK_URL), so keep it root-only.
+        chmod 600 "${CONFIG_FILE}" || true
 # NOTE: The downloader, notifier, and verification timer schedules are
 # derived from DL_TIMER_INTERVAL_MINUTES, NT_TIMER_INTERVAL_MINUTES, and
 # VERIFY_TIMER_INTERVAL_MINUTES in this file. After changing these values,
@@ -10489,9 +10490,9 @@ run_uninstall_helper_only() {
     # IMPORTANT: We only disable them; we never delete the unit files.
     if [ "${UNINSTALL_DISABLE_MAINT_TIMERS:-0}" -eq 1 ]; then
         log_info "[uninstall] Disabling maintenance timers (requested): snapper/btrfs/fstrim"
-        execute_guarded "Disable snapper timers" systemctl disable --now snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer 2>/dev/null || true
-        execute_guarded "Disable btrfs timers" systemctl disable --now btrfs-scrub.timer btrfs-balance.timer btrfs-trim.timer btrfs-defrag.timer 2>/dev/null || true
-        execute_guarded "Disable fstrim timer" systemctl disable --now fstrim.timer 2>/dev/null || true
+        execute_guarded "Disable snapper timers" systemctl disable --now snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer || true
+        execute_guarded "Disable btrfs timers" systemctl disable --now btrfs-scrub.timer btrfs-balance.timer btrfs-trim.timer btrfs-defrag.timer || true
+        execute_guarded "Disable fstrim timer" systemctl disable --now fstrim.timer || true
         log_info "[uninstall] Maintenance timers disabled (unit files preserved under /usr/lib/systemd/system)"
     fi
     execute_guarded "Stop downloader service" systemctl stop zypper-autodownload.service || true
@@ -10548,17 +10549,26 @@ run_uninstall_helper_only() {
             /usr/share/zsh/site-functions/_zypper-auto-helper \
             /usr/local/share/zsh/site-functions/_zypper-auto-helper || true
 
-        # Remove bash/zsh aliases we added (non-fatal if missing)
-        execute_guarded "Remove bash/zsh aliases added by helper" bash -lc "\
-            sed -i '/# Zypper wrapper for auto service check/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
-            sed -i '/alias zypper=/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
-            sed -i '/# Zypper wrapper for auto service check/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true;\
-            sed -i '/alias zypper=/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true;\
-            sed -i '/# zypper-auto-helper command alias/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
-            sed -i '/alias zypper-auto-helper=/d' '$SUDO_USER_HOME/.bashrc' 2>/dev/null || true;\
-            sed -i '/# zypper-auto-helper command alias/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true;\
-            sed -i '/alias zypper-auto-helper=/d' '$SUDO_USER_HOME/.zshrc' 2>/dev/null || true\
-        " || true
+        # Remove bash/zsh aliases we added (non-fatal if missing).
+        # Avoid `bash -lc` and ensure $SUDO_USER_HOME expands correctly.
+        if [ -f "${SUDO_USER_HOME}/.bashrc" ]; then
+            execute_guarded "Remove helper aliases from .bashrc" \
+                sed -i \
+                    -e '/# Zypper wrapper for auto service check/d' \
+                    -e '/alias zypper=/d' \
+                    -e '/# zypper-auto-helper command alias/d' \
+                    -e '/alias zypper-auto-helper=/d' \
+                    "${SUDO_USER_HOME}/.bashrc" 2>/dev/null || true
+        fi
+        if [ -f "${SUDO_USER_HOME}/.zshrc" ]; then
+            execute_guarded "Remove helper aliases from .zshrc" \
+                sed -i \
+                    -e '/# Zypper wrapper for auto service check/d' \
+                    -e '/alias zypper=/d' \
+                    -e '/# zypper-auto-helper command alias/d' \
+                    -e '/alias zypper-auto-helper=/d' \
+                    "${SUDO_USER_HOME}/.zshrc" 2>/dev/null || true
+        fi
     fi
 
     # 5. Remove custom hook scripts (enterprise extension)
@@ -10570,7 +10580,7 @@ run_uninstall_helper_only() {
             log_error "Refusing to remove hooks directory due to suspicious path: '${hooks_dir}'"
         elif [ -d "${hooks_dir}" ]; then
             log_debug "Removing hook scripts directory: ${hooks_dir}"
-            execute_guarded "Remove hooks directory (${hooks_dir})" rm -rf "${hooks_dir}" || true
+            execute_guarded "Remove hooks directory (${hooks_dir})" rm -rf -- "${hooks_dir}" || true
         fi
     fi
 
@@ -10601,8 +10611,13 @@ run_uninstall_helper_only() {
 
         # Remove helper-created backups (boot entries + btrfsmaintenance)
         if [ -d "${helper_backup_dir}" ]; then
-            execute_guarded "Remove boot-entry backup folders" rm -rf -- "${helper_backup_dir}"/boot-entries-* 2>/dev/null || true
-            execute_guarded "Remove btrfsmaintenance backups" rm -f -- "${helper_backup_dir}"/btrfsmaintenance-*.bak 2>/dev/null || true
+            # Remove helper-created boot-entry backup folders (best-effort).
+            # Use find to avoid rm errors when the glob does not match.
+            execute_guarded "Remove boot-entry backup folders" \
+                find "${helper_backup_dir}" -maxdepth 1 -mindepth 1 -type d -name 'boot-entries-*' -exec rm -rf -- {} + 2>/dev/null || true
+            # Remove any btrfsmaintenance backups (best-effort).
+            execute_guarded "Remove btrfsmaintenance backups" \
+                find "${helper_backup_dir}" -maxdepth 1 -type f -name 'btrfsmaintenance-*.bak' -delete 2>/dev/null || true
             # Remove the directory itself only if it is now empty
             rmdir "${helper_backup_dir}" 2>/dev/null || true
         fi
@@ -10613,8 +10628,8 @@ run_uninstall_helper_only() {
         fi
     fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
-        execute_guarded "Remove notifier logs" rm -rf "$SUDO_USER_HOME/.local/share/zypper-notify" || true
-        execute_guarded "Remove notifier caches" rm -rf "$SUDO_USER_HOME/.cache/zypper-notify" || true
+        execute_guarded "Remove notifier logs" rm -rf -- "$SUDO_USER_HOME/.local/share/zypper-notify" || true
+        execute_guarded "Remove notifier caches" rm -rf -- "$SUDO_USER_HOME/.cache/zypper-notify" || true
     fi
 
     # 7. Reload systemd daemons

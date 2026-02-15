@@ -95,6 +95,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 *  * `--dry-run` – show exactly what would be removed without making any changes
 *  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact (including the `status.html` dashboard) while still clearing caches
 *  * `--keep-hooks` – leave custom hook scripts under `/etc/zypper-auto/hooks` intact
+*  * It also cleans up any shell aliases it added to `~/.bashrc` / `~/.zshrc` (best-effort).
 *  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
 
 -----
@@ -270,6 +271,9 @@ The installer reads an optional config file at `/etc/zypper-auto.conf` on every 
 If the file does not exist, it generates a documented default template. You can
 safely edit this file and re-run `sudo ./zypper-auto.sh install` to apply
 changes.
+
+Security note: the installer sets `/etc/zypper-auto.conf` to **mode `600`** (root-only)
+because it can contain secrets such as `WEBHOOK_URL`.
 
 Key options include:
 
