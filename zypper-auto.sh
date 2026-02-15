@@ -10696,7 +10696,12 @@ run_snapper_menu_only() {
             _s_suffix="${C_RESET}"
         fi
 
-        echo "  5) ${_s_prefix}AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs${_s_suffix} (${_s_state})"
+        if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+            # Use printf %b so the ANSI sequences are interpreted.
+            printf "%b\n" "  5) ${_s_prefix}AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs${_s_suffix} (${_s_state})"
+        else
+            echo "  5) AUTO: Enable snapper timers (timeline + cleanup + boot) + sync configs (${_s_state})"
+        fi
         echo "  6) AUTO: Disable option-5 timers (snapper + btrfsmaintenance + fstrim)"
         echo "  7) Exit (7 / E / Q)"
         echo ""
