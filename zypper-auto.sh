@@ -115,6 +115,90 @@ __znh_pid_is_dashboard_http_server() {
     return 1
 }
 
+__znh_pid_is_dashboard_sync_worker() {
+    local pid="$1" dash_dir="$2"
+    [[ "${pid:-}" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+    if command -v ps >/dev/null 2>&1; then
+        local args
+        args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
+        # We mark the process name via: exec -a znh-dashboard-sync ...
+        printf '%s' "${args}" | grep -q "znh-dashboard-sync" || return 1
+        printf '%s' "${args}" | grep -q "${dash_dir}" || return 1
+        return 0
+    fi
+    return 1
+}
+
+__znh_start_dashboard_sync_worker() {
+    # Keep user dashboard files in sync with root-generated artifacts so an open
+    # dashboard tab doesn't go stale when root timers run in the background.
+    # This runs as the desktop user, reading world-readable files under /var/log.
+    local dash_dir="$1" user_name="${2:-}" user_home="${3:-}"
+    local pid_file
+    pid_file="${dash_dir}/dashboard-sync.pid"
+
+    # If an existing worker is already running, keep it.
+    if [ -f "${pid_file}" ]; then
+        local old_pid
+        old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+        if __znh_pid_is_dashboard_sync_worker "${old_pid}" "${dash_dir}"; then
+            return 0
+        fi
+        rm -f "${pid_file}" 2>/dev/null || true
+    fi
+
+    local run_cmd
+    run_cmd=$(cat <<'SYNC'
+exec -a znh-dashboard-sync bash -lc '
+  dash_dir="$1";
+  src_root="/var/log/zypper-auto";
+  while true; do
+    # Copy updated files if present (best-effort). cp -u is "update if newer".
+    cp -u "${src_root}/status-data.json" "${dash_dir}/status-data.json" 2>/dev/null || true
+    cp -u "${src_root}/dashboard-install-tail.log" "${dash_dir}/dashboard-install-tail.log" 2>/dev/null || true
+    cp -u "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log" 2>/dev/null || true
+    cp -u "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log" 2>/dev/null || true
+    cp -u "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log" 2>/dev/null || true
+    # status.html is larger; only update if it changed.
+    cp -u "${src_root}/status.html" "${dash_dir}/status.html" 2>/dev/null || true
+    sleep 10
+  done
+' _ "${dash_dir}"
+SYNC
+)
+
+    # Launch worker detached as the desktop user if known.
+    if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
+        sudo -u "${user_name}" bash -lc "nohup ${run_cmd} >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+    else
+        # Fallback: run as current user (non-sudo fast path already runs as desktop user).
+        bash -lc "nohup ${run_cmd} >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+    fi
+
+    chmod 600 "${pid_file}" 2>/dev/null || true
+    if [ -n "${user_name}" ] && [ -n "${user_home}" ]; then
+        chown "${user_name}:${user_name}" "${pid_file}" 2>/dev/null || true
+    fi
+}
+
+__znh_stop_dashboard_sync_worker() {
+    local dash_dir="$1"
+    local pid_file
+    pid_file="${dash_dir}/dashboard-sync.pid"
+    if [ ! -f "${pid_file}" ]; then
+        return 0
+    fi
+    local pid
+    pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+    if __znh_pid_is_dashboard_sync_worker "${pid}" "${dash_dir}"; then
+        kill "${pid}" 2>/dev/null || true
+        sleep 0.1
+        kill -9 "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${pid_file}" 2>/dev/null || true
+}
+
 __znh_pick_free_port() {
     # Pick the first free port in a range. Echo the port, or empty on failure.
     local start="$1" end="$2" p
@@ -175,6 +259,10 @@ __znh_detach_open_url() {
 
 if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
+
+    # Stop sync worker first (best-effort)
+    __znh_stop_dashboard_sync_worker "${dash_dir}" || true
+
     pid_file="${dash_dir}/dashboard-http.pid"
     port_file="${dash_dir}/dashboard-http.port"
 
@@ -323,6 +411,10 @@ PY
                 fi
             fi
         fi
+
+        # Start sync worker so status-data.json/log views keep updating even if
+        # this dashboard tab stays open for days.
+        __znh_start_dashboard_sync_worker "${dash_dir}" "${USER:-}" "${HOME:-}" || true
 
         echo "Open live dashboard: ${url}"
 
@@ -7528,6 +7620,9 @@ run_dash_stop_only() {
         dash_dir="$HOME/.local/share/zypper-notify"
     fi
 
+    # Stop sync worker first (best-effort)
+    __znh_stop_dashboard_sync_worker "${dash_dir}" || true
+
     pid_file="${dash_dir}/dashboard-http.pid"
     port_file="${dash_dir}/dashboard-http.port"
 
@@ -7716,6 +7811,13 @@ PY
             else
                 __znh_detach_cmd xdg-open "${url}" || true
             fi
+        fi
+
+        # Start user sync worker (best-effort) so user dashboard dir stays up-to-date.
+        if [ -n "${SUDO_USER:-}" ]; then
+            local user_home
+            user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
+            __znh_start_dashboard_sync_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" || true
         fi
 
         update_status "SUCCESS: Dashboard open attempted"
