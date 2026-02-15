@@ -75,13 +75,41 @@ fi
 
 __znh_port_listen_in_use() {
     # best-effort: return 0 if TCP port appears to have a LISTEN socket
+    # Works even when 'ss' is missing.
     local port="$1"
+
     if command -v ss >/dev/null 2>&1; then
         ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"
         return $?
     fi
-    # if ss isn't available, we cannot reliably detect -> assume free
-    return 1
+
+    # Fallback: attempt a fast TCP connect to localhost.
+    # - If connect succeeds -> something is listening.
+    # - If connection refused / timeout -> assume free.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 0.25 bash -lc "</dev/tcp/127.0.0.1/${port}" >/dev/null 2>&1
+        return $?
+    fi
+
+    # Last resort: try /dev/tcp without timeout (may hang in pathological cases); keep it best-effort.
+    (</dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1
+    return $?
+}
+
+__znh_pid_is_dashboard_http_server() {
+    local pid="$1" dash_dir="$2" port="$3"
+    [[ "${pid:-}" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+    if command -v ps >/dev/null 2>&1; then
+        local args
+        args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
+        # Verify it's our http.server and pointing at the right directory/port.
+        printf '%s' "${args}" | grep -q "python3 -m http.server" || return 1
+        printf '%s' "${args}" | grep -q "--directory ${dash_dir}" || return 1
+        printf '%s' "${args}" | grep -q " ${port}\b" || return 1
+        return 0
+    fi
+    return 0
 }
 
 __znh_pick_free_port() {
@@ -149,7 +177,7 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
             old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
             old_port=$(cat "${port_file}" 2>/dev/null || echo "")
-            if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null && [[ "${old_port:-}" =~ ^[0-9]+$ ]]; then
+            if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
                 port="${old_port}"
             fi
         fi
@@ -192,9 +220,10 @@ PY
         mkdir -p "${dash_dir}" 2>/dev/null || true
 
         server_running=0
-        if [ -f "${pid_file}" ]; then
+        if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
             old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-            if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null; then
+            old_port=$(cat "${port_file}" 2>/dev/null || echo "")
+            if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
                 server_running=1
             fi
         fi
@@ -7456,8 +7485,9 @@ run_dash_open_only() {
     # Best-effort regenerate so the page is fresh.
     generate_dashboard || true
 
-    local dash_path
-    dash_path="${SUDO_USER_HOME:-}/.local/share/zypper-notify/status.html"
+    local dash_path dash_dir
+    dash_dir="${SUDO_USER_HOME:-}/.local/share/zypper-notify"
+    dash_path="${dash_dir}/status.html"
 
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${dash_path}" ]; then
         log_info "Dashboard path: ${dash_path}"
@@ -7466,22 +7496,100 @@ run_dash_open_only() {
         fi
         echo "Open in browser: xdg-open ${dash_path}" | tee -a "${LOG_FILE}"
 
+        # Start the live dashboard server (same safeguards as non-sudo fast path).
+        local port url pid_file port_file err_file
+        port=8765
+        pid_file="${dash_dir}/dashboard-http.pid"
+        port_file="${dash_dir}/dashboard-http.port"
+        err_file="${dash_dir}/dashboard-http.err"
+
+        mkdir -p "${dash_dir}" 2>/dev/null || true
+        if [ -n "${SUDO_USER:-}" ]; then
+            chown "${SUDO_USER}:${SUDO_USER}" "${dash_dir}" 2>/dev/null || true
+        fi
+
+        # If a previous server is already running, reuse its port (validate PID is really our server).
+        if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
+            local old_pid old_port
+            old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+            old_port=$(cat "${port_file}" 2>/dev/null || echo "")
+            if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
+                port="${old_port}"
+            fi
+        fi
+
+        # If requested/default port is busy, pick a nearby free port.
+        if __znh_port_listen_in_use "${port}"; then
+            local port_pick
+            port_pick="$(__znh_pick_free_port 8765 8790 2>/dev/null || true)"
+            if [[ "${port_pick:-}" =~ ^[0-9]+$ ]]; then
+                port="${port_pick}"
+            fi
+        fi
+
+        url="http://127.0.0.1:${port}/status.html?live=1"
+
+        local server_running
+        server_running=0
+        if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
+            local p pp
+            p=$(cat "${pid_file}" 2>/dev/null || echo "")
+            pp=$(cat "${port_file}" 2>/dev/null || echo "")
+            if [[ "${pp:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${p}" "${dash_dir}" "${pp}"; then
+                server_running=1
+            fi
+        fi
+
+        if [ "${server_running}" -ne 1 ] 2>/dev/null; then
+            if [ -n "${SUDO_USER:-}" ] && command -v python3 >/dev/null 2>&1; then
+                rm -f "${err_file}" 2>/dev/null || true
+                # Run the web server as the desktop user so file permissions + paths match.
+                sudo -u "${SUDO_USER}" \
+                    bash -lc "python3 -m http.server --bind 127.0.0.1 --directory \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
+                sleep 0.25
+            fi
+        fi
+
+        # Verify server responds before opening browser (best-effort)
+        if command -v curl >/dev/null 2>&1; then
+            if ! curl -fsS --max-time 1 "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+                log_warn "Dashboard server did not respond on port ${port}"
+                if [ -s "${err_file}" ]; then
+                    log_warn "--- dashboard server error (last 20 lines):"
+                    tail -n 20 "${err_file}" 2>/dev/null | sed 's/^/[DASH_HTTP] /' | tee -a "${LOG_FILE}" || true
+                fi
+            fi
+        fi
+
+        echo "Open live dashboard: ${url}" | tee -a "${LOG_FILE}"
+
         local user_bus
         user_bus="$(get_user_bus "${SUDO_USER:-}" 2>/dev/null || true)"
 
+        # When launching GUI apps as the desktop user from sudo context, propagate XDG_RUNTIME_DIR.
+        local user_uid user_runtime
+        user_uid=""
+        if [ -n "${SUDO_USER:-}" ]; then
+            user_uid=$(id -u "${SUDO_USER}" 2>/dev/null || echo "")
+        fi
+        user_runtime=""
+        if [[ "${user_uid:-}" =~ ^[0-9]+$ ]]; then
+            user_runtime="/run/user/${user_uid}"
+        fi
+
         if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
-                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
-                    "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
+                    "${dash_browser}" "${url}" >/dev/null 2>&1 || true
             else
-                "${dash_browser}" "${dash_path}" >/dev/null 2>&1 || true
+                "${dash_browser}" "${url}" >/dev/null 2>&1 || true
             fi
         elif command -v xdg-open >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
-                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" \
-                    xdg-open "${dash_path}" >/dev/null 2>&1 || true
+                sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
+                    xdg-open "${url}" >/dev/null 2>&1 || true
             else
-                xdg-open "${dash_path}" >/dev/null 2>&1 || true
+                xdg-open "${url}" >/dev/null 2>&1 || true
             fi
         fi
 
