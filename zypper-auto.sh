@@ -199,6 +199,9 @@ CACHE_EXPIRY_MINUTES="10"
 SNOOZE_SHORT_HOURS="1"   # used by the "1h" snooze button
 SNOOZE_MEDIUM_HOURS="4"  # used by the "4h" snooze button
 SNOOZE_LONG_HOURS="24"   # used by the "1d" snooze button
+# Suppress duplicate "Updates Ready" popups while an interactive install is running.
+# Set to 0 to disable.
+INSTALL_CLICK_SUPPRESS_MINUTES="120"
 
 # Create log directory
 mkdir -p "${LOG_DIR}"
@@ -1174,6 +1177,17 @@ SNOOZE_SHORT_HOURS=1
 SNOOZE_MEDIUM_HOURS=4
 SNOOZE_LONG_HOURS=24
 
+# INSTALL_CLICK_SUPPRESS_MINUTES
+# After you click "Install Now" (Ready to install), the notifier writes a small
+# marker file under ~/.cache/zypper-notify and suppresses any further popups
+# while the interactive update window is open.
+#
+# This avoids the common annoyance where the "Updates Ready" notification can
+# re-appear while you are already installing updates.
+#
+# Set to 0 to disable this suppression behavior.
+INSTALL_CLICK_SUPPRESS_MINUTES=120
+
 # ---------------------------------------------------------------------
 # Zypper lock handling and downloader behaviour
 # ---------------------------------------------------------------------
@@ -1390,6 +1404,7 @@ EOF
     validate_int SNOOZE_SHORT_HOURS 1
     validate_int SNOOZE_MEDIUM_HOURS 4
     validate_int SNOOZE_LONG_HOURS 24
+    validate_nonneg_int_optional INSTALL_CLICK_SUPPRESS_MINUTES 120
     validate_int LOCK_RETRY_MAX_ATTEMPTS 10
     validate_int LOCK_RETRY_INITIAL_DELAY_SECONDS 1
 
@@ -6778,7 +6793,7 @@ run_diag_logs_runner_only() {
         fi
         echo "Config snapshot (${CONFIG_FILE}):"
         if [ -f "${CONFIG_FILE}" ]; then
-            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|CACHE_EXPIRY_MINUTES|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|VERIFY_NOTIFY_USER_ENABLED)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
+            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|CACHE_EXPIRY_MINUTES|SNOOZE_SHORT_HOURS|SNOOZE_MEDIUM_HOURS|SNOOZE_LONG_HOURS|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|INSTALL_CLICK_SUPPRESS_MINUTES|VERIFY_NOTIFY_USER_ENABLED)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
         else
             echo "  (config file missing)"
         fi
@@ -13582,6 +13597,9 @@ DRYRUN_OUTPUT_FILE = "/var/log/zypper-auto/dry-run-last.txt"
 CACHE_DIR = Path.home() / ".cache" / "zypper-notify"
 CACHE_FILE = CACHE_DIR / "last_check.txt"
 SNOOZE_FILE = CACHE_DIR / "snooze_until.txt"
+# Marker file used to suppress duplicate popups while an interactive install
+# is running (created by the notifier and the Ready-to-Install helper).
+INSTALL_MARKER_FILE = CACHE_DIR / "install_in_progress.txt"
 CACHE_EXPIRY_MINUTES = 10
 
 # Global config path for zypper-auto-helper
@@ -13760,10 +13778,57 @@ def _read_bool_from_config(name: str, default: bool) -> bool:
         return default
 
 
+def _read_int_from_config(
+    name: str,
+    default: int,
+    *,
+    min_value: int = 0,
+    max_value: int | None = None,
+) -> int:
+    """Best-effort integer reader for /etc/zypper-auto.conf.
+
+    Returns default on errors/out-of-range values.
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if not stripped.startswith(name + "="):
+                    continue
+                parts = stripped.split("=", 1)
+                if len(parts) != 2:
+                    continue
+                raw = parts[1].strip().strip("'\"").strip()
+                try:
+                    value = int(raw)
+                except ValueError:
+                    return default
+
+                if value < min_value:
+                    return default
+                if max_value is not None and value > max_value:
+                    return default
+                return value
+        return default
+    except FileNotFoundError:
+        return default
+    except Exception as e:
+        log_debug(f"Failed to read {CONFIG_FILE} for {name}: {e}")
+        return default
+
+
 DUP_EXTRA_FLAGS = _read_dup_extra_flags()
 LOCK_REMINDER_ENABLED = _read_bool_from_config("LOCK_REMINDER_ENABLED", True)
 NO_UPDATES_REMINDER_REPEAT_ENABLED = _read_bool_from_config("NO_UPDATES_REMINDER_REPEAT_ENABLED", True)
 UPDATES_READY_REMINDER_REPEAT_ENABLED = _read_bool_from_config("UPDATES_READY_REMINDER_REPEAT_ENABLED", True)
+INSTALL_CLICK_SUPPRESS_MINUTES = _read_int_from_config(
+    "INSTALL_CLICK_SUPPRESS_MINUTES",
+    120,
+    min_value=0,
+    max_value=24 * 60,
+)
 
 # --- Caching Functions ---
 def read_cache():
@@ -13841,6 +13906,68 @@ def set_snooze(hours: int) -> None:
         log_info(f"Updates snoozed for {hours} hours until {snooze_until.strftime('%Y-%m-%d %H:%M')}")
     except Exception as e:
         log_error(f"Failed to set snooze: {e}")
+
+
+# --- Install suppression (avoid duplicate popups while installing) ---
+
+def _read_install_marker_time() -> datetime | None:
+    """Read install marker timestamp.
+
+    Prefers parsing file content as an ISO timestamp. Falls back to mtime.
+    """
+    try:
+        if not INSTALL_MARKER_FILE.exists():
+            return None
+
+        raw = ""
+        try:
+            raw = INSTALL_MARKER_FILE.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            raw = ""
+
+        if raw:
+            # Allow optional metadata after the timestamp.
+            first = raw.split("|", 1)[0].strip()
+            try:
+                return datetime.fromisoformat(first)
+            except Exception:
+                pass
+
+        # Fallback: file mtime
+        return datetime.fromtimestamp(INSTALL_MARKER_FILE.stat().st_mtime)
+    except Exception as e:
+        log_debug(f"Failed to read install marker time: {e}")
+        return None
+
+
+def is_install_suppressed() -> bool:
+    """Return True when an interactive install is in progress."""
+    try:
+        if INSTALL_CLICK_SUPPRESS_MINUTES <= 0:
+            return False
+
+        t = _read_install_marker_time()
+        if t is None:
+            return False
+
+        age_minutes = (datetime.now() - t).total_seconds() / 60.0
+        if age_minutes < float(INSTALL_CLICK_SUPPRESS_MINUTES):
+            remaining = max(0, int(INSTALL_CLICK_SUPPRESS_MINUTES - age_minutes))
+            log_info(f"Install marker active; suppressing notifications for ~{remaining} more minute(s)")
+            update_status("SKIPPED: Install in progress (notification suppressed)")
+            return True
+
+        # Stale marker; remove it so we don't suppress forever.
+        try:
+            INSTALL_MARKER_FILE.unlink()
+        except Exception:
+            pass
+        return False
+
+    except Exception as e:
+        log_debug(f"Install suppression check failed: {e}")
+        return False
+
 
 # --- History Logging ---
 def log_update_history(snapshot: str, package_count: int) -> None:
@@ -14660,6 +14787,16 @@ def on_action(notification, action_id, user_data):
     
     if action_id == "install":
         update_status("User initiated update installation")
+
+        # Create an "install in progress" marker so the next timer tick does not
+        # re-show the exact same "Updates Ready" notification while the user is
+        # already installing updates.
+        try:
+            with open(INSTALL_MARKER_FILE, "w", encoding="utf-8") as f:
+                f.write(datetime.now().isoformat())
+        except Exception as e:
+            log_debug(f"Failed to write install marker file: {e}")
+
         action_script = user_data
         try:
             # Prefer to launch via systemd-run so the process is clearly
@@ -14765,6 +14902,11 @@ def main():
         # Check if updates are snoozed FIRST - skip all notifications if snoozed
         if check_snoozed():
             log_info("Updates are currently snoozed, skipping all notifications")
+            return
+
+        # If an interactive install is already running (user clicked "Install Now"),
+        # suppress all notifier popups until the helper clears the marker.
+        if is_install_suppressed():
             return
 
         # If the background downloader just finished, we'll attach a short
@@ -15467,6 +15609,17 @@ set -euo pipefail
 LOG_FILE="$HOME/.local/share/zypper-notify/run-install.log"
 LOG_DIR="$(dirname "$LOG_FILE")"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+# Suppress duplicate "Updates Ready" popups while this interactive install
+# window is running.
+INSTALL_MARKER_FILE="$HOME/.cache/zypper-notify/install_in_progress.txt"
+mkdir -p "$(dirname "$INSTALL_MARKER_FILE")" 2>/dev/null || true
+MARKER_TS="$(date -Iseconds 2>/dev/null || date +%s)"
+printf '%s\n' "${MARKER_TS}" >"${INSTALL_MARKER_FILE}" 2>/dev/null || true
+cleanup_install_marker() {
+    rm -f -- "${INSTALL_MARKER_FILE}" 2>/dev/null || true
+}
+trap cleanup_install_marker EXIT
 
 # Correlation IDs propagated from the notifier (when available)
 ZNH_RUN_ID="${ZNH_RUN_ID:-}"

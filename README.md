@@ -423,6 +423,11 @@ Key options include:
     "Snapshot XXXX Ready" / "Updates ready" notifications may be re-shown on
     later checks while the same snapshot is still pending. When `false`, each
     "Updates ready" state only generates one popup until the snapshot changes.
+  - `INSTALL_CLICK_SUPPRESS_MINUTES` – after you click **Install Now**, the notifier
+    writes a small marker file under `~/.cache/zypper-notify` and suppresses
+    further popups while the interactive Ready-to-Install window is running.
+    This prevents duplicate “Updates Ready” notifications during installation.
+    Set to `0` to disable.
   - `VERIFY_NOTIFY_USER_ENABLED` – when `true` (default), the periodic
     verification/auto‑repair service sends a short desktop notification when it
     detects and fixes at least one issue; when `false`, verification remains
@@ -1220,6 +1225,7 @@ systemctl status zypper-autodownload.service
 ### Version History
 
 - **Unreleased (next build):**
+  - 🔔 **FIXED:** the "Updates Ready" notification no longer re-appears while you are already installing updates (install action now suppresses notifier popups via an install-in-progress marker; configurable via `INSTALL_CLICK_SUPPRESS_MINUTES`).
   - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
   - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
   - 🥾 **NEW:** boot-menu hygiene: Snapper cleanup can prune old systemd-boot/BLS entry files to keep the boot menu clean (backup/delete modes).
