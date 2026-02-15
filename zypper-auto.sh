@@ -2739,6 +2739,19 @@ generate_dashboard() {
   <title>Zypper Auto Command Center</title>
   <style>
     html { color-scheme: light dark; }
+    /* Ensure native form controls (especially <select>/<option>) follow our theme */
+    html[data-theme="dark"] { color-scheme: dark; }
+    html[data-theme="light"] { color-scheme: light; }
+
+    select, input[type="number"], input[type="text"], textarea {
+        color: var(--text);
+        background: rgba(255,255,255,0.04);
+        border: 1px solid var(--border);
+    }
+    select option {
+        background: var(--bg);
+        color: var(--text);
+    }
 
     :root {
         --bg: #f6f7fb;
