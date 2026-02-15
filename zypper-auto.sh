@@ -124,6 +124,31 @@ __znh_pick_free_port() {
     return 1
 }
 
+__znh_detach_cmd() {
+    # Run a command fully detached (best-effort) so closing the terminal doesn't kill it.
+    # Usage: __znh_detach_cmd cmd arg1 arg2 ...
+    if command -v setsid >/dev/null 2>&1; then
+        # setsid detaches from controlling terminal; nohup guards against SIGHUP.
+        nohup setsid "$@" >/dev/null 2>&1 &
+    else
+        nohup "$@" >/dev/null 2>&1 &
+    fi
+}
+
+__znh_detach_open_url() {
+    # Usage: __znh_detach_open_url <url> [browser]
+    local url="$1" browser="${2:-}"
+    if [ -n "${browser}" ] && command -v "${browser}" >/dev/null 2>&1; then
+        __znh_detach_cmd "${browser}" "${url}"
+        return 0
+    fi
+    if command -v xdg-open >/dev/null 2>&1; then
+        __znh_detach_cmd xdg-open "${url}"
+        return 0
+    fi
+    return 1
+}
+
 if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
     pid_file="${dash_dir}/dashboard-http.pid"
@@ -232,10 +257,12 @@ PY
             # Start server in the background; capture stderr so startup failures aren't silent.
             if command -v python3 >/dev/null 2>&1; then
                 rm -f "${err_file}" 2>/dev/null || true
-                ( python3 -m http.server --bind 127.0.0.1 --directory "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
+                # Bind explicitly to localhost (privacy/safety) and detach so the server survives terminal close.
+                ( nohup python3 -m http.server --bind 127.0.0.1 --directory "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
                 sleep 0.25
             else
                 echo "python3 not found; cannot start live dashboard server." >&2
+                echo "Install it with: sudo zypper install python3" >&2
             fi
         fi
 
@@ -256,11 +283,8 @@ PY
 
         # Best-effort open.
         # Prefer explicit browser when requested; fall back to xdg-open.
-        if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
-            "${dash_browser}" "${url}" >/dev/null 2>&1 || true
-        elif command -v xdg-open >/dev/null 2>&1; then
-            xdg-open "${url}" >/dev/null 2>&1 || true
-        fi
+        # Detach so closing the terminal does not kill the browser/tab.
+        __znh_detach_open_url "${url}" "${dash_browser:-}" || true
 
         echo ""
         echo "To refresh/regenerate first (requires sudo):"
@@ -7544,8 +7568,9 @@ run_dash_open_only() {
             if [ -n "${SUDO_USER:-}" ] && command -v python3 >/dev/null 2>&1; then
                 rm -f "${err_file}" 2>/dev/null || true
                 # Run the web server as the desktop user so file permissions + paths match.
+                # Use nohup so the server survives terminal close.
                 sudo -u "${SUDO_USER}" \
-                    bash -lc "python3 -m http.server --bind 127.0.0.1 --directory \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
+                    bash -lc "nohup python3 -m http.server --bind 127.0.0.1 --directory \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
                 sleep 0.25
             fi
         fi
@@ -7577,19 +7602,20 @@ run_dash_open_only() {
             user_runtime="/run/user/${user_uid}"
         fi
 
+        # Open the browser detached (best-effort) so terminal close doesn't kill it.
         if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
-                    "${dash_browser}" "${url}" >/dev/null 2>&1 || true
+                    bash -lc "nohup \"${dash_browser}\" \"${url}\" >/dev/null 2>&1 &" || true
             else
-                "${dash_browser}" "${url}" >/dev/null 2>&1 || true
+                __znh_detach_cmd "${dash_browser}" "${url}" || true
             fi
         elif command -v xdg-open >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
-                    xdg-open "${url}" >/dev/null 2>&1 || true
+                    bash -lc "nohup xdg-open \"${url}\" >/dev/null 2>&1 &" || true
             else
-                xdg-open "${url}" >/dev/null 2>&1 || true
+                __znh_detach_cmd xdg-open "${url}" || true
             fi
         fi
 
