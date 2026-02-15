@@ -45,7 +45,7 @@ if [[ $# -gt 0 ]]; then
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
-        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|\
+        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --analyze|--health|--debug)
@@ -114,6 +114,29 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         port=8765
         url="http://127.0.0.1:${port}/status.html?live=1"
         pid_file="${dash_dir}/dashboard-http.pid"
+
+        # Dashboard Settings API (localhost)
+        # The Settings drawer in the dashboard talks to a root-only API on:
+        #   http://127.0.0.1:8766
+        # Auth is done via a random token stored in the dashboard directory.
+        token_file="${dash_dir}/dashboard-token.txt"
+        token=""
+        if command -v python3 >/dev/null 2>&1; then
+            token=$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)
+        else
+            token="$(date +%s%N)"
+        fi
+        printf '%s' "${token}" >"${token_file}" 2>/dev/null || true
+        chmod 600 "${token_file}" 2>/dev/null || true
+
+        # Start/refresh the dashboard API service (requires sudo). Best-effort.
+        if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
+            sudo /usr/local/bin/zypper-auto-helper --dash-api-on "${token}" >/dev/null 2>&1 || true
+        fi
 
         mkdir -p "${dash_dir}" 2>/dev/null || true
 
@@ -716,6 +739,66 @@ __znh_unit_file_exists_user() {
 log_command() {
     local cmd="$*"
     execute_guarded "$cmd" bash -lc "$cmd"
+}
+
+# --- Dashboard Settings Schema (single source of truth) ---
+# This schema drives:
+#  - the HTML dashboard Settings drawer predefined choices
+#  - the localhost Settings API validation
+#
+# IMPORTANT: Do NOT parse /etc/zypper-auto.conf comments for machine rules.
+# Comments are for humans; this JSON is the actual source of truth for the UI/API.
+__znh_write_dashboard_schema_json() {
+    # Writes a JSON schema file used by the Settings API (/api/schema) so the
+    # dashboard UI can render predefined choices (allowed/min/max/step/presets).
+    local out_path="$1"
+    [ -z "${out_path:-}" ] && return 1
+
+    mkdir -p "$(dirname "${out_path}")" 2>/dev/null || true
+
+    cat >"${out_path}" <<'EOF'
+{
+  "schema": {
+    "ENABLE_FLATPAK_UPDATES": {"type": "bool", "default": "true"},
+    "ENABLE_SNAP_UPDATES": {"type": "bool", "default": "true"},
+    "ENABLE_SOAR_UPDATES": {"type": "bool", "default": "true"},
+    "ENABLE_BREW_UPDATES": {"type": "bool", "default": "true"},
+    "ENABLE_PIPX_UPDATES": {"type": "bool", "default": "true"},
+    "HOOKS_ENABLED": {"type": "bool", "default": "true"},
+    "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
+    "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
+
+    "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
+    "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
+    "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
+
+    "DOWNLOADER_DOWNLOAD_MODE": {"type": "enum", "allowed": ["full","detect-only"], "default": "full"},
+    "AUTO_DUPLICATE_RPM_MODE": {"type": "enum", "allowed": ["whitelist","thirdparty","both"], "default": "whitelist"},
+    "CLEANUP_REPORT_FORMAT": {"type": "enum", "allowed": ["text","json","both"], "default": "both"},
+    "BOOT_ENTRY_CLEANUP_MODE": {"type": "enum", "allowed": ["backup","delete"], "default": "backup"},
+
+    "SNAP_RETENTION_OPTIMIZER_ENABLED": {"type": "bool", "default": "true"},
+    "SNAP_RETENTION_MAX_NUMBER_LIMIT": {"type": "int", "min": 0, "max": 200, "step": 1, "default": "15"},
+    "SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT": {"type": "int", "min": 0, "max": 100, "step": 1, "default": "5"},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY": {"type": "int", "min": 0, "max": 200, "step": 1, "default": "10"},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY": {"type": "int", "min": 0, "max": 120, "step": 1, "default": "7"},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY": {"type": "int", "min": 0, "max": 104, "step": 1, "default": "2"},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY": {"type": "int", "min": 0, "max": 60, "step": 1, "default": "2"},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY": {"type": "int", "min": 0, "max": 20, "step": 1, "default": "0"},
+
+    "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED": {"type": "bool", "default": "true"},
+    "SNAP_CLEANUP_CRITICAL_FREE_MB": {"type": "int", "min": 0, "max": 5000, "step": 50, "default": "300"},
+
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED": {"type": "bool", "default": "false"},
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX": {"type": "string", "max_len": 200, "default": "aborted|failed", "presets": ["aborted|failed", "aborted", "failed", "error", "aborted|failed|error"]},
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM": {"type": "bool", "default": "true"}
+  }
+}
+EOF
+
+    chmod 600 "${out_path}" 2>/dev/null || true
+    chown root:root "${out_path}" 2>/dev/null || true
+    return 0
 }
 
 # Load external configuration if present, otherwise create a default template.
@@ -1398,6 +1481,102 @@ EOF
             printf -v "$name" '%s' "$default"
         fi
     }
+
+    # Validate that a key is one of an allowed set of literal values.
+    validate_allowed_set() {
+        local name="$1" default="$2" allowed_csv="$3" value
+        value="${!name-}"
+        if [ -z "${value}" ]; then
+            printf -v "$name" '%s' "$default"
+            return
+        fi
+        if ! printf '%s' ",${allowed_csv}," | grep -q ",${value},"; then
+            local msg="Invalid $name='$value' in ${CONFIG_FILE}, allowed values are: ${allowed_csv}. Using default ${default}"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            printf -v "$name" '%s' "$default"
+        fi
+    }
+
+    # Optional non-negative int with upper bound.
+    validate_nonneg_int_bounded_optional() {
+        local name="$1" default="$2" min="$3" max="$4" value
+        value="${!name-}"
+        if [ -z "${value}" ]; then
+            printf -v "$name" '%s' "$default"
+            return
+        fi
+        if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+            local msg="Invalid $name='$value' in ${CONFIG_FILE}, using default $default"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            printf -v "$name" '%s' "$default"
+            return
+        fi
+        if [ "$value" -lt "$min" ] 2>/dev/null || [ "$value" -gt "$max" ] 2>/dev/null; then
+            local msg="Invalid $name='$value' in ${CONFIG_FILE}, allowed range is ${min}-${max}. Using default ${default}"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            printf -v "$name" '%s' "$default"
+        fi
+    }
+
+    validate_string_max_len_optional() {
+        local name="$1" default="$2" max_len="$3" value
+        value="${!name-}"
+        if [ -z "${value}" ]; then
+            printf -v "$name" '%s' "$default"
+            return
+        fi
+        # Strip CR to prevent odd rendering, keep other characters.
+        value="${value//$'\r'/}"
+        if [ "${#value}" -gt "$max_len" ] 2>/dev/null; then
+            local msg="Invalid $name (length ${#value}) in ${CONFIG_FILE}, max length is ${max_len}. Using default ${default}"
+            log_info "$msg"
+            CONFIG_WARNINGS+=("$msg")
+            printf -v "$name" '%s' "$default"
+        else
+            printf -v "$name" '%s' "$value"
+        fi
+    }
+
+    # --- Dashboard mirrored settings validation (must match /var/lib/zypper-auto/dashboard-schema.json) ---
+    validate_bool_flag ENABLE_FLATPAK_UPDATES true
+    validate_bool_flag ENABLE_SNAP_UPDATES true
+    validate_bool_flag ENABLE_SOAR_UPDATES true
+    validate_bool_flag ENABLE_BREW_UPDATES true
+    validate_bool_flag ENABLE_PIPX_UPDATES true
+    validate_bool_flag HOOKS_ENABLED true
+    validate_bool_flag DASHBOARD_ENABLED true
+    validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
+
+    # Timers: exact allowed list
+    validate_allowed_set DL_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
+    validate_allowed_set NT_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
+    validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 60 "1,5,10,15,30,60"
+
+    # Enums
+    validate_allowed_set DOWNLOADER_DOWNLOAD_MODE full "full,detect-only"
+    validate_allowed_set AUTO_DUPLICATE_RPM_MODE whitelist "whitelist,thirdparty,both"
+    validate_allowed_set CLEANUP_REPORT_FORMAT both "text,json,both"
+    validate_allowed_set BOOT_ENTRY_CLEANUP_MODE backup "backup,delete"
+
+    # Snapper knobs (bounded ints + bools)
+    validate_bool_flag SNAP_RETENTION_OPTIMIZER_ENABLED true
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_NUMBER_LIMIT 15 0 200
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT 5 0 100
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY 10 0 200
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY 7 0 120
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY 2 0 104
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY 2 0 60
+    validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY 0 0 20
+
+    validate_bool_flag SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED true
+    validate_nonneg_int_bounded_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300 0 5000
+
+    validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED false
+    validate_string_max_len_optional SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX "aborted|failed" 200
+    validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM true
 
     validate_int MAX_LOG_FILES 10
     validate_int MAX_LOG_SIZE_MB 50
@@ -2983,6 +3162,20 @@ generate_dashboard() {
         <div class="feat-badge"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
       </div>
 
+      <details id="settings-drawer" style="margin-top: 16px;">
+        <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Settings (edit /etc/zypper-auto.conf)</summary>
+        <div style="margin-top: 12px; color: var(--muted); font-size: 0.9rem;">
+          This panel writes settings via a localhost API (<code>127.0.0.1:8766</code>). If a value is invalid, it will auto-heal back to safe defaults.
+        </div>
+        <div id="settings-banner" style="margin-top: 10px; display:none; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--text); font-weight: 900;"></div>
+        <div id="settings-form" style="margin-top: 12px; display:grid; gap: 10px;"></div>
+        <div style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="pill" type="button" id="settings-save">Save</button>
+          <button class="pill" type="button" id="settings-reload">Reload</button>
+          <button class="pill" type="button" id="settings-reset" title="Backup and regenerate defaults" style="border-color: rgba(239,68,68,0.30);">Factory reset</button>
+        </div>
+      </details>
+
       <div style="margin-top: 14px;">
         <span class="stat-label" style="text-transform:none;">Run ID</span>
         <code style="font-size:0.85rem; background:var(--subtle); padding:2px 6px; border-radius:6px; border:1px solid var(--border);" id="run-id">${RUN_ID}</code>
@@ -3138,6 +3331,7 @@ generate_dashboard() {
         <button class="pill log-tab" type="button" data-view="live">View: Live</button>
         <button class="pill log-tab" type="button" data-view="install">View: Logs (tail)</button>
         <button class="pill log-tab" type="button" data-view="diag">View: Diagnostics</button>
+        <button class="pill log-tab" type="button" data-view="api">View: API</button>
         <button class="pill log-tab" type="button" data-view="journal">View: journalctl</button>
         <span style="font-size:0.82rem; color: var(--muted);">Source: <code id="log-source-hint">dashboard-live.log</code></span>
       </div>
@@ -3207,6 +3401,488 @@ generate_dashboard() {
             // ignore
         }
     }
+
+    // --- Settings drawer (localhost API) ---
+    var SETTINGS_API_BASE = 'http://127.0.0.1:8766';
+    var _settingsToken = null;
+    var _settingsSchema = null;
+    var _settingsConfig = null;
+    var _settingsDirty = false;
+    var _settingsDirtyToastShown = false;
+    var _settingsAutosaveTimer = null;
+    var _settingsAutosaveInFlight = false;
+    var SETTINGS_AUTOSAVE_ENABLED = true;
+    var SETTINGS_AUTOSAVE_DEBOUNCE_MS = 900;
+
+    function _settingsSetDirty(v) {
+        _settingsDirty = !!v;
+        var saveBtn = document.getElementById('settings-save');
+        if (!saveBtn) return;
+        if (_settingsDirty) {
+            saveBtn.textContent = 'Save (unsaved)';
+            saveBtn.style.borderColor = 'rgba(250,204,21,0.55)';
+        } else {
+            saveBtn.textContent = 'Save';
+            saveBtn.style.borderColor = 'rgba(255,255,255,0.10)';
+            _settingsDirtyToastShown = false;
+        }
+    }
+
+    function _settingsMarkDirty() {
+        _settingsSetDirty(true);
+
+        if (SETTINGS_AUTOSAVE_ENABLED) {
+            if (_settingsAutosaveTimer) {
+                try { clearTimeout(_settingsAutosaveTimer); } catch (e) {}
+            }
+            _settingsAutosaveTimer = setTimeout(function() {
+                settingsAutoSave();
+            }, SETTINGS_AUTOSAVE_DEBOUNCE_MS);
+            toast('Auto-save pending', 'Applying changes…', 'ok');
+        } else {
+            if (!_settingsDirtyToastShown) {
+                _settingsDirtyToastShown = true;
+                toast('Unsaved changes', 'Click Save to apply', 'ok');
+            }
+        }
+    }
+
+    var SETTINGS_FIELDS = [
+        { key: 'ENABLE_FLATPAK_UPDATES', type: 'bool', label: 'Flatpak updates' },
+        { key: 'ENABLE_SNAP_UPDATES', type: 'bool', label: 'Snap updates' },
+        { key: 'ENABLE_SOAR_UPDATES', type: 'bool', label: 'Soar updates' },
+        { key: 'ENABLE_BREW_UPDATES', type: 'bool', label: 'Homebrew updates' },
+        { key: 'ENABLE_PIPX_UPDATES', type: 'bool', label: 'pipx upgrade-all' },
+        { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
+        { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
+        { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
+
+        // Snapper safety (affects /etc/snapper/configs/* only when you run snapper tools)
+        { key: 'SNAP_RETENTION_OPTIMIZER_ENABLED', type: 'bool', label: 'Snapper retention optimizer (cap overly high limits)' },
+        { key: 'SNAP_RETENTION_MAX_NUMBER_LIMIT', type: 'int', label: 'Snapper cap: NUMBER_LIMIT (max upper bound)' },
+        { key: 'SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT', type: 'int', label: 'Snapper cap: NUMBER_LIMIT_IMPORTANT' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_HOURLY' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_DAILY' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_WEEKLY' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_MONTHLY' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_YEARLY (0 disables yearly)' },
+        { key: 'SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED', type: 'bool', label: 'Snapper cleanup concurrency guard' },
+        { key: 'SNAP_CLEANUP_CRITICAL_FREE_MB', type: 'int', label: 'Snapper cleanup critical free space (MB)' },
+        { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED', type: 'bool', label: 'Deep clean: broken snapshot hunter' },
+        { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX', type: 'string', label: 'Deep clean: broken snapshot regex' },
+        { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM', type: 'bool', label: 'Deep clean: confirm before delete' },
+
+        { key: 'DL_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Downloader interval (min)' },
+        { key: 'NT_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Notifier interval (min)' },
+        { key: 'VERIFY_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Verify interval (min)' },
+
+        { key: 'DOWNLOADER_DOWNLOAD_MODE', type: 'enum', label: 'Downloader mode' },
+        { key: 'AUTO_DUPLICATE_RPM_MODE', type: 'enum', label: 'Duplicate RPM cleanup mode' },
+        { key: 'CLEANUP_REPORT_FORMAT', type: 'enum', label: 'Cleanup report format' },
+        { key: 'BOOT_ENTRY_CLEANUP_MODE', type: 'enum', label: 'Boot entry cleanup mode' }
+    ];
+
+    function _settingsBanner(msg, isErr) {
+        var b = document.getElementById('settings-banner');
+        if (!b) return;
+        if (!msg) {
+            b.style.display = 'none';
+            b.textContent = '';
+            return;
+        }
+        b.style.display = 'block';
+        b.style.borderColor = isErr ? 'rgba(239,68,68,0.35)' : 'rgba(34,197,94,0.35)';
+        b.style.background = isErr ? 'rgba(239,68,68,0.08)' : 'rgba(34,197,94,0.08)';
+        b.textContent = msg;
+    }
+
+    function _fetchToken() {
+        if (_settingsToken) return Promise.resolve(_settingsToken);
+        // Token is served from the dashboard directory itself:
+        //   ~/.local/share/zypper-notify/dashboard-token.txt
+        return fetch('dashboard-token.txt', { cache: 'no-store' }).then(function(r) {
+            if (!r.ok) throw new Error('token file not found');
+            return r.text();
+        }).then(function(t) {
+            _settingsToken = (t || '').trim();
+            return _settingsToken;
+        });
+    }
+
+    function _api(path, opts) {
+        opts = opts || {};
+        return _fetchToken().then(function(tok) {
+            var headers = opts.headers || {};
+            headers['X-ZNH-Token'] = tok;
+            if (opts.body && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+            opts.headers = headers;
+            return fetch(SETTINGS_API_BASE + path, opts);
+        }).then(function(r) {
+            return r.json().then(function(j) {
+                if (!r.ok) {
+                    var e = new Error((j && j.error) ? j.error : ('HTTP ' + r.status));
+                    e.payload = j;
+                    throw e;
+                }
+                return j;
+            });
+        });
+    }
+
+    function _settingsClientLog(level, msg, ctx) {
+        // Best-effort: send UI events to the API log so debug level matches the rest of the project.
+        // If API is down, this will fail silently.
+        try {
+            return _api('/api/client-log', { method: 'POST', body: JSON.stringify({ level: level || 'info', msg: String(msg || ''), ctx: ctx || {} }) });
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function _renderSettingsForm(schema, cfg) {
+        var form = document.getElementById('settings-form');
+        if (!form) return;
+        form.innerHTML = '';
+        _settingsSetDirty(false);
+
+        SETTINGS_FIELDS.forEach(function(f) {
+            if (!schema || !schema[f.key]) return;
+            var meta = schema[f.key];
+            var row = document.createElement('div');
+            row.style.display = 'grid';
+            row.style.gridTemplateColumns = 'minmax(180px, 1fr) minmax(180px, 1fr)';
+            row.style.gap = '10px';
+            row.style.alignItems = 'center';
+            row.style.padding = '10px 12px';
+            row.style.border = '1px solid var(--border)';
+            row.style.borderRadius = '12px';
+            row.style.background = 'var(--subtle)';
+
+            var lab = document.createElement('div');
+            lab.innerHTML = '<div style="font-weight:950;">' + f.label + '</div>' +
+                            '<div style="color:var(--muted); font-size:0.82rem;">' + f.key + '</div>';
+
+            var ctrlWrap = document.createElement('div');
+
+            if (meta.type === 'bool') {
+                var c = document.createElement('label');
+                c.className = 'pill';
+                c.style.gap = '10px';
+                var inp = document.createElement('input');
+                inp.type = 'checkbox';
+                inp.dataset.key = f.key;
+                inp.checked = String(cfg[f.key]).toLowerCase() === 'true';
+                c.appendChild(inp);
+                c.appendChild(document.createTextNode(inp.checked ? 'ON' : 'OFF'));
+                inp.addEventListener('change', function() {
+                    c.lastChild.nodeValue = inp.checked ? 'ON' : 'OFF';
+                    _settingsMarkDirty();
+                });
+                ctrlWrap.appendChild(c);
+            } else if (meta.type === 'enum' || meta.type === 'interval') {
+                var sel = document.createElement('select');
+                sel.dataset.key = f.key;
+                sel.style.width = '100%';
+                sel.style.padding = '10px 12px';
+                sel.style.borderRadius = '12px';
+                sel.style.border = '1px solid var(--border)';
+                sel.style.background = 'rgba(255,255,255,0.04)';
+                sel.style.color = 'var(--text)';
+                (meta.allowed || []).forEach(function(opt) {
+                    var o = document.createElement('option');
+                    o.value = opt;
+                    o.textContent = opt;
+                    sel.appendChild(o);
+                });
+                sel.value = String(cfg[f.key]);
+                sel.addEventListener('change', function() { _settingsMarkDirty(); });
+                ctrlWrap.appendChild(sel);
+            } else if (meta.type === 'int') {
+                // Prefer predefined select options when a bounded range is provided
+                var mn = (meta.min != null) ? parseInt(meta.min, 10) : 0;
+                var mx = (meta.max != null) ? parseInt(meta.max, 10) : null;
+                var st = (meta.step != null) ? parseInt(meta.step, 10) : 1;
+
+                if (mx != null && isFinite(mx) && st > 0 && (mx - mn) / st <= 400) {
+                    var sel2 = document.createElement('select');
+                    sel2.dataset.key = f.key;
+                    sel2.style.width = '100%';
+                    sel2.style.padding = '10px 12px';
+                    sel2.style.borderRadius = '12px';
+                    sel2.style.border = '1px solid var(--border)';
+                    sel2.style.background = 'rgba(255,255,255,0.04)';
+                    sel2.style.color = 'var(--text)';
+                    for (var i = mn; i <= mx; i += st) {
+                        var o2 = document.createElement('option');
+                        o2.value = String(i);
+                        o2.textContent = String(i);
+                        sel2.appendChild(o2);
+                    }
+                    sel2.value = String(cfg[f.key]);
+                    sel2.addEventListener('change', function() { _settingsMarkDirty(); });
+                    ctrlWrap.appendChild(sel2);
+                } else {
+                    // fallback (should be rare): still allow manual number entry
+                    var num = document.createElement('input');
+                    num.type = 'number';
+                    num.min = String(mn);
+                    if (mx != null && isFinite(mx)) num.max = String(mx);
+                    num.step = String(st);
+                    num.dataset.key = f.key;
+                    num.value = String(cfg[f.key]);
+                    num.addEventListener('input', function() { _settingsMarkDirty(); });
+                    num.style.width = '100%';
+                    num.style.padding = '10px 12px';
+                    num.style.borderRadius = '12px';
+                    num.style.border = '1px solid var(--border)';
+                    num.style.background = 'rgba(255,255,255,0.04)';
+                    num.style.color = 'var(--text)';
+                    ctrlWrap.appendChild(num);
+                }
+            } else if (meta.type === 'string') {
+                var presets = meta.presets || null;
+                var cur = String(cfg[f.key] || '');
+
+                if (presets && Array.isArray(presets) && presets.length > 0) {
+                    var sel3 = document.createElement('select');
+                    sel3.dataset.key = f.key;
+                    sel3.style.width = '100%';
+                    sel3.style.padding = '10px 12px';
+                    sel3.style.borderRadius = '12px';
+                    sel3.style.border = '1px solid var(--border)';
+                    sel3.style.background = 'rgba(255,255,255,0.04)';
+                    sel3.style.color = 'var(--text)';
+
+                    (presets || []).forEach(function(p) {
+                        var o3 = document.createElement('option');
+                        o3.value = String(p);
+                        o3.textContent = String(p);
+                        sel3.appendChild(o3);
+                    });
+                    var oc = document.createElement('option');
+                    oc.value = '__custom__';
+                    oc.textContent = 'Custom...';
+                    sel3.appendChild(oc);
+
+                    var txt = document.createElement('input');
+                    txt.type = 'text';
+                    txt.dataset.customFor = f.key;
+                    txt.value = cur;
+                    txt.placeholder = (meta.default != null) ? String(meta.default) : '';
+                    txt.style.display = 'none';
+                    txt.style.marginTop = '8px';
+                    txt.style.width = '100%';
+                    txt.style.padding = '10px 12px';
+                    txt.style.borderRadius = '12px';
+                    txt.style.border = '1px solid var(--border)';
+                    txt.style.background = 'rgba(255,255,255,0.04)';
+                    txt.style.color = 'var(--text)';
+
+                    if (presets.indexOf(cur) >= 0) {
+                        sel3.value = cur;
+                        txt.style.display = 'none';
+                    } else {
+                        sel3.value = '__custom__';
+                        txt.style.display = 'block';
+                    }
+
+                    sel3.addEventListener('change', function() {
+                        if (sel3.value === '__custom__') {
+                            txt.style.display = 'block';
+                        } else {
+                            txt.style.display = 'none';
+                            txt.value = sel3.value;
+                        }
+                        _settingsMarkDirty();
+                    });
+                    txt.addEventListener('input', function() { _settingsMarkDirty(); });
+
+                    ctrlWrap.appendChild(sel3);
+                    ctrlWrap.appendChild(txt);
+                } else {
+                    var txt2 = document.createElement('input');
+                    txt2.type = 'text';
+                    txt2.dataset.key = f.key;
+                    txt2.value = cur;
+                    txt2.placeholder = (meta.default != null) ? String(meta.default) : '';
+                    txt2.addEventListener('input', function() { _settingsMarkDirty(); });
+                    txt2.style.width = '100%';
+                    txt2.style.padding = '10px 12px';
+                    txt2.style.borderRadius = '12px';
+                    txt2.style.border = '1px solid var(--border)';
+                    txt2.style.background = 'rgba(255,255,255,0.04)';
+                    txt2.style.color = 'var(--text)';
+                    ctrlWrap.appendChild(txt2);
+                }
+            }
+
+            row.appendChild(lab);
+            row.appendChild(ctrlWrap);
+            form.appendChild(row);
+        });
+    }
+
+    function _collectSettingsPatch(schema) {
+        var form = document.getElementById('settings-form');
+        if (!form) return {};
+        var patch = {};
+        var inputs = form.querySelectorAll('[data-key]');
+        inputs.forEach(function(el) {
+            var k = el.dataset.key;
+            if (!schema || !schema[k]) return;
+            if (el.tagName.toLowerCase() === 'input' && el.type === 'checkbox') {
+                patch[k] = el.checked ? 'true' : 'false';
+            } else if (el.tagName.toLowerCase() === 'select') {
+                if (el.value === '__custom__') {
+                    var c = form.querySelector('[data-custom-for="' + k + '"]');
+                    patch[k] = c ? String(c.value || '') : '';
+                } else {
+                    patch[k] = el.value;
+                }
+            } else if (el.tagName.toLowerCase() === 'input' && el.type === 'number') {
+                patch[k] = el.value;
+            } else if (el.tagName.toLowerCase() === 'input' && el.type === 'text') {
+                // ignore custom companion inputs; read via select '__custom__'
+                if (el.dataset.customFor) return;
+                patch[k] = el.value;
+            }
+        });
+        return patch;
+    }
+
+    function settingsLoad(showToast) {
+        _settingsBanner('', false);
+        return _api('/api/schema', { method: 'GET' }).then(function(s) {
+            _settingsSchema = s.schema;
+            return _api('/api/config', { method: 'GET' });
+        }).then(function(c) {
+            _settingsConfig = c.config;
+            _renderSettingsForm(_settingsSchema, _settingsConfig);
+
+            var inv = (c.invalid_keys || []);
+            var warn = (c.warnings || []);
+            if (inv.length > 0) {
+                _settingsBanner('Config had invalid values: ' + inv.join(', ') + ' (defaults applied). You can Factory reset or Save to heal.', true);
+            } else if (warn.length > 0) {
+                _settingsBanner('Warnings: ' + warn.slice(0, 3).join(' | '), true);
+            } else {
+                _settingsBanner('Config OK', false);
+            }
+
+            if (showToast) {
+                toast('Settings loaded', 'Read from /etc/zypper-auto.conf', 'ok');
+            }
+            _settingsClientLog('info', 'settingsLoad ok', { invalid_keys: inv, warnings: warn });
+            return c;
+        }).catch(function(e) {
+            _settingsBanner('Settings API not reachable. Try re-opening dashboard so it can start the API (sudo may prompt).', true);
+            if (showToast) {
+                toast('Settings load failed', (e && e.message) ? e.message : 'API not reachable', 'err');
+            }
+            try { console && console.warn && console.warn('settingsLoad failed', e); } catch (ee) {}
+            // Can't log via API if the API is unreachable.
+            return null;
+        });
+    }
+
+    function settingsSave() {
+        if (!_settingsSchema) return settingsLoad(true);
+        var patch = _collectSettingsPatch(_settingsSchema);
+        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
+            toast('Settings saved', 'Applied to /etc/zypper-auto.conf', 'ok');
+            _settingsClientLog('info', 'settingsSave ok', { keys: Object.keys(patch || {}) });
+            _settingsSetDirty(false);
+            return settingsLoad(false);
+        }).catch(function(e) {
+            try { console && console.warn && console.warn('settingsSave failed', e); } catch (ee) {}
+            toast('Save failed', (e && e.message) ? e.message : 'unknown error', 'err');
+            _settingsClientLog('warn', 'settingsSave failed', { error: (e && e.message) ? e.message : 'unknown' });
+            // Offer a safe recovery path
+            if (confirm('Save failed. Do you want to Factory Reset settings to safe defaults?')) {
+                return settingsReset();
+            }
+            return settingsLoad(false);
+        });
+    }
+
+    function settingsAutoSave() {
+        if (!SETTINGS_AUTOSAVE_ENABLED) return;
+        if (_settingsAutosaveInFlight) return;
+        if (!_settingsDirty) return;
+        if (!_settingsSchema) {
+            // Try to load schema/config first, then autosave.
+            return settingsLoad(false).then(function() {
+                if (_settingsDirty) return settingsAutoSave();
+                return null;
+            });
+        }
+
+        _settingsAutosaveInFlight = true;
+        var patch = _collectSettingsPatch(_settingsSchema);
+        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
+            toast('Settings auto-saved', 'Applied to /etc/zypper-auto.conf', 'ok');
+            _settingsClientLog('info', 'settingsAutoSave ok', { keys: Object.keys(patch || {}) });
+            _settingsSetDirty(false);
+            return settingsLoad(false);
+        }).catch(function(e) {
+            try { console && console.warn && console.warn('settingsAutoSave failed', e); } catch (ee) {}
+            toast('Auto-save failed', (e && e.message) ? e.message : 'unknown error', 'err');
+            _settingsClientLog('warn', 'settingsAutoSave failed', { error: (e && e.message) ? e.message : 'unknown' });
+            _settingsBanner('Auto-save failed. You can click Factory reset to restore safe defaults.', true);
+            // Offer a reset prompt without forcing it.
+            if (confirm('Auto-save failed. Factory Reset settings to safe defaults?')) {
+                return settingsReset();
+            }
+            return null;
+        }).finally(function() {
+            _settingsAutosaveInFlight = false;
+        });
+    }
+
+    function settingsReset() {
+        return _api('/api/reset-config', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
+            toast('Factory reset complete', 'Defaults restored (backup created)', 'ok');
+            _settingsSetDirty(false);
+            return settingsLoad(false);
+        }).catch(function(e) {
+            toast('Factory reset failed', (e && e.message) ? e.message : 'unknown error', 'err');
+            return settingsLoad(false);
+        });
+    }
+
+    function _wireSettingsUI() {
+        var drawer = document.getElementById('settings-drawer');
+        if (!drawer) return;
+
+        var saveBtn = document.getElementById('settings-save');
+        var reloadBtn = document.getElementById('settings-reload');
+        var resetBtn = document.getElementById('settings-reset');
+
+        if (saveBtn) saveBtn.addEventListener('click', function() { settingsSave(); });
+        if (reloadBtn) reloadBtn.addEventListener('click', function() { settingsLoad(true); });
+
+        // Auto-load on page open so users immediately see success/failure.
+        // (Drawer toggle handler below still refreshes when opened.)
+        try {
+            settingsLoad(true);
+        } catch (e) {}
+        if (resetBtn) resetBtn.addEventListener('click', function() {
+            if (confirm('Factory reset /etc/zypper-auto.conf to defaults? (a backup will be created)')) {
+                settingsReset();
+            }
+        });
+
+        drawer.addEventListener('toggle', function() {
+            if (drawer.open) {
+                settingsLoad(true);
+            }
+        });
+    }
+
+    // Wire settings drawer once DOM is ready (we are at end of body).
+    _wireSettingsUI();
 
     // Ripple click effect on buttons
     function addRipple(el, x, y) {
@@ -3282,6 +3958,8 @@ generate_dashboard() {
         }
     }
     window.copyCmd = copyCmd;
+
+    // Settings drawer wired above.
 
     // 1) Live "time ago" counter
     function _timeAgoText(diffSeconds) {
@@ -3725,13 +4403,14 @@ generate_dashboard() {
             }
 
             var hint = document.getElementById('log-source-hint');
-            if (hint) {
-                var txt = 'dashboard-live.log';
-                if (logView === 'install') txt = 'dashboard-install-tail.log';
-                else if (logView === 'diag') txt = 'dashboard-diag-tail.log';
-                else if (logView === 'journal') txt = 'dashboard-journal-tail.log';
-                hint.textContent = txt;
-            }
+                if (hint) {
+                    var txt = 'dashboard-live.log';
+                    if (logView === 'install') txt = 'dashboard-install-tail.log';
+                    else if (logView === 'diag') txt = 'dashboard-diag-tail.log';
+                    else if (logView === 'api') txt = 'dashboard-api.log';
+                    else if (logView === 'journal') txt = 'dashboard-journal-tail.log';
+                    hint.textContent = txt;
+                }
         } catch (e) {
             // ignore
         }
@@ -3777,11 +4456,12 @@ generate_dashboard() {
         var rangeBytes = 60000;
         if (logView === 'install') base = 'dashboard-install-tail.log';
         else if (logView === 'diag') base = 'dashboard-diag-tail.log';
+        else if (logView === 'api') base = 'dashboard-api.log';
         else if (logView === 'journal') base = 'dashboard-journal-tail.log';
 
         var url = base + '?ts=' + Date.now();
         var headers = {};
-        if (logView === 'live' || logView === 'diag' || logView === 'journal') {
+        if (logView === 'live' || logView === 'diag' || logView === 'api' || logView === 'journal') {
             headers['Range'] = 'bytes=-' + String(rangeBytes);
         }
 
@@ -6389,12 +7069,16 @@ run_reset_config_only() {
     echo "while keeping a timestamped backup copy alongside it." | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
-    read -p "Are you sure you want to reset ${CONFIG_FILE} to defaults? [y/N]: " -r CONFIRM
-    echo
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-        log_info "Config reset aborted by user. No changes made."
-        update_status "ABORTED: Config reset cancelled by user"
-        return 0
+    if [ "${RESET_ASSUME_YES:-0}" -ne 1 ]; then
+        read -p "Are you sure you want to reset ${CONFIG_FILE} to defaults? [y/N]: " -r CONFIRM
+        echo
+        if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+            log_info "Config reset aborted by user. No changes made."
+            update_status "ABORTED: Config reset cancelled by user"
+            return 0
+        fi
+    else
+        log_info "Non-interactive mode: proceeding without confirmation (--yes)."
     fi
 
     # Backup existing config if present
@@ -6676,6 +7360,95 @@ run_dash_open_only() {
     log_info "Try: sudo zypper-auto-helper --dashboard"
     update_status "FAILED: Dashboard file not found"
     return 1
+}
+
+# --- Helper: Dashboard settings API (localhost) ---
+run_dash_api_on_only() {
+    local token="$1"
+    local unit="zypper-auto-dashboard-api.service"
+    local token_dir="/var/lib/zypper-auto"
+    local token_file="${token_dir}/dashboard-api.token"
+    local env_file="${token_dir}/dashboard-api.env"
+    local schema_file="${token_dir}/dashboard-schema.json"
+
+    if [ "${EUID}" -ne 0 ] 2>/dev/null; then
+        log_error "--dash-api-on must be run as root (use sudo)"
+        return 1
+    fi
+
+    mkdir -p "${token_dir}" 2>/dev/null || true
+    chown root:root "${token_dir}" 2>/dev/null || true
+    chmod 700 "${token_dir}" 2>/dev/null || true
+
+    # Ensure schema exists (needed by the API service for predefined allowed values)
+    __znh_write_dashboard_schema_json "${schema_file}" || true
+
+    if [ -z "${token:-}" ]; then
+        if command -v python3 >/dev/null 2>&1; then
+            token=$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)
+        else
+            token="$(date +%s%N)"
+        fi
+    fi
+
+    printf '%s' "${token}" >"${token_file}" 2>/dev/null || true
+    chmod 600 "${token_file}" 2>/dev/null || true
+
+    # Configure per-user mirror path so the dashboard can display API logs.
+    # This is stored in a root-only EnvironmentFile used by the systemd unit.
+    local user_home mirror_file
+    user_home=""
+    if [ -n "${SUDO_USER:-}" ]; then
+        user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
+    fi
+    mirror_file=""
+    if [ -n "${user_home:-}" ]; then
+        mirror_file="${user_home}/.local/share/zypper-notify/dashboard-api.log"
+        mkdir -p "${user_home}/.local/share/zypper-notify" 2>/dev/null || true
+        touch "${mirror_file}" 2>/dev/null || true
+        if [ -n "${SUDO_USER:-}" ]; then
+            chown "${SUDO_USER}:${SUDO_USER}" "${mirror_file}" 2>/dev/null || true
+        fi
+        chmod 644 "${mirror_file}" 2>/dev/null || true
+    fi
+
+    {
+        echo "DASH_API_MIRROR_FILE=${mirror_file}"
+        echo "DASH_API_LOG_LEVEL=${ZYPPER_AUTO_DASH_API_LOG_LEVEL:-info}"
+    } >"${env_file}" 2>/dev/null || true
+    chmod 600 "${env_file}" 2>/dev/null || true
+
+    execute_guarded "systemd daemon-reload (dashboard api)" systemctl daemon-reload || true
+    execute_guarded "Enable + start dashboard API" systemctl enable --now "${unit}" || true
+    execute_guarded "Restart dashboard API (reload token)" systemctl restart "${unit}" || true
+
+    log_success "Dashboard API is running (best-effort) on http://127.0.0.1:8766"
+    update_status "SUCCESS: Dashboard API started"
+    return 0
+}
+
+run_dash_api_off_only() {
+    local unit="zypper-auto-dashboard-api.service"
+    if [ "${EUID}" -ne 0 ] 2>/dev/null; then
+        log_error "--dash-api-off must be run as root (use sudo)"
+        return 1
+    fi
+
+    execute_guarded "Disable dashboard API" systemctl disable --now "${unit}" || true
+    execute_guarded "systemd daemon-reload (dashboard api off)" systemctl daemon-reload || true
+    log_success "Dashboard API stopped (best-effort)"
+    update_status "SUCCESS: Dashboard API stopped"
+    return 0
+}
+
+run_dash_api_status_only() {
+    local unit="zypper-auto-dashboard-api.service"
+    systemctl status "${unit}" --no-pager 2>/dev/null || systemctl is-active "${unit}" 2>/dev/null || true
+    return 0
 }
 
 # --- Helper: Background diagnostic log follower (CLI) ---
@@ -9460,9 +10233,10 @@ run_debug_menu_only() {
         echo "  9) Run log health report (recent history)"
         echo " 10) Analyze last GUI-triggered run (by Trace ID)"
         echo " 11) Show last diagnostics snapshot path + tail"
-        echo " 12) Exit menu (12 / E / Q)"
+        echo " 12) Tail dashboard Settings API log"
+        echo " 13) Exit menu (13 / E / Q)"
         echo ""
-        read -p "Select an option [1-12, E, Q]: " -r choice
+        read -p "Select an option [1-13, E, Q]: " -r choice
         log_info "[debug-menu] User selected menu option: ${choice}"
 
         case "${choice}" in
@@ -9816,7 +10590,26 @@ run_debug_menu_only() {
                     echo "-----------------------------------"
                 fi
                 ;;
-            12|q|Q|e|E)
+            12)
+                log_info "[debug-menu] Tailing dashboard API log"
+                local api_log
+                api_log="${LOG_DIR}/service-logs/dashboard-api.log"
+                if [ ! -f "${api_log}" ]; then
+                    echo "Dashboard API log not found yet at ${api_log}."
+                    echo "Tip: open dashboard once to start API: zypper-auto-helper --dash-open"
+                    continue
+                fi
+                echo "- [API] ${api_log}"
+                echo "Press E or Enter to stop viewing logs and return to the menu."
+                tail -n 60 -F "${api_log}" &
+                local tail_pid=$!
+                local key
+                read -r -n1 key
+                kill "${tail_pid}" 2>/dev/null || true
+                wait "${tail_pid}" 2>/dev/null || true
+                continue
+                ;;
+            13|q|Q|e|E)
                 log_info "[debug-menu] Exiting debug/diagnostics menu"
                 break
                 ;;
@@ -10500,6 +11293,8 @@ run_uninstall_helper_only() {
     execute_guarded "Stop verification service" systemctl stop zypper-auto-verify.service || true
     # Diagnostics follower service (may or may not be enabled)
     execute_guarded "Disable diagnostics follower service" systemctl disable --now zypper-auto-diag-logs.service || true
+    # Dashboard settings API service (optional)
+    execute_guarded "Disable dashboard API service" systemctl disable --now zypper-auto-dashboard-api.service || true
 
     # 2. Stop and disable user timer/service
     if [ -n "${SUDO_USER:-}" ]; then
@@ -10523,9 +11318,11 @@ run_uninstall_helper_only() {
         /etc/systemd/system/zypper-auto-verify.service \
         /etc/systemd/system/zypper-auto-verify.timer \
         /etc/systemd/system/zypper-auto-diag-logs.service \
+        /etc/systemd/system/zypper-auto-dashboard-api.service \
         /usr/local/bin/zypper-download-with-progress \
         /usr/local/bin/zypper-auto-helper \
-        /usr/local/bin/zypper-auto-diag-follow || true
+        /usr/local/bin/zypper-auto-diag-follow \
+        /usr/local/bin/zypper-auto-dashboard-api || true
 
     # 4. Remove user-level scripts and systemd units
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -10625,6 +11422,12 @@ run_uninstall_helper_only() {
         # If we created the purge-kernels marker in /boot, remove it as well.
         if [ -f /boot/do_purge_kernels ]; then
             execute_guarded "Remove /boot/do_purge_kernels marker" rm -f -- /boot/do_purge_kernels || true
+        fi
+
+        # Remove dashboard API token (best-effort)
+        if [ -d /var/lib/zypper-auto ]; then
+            execute_guarded "Remove dashboard API token" rm -f -- /var/lib/zypper-auto/dashboard-api.token 2>/dev/null || true
+            rmdir /var/lib/zypper-auto 2>/dev/null || true
         fi
     fi
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -11232,6 +12035,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --dash-open             Generate/refresh and open the dashboard in your browser"
     echo "  --dash-stop             Stop the local live dashboard server started by --dash-open"
     echo "  --dash-install          Enterprise quickstart: enable default hooks + generate/open dashboard"
+    echo "  --dash-api-on           Start the localhost dashboard Settings API (root; used by Settings drawer)"
+    echo "  --dash-api-off          Stop the localhost dashboard Settings API (root)"
+    echo "  --dash-api-status       Show status of the dashboard Settings API (root)"
     echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help                  Show this help message"
@@ -11292,6 +12098,22 @@ elif [[ "${1:-}" == "--setup-SF" ]]; then
     set -e
     exit $rc
 elif [[ "${1:-}" == "--reset-config" ]]; then
+    shift || true
+    # Optional flags:
+    #   --yes / -y / --non-interactive : skip confirmation prompt
+    RESET_ASSUME_YES=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y|--non-interactive)
+                RESET_ASSUME_YES=1
+                ;;
+            *)
+                log_error "Unknown option for --reset-config: $1"
+                exit 1
+                ;;
+        esac
+        shift
+    done
     log_info "Config reset mode requested"
     run_reset_config_only
     exit $?
@@ -11513,6 +12335,20 @@ elif [[ "${1:-}" == "--dash-open" ]]; then
 elif [[ "${1:-}" == "--dash-install" ]]; then
     log_info "Enterprise quickstart requested"
     run_dash_install_only
+    exit $?
+elif [[ "${1:-}" == "--dash-api-on" ]]; then
+    shift || true
+    token="${1:-}"
+    log_info "Dashboard API enable requested"
+    run_dash_api_on_only "${token}"
+    exit $?
+elif [[ "${1:-}" == "--dash-api-off" ]]; then
+    log_info "Dashboard API disable requested"
+    run_dash_api_off_only
+    exit $?
+elif [[ "${1:-}" == "--dash-api-status" ]]; then
+    log_info "Dashboard API status requested"
+    run_dash_api_status_only
     exit $?
 elif [[ "${1:-}" == "--send-webhook" || "${1:-}" == "--webhook" ]]; then
     log_info "Webhook send requested"
@@ -13345,7 +14181,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-    ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
+    ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -16641,6 +17477,431 @@ if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PA
     log_info "You can now run: zypper-auto-helper --help"
 else
     log_error "Warning: Could not install command (non-fatal)"
+fi
+
+# --- 11e. Install dashboard settings API (localhost) ---
+# This provides a small API for the HTML dashboard to read/write
+# /etc/zypper-auto.conf settings via localhost.
+DASH_API_BIN="/usr/local/bin/zypper-auto-dashboard-api"
+DASH_API_UNIT="/etc/systemd/system/zypper-auto-dashboard-api.service"
+DASH_API_TOKEN_DIR="/var/lib/zypper-auto"
+DASH_API_TOKEN_FILE="${DASH_API_TOKEN_DIR}/dashboard-api.token"
+
+log_info ">>> Installing dashboard settings API (localhost)..."
+update_status "Installing dashboard settings API..."
+
+# Install API server script
+if write_atomic "${DASH_API_BIN}" <<'PYEOF'
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import re
+import subprocess
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
+
+def _load_schema(schema_file: str) -> dict:
+    with open(schema_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    schema = data.get("schema") or {}
+    if not isinstance(schema, dict):
+        raise ValueError("schema must be an object")
+    return schema
+
+
+def _build_defaults(schema: dict) -> dict:
+    out = {}
+    for k, meta in (schema or {}).items():
+        if not isinstance(meta, dict):
+            continue
+        d = meta.get("default")
+        if d is None:
+            continue
+        out[k] = str(d)
+    return out
+
+
+DEFAULTS = {}
+SCHEMA = {}
+
+MANAGED_BEGIN = "# BEGIN ZNH DASHBOARD MANAGED SETTINGS"
+MANAGED_END = "# END ZNH DASHBOARD MANAGED SETTINGS"
+
+
+def _load_token(token_file: str) -> str:
+    with open(token_file, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _parse_conf_text(text: str) -> dict:
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # basic KEY=VALUE (value may be quoted)
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+        if not m:
+            continue
+        k = m.group(1)
+        v = m.group(2).strip()
+        if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def _validate(cfg: dict) -> tuple[dict, list[str], list[str]]:
+    warnings = []
+    invalid = []
+    eff = dict(DEFAULTS)
+    eff.update({k: str(v) for k, v in cfg.items() if k in SCHEMA})
+
+    def set_default(k: str, why: str):
+        invalid.append(k)
+        warnings.append(f"Invalid {k}='{eff.get(k)}': {why}. Using default {SCHEMA[k].get('default')}.")
+        eff[k] = SCHEMA[k].get("default")
+
+    for k, meta in SCHEMA.items():
+        v = eff.get(k, meta.get("default"))
+        t = meta["type"]
+        if t == "bool":
+            vl = str(v).lower()
+            if vl not in ("true", "false"):
+                set_default(k, "must be true/false")
+            else:
+                eff[k] = vl
+        elif t == "interval":
+            if str(v) not in meta.get("allowed", []):
+                set_default(k, f"allowed: {','.join(meta.get('allowed', []))}")
+        elif t == "enum":
+            if str(v) not in meta.get("allowed", []):
+                set_default(k, f"allowed: {','.join(meta.get('allowed', []))}")
+        elif t == "int":
+            s = str(v).strip()
+            if not re.fullmatch(r"[0-9]+", s or ""):
+                set_default(k, "must be a non-negative integer")
+            else:
+                n = int(s)
+                mn = int(meta.get("min", 0))
+                mx = meta.get("max", None)
+                if n < mn:
+                    set_default(k, f"minimum is {mn}")
+                elif mx is not None and n > int(mx):
+                    set_default(k, f"maximum is {int(mx)}")
+                else:
+                    eff[k] = str(n)
+        elif t == "string":
+            s = str(v)
+            s = s.replace("\r", "").strip()
+            max_len = int(meta.get("max_len", 200))
+            if len(s) == 0:
+                eff[k] = meta.get("default", "")
+            elif len(s) > max_len:
+                set_default(k, f"max length is {max_len}")
+            else:
+                eff[k] = s
+        else:
+            # unknown type -> fall back
+            set_default(k, "unknown type")
+
+    return eff, warnings, invalid
+
+
+def _read_conf(conf_path: str) -> tuple[dict, list[str], list[str]]:
+    try:
+        with open(conf_path, "r", encoding="utf-8") as f:
+            txt = f.read()
+    except FileNotFoundError:
+        txt = ""
+    raw = _parse_conf_text(txt)
+    eff, warnings, invalid = _validate(raw)
+    return eff, warnings, invalid
+
+
+def _write_managed_block(conf_path: str, values: dict) -> None:
+    try:
+        with open(conf_path, "r", encoding="utf-8") as f:
+            txt = f.read()
+    except FileNotFoundError:
+        txt = ""
+
+    # Remove existing managed block
+    if MANAGED_BEGIN in txt and MANAGED_END in txt:
+        pre = txt.split(MANAGED_BEGIN, 1)[0]
+        post = txt.split(MANAGED_END, 1)[1]
+        txt = pre.rstrip() + "\n\n" + post.lstrip()
+
+    lines = [MANAGED_BEGIN]
+    for k in sorted(SCHEMA.keys()):
+        v = values.get(k, SCHEMA[k].get("default"))
+        # Quote everything for safety
+        lines.append(f'{k}="{str(v)}"')
+    lines.append(MANAGED_END)
+
+    new_txt = txt.rstrip() + "\n\n" + "\n".join(lines) + "\n"
+
+    tmp = conf_path + ".tmp"
+    os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(new_txt)
+    os.replace(tmp, conf_path)
+    os.chmod(conf_path, 0o600)
+
+
+def _json_response(handler: BaseHTTPRequestHandler, code: int, obj: dict, origin: str | None = None):
+    data = json.dumps(obj, indent=2).encode("utf-8")
+    handler.send_response(code)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
+    if origin:
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        handler.send_header("Vary", "Origin")
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-ZNH-Token")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _read_json(handler: BaseHTTPRequestHandler) -> dict:
+    length = int(handler.headers.get("Content-Length", "0"))
+    raw = handler.rfile.read(length) if length > 0 else b"{}"
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _allowed_origin(origin: str | None) -> str | None:
+    if not origin:
+        return None
+    # Allow the local dashboard server
+    if origin in ("http://127.0.0.1:8765", "http://localhost:8765"):
+        return origin
+    return None
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "ZNH-Dashboard-API/1.0"
+
+    def do_OPTIONS(self):
+        origin = _allowed_origin(self.headers.get("Origin"))
+        self.send_response(204)
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-ZNH-Token")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
+
+    def _auth_ok(self) -> bool:
+        token = getattr(self.server, "token", "")
+        provided = self.headers.get("X-ZNH-Token", "")
+        return bool(token) and provided == token
+
+    def log_message(self, fmt, *args):
+        # Quiet default HTTP logs (systemd journal has enough noise already).
+        return
+
+    def do_GET(self):
+        origin = _allowed_origin(self.headers.get("Origin"))
+        path = urlparse(self.path).path
+        try:
+            getattr(self.server, "_znh_log", lambda *_: None)("debug", f"GET {path} from {self.client_address[0]}")
+        except Exception:
+            pass
+        if path == "/api/schema":
+            return _json_response(self, 200, {"schema": SCHEMA}, origin)
+        if path == "/api/config":
+            eff, warnings, invalid = _read_conf(self.server.conf_path)
+            return _json_response(self, 200, {"config": eff, "warnings": warnings, "invalid_keys": invalid}, origin)
+        return _json_response(self, 404, {"error": "not found"}, origin)
+
+    def do_POST(self):
+        origin = _allowed_origin(self.headers.get("Origin"))
+        path = urlparse(self.path).path
+        try:
+            getattr(self.server, "_znh_log", lambda *_: None)("info", f"POST {path} from {self.client_address[0]}")
+        except Exception:
+            pass
+        if not self._auth_ok():
+            try:
+                getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized POST {path} from {self.client_address[0]}")
+            except Exception:
+                pass
+            return _json_response(self, 401, {"error": "unauthorized"}, origin)
+
+        if path == "/api/client-log":
+            body = _read_json(self)
+            level = str(body.get("level", "info")).lower()
+            msg = str(body.get("msg", ""))
+            ctx = body.get("ctx", {})
+            if level not in ("error","warn","info","debug"):
+                level = "info"
+            try:
+                getattr(self.server, "_znh_log", lambda *_: None)(level, f"[UI] {msg} ctx={json.dumps(ctx, ensure_ascii=False)[:400]}")
+            except Exception:
+                pass
+            return _json_response(self, 200, {"ok": True}, origin)
+
+        if path == "/api/reset-config":
+            # Non-interactive reset via helper so it stays consistent with installer template.
+            cmd = ["/usr/local/bin/zypper-auto-helper", "--reset-config", "--yes"]
+            try:
+                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            eff, warnings, invalid = _read_conf(self.server.conf_path)
+            # Ensure managed block matches the validated effective config.
+            _write_managed_block(self.server.conf_path, eff)
+            eff2, warnings2, invalid2 = _read_conf(self.server.conf_path)
+            return _json_response(self, 200, {"config": eff2, "warnings": warnings2, "invalid_keys": invalid2}, origin)
+
+        if path == "/api/config":
+            body = _read_json(self)
+            patch = body.get("patch", body)
+            if not isinstance(patch, dict):
+                patch = {}
+            eff, warnings, invalid = _read_conf(self.server.conf_path)
+
+            # Apply patch to effective config (only known keys)
+            for k, v in patch.items():
+                if k not in SCHEMA:
+                    continue
+                eff[k] = str(v)
+
+            eff2, warnings2, invalid2 = _validate(eff)
+            # Write corrected values back so invalid inputs auto-heal to defaults.
+            _write_managed_block(self.server.conf_path, eff2)
+            eff3, warnings3, invalid3 = _read_conf(self.server.conf_path)
+            return _json_response(self, 200, {"config": eff3, "warnings": warnings2 + warnings3, "invalid_keys": invalid2 + invalid3}, origin)
+
+        return _json_response(self, 404, {"error": "not found"}, origin)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--listen", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8766)
+    ap.add_argument("--token-file", required=True)
+    ap.add_argument("--config", default="/etc/zypper-auto.conf")
+    ap.add_argument("--schema-file", default="/var/lib/zypper-auto/dashboard-schema.json")
+    ap.add_argument("--log-file", default="/var/log/zypper-auto/service-logs/dashboard-api.log")
+    ap.add_argument("--mirror-file", default="")
+    ap.add_argument("--log-level", default="info", choices=["error","warn","info","debug"])
+    args = ap.parse_args()
+
+    global SCHEMA, DEFAULTS
+    SCHEMA = _load_schema(args.schema_file)
+    DEFAULTS = _build_defaults(SCHEMA)
+
+# Structured logging similar to the bash helper
+run_id = f"API-{os.getpid()}"
+
+def _ts():
+    # millisecond timestamp
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+def _write_line(path: str, line: str):
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        return
+
+LEVEL_ORDER = {"error": 0, "warn": 1, "info": 2, "debug": 3}
+LOG_LEVEL = args.log_level
+
+def log(level: str, msg: str):
+    if LEVEL_ORDER.get(level, 2) > LEVEL_ORDER.get(LOG_LEVEL, 2):
+        return
+    line = f"[{level.upper()}] {_ts()} [RUN={run_id}] {msg}"
+    _write_line(args.log_file, line)
+    # Mirror into user dashboard dir so the HTML can display it.
+    if args.mirror_file:
+        _write_line(args.mirror_file, line)
+        try:
+            os.chmod(args.mirror_file, 0o644)
+        except Exception:
+            pass
+
+# Log startup
+log("info", f"Starting dashboard API on {args.listen}:{args.port} (config={args.config})")
+
+token = _load_token(args.token_file)
+httpd = HTTPServer((args.listen, args.port), Handler)
+httpd.token = token
+httpd.conf_path = args.config
+httpd._znh_log = log
+httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+then
+    execute_guarded "Set API server permissions (755)" chmod 755 "${DASH_API_BIN}" || true
+    log_success "Dashboard API server installed: ${DASH_API_BIN}"
+else
+    log_warn "Failed to install dashboard API server (non-fatal)"
+fi
+
+# Install systemd unit
+if write_atomic "${DASH_API_UNIT}" <<EOF
+[Unit]
+Description=Zypper Auto Dashboard Settings API (localhost)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/var/lib/zypper-auto/dashboard-api.env
+ExecStart=${DASH_API_BIN} --listen 127.0.0.1 --port 8766 --token-file ${DASH_API_TOKEN_FILE} --config ${CONFIG_FILE} --schema-file /var/lib/zypper-auto/dashboard-schema.json --log-file /var/log/zypper-auto/service-logs/dashboard-api.log --mirror-file ${DASH_API_MIRROR_FILE:-} --log-level ${DASH_API_LOG_LEVEL:-info}
+Restart=on-failure
+RestartSec=2
+
+# Basic hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto/service-logs
+
+[Install]
+WantedBy=multi-user.target
+EOF
+then
+    chmod 644 "${DASH_API_UNIT}" 2>/dev/null || true
+    execute_guarded "systemd daemon-reload (dashboard api unit)" systemctl daemon-reload || true
+    log_success "Dashboard API systemd unit installed: ${DASH_API_UNIT}"
+else
+    log_warn "Failed to write dashboard API unit file (non-fatal): ${DASH_API_UNIT}"
+fi
+
+# Ensure token directory exists with strict perms
+mkdir -p "${DASH_API_TOKEN_DIR}" 2>/dev/null || true
+chown root:root "${DASH_API_TOKEN_DIR}" 2>/dev/null || true
+chmod 700 "${DASH_API_TOKEN_DIR}" 2>/dev/null || true
+
+# Write dashboard schema used by the Settings API/UI
+__znh_write_dashboard_schema_json "${DASH_API_TOKEN_DIR}/dashboard-schema.json" || true
+
+# Create an initial token if missing (will be replaced by --dash-open as needed)
+if [ ! -f "${DASH_API_TOKEN_FILE}" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+    else
+        date +%s%N
+    fi | tr -d '\n' >"${DASH_API_TOKEN_FILE}" 2>/dev/null || true
+    chmod 600 "${DASH_API_TOKEN_FILE}" 2>/dev/null || true
 fi
 
 # --- 12. Final self-check ---
