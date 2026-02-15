@@ -17797,49 +17797,49 @@ def main():
     SCHEMA = _load_schema(args.schema_file)
     DEFAULTS = _build_defaults(SCHEMA)
 
-# Structured logging similar to the bash helper
-run_id = f"API-{os.getpid()}"
+    # Structured logging similar to the bash helper
+    run_id = f"API-{os.getpid()}"
 
-def _ts():
-    # millisecond timestamp
-    import datetime
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    def _ts():
+        # millisecond timestamp
+        import datetime
+        return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-def _write_line(path: str, line: str):
-    if not path:
-        return
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        return
-
-LEVEL_ORDER = {"error": 0, "warn": 1, "info": 2, "debug": 3}
-LOG_LEVEL = args.log_level
-
-def log(level: str, msg: str):
-    if LEVEL_ORDER.get(level, 2) > LEVEL_ORDER.get(LOG_LEVEL, 2):
-        return
-    line = f"[{level.upper()}] {_ts()} [RUN={run_id}] {msg}"
-    _write_line(args.log_file, line)
-    # Mirror into user dashboard dir so the HTML can display it.
-    if args.mirror_file:
-        _write_line(args.mirror_file, line)
+    def _write_line(path: str, line: str):
+        if not path:
+            return
         try:
-            os.chmod(args.mirror_file, 0o644)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
         except Exception:
-            pass
+            return
 
-# Log startup
-log("info", f"Starting dashboard API on {args.listen}:{args.port} (config={args.config})")
+    LEVEL_ORDER = {"error": 0, "warn": 1, "info": 2, "debug": 3}
+    LOG_LEVEL = args.log_level
 
-token = _load_token(args.token_file)
-httpd = HTTPServer((args.listen, args.port), Handler)
-httpd.token = token
-httpd.conf_path = args.config
-httpd._znh_log = log
-httpd.serve_forever()
+    def log(level: str, msg: str):
+        if LEVEL_ORDER.get(level, 2) > LEVEL_ORDER.get(LOG_LEVEL, 2):
+            return
+        line = f"[{level.upper()}] {_ts()} [RUN={run_id}] {msg}"
+        _write_line(args.log_file, line)
+        # Mirror into user dashboard dir so the HTML can display it.
+        if args.mirror_file:
+            _write_line(args.mirror_file, line)
+            try:
+                os.chmod(args.mirror_file, 0o644)
+            except Exception:
+                pass
+
+    # Log startup
+    log("info", f"Starting dashboard API on {args.listen}:{args.port} (config={args.config})")
+
+    token = _load_token(args.token_file)
+    httpd = HTTPServer((args.listen, args.port), Handler)
+    httpd.token = token
+    httpd.conf_path = args.config
+    httpd._znh_log = log
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":
