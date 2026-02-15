@@ -1401,6 +1401,11 @@ EOF
         # Ensure config file has safe permissions.
         # This file may contain secrets (e.g. WEBHOOK_URL), so keep it root-only.
         chmod 600 "${CONFIG_FILE}" || true
+
+        # The dashboard Settings API uses a sandboxed systemd unit with ProtectSystem=strict.
+        # It writes atomically via a sibling temp file; ensure it exists so ReadWritePaths can be set safely.
+        touch "${CONFIG_FILE}.tmp" 2>/dev/null || true
+        chmod 600 "${CONFIG_FILE}.tmp" 2>/dev/null || true
 # NOTE: The downloader, notifier, and verification timer schedules are
 # derived from DL_TIMER_INTERVAL_MINUTES, NT_TIMER_INTERVAL_MINUTES, and
 # VERIFY_TIMER_INTERVAL_MINUTES in this file. After changing these values,
