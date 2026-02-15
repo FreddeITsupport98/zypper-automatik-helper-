@@ -138,11 +138,32 @@ __znh_detach_cmd() {
     fi
 }
 
+__znh_browser_extra_args() {
+    # Print extra args for known browsers to avoid profile-lock oddities and
+    # make launches more deterministic.
+    # Usage: __znh_browser_extra_args <browser>
+    local b
+    b="$(basename "${1:-}")"
+    case "${b}" in
+        firefox|firefox-esr)
+            printf '%s\n' "--new-window"
+            ;;
+        google-chrome|google-chrome-stable|chromium|chromium-browser|brave|brave-browser|vivaldi|microsoft-edge)
+            printf '%s\n' "--new-window"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 __znh_detach_open_url() {
     # Usage: __znh_detach_open_url <url> [browser]
     local url="$1" browser="${2:-}"
     if [ -n "${browser}" ] && command -v "${browser}" >/dev/null 2>&1; then
-        __znh_detach_cmd "${browser}" "${url}"
+        # shellcheck disable=SC2207
+        local extra=( $(__znh_browser_extra_args "${browser}" 2>/dev/null || true) )
+        __znh_detach_cmd "${browser}" "${extra[@]}" "${url}"
         return 0
     fi
     if command -v xdg-open >/dev/null 2>&1; then
@@ -155,10 +176,12 @@ __znh_detach_open_url() {
 if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
     pid_file="${dash_dir}/dashboard-http.pid"
+    port_file="${dash_dir}/dashboard-http.port"
 
-    if [ -f "${pid_file}" ]; then
+    if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
         old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-        if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null; then
+        old_port=$(cat "${port_file}" 2>/dev/null || echo "")
+        if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
             kill "${old_pid}" 2>/dev/null || true
             sleep 0.1
             if kill -0 "${old_pid}" 2>/dev/null; then
@@ -166,11 +189,11 @@ if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
             fi
             echo "Stopped dashboard server (pid=${old_pid})."
         else
-            echo "Dashboard server not running (stale pid file: ${pid_file})."
+            echo "Dashboard server not running or PID could not be validated (stale pid file: ${pid_file})."
         fi
-        rm -f "${pid_file}" 2>/dev/null || true
+        rm -f "${pid_file}" "${port_file}" 2>/dev/null || true
     else
-        echo "No dashboard server pid file found at ${pid_file}."
+        echo "No dashboard server pid/port files found under ${dash_dir}."
     fi
 
     exit 0
@@ -2486,9 +2509,14 @@ update_status() {
 
 # --- Remote monitoring: Webhooks (best-effort) ---
 _json_escape() {
-    # Minimal JSON escaping for safe webhook payloads.
+    # Minimal JSON escaping for safe webhook payloads and dashboard JSON blobs.
     # Escapes: backslash, double quote, newlines, CR, tabs.
+    # Also strips other ASCII control chars which can break JSON parsers.
     local s="$*"
+    if command -v tr >/dev/null 2>&1; then
+        # delete: NUL..BS, VT, FF, SO..US
+        s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')
+    fi
     s=${s//\\/\\\\}
     s=${s//"/\\"}
     s=${s//$'\n'/\\n}
@@ -4662,7 +4690,8 @@ generate_dashboard() {
             .then(function(r) {
                 // Accept 206 (partial content) and 200. If the file is empty and Range is used,
                 // some servers reply 416; treat that as empty content.
-                if (r.status === 416) return '';
+                // If the file is missing (404), also treat as empty so the UI doesn't freeze.
+                if (r.status === 416 || r.status === 404) return '';
                 if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
                 return r.text();
             })
@@ -7477,7 +7506,7 @@ EOF
 run_dash_stop_only() {
     log_info ">>> Stopping live dashboard server (best-effort)"
 
-    local dash_dir pid_file
+    local dash_dir pid_file port_file
 
     dash_dir=""
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -7494,11 +7523,13 @@ run_dash_stop_only() {
     fi
 
     pid_file="${dash_dir}/dashboard-http.pid"
+    port_file="${dash_dir}/dashboard-http.port"
 
-    if [ -f "${pid_file}" ]; then
-        local old_pid
+    if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
+        local old_pid old_port
         old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-        if [[ "${old_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" 2>/dev/null; then
+        old_port=$(cat "${port_file}" 2>/dev/null || echo "")
+        if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
             kill "${old_pid}" 2>/dev/null || true
             sleep 0.1
             if kill -0 "${old_pid}" 2>/dev/null; then
@@ -7508,15 +7539,15 @@ run_dash_stop_only() {
             update_status "SUCCESS: Dashboard server stopped"
             echo "Stopped dashboard server (pid=${old_pid})."
         else
-            log_info "Dashboard server not running (stale pid file: ${pid_file})"
+            log_info "Dashboard server not running or PID could not be validated (stale pid file: ${pid_file})"
             update_status "SUCCESS: Dashboard server not running"
-            echo "Dashboard server not running (stale pid file: ${pid_file})."
+            echo "Dashboard server not running or PID could not be validated (stale pid file: ${pid_file})."
         fi
-        rm -f "${pid_file}" 2>/dev/null || true
+        rm -f "${pid_file}" "${port_file}" 2>/dev/null || true
     else
-        log_info "No dashboard server pid file found at ${pid_file}"
-        update_status "SUCCESS: No dashboard server pid file found"
-        echo "No dashboard server pid file found at ${pid_file}."
+        log_info "No dashboard server pid/port files found under ${dash_dir}"
+        update_status "SUCCESS: No dashboard server pid/port files found"
+        echo "No dashboard server pid/port files found under ${dash_dir}."
     fi
 
     return 0
@@ -7662,11 +7693,15 @@ PY
 
         # Open the browser detached (best-effort) so terminal close doesn't kill it.
         if [ -n "${dash_browser:-}" ] && command -v "${dash_browser}" >/dev/null 2>&1; then
+            local extra_args
+            extra_args="$(__znh_browser_extra_args "${dash_browser}" 2>/dev/null | tr '\n' ' ' || true)"
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
-                    bash -lc "nohup \"${dash_browser}\" \"${url}\" >/dev/null 2>&1 &" || true
+                    bash -lc "nohup \"${dash_browser}\" ${extra_args} \"${url}\" >/dev/null 2>&1 &" || true
             else
-                __znh_detach_cmd "${dash_browser}" "${url}" || true
+                # shellcheck disable=SC2207
+                local extra=( $(__znh_browser_extra_args "${dash_browser}" 2>/dev/null || true) )
+                __znh_detach_cmd "${dash_browser}" "${extra[@]}" "${url}" || true
             fi
         elif command -v xdg-open >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
