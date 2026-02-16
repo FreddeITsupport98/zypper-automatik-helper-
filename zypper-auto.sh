@@ -92,7 +92,8 @@ __znh_port_listen_in_use() {
     fi
 
     # Last resort: try /dev/tcp without timeout (may hang in pathological cases); keep it best-effort.
-    (</dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1
+    # Use ':' as a no-op command so the redirection is attached to something (ShellCheck SC2188).
+    : </dev/tcp/127.0.0.1/"${port}" >/dev/null 2>&1
     return $?
 }
 
@@ -5707,7 +5708,7 @@ attempt_repair() {
 
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))  # Track that we're attempting a repair
 
-    for i in $(seq 1 $max_attempts); do
+    for i in $(seq 1 "$max_attempts"); do
         log_info "  → Repair attempt $i/$max_attempts: $check_name"
         if log_command "$repair_command"; then
             sleep 0.5  # Brief pause for system to stabilize
@@ -5914,7 +5915,7 @@ fi
 log_debug "Checking for stale Python processes..."
 if pgrep -f "zypper-notify-updater.py" &>/dev/null; then
     PROCESS_COUNT=$(pgrep -f "zypper-notify-updater.py" | wc -l)
-    if [ $PROCESS_COUNT -gt 1 ]; then
+    if [ "$PROCESS_COUNT" -gt 1 ]; then
         log_warn "⚠ Warning: $PROCESS_COUNT Python notifier processes running (expected 0-1)"
         log_info "  → Attempting to fix: killing stale processes..."
         execute_guarded "Kill stale notifier processes" pkill -9 -f "zypper-notify-updater.py" || true
@@ -6743,7 +6744,7 @@ else
     fi
 
     # Only run the aggressive cleanup if space is low OR earlier checks flagged it.
-    if [ "${DISK_SPACE_CRITICAL:-0}" -eq 1 ] 2>/dev/null || ([[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -le 2000 ] 2>/dev/null); then
+    if [ "${DISK_SPACE_CRITICAL:-0}" -eq 1 ] 2>/dev/null || { [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -le 2000 ] 2>/dev/null; }; then
         log_info "  → Attempting auto-repair: vacuum journals and clean caches/snapshots..."
         REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
 
@@ -7160,9 +7161,9 @@ if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null; then
     echo "==============================================" | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
-    if [ $VERIFICATION_FAILED -eq 0 ]; then
+    if [ "$VERIFICATION_FAILED" -eq 0 ]; then
         log_success ">>> All verification checks passed! ✓"
-        if [ $PROBLEMS_FIXED -gt 0 ]; then
+        if [ "$PROBLEMS_FIXED" -gt 0 ]; then
             log_success "  ✓ Auto-repair fixed $PROBLEMS_FIXED issue(s)"
         fi
     else
@@ -8428,7 +8429,11 @@ run_diag_bundle_only() {
 
     # All diagnostics logs (already pruned to ~10 days)
     if ls -1 "${diag_dir}"/diag-*.log >/dev/null 2>&1; then
-        include_files+=("-C" "${diag_dir}" $(ls -1 "${diag_dir}"/diag-*.log | xargs -n1 basename))
+        include_files+=("-C" "${diag_dir}")
+        mapfile -t __diag_logs < <(ls -1 "${diag_dir}"/diag-*.log 2>/dev/null || true)
+        for __f in "${__diag_logs[@]}"; do
+            include_files+=("$(basename "${__f}")")
+        done
     fi
 
     # Last-status summary
@@ -8439,9 +8444,13 @@ run_diag_bundle_only() {
     # Most recent installer logs (up to 3)
     if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
         local inst
-        inst=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -3)
+        inst=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -3 || true)
         if [ -n "${inst}" ]; then
-            include_files+=("-C" "${LOG_DIR}" $(printf '%s\\n' ${inst} | xargs -n1 basename))
+            include_files+=("-C" "${LOG_DIR}")
+            while IFS= read -r __f; do
+                [ -n "${__f}" ] || continue
+                include_files+=("$(basename "${__f}")")
+            done <<<"${inst}"
         fi
     fi
 
@@ -8455,7 +8464,11 @@ run_diag_bundle_only() {
         local envsnap
         envsnap=$(ls -1t "${LOG_DIR}"/pre-install-env-*.txt 2>/dev/null || true)
         if [ -n "${envsnap}" ]; then
-            include_files+=("-C" "${LOG_DIR}" $(printf '%s\\n' ${envsnap} | xargs -n1 basename))
+            include_files+=("-C" "${LOG_DIR}")
+            while IFS= read -r __f; do
+                [ -n "${__f}" ] || continue
+                include_files+=("$(basename "${__f}")")
+            done <<<"${envsnap}"
         fi
     fi
 
@@ -8473,7 +8486,9 @@ run_diag_bundle_only() {
             # Include recent package delta logs produced by the Ready-to-Install helper.
             if ls -1 "${ulogdir}"/pkg-deltas/update-delta-*.log >/dev/null 2>&1; then
                 local udelta
-                for udelta in $(ls -1t "${ulogdir}"/pkg-deltas/update-delta-*.log 2>/dev/null | head -5); do
+                mapfile -t __udelta_logs < <(ls -1t "${ulogdir}"/pkg-deltas/update-delta-*.log 2>/dev/null | head -5 || true)
+                for udelta in "${__udelta_logs[@]}"; do
+                    [ -n "${udelta}" ] || continue
                     include_files+=("-C" "${ulogdir}/pkg-deltas" "$(basename "${udelta}")")
                 done
             fi
@@ -8498,7 +8513,11 @@ run_diag_bundle_only() {
             > "${journal_dir}/oom_kills.txt" 2>&1 || true
     fi
     if ls -1 "${journal_dir}"/* >/dev/null 2>&1; then
-        include_files+=("-C" "${journal_dir}" $(ls -1 "${journal_dir}"/* | xargs -n1 basename))
+        include_files+=("-C" "${journal_dir}")
+        mapfile -t __jfiles < <(ls -1 "${journal_dir}"/* 2>/dev/null || true)
+        for __f in "${__jfiles[@]}"; do
+            include_files+=("$(basename "${__f}")")
+        done
     fi
 
     # Config and version header (include whole config + script header)
@@ -9574,6 +9593,8 @@ run_snapper_menu_only() {
                     else
                         echo "[deep-clean] ${conf}: found potential junk snapshot IDs: ${ids}"
                     fi
+                    # shellcheck disable=SC2086
+                    # We intentionally expand ${ids} into multiple snapshot-number arguments.
                     if command -v timeout >/dev/null 2>&1; then
                         execute_guarded "Delete suspected junk snapshots (${conf})" timeout 300 "${SNAPPER_CMD[@]}" -c "${conf}" delete ${ids} || true
                     else
@@ -11521,11 +11542,10 @@ run_analyze_logs_only() {
     local locks_raw
     if [ -n "${TID_FILTER}" ]; then
         locks_raw=$(grep "TID=${TID_FILTER}" "${log_files[@]}" 2>/dev/null \
-            | grep -E "Zypper is locked by another process|System management is locked" \
-            | wc -l | tr -d ' ')
+            | grep -cE "Zypper is locked by another process|System management is locked" || echo 0)
     else
-        locks_raw=$(grep -E "Zypper is locked by another process|System management is locked" \
-            "${log_files[@]}" 2>/dev/null | wc -l | tr -d ' ')
+        locks_raw=$(grep -cE "Zypper is locked by another process|System management is locked" \
+            "${log_files[@]}" 2>/dev/null || echo 0)
     fi
     local locks="${locks_raw:-0}"
     echo "" | tee -a "${LOG_FILE}"
@@ -12383,7 +12403,9 @@ run_brew_install_only() {
         if [ -d "$FISH_CONFIG_DIR" ]; then
             if ! sudo -u "$SUDO_USER" grep -F "$BREW_SHELLENV_LINE" "$FISH_CONFIG_FILE" >/dev/null 2>&1; then
                 mkdir -p "$FISH_CONFIG_DIR"
+                # shellcheck disable=SC2016
                 sudo -u "$SUDO_USER" bash -lc "echo >> '$FISH_CONFIG_FILE'"
+                # shellcheck disable=SC2016
                 sudo -u "$SUDO_USER" bash -lc "echo '$BREW_SHELLENV_LINE' >> '$FISH_CONFIG_FILE'"
                 echo "Added Homebrew PATH setup to $FISH_CONFIG_FILE" | tee -a "${LOG_FILE}"
             fi
@@ -12393,7 +12415,9 @@ run_brew_install_only() {
         BASH_RC="$SUDO_USER_HOME/.bashrc"
         if [ -f "$BASH_RC" ]; then
             if ! sudo -u "$SUDO_USER" grep -F "$BREW_SHELLENV_LINE" "$BASH_RC" >/dev/null 2>&1; then
+                # shellcheck disable=SC2016
                 sudo -u "$SUDO_USER" bash -lc "echo >> '$BASH_RC'"
+                # shellcheck disable=SC2016
                 sudo -u "$SUDO_USER" bash -lc "echo '$BREW_SHELLENV_LINE' >> '$BASH_RC'"
                 echo "Added Homebrew PATH setup to $BASH_RC" | tee -a "${LOG_FILE}"
             fi
@@ -12403,7 +12427,9 @@ run_brew_install_only() {
         ZSH_RC="$SUDO_USER_HOME/.zshrc"
         if [ -f "$ZSH_RC" ]; then
             if ! sudo -u "$SUDO_USER" grep -F "$BREW_SHELLENV_LINE" "$ZSH_RC" >/dev/null 2>&1; then
+                # shellcheck disable=SC2016
                 sudo -u "$SUDO_USER" bash -lc "echo >> '$ZSH_RC'"
+                # shellcheck disable=SC2016
                 sudo -u "$SUDO_USER" bash -lc "echo '$BREW_SHELLENV_LINE' >> '$ZSH_RC'"
                 echo "Added Homebrew PATH setup to $ZSH_RC" | tee -a "${LOG_FILE}"
             fi
@@ -14821,9 +14847,11 @@ if [ -f "$SUDO_USER_HOME/.bashrc" ]; then
     sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.bashrc"
     sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.bashrc"
     # Add new alias
-    echo "" >> "$SUDO_USER_HOME/.bashrc"
-    echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.bashrc"
-    echo "alias zypper='$ZYPPER_WRAPPER_PATH'" >> "$SUDO_USER_HOME/.bashrc"
+    {
+        echo ""
+        echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)"
+        echo "alias zypper='$ZYPPER_WRAPPER_PATH'"
+    } >> "$SUDO_USER_HOME/.bashrc"
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.bashrc"
     log_success "Added zypper alias to .bashrc"
 fi
@@ -14876,9 +14904,11 @@ if [ -f "$SUDO_USER_HOME/.zshrc" ]; then
     sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.zshrc"
     sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.zshrc"
     # Add new alias
-    echo "" >> "$SUDO_USER_HOME/.zshrc"
-    echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.zshrc"
-    echo "alias zypper='$ZYPPER_WRAPPER_PATH'" >> "$SUDO_USER_HOME/.zshrc"
+    {
+        echo ""
+        echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)"
+        echo "alias zypper='$ZYPPER_WRAPPER_PATH'"
+    } >> "$SUDO_USER_HOME/.zshrc"
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.zshrc"
     log_success "Added zypper alias to .zshrc"
 fi
@@ -14897,15 +14927,17 @@ if [ -f "$SUDO_USER_HOME/.bashrc" ]; then
     sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.bashrc"
     sed -i '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}$/d' "$SUDO_USER_HOME/.bashrc" 2>/dev/null || true
 
-    echo "" >> "$SUDO_USER_HOME/.bashrc"
-    echo "# zypper-auto-helper command wrapper (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.bashrc"
-    echo "zypper-auto-helper() {" >> "$SUDO_USER_HOME/.bashrc"
-    echo "  if [ \"\${1:-}\" = \"--dash-open\" ]; then" >> "$SUDO_USER_HOME/.bashrc"
-    echo "    /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.bashrc"
-    echo "  else" >> "$SUDO_USER_HOME/.bashrc"
-    echo "    sudo /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.bashrc"
-    echo "  fi" >> "$SUDO_USER_HOME/.bashrc"
-    echo "}" >> "$SUDO_USER_HOME/.bashrc"
+    {
+        echo ""
+        echo "# zypper-auto-helper command wrapper (added by zypper-auto-helper)"
+        echo "zypper-auto-helper() {"
+        echo "  if [ \\\"\\\${1:-}\\\" = \\\"--dash-open\\\" ]; then"
+        echo "    /usr/local/bin/zypper-auto-helper \\\"\\\$@\\\""
+        echo "  else"
+        echo "    sudo /usr/local/bin/zypper-auto-helper \\\"\\\$@\\\""
+        echo "  fi"
+        echo "}"
+    } >> "$SUDO_USER_HOME/.bashrc"
 
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.bashrc"
     log_success "Added zypper-auto-helper wrapper to .bashrc"
@@ -14944,15 +14976,17 @@ if [ -f "$SUDO_USER_HOME/.zshrc" ]; then
     sed -i '/alias zypper-auto-helper=/d' "$SUDO_USER_HOME/.zshrc"
     sed -i '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}/d' "$SUDO_USER_HOME/.zshrc" 2>/dev/null || true
 
-    echo "" >> "$SUDO_USER_HOME/.zshrc"
-    echo "# zypper-auto-helper command wrapper (added by zypper-auto-helper)" >> "$SUDO_USER_HOME/.zshrc"
-    echo "zypper-auto-helper() {" >> "$SUDO_USER_HOME/.zshrc"
-    echo "  if [ \"\${1:-}\" = \"--dash-open\" ]; then" >> "$SUDO_USER_HOME/.zshrc"
-    echo "    /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.zshrc"
-    echo "  else" >> "$SUDO_USER_HOME/.zshrc"
-    echo "    sudo /usr/local/bin/zypper-auto-helper \"\$@\"" >> "$SUDO_USER_HOME/.zshrc"
-    echo "  fi" >> "$SUDO_USER_HOME/.zshrc"
-    echo "}" >> "$SUDO_USER_HOME/.zshrc"
+    {
+        echo ""
+        echo "# zypper-auto-helper command wrapper (added by zypper-auto-helper)"
+        echo "zypper-auto-helper() {"
+        echo "  if [ \\\"\\\${1:-}\\\" = \\\"--dash-open\\\" ]; then"
+        echo "    /usr/local/bin/zypper-auto-helper \\\"\\\$@\\\""
+        echo "  else"
+        echo "    sudo /usr/local/bin/zypper-auto-helper \\\"\\\$@\\\""
+        echo "  fi"
+        echo "}"
+    } >> "$SUDO_USER_HOME/.zshrc"
 
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.zshrc"
     log_success "Added zypper-auto-helper wrapper to .zshrc"
@@ -18832,7 +18866,7 @@ if [ "$PIPX_MISSING_FOR_UPDATES" -eq 1 ]; then
 fi
 
 # Notify user about missing packages if any
-if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
     log_info "Optional package managers missing: ${MISSING_PACKAGES[*]}"
     
     # Create notification for user
