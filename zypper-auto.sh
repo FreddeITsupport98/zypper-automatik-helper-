@@ -260,8 +260,7 @@ __znh_detach_open_url() {
 }
 
 __znh_ensure_dash_desktop_shortcut() {
-    # Ensure a desktop launcher exists for opening the dashboard.
-    # This is safe to run repeatedly.
+    # Pro Version: Desktop launcher with Keywords, Search terms, and 'Check Now' action.
     # Usage: __znh_ensure_dash_desktop_shortcut <user> <home>
     local u="$1" h="$2"
     [ -n "${u:-}" ] || return 0
@@ -271,29 +270,57 @@ __znh_ensure_dash_desktop_shortcut() {
     apps_dir="${h}/.local/share/applications"
     desktop_file="${apps_dir}/zypper-auto-dashboard.desktop"
 
-    local expected_exec expected
-    expected_exec="/usr/local/bin/zypper-auto-helper --dash-open"
+    # Paths to helpers
+    local helper_bin
+    helper_bin="/usr/local/bin/zypper-auto-helper"
 
+    # Define the Pro Desktop Entry content
+    # NOTE: .desktop Exec does not expand ~ or $HOME, so we use sh -c where needed.
+    local expected
     expected=$(cat <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
 Name=Zypper Auto Dashboard
-Comment=Open the Zypper Auto Command Center dashboard
-Exec=${expected_exec}
+GenericName=System Update Center
+Comment=View update status, logs, and manage system maintenance
+Exec=${helper_bin} --dash-open
 Terminal=false
 Icon=system-software-update
-Categories=System;Utility;
+Categories=System;Utility;Monitor;
+Keywords=Update;Upgrade;Check;Maintenance;Suse;Snapshot;
 StartupNotify=true
+X-GNOME-UsesNotifications=true
+Actions=Install;CheckNow;StopServer;UserLogs;
+
+[Desktop Action Install]
+Name=Install Updates (Interactive)
+Exec=sh -lc "\"\${HOME}/.local/bin/zypper-run-install\""
+Icon=system-software-install
+
+[Desktop Action CheckNow]
+Name=Check for Updates Now
+Exec=sh -lc "systemctl --user start zypper-notify-user.service >/dev/null 2>&1 || true"
+Icon=view-refresh
+
+[Desktop Action StopServer]
+Name=Stop Dashboard Server
+Exec=${helper_bin} --dash-stop
+Icon=process-stop
+
+[Desktop Action UserLogs]
+Name=Open Log Folder
+Exec=sh -lc "xdg-open \"\${HOME}/.local/share/zypper-notify\""
+Icon=folder-open
 EOF
 )
 
-    # Write/refresh the .desktop entry when missing or outdated.
+    # Smart Update: Force update if missing OR if it lacks the new 'CheckNow' action
     local need=0
     if [ ! -f "${desktop_file}" ]; then
         need=1
     else
-        if ! grep -qF "Exec=${expected_exec}" "${desktop_file}" 2>/dev/null; then
+        if ! grep -qF "Actions=Install;CheckNow;" "${desktop_file}" 2>/dev/null; then
             need=1
         fi
     fi
@@ -304,13 +331,18 @@ EOF
         chmod 644 "${desktop_file}" 2>/dev/null || true
         chown "${u}:${u}" "${desktop_file}" 2>/dev/null || true
 
-        # Optional: refresh desktop database if available (non-fatal).
+        # Validate to ensure it appears in strict menus (GNOME/KDE)
+        if command -v desktop-file-validate >/dev/null 2>&1; then
+            desktop-file-validate "${desktop_file}" >/dev/null 2>&1 || true
+        fi
+
+        # Refresh desktop database so it appears in search immediately
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database "${apps_dir}" >/dev/null 2>&1 || true
         fi
     fi
 
-    # Also place a clickable shortcut on the Desktop folder (best-effort).
+    # Handle the Desktop Surface shortcut (Copy if changed)
     local desk_dir
     desk_dir=""
     if command -v xdg-user-dir >/dev/null 2>&1; then
@@ -323,7 +355,9 @@ EOF
     if [ -n "${desk_dir:-}" ] && [ -d "${desk_dir}" ]; then
         local desktop_copy
         desktop_copy="${desk_dir}/Zypper Auto Dashboard.desktop"
-        if [ ! -f "${desktop_copy}" ]; then
+
+        # Copy if missing OR if we just updated the master copy
+        if [ ! -f "${desktop_copy}" ] || [ "${need}" -eq 1 ] 2>/dev/null; then
             cp -f "${desktop_file}" "${desktop_copy}" 2>/dev/null || true
             chmod 755 "${desktop_copy}" 2>/dev/null || true
             chown "${u}:${u}" "${desktop_copy}" 2>/dev/null || true

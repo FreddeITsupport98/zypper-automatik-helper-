@@ -1049,6 +1049,8 @@ zypper-auto-helper --dash-open
 Desktop shortcut:
 - The installer creates a launcher in your desktop environment menus:
   `~/.local/share/applications/zypper-auto-dashboard.desktop`
+  - Search keywords: update/upgrade/check/suse/maintenance/snapshot
+  - Right-click Quick Actions: Install Updates, **Check Now**, Stop Server, Open User Logs
 - If you have a Desktop folder, it also drops a clickable shortcut:
   `~/Desktop/Zypper Auto Dashboard.desktop`
 - The helper also auto-heals these shortcuts when you open the dashboard.
