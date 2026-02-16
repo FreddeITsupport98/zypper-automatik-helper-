@@ -11861,6 +11861,8 @@ run_uninstall_helper_only() {
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
+        echo "  - Desktop/menu shortcuts: $SUDO_USER_HOME/.local/share/applications/zypper-auto-dashboard.desktop" | tee -a "${LOG_FILE}"
+        echo "    (and a Desktop shortcut if present: 'Zypper Auto Dashboard.desktop')" | tee -a "${LOG_FILE}"
 
         if [ "${UNINSTALL_KEEP_HOOKS:-0}" -eq 1 ]; then
             echo "  - Hooks under ${hooks_dir} would be LEFT IN PLACE (--keep-hooks)" | tee -a "${LOG_FILE}"
@@ -11953,10 +11955,22 @@ run_uninstall_helper_only() {
         /usr/local/bin/zypper-auto-diag-follow \
         /usr/local/bin/zypper-auto-dashboard-api || true
 
-    # 4. Remove user-level scripts and systemd units
+    # 4. Remove user-level scripts, systemd units, and desktop/menu shortcuts
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         log_debug "Removing user scripts and units under $SUDO_USER_HOME..."
-        execute_guarded "Remove user scripts and unit files" rm -f \
+
+        # Desktop shortcut location can vary by locale; use xdg-user-dir when available.
+        local _desk_dir _dash_desktop_shortcut
+        _desk_dir=""
+        if command -v xdg-user-dir >/dev/null 2>&1; then
+            _desk_dir=$(sudo -u "${SUDO_USER}" XDG_CONFIG_HOME="${SUDO_USER_HOME}/.config" XDG_DATA_HOME="${SUDO_USER_HOME}/.local/share" xdg-user-dir DESKTOP 2>/dev/null || true)
+        fi
+        if [ -z "${_desk_dir:-}" ]; then
+            _desk_dir="${SUDO_USER_HOME}/Desktop"
+        fi
+        _dash_desktop_shortcut="${_desk_dir}/Zypper Auto Dashboard.desktop"
+
+        execute_guarded "Remove user scripts, unit files, and desktop shortcuts" rm -f \
             "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service" \
             "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.timer" \
             "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" \
@@ -11966,7 +11980,9 @@ run_uninstall_helper_only() {
             "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" \
-            "$SUDO_USER_HOME/.config/fish/completions/zypper-auto-helper.fish" || true
+            "$SUDO_USER_HOME/.config/fish/completions/zypper-auto-helper.fish" \
+            "$SUDO_USER_HOME/.local/share/applications/zypper-auto-dashboard.desktop" \
+            "${_dash_desktop_shortcut}" || true
 
         # Remove system-wide completions (best-effort)
         execute_guarded "Remove bash/zsh completion files" rm -f \
