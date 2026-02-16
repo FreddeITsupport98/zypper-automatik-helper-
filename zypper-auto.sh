@@ -260,7 +260,7 @@ __znh_detach_open_url() {
 }
 
 __znh_ensure_dash_desktop_shortcut() {
-    # Ultimate Version: L10n, Native Icons, and Maintenance Actions (Verify/Health)
+    # UX Polish Version: Adds visual feedback (Notifications) and "Press Enter" delays.
     # Usage: __znh_ensure_dash_desktop_shortcut <user> <home>
     local u="$1" h="$2"
     [ -n "${u:-}" ] || return 0
@@ -274,7 +274,7 @@ __znh_ensure_dash_desktop_shortcut() {
     local helper_bin
     helper_bin="/usr/local/bin/zypper-auto-helper"
 
-    # Smart Icon Detection: Prefer SUSE/YaST icons if available, fall back to generic
+    # Icon logic (same as before)
     local icon_name
     icon_name="system-software-update"
     if [ -e /usr/share/icons/hicolor/scalable/apps/yast-update.svg ] || \
@@ -284,8 +284,20 @@ __znh_ensure_dash_desktop_shortcut() {
         icon_name="yast-software"
     fi
 
+    # --- UX COMMAND STRINGS ---
+    # 1) Install: run, then wait for user input so the window doesn't vanish.
+    local cmd_install
+    cmd_install="sh -lc \"\\\"\\\${HOME}/.local/bin/zypper-run-install\\\"; echo; echo 'Press Enter to close...'; read line\""
+
+    # 2) CheckNow: show a notification (if available), then wake the notifier.
+    local cmd_check
+    cmd_check="sh -lc \"command -v notify-send >/dev/null 2>&1 && notify-send 'Zypper Auto' 'Checking for updates...' -i view-refresh; systemctl --user start zypper-notify-user.service >/dev/null 2>&1 || true\""
+
+    # 3) Health report: run via the install helper (nice terminal UX) and wait.
+    local cmd_health
+    cmd_health="sh -lc \"\\\"\\\${HOME}/.local/bin/zypper-run-install\\\" --inner --health; echo; echo 'Press Enter to close...'; read line\""
+
     # Define the Desktop Entry with Translations and Maintenance Actions.
-    # NOTE: .desktop Exec does not expand ~ or $HOME, so we use sh -lc where needed.
     local expected
     expected=$(cat <<EOF
 [Desktop Entry]
@@ -317,7 +329,7 @@ Name=Install Updates (Interactive)
 Name[de]=Updates installieren (Interaktiv)
 Name[fr]=Installer les mises à jour
 Name[es]=Instalar actualizaciones
-Exec=sh -lc "\"\${HOME}/.local/bin/zypper-run-install\""
+Exec=${cmd_install}
 Icon=system-software-install
 
 [Desktop Action CheckNow]
@@ -325,7 +337,7 @@ Name=Check for Updates Now
 Name[de]=Jetzt nach Updates suchen
 Name[fr]=Vérifier les mises à jour
 Name[es]=Buscar actualizaciones ahora
-Exec=sh -lc "systemctl --user start zypper-notify-user.service >/dev/null 2>&1 || true"
+Exec=${cmd_check}
 Icon=view-refresh
 
 [Desktop Action Verify]
@@ -341,7 +353,7 @@ Name=Generate Health Report
 Name[de]=Gesundheitsbericht erstellen
 Name[fr]=Rapport de santé
 Name[es]=Informe de salud
-Exec=pkexec ${helper_bin} --health
+Exec=${cmd_health}
 Icon=yast-hardware-group
 
 [Desktop Action StopServer]
@@ -362,16 +374,15 @@ Icon=folder-open
 EOF
 )
 
-    # Smart Update: Force update if missing OR if it lacks the new 'Verify' action
+    # Smart Update: upgrade if missing OR if it lacks our new wait/feedback logic.
     local need=0
     if [ ! -f "${desktop_file}" ]; then
         need=1
     else
-        # If the existing file doesn't have our new Maintenance actions, overwrite it
-        if ! grep -qF "Actions=Install;CheckNow;Verify;" "${desktop_file}" 2>/dev/null; then
+        if ! grep -qF "read line" "${desktop_file}" 2>/dev/null; then
             need=1
         fi
-        # Also update if we found a better icon than the generic one
+        # Or if the icon is generic but a better one exists
         if [ "${icon_name}" != "system-software-update" ] && grep -qF "Icon=system-software-update" "${desktop_file}" 2>/dev/null; then
             need=1
         fi
@@ -5655,7 +5666,7 @@ run_verification_only() {
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
     MAX_REPAIR_ATTEMPTS=3
-    local TOTAL_CHECKS=37
+    local TOTAL_CHECKS=38
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -6595,8 +6606,46 @@ else
     log_info "ℹ zypper not available; skipping reboot requirement check"
 fi
 
-# Check 30: Memory headroom (solver safety)
-log_debug "[30/${TOTAL_CHECKS}] Checking memory headroom for update solver..."
+# Check 30: Dashboard Shortcut Health (auto-fix)
+log_debug "[30/${TOTAL_CHECKS}] Checking Dashboard Desktop Shortcut..."
+local desk_path desk_ok
+desk_path="${SUDO_USER_HOME}/.local/share/applications/zypper-auto-dashboard.desktop"
+desk_ok=0
+
+# 1) Does the file exist?
+if [ -f "${desk_path}" ]; then
+    # 2) Does it look like our current-generation shortcut?
+    # - Must expose Verify action
+    # - Must include the 'read line' UX marker (Press Enter to close)
+    if grep -qE '^[[:space:]]*Actions=.*Verify' "${desk_path}" 2>/dev/null && \
+       grep -qF "read line" "${desk_path}" 2>/dev/null; then
+        desk_ok=1
+    fi
+fi
+
+if [ "${desk_ok}" -eq 1 ] 2>/dev/null; then
+    log_success "✓ Desktop shortcut is present and up-to-date"
+else
+    log_error "✗ Desktop shortcut is missing or outdated"
+    log_info "  → Attempting auto-repair: regenerating user shortcut..."
+
+    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+    if execute_guarded "Regenerate dashboard desktop shortcut" \
+        __znh_ensure_dash_desktop_shortcut "${SUDO_USER}" "${SUDO_USER_HOME}"; then
+        # Extra polish: bump mtime to encourage some desktops to refresh caches.
+        execute_optional "Refresh shortcut mtime (icon refresh hint)" \
+            sudo -u "${SUDO_USER}" touch "${desk_path}" >/dev/null 2>&1 || true
+
+        log_success "  ✓ Auto-repair successful: shortcut restored"
+    else
+        log_error "  ✗ Failed to restore shortcut"
+        VERIFICATION_FAILED=1
+    fi
+fi
+
+# Check 31: Memory headroom (solver safety)
+log_debug "[31/${TOTAL_CHECKS}] Checking memory headroom for update solver..."
 mem_avail_mb=""
 if [ -r /proc/meminfo ]; then
     mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo "")
@@ -6644,8 +6693,8 @@ else
     log_info "ℹ Unable to determine available memory; skipping memory headroom check"
 fi
 
-# Check 31: AppArmor security status (auto-fix enabled)
-log_debug "[31/${TOTAL_CHECKS}] Verifying AppArmor security status..."
+# Check 32: AppArmor security status (auto-fix enabled)
+log_debug "[32/${TOTAL_CHECKS}] Verifying AppArmor security status..."
 if systemctl is-active apparmor.service >/dev/null 2>&1 || systemctl is-active apparmor >/dev/null 2>&1; then
     if command -v aa-status >/dev/null 2>&1; then
         set +e
@@ -6680,8 +6729,8 @@ else
     log_info "ℹ AppArmor is not active (disabled or not installed)"
 fi
 
-# Check 32: Proactive disk space reclamation (auto-fix)
-log_debug "[32/${TOTAL_CHECKS}] Verifying disk space headroom..."
+# Check 33: Proactive disk space reclamation (auto-fix)
+log_debug "[33/${TOTAL_CHECKS}] Verifying disk space headroom..."
 disk_avail=""
 disk_avail=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
 if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -gt 2000 ] 2>/dev/null; then
@@ -6731,8 +6780,8 @@ else
     fi
 fi
 
-# Check 33: Zypper lock state (deadlock killer)
-log_debug "[33/${TOTAL_CHECKS}] Checking for zypper locks (stale vs active)..."
+# Check 34: Zypper lock state (deadlock killer)
+log_debug "[34/${TOTAL_CHECKS}] Checking for zypper locks (stale vs active)..."
 lock_found=0
 for zlock in /run/zypp.pid /var/run/zypp.pid; do
     if [ -f "$zlock" ]; then
@@ -6766,8 +6815,8 @@ if [ "$lock_found" -eq 0 ] 2>/dev/null; then
     log_success "✓ No zypper lock files detected"
 fi
 
-# Check 34: RPM database repair (nuclear option; best-effort)
-log_debug "[34/${TOTAL_CHECKS}] Verifying RPM database integrity and attempting repair if needed..."
+# Check 35: RPM database repair (nuclear option; best-effort)
+log_debug "[35/${TOTAL_CHECKS}] Verifying RPM database integrity and attempting repair if needed..."
 rpmdb_needs_repair=0
 
 # If earlier structural check failed, we already know we should repair.
@@ -6898,8 +6947,8 @@ if [ "$rpmdb_needs_repair" -eq 1 ] 2>/dev/null; then
     fi
 fi
 
-# Check 35: Dependency & package consistency (deep repair)
-log_debug "[35/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
+# Check 36: Dependency & package consistency (deep repair)
+log_debug "[36/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping dependency consistency check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
@@ -6951,8 +7000,8 @@ else
     log_info "ℹ zypper not available; skipping dependency consistency check"
 fi
 
-# Check 36: Btrfs metadata health (advanced repair)
-log_debug "[36/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
+# Check 37: Btrfs metadata health (advanced repair)
+log_debug "[37/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
 root_fstype2=""
 if command -v findmnt >/dev/null 2>&1; then
     root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
@@ -7026,8 +7075,8 @@ else
     log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
 fi
 
-# Check 37: GPG keyring/signature handling (deep repair)
-log_debug "[37/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
+# Check 38: GPG keyring/signature handling (deep repair)
+log_debug "[38/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping deep GPG check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then

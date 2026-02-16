@@ -1051,6 +1051,8 @@ Desktop shortcut:
   `~/.local/share/applications/zypper-auto-dashboard.desktop`
   - Search keywords: update/upgrade/check/suse/maintenance/snapshot/repair/health
   - Right-click Quick Actions: Install Updates, **Check Now**, **Auto-Repair (Verify)**, **Health Report**, Stop Server, Open User Logs
+    - **Install Updates** and **Health Report** keep the terminal open until you press Enter (so the window doesn't disappear immediately)
+    - **Check Now** shows a small desktop bubble (when `notify-send` is available)
   - Uses native YaST icons when available and includes basic translations (de/fr/es)
 - If you have a Desktop folder, it also drops a clickable shortcut:
   `~/Desktop/Zypper Auto Dashboard.desktop`
@@ -1277,6 +1279,10 @@ systemctl status zypper-autodownload.service
 ### Version History
 
 - **Unreleased (next build):**
+  - 🩺 **IMPROVED:** `zypper-auto-helper --verify` now also verifies the dashboard desktop/start-menu shortcut and auto-regenerates it if it was deleted or is outdated.
+  - 🖥️ **IMPROVED:** desktop/start-menu dashboard shortcut Quick Actions now have better UX:
+    - **Check Now** shows a desktop bubble (when `notify-send` exists) before waking the notifier service.
+    - **Install Updates** and **Health Report** now keep the terminal window open until you press Enter.
   - 🔔 **FIXED:** the "Updates Ready" notification no longer re-appears while you are already installing updates (install action now suppresses notifier popups via an install-in-progress marker; configurable via `INSTALL_CLICK_SUPPRESS_MINUTES`).
   - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
   - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
