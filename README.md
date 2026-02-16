@@ -1046,6 +1046,13 @@ Open dashboard only (opens **live mode** via a local http server):
 zypper-auto-helper --dash-open
 ```
 
+Desktop shortcut:
+- The installer creates a launcher in your desktop environment menus:
+  `~/.local/share/applications/zypper-auto-dashboard.desktop`
+- If you have a Desktop folder, it also drops a clickable shortcut:
+  `~/Desktop/Zypper Auto Dashboard.desktop`
+- The helper also auto-heals these shortcuts when you open the dashboard.
+
 Force a specific browser (optional):
 
 ```bash

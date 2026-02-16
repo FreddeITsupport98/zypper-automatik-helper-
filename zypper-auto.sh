@@ -259,6 +259,78 @@ __znh_detach_open_url() {
     return 1
 }
 
+__znh_ensure_dash_desktop_shortcut() {
+    # Ensure a desktop launcher exists for opening the dashboard.
+    # This is safe to run repeatedly.
+    # Usage: __znh_ensure_dash_desktop_shortcut <user> <home>
+    local u="$1" h="$2"
+    [ -n "${u:-}" ] || return 0
+    [ -n "${h:-}" ] || return 0
+
+    local apps_dir desktop_file
+    apps_dir="${h}/.local/share/applications"
+    desktop_file="${apps_dir}/zypper-auto-dashboard.desktop"
+
+    local expected_exec expected
+    expected_exec="/usr/local/bin/zypper-auto-helper --dash-open"
+
+    expected=$(cat <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Zypper Auto Dashboard
+Comment=Open the Zypper Auto Command Center dashboard
+Exec=${expected_exec}
+Terminal=false
+Icon=system-software-update
+Categories=System;Utility;
+StartupNotify=true
+EOF
+)
+
+    # Write/refresh the .desktop entry when missing or outdated.
+    local need=0
+    if [ ! -f "${desktop_file}" ]; then
+        need=1
+    else
+        if ! grep -qF "Exec=${expected_exec}" "${desktop_file}" 2>/dev/null; then
+            need=1
+        fi
+    fi
+
+    if [ "${need}" -eq 1 ] 2>/dev/null; then
+        mkdir -p "${apps_dir}" 2>/dev/null || true
+        printf '%s\n' "${expected}" >"${desktop_file}" 2>/dev/null || true
+        chmod 644 "${desktop_file}" 2>/dev/null || true
+        chown "${u}:${u}" "${desktop_file}" 2>/dev/null || true
+
+        # Optional: refresh desktop database if available (non-fatal).
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database "${apps_dir}" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # Also place a clickable shortcut on the Desktop folder (best-effort).
+    local desk_dir
+    desk_dir=""
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        desk_dir=$(sudo -u "${u}" XDG_CONFIG_HOME="${h}/.config" XDG_DATA_HOME="${h}/.local/share" xdg-user-dir DESKTOP 2>/dev/null || true)
+    fi
+    if [ -z "${desk_dir:-}" ]; then
+        desk_dir="${h}/Desktop"
+    fi
+
+    if [ -n "${desk_dir:-}" ] && [ -d "${desk_dir}" ]; then
+        local desktop_copy
+        desktop_copy="${desk_dir}/Zypper Auto Dashboard.desktop"
+        if [ ! -f "${desktop_copy}" ]; then
+            cp -f "${desktop_file}" "${desktop_copy}" 2>/dev/null || true
+            chmod 755 "${desktop_copy}" 2>/dev/null || true
+            chown "${u}:${u}" "${desktop_copy}" 2>/dev/null || true
+        fi
+    fi
+}
+
 if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
 
@@ -417,6 +489,9 @@ PY
         # Start sync worker so status-data.json/log views keep updating even if
         # this dashboard tab stays open for days.
         __znh_start_dashboard_sync_worker "${dash_dir}" "${USER:-}" "${HOME:-}" || true
+
+        # Ensure Desktop/app launcher exists (best-effort)
+        __znh_ensure_dash_desktop_shortcut "${USER:-}" "${HOME:-}" || true
 
         echo "Open live dashboard: ${url}"
 
@@ -7852,6 +7927,8 @@ PY
             local user_home
             user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
             __znh_start_dashboard_sync_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" || true
+            # Ensure Desktop/app launcher exists (best-effort)
+            __znh_ensure_dash_desktop_shortcut "${SUDO_USER}" "${user_home}" || true
         fi
 
         update_status "SUCCESS: Dashboard open attempted"
@@ -18686,6 +18763,11 @@ update_status "SUCCESS: Installation completed"
 
 # Update the static HTML dashboard (best-effort)
 generate_dashboard || true
+
+# Ensure dashboard desktop shortcut exists for the primary user (best-effort)
+if [ -n "${SUDO_USER:-}" ] && [ -n "${SUDO_USER_HOME:-}" ]; then
+    __znh_ensure_dash_desktop_shortcut "${SUDO_USER}" "${SUDO_USER_HOME}" || true
+fi
 
 # Remote monitoring: notify success (best-effort)
 send_webhook "zypper-auto-helper: Installation successful" \
