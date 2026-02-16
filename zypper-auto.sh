@@ -260,7 +260,7 @@ __znh_detach_open_url() {
 }
 
 __znh_ensure_dash_desktop_shortcut() {
-    # Pro Version: Desktop launcher with Keywords, Search terms, and 'Check Now' action.
+    # Ultimate Version: L10n, Native Icons, and Maintenance Actions (Verify/Health)
     # Usage: __znh_ensure_dash_desktop_shortcut <user> <home>
     local u="$1" h="$2"
     [ -n "${u:-}" ] || return 0
@@ -270,57 +270,109 @@ __znh_ensure_dash_desktop_shortcut() {
     apps_dir="${h}/.local/share/applications"
     desktop_file="${apps_dir}/zypper-auto-dashboard.desktop"
 
-    # Paths to helpers
+    # Helpers
     local helper_bin
     helper_bin="/usr/local/bin/zypper-auto-helper"
 
-    # Define the Pro Desktop Entry content
-    # NOTE: .desktop Exec does not expand ~ or $HOME, so we use sh -c where needed.
+    # Smart Icon Detection: Prefer SUSE/YaST icons if available, fall back to generic
+    local icon_name
+    icon_name="system-software-update"
+    if [ -e /usr/share/icons/hicolor/scalable/apps/yast-update.svg ] || \
+       [ -e /usr/share/icons/hicolor/48x48/apps/yast-update.png ]; then
+        icon_name="yast-update"
+    elif [ -e /usr/share/icons/hicolor/scalable/apps/yast-software.svg ]; then
+        icon_name="yast-software"
+    fi
+
+    # Define the Desktop Entry with Translations and Maintenance Actions.
+    # NOTE: .desktop Exec does not expand ~ or $HOME, so we use sh -lc where needed.
     local expected
     expected=$(cat <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
 Name=Zypper Auto Dashboard
+Name[de]=Zypper Auto Dashboard
+Name[fr]=Tableau de bord Zypper
+Name[es]=Panel de Zypper Auto
 GenericName=System Update Center
+GenericName[de]=Systemaktualisierung
+GenericName[fr]=Centre de mise à jour
+GenericName[es]=Centro de actualizaciones
 Comment=View update status, logs, and manage system maintenance
+Comment[de]=Update-Status anzeigen und Systemwartung verwalten
+Comment[fr]=Voir l'état des mises à jour et gérer la maintenance
+Comment[es]=Ver estado de actualizaciones y mantenimiento
 Exec=${helper_bin} --dash-open
 Terminal=false
-Icon=system-software-update
-Categories=System;Utility;Monitor;
-Keywords=Update;Upgrade;Check;Maintenance;Suse;Snapshot;
+Icon=${icon_name}
+Categories=System;Utility;Monitor;GTK;Qt;
+Keywords=Update;Upgrade;Check;Maintenance;Suse;Snapshot;Repair;Health;
 StartupNotify=true
 X-GNOME-UsesNotifications=true
-Actions=Install;CheckNow;StopServer;UserLogs;
+Actions=Install;CheckNow;Verify;Health;StopServer;UserLogs;
 
 [Desktop Action Install]
 Name=Install Updates (Interactive)
+Name[de]=Updates installieren (Interaktiv)
+Name[fr]=Installer les mises à jour
+Name[es]=Instalar actualizaciones
 Exec=sh -lc "\"\${HOME}/.local/bin/zypper-run-install\""
 Icon=system-software-install
 
 [Desktop Action CheckNow]
 Name=Check for Updates Now
+Name[de]=Jetzt nach Updates suchen
+Name[fr]=Vérifier les mises à jour
+Name[es]=Buscar actualizaciones ahora
 Exec=sh -lc "systemctl --user start zypper-notify-user.service >/dev/null 2>&1 || true"
 Icon=view-refresh
 
+[Desktop Action Verify]
+Name=Run Auto-Repair (Root)
+Name[de]=Auto-Reparatur starten (Root)
+Name[fr]=Lancer l'auto-réparation (Root)
+Name[es]=Ejecutar auto-reparación (Root)
+Exec=pkexec ${helper_bin} --verify
+Icon=yast-restore
+
+[Desktop Action Health]
+Name=Generate Health Report
+Name[de]=Gesundheitsbericht erstellen
+Name[fr]=Rapport de santé
+Name[es]=Informe de salud
+Exec=pkexec ${helper_bin} --health
+Icon=yast-hardware-group
+
 [Desktop Action StopServer]
 Name=Stop Dashboard Server
+Name[de]=Dashboard-Server stoppen
+Name[fr]=Arrêter le serveur
+Name[es]=Detener servidor
 Exec=${helper_bin} --dash-stop
 Icon=process-stop
 
 [Desktop Action UserLogs]
 Name=Open Log Folder
+Name[de]=Log-Ordner öffnen
+Name[fr]=Ouvrir les journaux
+Name[es]=Abrir registros
 Exec=sh -lc "xdg-open \"\${HOME}/.local/share/zypper-notify\""
 Icon=folder-open
 EOF
 )
 
-    # Smart Update: Force update if missing OR if it lacks the new 'CheckNow' action
+    # Smart Update: Force update if missing OR if it lacks the new 'Verify' action
     local need=0
     if [ ! -f "${desktop_file}" ]; then
         need=1
     else
-        if ! grep -qF "Actions=Install;CheckNow;" "${desktop_file}" 2>/dev/null; then
+        # If the existing file doesn't have our new Maintenance actions, overwrite it
+        if ! grep -qF "Actions=Install;CheckNow;Verify;" "${desktop_file}" 2>/dev/null; then
+            need=1
+        fi
+        # Also update if we found a better icon than the generic one
+        if [ "${icon_name}" != "system-software-update" ] && grep -qF "Icon=system-software-update" "${desktop_file}" 2>/dev/null; then
             need=1
         fi
     fi
