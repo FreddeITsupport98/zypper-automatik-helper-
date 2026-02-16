@@ -1279,6 +1279,11 @@ systemctl status zypper-autodownload.service
 ### Version History
 
 - **Unreleased (next build):**
+  - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs in **High Priority Mode** by default:
+    - First run occurs ~30 seconds after boot (instead of waiting a full interval)
+    - Default interval is now **5 minutes**
+    - The verification service runs with elevated CPU/I/O priority (Nice + realtime I/O)
+  - 🔐 **IMPROVED:** installing now also drops a Polkit action file so `pkexec` prompts for "System Verification and Repair" look trusted/official (instead of a generic "run /usr/local/bin/..." prompt). The uninstaller removes it.
   - 🩺 **IMPROVED:** `zypper-auto-helper --verify` now also verifies the dashboard desktop/start-menu shortcut and auto-regenerates it if it was deleted or is outdated.
   - 🖥️ **IMPROVED:** desktop/start-menu dashboard shortcut Quick Actions now have better UX:
     - **Check Now** shows a desktop bubble (when `notify-send` exists) before waking the notifier service.
@@ -1407,6 +1412,7 @@ zypper-auto-helper --uninstall-zypper
 ```
 
 By default this will:
+- Remove the Polkit action file (if installed): `/usr/share/polkit-1/actions/org.opensuse.zypper-auto.policy`
 - Stop and disable the root timers/services (`zypper-autodownload`, `zypper-cache-cleanup`, `zypper-auto-verify`)
 - Stop and disable the user notifier timer/service for your user
 - Remove all helper systemd unit files and helper binaries

@@ -202,6 +202,69 @@ __znh_stop_dashboard_sync_worker() {
     rm -f "${pid_file}" 2>/dev/null || true
 }
 
+__znh_install_polkit_policy() {
+    # Installs a Polkit policy so 'pkexec' shows a trusted, human-friendly UI
+    # instead of a generic "run /usr/local/bin/..." prompt.
+    #
+    # This is best-effort and non-fatal: older systems may not run polkit as a
+    # systemd unit, and some environments cache actions.
+    local policy_file
+    policy_file="/usr/share/polkit-1/actions/org.opensuse.zypper-auto.policy"
+
+    log_debug "Installing Polkit policy to ${policy_file}..."
+
+    mkdir -p "$(dirname "${policy_file}")" 2>/dev/null || true
+
+    if ! write_atomic "${policy_file}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Zypper Auto Helper</vendor>
+  <vendor_url>https://github.com</vendor_url>
+  <icon_name>yast-restore</icon_name>
+
+  <action id="org.opensuse.zypper-auto.verify">
+    <description>Run System Verification and Repair</description>
+    <description xml:lang="de">Systemprüfung und Reparatur ausführen</description>
+    <description xml:lang="fr">Exécuter la vérification et la réparation du système</description>
+    <description xml:lang="es">Ejecutar verificación y reparación del sistema</description>
+
+    <message>Authentication is required to run the Zypper Auto system repair tool</message>
+    <message xml:lang="de">Authentifizierung ist erforderlich, um das Systemreparatur-Tool auszuführen</message>
+    <message xml:lang="fr">Une authentification est requise pour lancer l'outil de réparation</message>
+    <message xml:lang="es">Se requiere autenticación para ejecutar la herramienta de reparación</message>
+
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/zypper-auto-helper</annotate>
+  </action>
+</policyconfig>
+EOF
+    then
+        log_warn "Failed to write Polkit policy file: ${policy_file}"
+        return 1
+    fi
+
+    chmod 644 "${policy_file}" 2>/dev/null || true
+
+    # Best-effort reload so the new action shows up immediately.
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet polkit.service 2>/dev/null; then
+            systemctl reload polkit.service 2>/dev/null || true
+        elif systemctl is-active --quiet polkit 2>/dev/null; then
+            systemctl reload polkit 2>/dev/null || true
+        fi
+    fi
+
+    return 0
+}
+
 __znh_pick_free_port() {
     # Pick the first free port in a range. Echo the port, or empty on failure.
     local start="$1" end="$2" p
@@ -1368,7 +1431,8 @@ NT_TIMER_INTERVAL_MINUTES=1
 #   30 = every 30 minutes
 #   60 = every hour (hourly)
 # Any other value is treated as invalid and will be reset to a safe default.
-VERIFY_TIMER_INTERVAL_MINUTES=60
+# Default: 5 (High Priority Mode default)
+VERIFY_TIMER_INTERVAL_MINUTES=5
 
 # ---------------------------------------------------------------------
 # Snapper safety: retention optimizer caps (prevent disk filling)
@@ -6607,40 +6671,73 @@ else
     log_info "ℹ zypper not available; skipping reboot requirement check"
 fi
 
-# Check 30: Dashboard Shortcut Health (auto-fix)
-log_debug "[30/${TOTAL_CHECKS}] Checking Dashboard Desktop Shortcut..."
-local desk_path desk_ok
-desk_path="${SUDO_USER_HOME}/.local/share/applications/zypper-auto-dashboard.desktop"
-desk_ok=0
+# Check 30: Dashboard Shortcut Health (Start Menu & Desktop)
+log_debug "[30/${TOTAL_CHECKS}] Checking Shortcuts (Start Menu + Desktop)..."
 
-# 1) Does the file exist?
-if [ -f "${desk_path}" ]; then
-    # 2) Does it look like our current-generation shortcut?
-    # - Must expose Verify action
-    # - Must include the 'read line' UX marker (Press Enter to close)
-    if grep -qE '^[[:space:]]*Actions=.*Verify' "${desk_path}" 2>/dev/null && \
-       grep -qF "read line" "${desk_path}" 2>/dev/null; then
-        desk_ok=1
-    fi
+# 1) Define paths
+local app_shortcut desktop_dir desk_shortcut shortcuts_ok
+app_shortcut="${SUDO_USER_HOME}/.local/share/applications/zypper-auto-dashboard.desktop"
+
+# Smart detection of the Desktop folder (handles different languages)
+desktop_dir="${SUDO_USER_HOME}/Desktop"
+if [ -n "${SUDO_USER:-}" ]; then
+    desktop_dir=$(sudo -u "${SUDO_USER}" sh -c 'command -v xdg-user-dir >/dev/null && xdg-user-dir DESKTOP || echo "$HOME/Desktop"' 2>/dev/null || echo "${SUDO_USER_HOME}/Desktop")
 fi
 
-if [ "${desk_ok}" -eq 1 ] 2>/dev/null; then
-    log_success "✓ Desktop shortcut is present and up-to-date"
+desk_shortcut="${desktop_dir}/Zypper Auto Dashboard.desktop"
+
+log_debug "[shortcuts] app_shortcut=${app_shortcut}"
+log_debug "[shortcuts] desktop_dir=${desktop_dir}"
+log_debug "[shortcuts] desk_shortcut=${desk_shortcut}"
+
+shortcuts_ok=1
+
+# 2) Verify Start Menu Icon
+if [ ! -f "${app_shortcut}" ]; then
+    shortcuts_ok=0
+    log_warn "[shortcuts] Missing Start Menu launcher: ${app_shortcut}"
+elif ! grep -qE '^[[:space:]]*Actions=.*Verify' "${app_shortcut}" 2>/dev/null; then
+    shortcuts_ok=0
+    log_warn "[shortcuts] Start Menu launcher is outdated (missing Verify action): ${app_shortcut}"
+elif ! grep -qF "read line" "${app_shortcut}" 2>/dev/null; then
+    # Keep the check strict so older shortcut generations get upgraded.
+    shortcuts_ok=0
+    log_warn "[shortcuts] Start Menu launcher is outdated (missing UX marker 'read line'): ${app_shortcut}"
+fi
+
+# 3) Verify Desktop Surface Icon
+# Only check if the Desktop folder actually exists (some users disable it)
+if [ -d "${desktop_dir}" ]; then
+    if [ ! -f "${desk_shortcut}" ]; then
+        shortcuts_ok=0
+        log_warn "[shortcuts] Missing Desktop shortcut: ${desk_shortcut}"
+    fi
 else
-    log_error "✗ Desktop shortcut is missing or outdated"
-    log_info "  → Attempting auto-repair: regenerating user shortcut..."
+    log_info "[shortcuts] Desktop directory does not exist; skipping Desktop shortcut check: ${desktop_dir}"
+fi
+
+# 4) Act
+if [ "${shortcuts_ok}" -eq 1 ] 2>/dev/null; then
+    log_success "✓ Shortcuts present in Start Menu & Desktop"
+else
+    log_error "✗ Shortcuts are missing or outdated"
+    log_info "  → Triggering immediate restore via __znh_ensure_dash_desktop_shortcut..."
 
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
 
-    if execute_guarded "Regenerate dashboard desktop shortcut" \
+    if execute_guarded "Regenerate shortcuts" \
         __znh_ensure_dash_desktop_shortcut "${SUDO_USER}" "${SUDO_USER_HOME}"; then
-        # Extra polish: bump mtime to encourage some desktops to refresh caches.
-        execute_optional "Refresh shortcut mtime (icon refresh hint)" \
-            sudo -u "${SUDO_USER}" touch "${desk_path}" >/dev/null 2>&1 || true
 
-        log_success "  ✓ Auto-repair successful: shortcut restored"
+        # Polish: Touch the desktop file to force the DE to redraw it immediately
+        if [ -f "${desk_shortcut}" ] && [ -n "${SUDO_USER:-}" ]; then
+            execute_optional "Touch Desktop shortcut (icon refresh hint)" \
+                sudo -u "${SUDO_USER}" touch "${desk_shortcut}" >/dev/null 2>&1 || true
+        fi
+
+        log_success "  ✓ Auto-repair successful: All shortcuts restored"
     else
-        log_error "  ✗ Failed to restore shortcut"
+        log_error "  ✗ Failed to restore shortcuts"
+        log_info "  → You can manually regenerate via: zypper-auto-helper --dash-open"
         VERIFICATION_FAILED=1
     fi
 fi
@@ -12097,6 +12194,7 @@ run_uninstall_helper_only() {
     # 3. Remove systemd unit files and root binaries
     log_debug "Removing root systemd units and binaries..."
     execute_guarded "Remove root unit files and binaries" rm -f \
+        /usr/share/polkit-1/actions/org.opensuse.zypper-auto.policy \
         /etc/systemd/system/zypper-autodownload.service \
         /etc/systemd/system/zypper-autodownload.timer \
         /etc/systemd/system/zypper-cache-cleanup.service \
@@ -12381,6 +12479,8 @@ run_brew_install_only() {
     check_and_install curl curl "required to download the Homebrew installer script"
     check_and_install git git "required for Homebrew operations (manages formula repositories)"
 
+    # shellcheck disable=SC2016
+    # This is a user-facing string; we intentionally keep it single-quoted.
     BREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
     echo "" | tee -a "${LOG_FILE}"
@@ -12395,6 +12495,8 @@ run_brew_install_only() {
         # Best-effort: automatically add Homebrew to the user's shell PATH if
         # they are using common shells and the recommended snippet is not
         # already present. This avoids the common "brew not in PATH" warning.
+        # shellcheck disable=SC2016
+        # This is a user-facing string snippet; we intentionally keep it single-quoted.
         BREW_SHELLENV_LINE='eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"'
 
         # fish
@@ -12436,6 +12538,7 @@ run_brew_install_only() {
         fi
 
         echo "You may need to add brew to your PATH. For example:" | tee -a "${LOG_FILE}"
+        # shellcheck disable=SC2016
         echo '  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' | tee -a "${LOG_FILE}"
         echo 'or see:  https://docs.brew.sh/Homebrew-on-Linux' | tee -a "${LOG_FILE}"
         return 0
@@ -13936,7 +14039,8 @@ log_debug "Writing service file: ${VERIFY_SERVICE_FILE}"
 # Derive systemd schedule for the verification timer from
 # VERIFY_TIMER_INTERVAL_MINUTES. We mirror the downloader's
 # behaviour: minutely/hourly for 1/60, or "*:0/N" for other values.
-VERIFY_ONBOOTSEC="${VERIFY_TIMER_INTERVAL_MINUTES}min"
+# High Priority: run shortly after boot instead of waiting a full interval.
+VERIFY_ONBOOTSEC="30s"
 VERIFY_ONCALENDAR="minutely"
 if [ "${VERIFY_TIMER_INTERVAL_MINUTES}" -eq 60 ]; then
     VERIFY_ONCALENDAR="hourly"
@@ -13952,6 +14056,13 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+
+# --- HIGH PRIORITY SETTINGS ---
+Nice=-19
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+# ------------------------------
+
 ExecStart=/usr/local/bin/zypper-auto-helper --verify
 StandardOutput=append:${LOG_DIR}/service-logs/verify.log
 StandardError=append:${LOG_DIR}/service-logs/verify-error.log
@@ -18296,6 +18407,9 @@ if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PA
     execute_guarded "Set ${COMMAND_PATH} permissions (755)" chmod 755 "$COMMAND_PATH"
     log_success "Command installed: zypper-auto-helper"
     log_info "You can now run: zypper-auto-helper --help"
+
+    # Polkit action (pkexec UX polish for desktop shortcut actions)
+    __znh_install_polkit_policy || log_warn "Failed to install Polkit policy (non-fatal)"
 else
     log_error "Warning: Could not install command (non-fatal)"
 fi
