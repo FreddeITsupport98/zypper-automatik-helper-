@@ -1293,6 +1293,7 @@ systemctl status zypper-autodownload.service
   - ⚡ **IMPROVED:** dashboard components are now true "background" priority:
     - dashboard API unit includes systemd CPU/IO/memory caps + low priority
     - dashboard HTTP server + sync/perf workers run with best-effort `ionice -c3` + `nice(19)` (when tools are available)
+  - 🧰 **IMPROVED:** Snapper menu and dashboard now show **snapper timer status** (`snapper-*.timer`) with the same green/yellow/red state colors as the AUTO option.
   - ⚡ **IMPROVED:** installer log cleanup trims uncompressed `install-*.log` files using a single directory scan (avoids repeated `find | wc -l` passes).
   - 🧹 **IMPROVED:** `zypper-auto.sh` now passes `shellcheck -x` cleanly (removed `ls`-based file listings, removed truly-unused variables, and suppressed the one unavoidable config-source follow warning).
   - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:

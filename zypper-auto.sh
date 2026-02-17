@@ -721,6 +721,7 @@ PY
                 rm -f "${err_file}" 2>/dev/null || true
                 # Bind explicitly to localhost (privacy/safety) and detach so the server survives terminal close.
                 # Run the server at background priority (nice + idle IO) so it never contends with foreground apps.
+                # shellcheck disable=SC2016  # $$ is expanded by the nested bash -lc, not by this outer script
                 ( nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec python3 -m http.server --bind 127.0.0.1 --directory "$1" "$2"' _ "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
                 sleep 0.25
             else
@@ -3304,6 +3305,53 @@ generate_dashboard() {
     if [ "${verify_timer}" = "active" ]; then verify_timer_class="timer-active"; fi
     if [ "${nt_timer}" = "active" ]; then nt_timer_class="timer-active"; fi
 
+    # Snapper timers (for dashboard snapper panel): enabled/partial/disabled/missing.
+    local snapper_timeline_timer snapper_cleanup_timer snapper_boot_timer
+    local snapper_timeline_class snapper_cleanup_class snapper_boot_class
+
+    __znh_dash_timer_state() {
+        local unit="$1"
+        if ! __znh_unit_file_exists_system "${unit}"; then
+            printf '%s' "missing"
+            return 0
+        fi
+
+        local en=0 act=0
+        if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+            en=1
+        fi
+        if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            act=1
+        fi
+
+        if [ "${en}" -eq 1 ] 2>/dev/null && [ "${act}" -eq 1 ] 2>/dev/null; then
+            printf '%s' "enabled"
+        elif [ "${en}" -eq 1 ] 2>/dev/null || [ "${act}" -eq 1 ] 2>/dev/null; then
+            printf '%s' "partial"
+        else
+            printf '%s' "disabled"
+        fi
+        return 0
+    }
+
+    __znh_dash_timer_class() {
+        local state="$1"
+        case "${state}" in
+            enabled) printf '%s' "timer-active" ;;
+            partial) printf '%s' "timer-partial" ;;
+            *) printf '%s' "timer-inactive" ;;
+        esac
+        return 0
+    }
+
+    snapper_timeline_timer="$(__znh_dash_timer_state snapper-timeline.timer 2>/dev/null || echo disabled)"
+    snapper_cleanup_timer="$(__znh_dash_timer_state snapper-cleanup.timer 2>/dev/null || echo disabled)"
+    snapper_boot_timer="$(__znh_dash_timer_state snapper-boot.timer 2>/dev/null || echo disabled)"
+
+    snapper_timeline_class="$(__znh_dash_timer_class "${snapper_timeline_timer}" 2>/dev/null || echo timer-inactive)"
+    snapper_cleanup_class="$(__znh_dash_timer_class "${snapper_cleanup_timer}" 2>/dev/null || echo timer-inactive)"
+    snapper_boot_class="$(__znh_dash_timer_class "${snapper_boot_timer}" 2>/dev/null || echo timer-inactive)"
+
     # System metrics for quick scanning.
     local kernel_ver uptime_info disk_used disk_total disk_percent disk_usage_display mem_usage
     kernel_ver=$(uname -r 2>/dev/null || echo "Unknown")
@@ -3687,6 +3735,7 @@ generate_dashboard() {
         overflow-wrap: anywhere;
     }
     .timer-active { color: #2ecc71; font-weight: 800; }
+    .timer-partial { color: #f59e0b; font-weight: 800; }
     .timer-inactive { color: #e74c3c; font-weight: 800; }
 
     /* Disk usage bar */
@@ -3943,6 +3992,21 @@ generate_dashboard() {
       <h2>🧰 Snapper Manager (Root)</h2>
       <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
         Runs Snapper menu actions (1–6) through the local Dashboard API. Requires confirmation for any change.
+      </div>
+
+      <div class="grid" style="margin-bottom: 12px;">
+        <div class="stat-box">
+          <span class="stat-label">snapper-timeline.timer</span>
+          <span class="stat-value ${snapper_timeline_class}" id="snapper-timeline-timer">${snapper_timeline_timer}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">snapper-cleanup.timer</span>
+          <span class="stat-value ${snapper_cleanup_class}" id="snapper-cleanup-timer">${snapper_cleanup_timer}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">snapper-boot.timer</span>
+          <span class="stat-value ${snapper_boot_class}" id="snapper-boot-timer">${snapper_boot_timer}</span>
+        </div>
       </div>
 
       <div class="grid">
@@ -5066,6 +5130,19 @@ generate_dashboard() {
         el.classList.add(on ? 'feat-on' : 'feat-off');
     }
 
+    function setTimerState(id, state) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var s = (state === undefined || state === null) ? '' : String(state);
+        if (el.textContent !== s) el.textContent = s;
+        el.classList.remove('timer-active');
+        el.classList.remove('timer-partial');
+        el.classList.remove('timer-inactive');
+        if (s === 'enabled') el.classList.add('timer-active');
+        else if (s === 'partial') el.classList.add('timer-partial');
+        else el.classList.add('timer-inactive');
+    }
+
     function applyLiveData(d) {
         if (!d) return;
 
@@ -5092,6 +5169,11 @@ generate_dashboard() {
         setText('dl-timer', d.dl_timer);
         setText('verify-timer', d.verify_timer);
         setText('notifier-timer', d.nt_timer);
+
+        // Snapper timers (dashboard Snapper panel)
+        if (d.snapper_timeline_timer !== undefined) setTimerState('snapper-timeline-timer', d.snapper_timeline_timer);
+        if (d.snapper_cleanup_timer !== undefined) setTimerState('snapper-cleanup-timer', d.snapper_cleanup_timer);
+        if (d.snapper_boot_timer !== undefined) setTimerState('snapper-boot-timer', d.snapper_boot_timer);
 
         setText('last-install-log', d.last_install_log);
         setText('flight-report-log', d.flight_report_log);
@@ -5652,6 +5734,10 @@ EOF
   "dl_timer": "$(_json_escape "$dl_timer")",
   "verify_timer": "$(_json_escape "$verify_timer")",
   "nt_timer": "$(_json_escape "$nt_timer")",
+
+  "snapper_timeline_timer": "$(_json_escape "$snapper_timeline_timer")",
+  "snapper_cleanup_timer": "$(_json_escape "$snapper_cleanup_timer")",
+  "snapper_boot_timer": "$(_json_escape "$snapper_boot_timer")",
 
   "kernel_ver": "$(_json_escape "$kernel_ver")",
   "uptime_info": "$(_json_escape "$uptime_info")",
@@ -11495,12 +11581,69 @@ run_snapper_menu_only() {
             ;;
     esac
 
+    __znh_timer_state() {
+        # Prints: enabled | partial | disabled | missing
+        local unit="$1"
+        if ! __znh_unit_file_exists_system "${unit}"; then
+            printf '%s' "missing"
+            return 0
+        fi
+
+        local en=0 act=0
+        if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+            en=1
+        fi
+        if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            act=1
+        fi
+
+        if [ "${en}" -eq 1 ] 2>/dev/null && [ "${act}" -eq 1 ] 2>/dev/null; then
+            printf '%s' "enabled"
+        elif [ "${en}" -eq 1 ] 2>/dev/null || [ "${act}" -eq 1 ] 2>/dev/null; then
+            printf '%s' "partial"
+        else
+            printf '%s' "disabled"
+        fi
+        return 0
+    }
+
+    __znh_timer_state_color() {
+        local state="$1"
+        case "${state}" in
+            enabled) printf '%s' "${C_GREEN}" ;;
+            partial) printf '%s' "${C_YELLOW}" ;;
+            *) printf '%s' "${C_RED}" ;;
+        esac
+        return 0
+    }
+
+    __znh_print_snapper_timer_status_block() {
+        # Compact timer status so users can see at a glance whether automation is active.
+        # Printed on menu load and on each re-render.
+        local u state color prefix suffix
+        echo ""
+        echo "Snapper timers (systemd):"
+        for u in snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer; do
+            state="$(__znh_timer_state "${u}" 2>/dev/null || echo "unknown")"
+            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                color="$(__znh_timer_state_color "${state}" 2>/dev/null || echo "")"
+                prefix="${color}"
+                suffix="${C_RESET}"
+                printf "  - %s: %b%s%b\n" "${u}" "${prefix}" "${state}" "${suffix}"
+            else
+                printf "  - %s: %s\n" "${u}" "${state}"
+            fi
+        done
+        return 0
+    }
+
     while true; do
         echo ""
         echo "=============================================="
         echo "  Zypper Auto-Helper Snapper Menu"
         echo "=============================================="
         echo "  (Snapper mode: ${snapper_mode})"
+        __znh_print_snapper_timer_status_block || true
         echo "  1) Status (configs + snapshot detection + timers)"
         echo "  2) List recent snapshots (root)"
         echo "  3) Create snapshot (single)"
