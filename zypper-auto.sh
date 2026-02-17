@@ -106,7 +106,8 @@ __znh_pid_is_dashboard_http_server() {
         args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
         # Verify it's our http.server and pointing at the right directory/port.
         printf '%s' "${args}" | grep -q "python3 -m http.server" || return 1
-        printf '%s' "${args}" | grep -q "--directory ${dash_dir}" || return 1
+        # Pattern begins with "--" so terminate grep options explicitly.
+        printf '%s' "${args}" | grep -qF -- "--directory ${dash_dir}" || return 1
         printf '%s' "${args}" | grep -q " ${port}\b" || return 1
         return 0
     fi
@@ -223,7 +224,8 @@ __znh_pid_is_dashboard_perf_worker() {
         # We mark the process name via: exec -a znh-dashboard-perf ...
         printf '%s' "${args}" | grep -q "znh-dashboard-perf" || return 1
         # Ensure it's writing into the correct dashboard directory.
-        printf '%s' "${args}" | grep -qF "--out-dir ${dash_dir}" || return 1
+        # Pattern begins with "--" so terminate grep options explicitly.
+        printf '%s' "${args}" | grep -qF -- "--out-dir ${dash_dir}" || return 1
         return 0
     fi
     return 1
