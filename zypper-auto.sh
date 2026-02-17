@@ -767,12 +767,12 @@ PY
         # is still starting up.
         if command -v curl >/dev/null 2>&1; then
             ok=0
-            for _i in 1 2 3; do
-                if curl -fsS --max-time 1 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
+            for _i in 1 2 3 4 5 6 7 8; do
+                if curl -fsS --max-time 2 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
                     ok=1
                     break
                 fi
-                sleep 0.2
+                sleep 0.25
             done
 
             if [ "${ok}" -ne 1 ] 2>/dev/null; then
@@ -8881,12 +8881,12 @@ PY
         if command -v curl >/dev/null 2>&1; then
             local ok
             ok=0
-            for _i in 1 2 3; do
-                if curl -fsS --max-time 1 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
+            for _i in 1 2 3 4 5 6 7 8; do
+                if curl -fsS --max-time 2 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
                     ok=1
                     break
                 fi
-                sleep 0.2
+                sleep 0.25
             done
 
             if [ "${ok}" -ne 1 ] 2>/dev/null; then
