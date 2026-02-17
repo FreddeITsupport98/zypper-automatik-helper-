@@ -1104,7 +1104,7 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
 - The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
-- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), subtle JS effects (toast notifications, ripple clicks, and live-update highlights), plus Recent Activity Log **view switching** (Live / Logs tail / Diagnostics / journalctl) and quick-copy log tools.
+- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), subtle JS effects (toast notifications, ripple clicks, and live-update highlights), plus Recent Activity Log **view switching** (Live / Logs tail / Verify/Repair / Diagnostics / API / journalctl) and quick-copy log tools.
 
 Quickstart (enable example hooks + generate/open dashboard):
 
@@ -1185,6 +1185,7 @@ sudo zypper-auto-helper --dashboard
 The dashboard also writes small sidecar files alongside the HTML:
 - `/var/log/zypper-auto/status-data.json`
 - `~/.local/share/zypper-notify/dashboard-live.log` (realtime log stream for Live mode)
+- `~/.local/share/zypper-notify/dashboard-verify-tail.log` (tail of auto-repair/verification service log for the Recent Activity view)
 - `~/.local/share/zypper-notify/dashboard-api.log` (Settings API log mirror for the UI)
 
 If you open the dashboard through a local web server (recommended), you can enable **Live mode** in the UI and it will:
@@ -1311,6 +1312,7 @@ systemctl status zypper-autodownload.service
     - **Install Updates** and **Health Report** now keep the terminal window open until you press Enter.
   - 🔔 **FIXED:** the "Updates Ready" notification no longer re-appears while you are already installing updates (install action now suppresses notifier popups via an install-in-progress marker; configurable via `INSTALL_CLICK_SUPPRESS_MINUTES`).
   - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
+  - 🧰 **IMPROVED:** dashboard Recent Activity log now also includes a **Verify/Repair** view (tail of `verify.log`) so auto-repair runs are visible in the timeline.
   - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
   - 🥾 **NEW:** boot-menu hygiene: Snapper cleanup can prune old systemd-boot/BLS entry files to keep the boot menu clean (backup/delete modes).
   - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path (highlighted in color when supported) and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
@@ -1330,7 +1332,7 @@ systemctl status zypper-autodownload.service
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
-  - 🧾 **NEW: Dashboard live logs + log view switching** – dashboard can follow `dashboard-live.log` and switch Recent Activity views (Live / Logs tail / Diagnostics / journalctl).
+  - 🧾 **NEW: Dashboard live logs + log view switching** – dashboard can follow `dashboard-live.log` and switch Recent Activity views (Live / Logs tail / Verify/Repair / Diagnostics / API / journalctl).
   - 🔋 **IMPROVED: Power safety detection** – installer now ensures `upower` is installed and the notifier uses `/sys/class/power_supply` fallbacks (then upower) for more reliable AC/battery detection.
   - ✅ **IMPROVED: Dependency prompt UX (default Yes)** – missing required dependencies now prompt with `[Y/n]` (recommended).
   - 🧰 **NEW: Recommended dev tool prompt** – offers to install `ShellCheck` (optional, default Yes) to help maintain bash code quality.

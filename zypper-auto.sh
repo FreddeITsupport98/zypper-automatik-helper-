@@ -171,6 +171,7 @@ exec -a znh-dashboard-sync bash -lc '
     cp -u "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log" 2>/dev/null || true
     cp -u "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log" 2>/dev/null || true
     cp -u "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log" 2>/dev/null || true
+    cp -u "${src_root}/dashboard-verify-tail.log" "${dash_dir}/dashboard-verify-tail.log" 2>/dev/null || true
     # Live mode polls download-status.txt; keep it synced too.
     cp -u "${src_root}/download-status.txt" "${dash_dir}/download-status.txt" 2>/dev/null || true
     # status.html is larger; only update if it changed.
@@ -2939,7 +2940,18 @@ EOF
 # Status update function
 update_status() {
     local status="$1"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $status" | tee "${STATUS_FILE}" | tee -a "${LOG_FILE}"
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # Status file is a single-line indicator consumed by the dashboard.
+    # Keep it plain and stable so it can be parsed by humans and tools.
+    printf '[%s] %s\n' "${ts}" "${status}" >"${STATUS_FILE}" 2>/dev/null || true
+    chmod 644 "${STATUS_FILE}" 2>/dev/null || true
+
+    # Also emit a structured line so the dashboard Recent Activity timeline
+    # shows verification/auto-repair progress with the same log format.
+    # (This replaces the previous tee-to-LOG_FILE behaviour to avoid duplicates.)
+    log_info "[status] ${status}"
 }
 
 # --- Remote monitoring: Webhooks (best-effort) ---
@@ -4116,6 +4128,7 @@ generate_dashboard() {
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 10px 0;">
         <button class="pill log-tab" type="button" data-view="live">View: Live</button>
         <button class="pill log-tab" type="button" data-view="install">View: Logs (tail)</button>
+        <button class="pill log-tab" type="button" data-view="verify">View: Verify/Repair</button>
         <button class="pill log-tab" type="button" data-view="diag">View: Diagnostics</button>
         <button class="pill log-tab" type="button" data-view="api">View: API</button>
         <button class="pill log-tab" type="button" data-view="journal">View: journalctl</button>
@@ -4126,6 +4139,7 @@ generate_dashboard() {
         <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper --live-logs', this)">Copy: Live Logs</button>
         <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper debug', this)">Copy: Debug Menu</button>
         <button class="pill" type="button" onclick="copyCmd('sudo zypper-auto-helper --logs', this)">Copy: Logs (tail)</button>
+        <button class="pill" type="button" onclick="copyCmd('sudo tail -n 220 /var/log/zypper-auto/service-logs/verify.log', this)">Copy: Verify</button>
         <button class="pill" type="button" onclick="copyCmd('journalctl -t zypper-auto-helper -n 200 --no-pager', this)">Copy: journalctl</button>
       </div>
 
@@ -5570,6 +5584,7 @@ generate_dashboard() {
                 if (hint) {
                     var txt = 'dashboard-live.log';
                     if (logView === 'install') txt = 'dashboard-install-tail.log';
+                    else if (logView === 'verify') txt = 'dashboard-verify-tail.log';
                     else if (logView === 'diag') txt = 'dashboard-diag-tail.log';
                     else if (logView === 'api') txt = 'dashboard-api.log';
                     else if (logView === 'journal') txt = 'dashboard-journal-tail.log';
@@ -5619,13 +5634,14 @@ generate_dashboard() {
         var base = 'dashboard-live.log';
         var rangeBytes = 60000;
         if (logView === 'install') base = 'dashboard-install-tail.log';
+        else if (logView === 'verify') base = 'dashboard-verify-tail.log';
         else if (logView === 'diag') base = 'dashboard-diag-tail.log';
         else if (logView === 'api') base = 'dashboard-api.log';
         else if (logView === 'journal') base = 'dashboard-journal-tail.log';
 
         var url = base + '?ts=' + Date.now();
         var headers = {};
-        if (logView === 'live' || logView === 'diag' || logView === 'api' || logView === 'journal') {
+        if (logView === 'live' || logView === 'verify' || logView === 'diag' || logView === 'api' || logView === 'journal') {
             headers['Range'] = 'bytes=-' + String(rangeBytes);
         }
 
@@ -5756,14 +5772,25 @@ JSON_EOF
     chmod 644 "${out_json_root}" 2>/dev/null || true
 
     # Extra pre-rendered log views for the dashboard toggles
-    local out_install_tail_root out_diag_tail_root out_journal_tail_root out_api_tail_root
+    local out_install_tail_root out_verify_tail_root out_diag_tail_root out_journal_tail_root out_api_tail_root
     out_install_tail_root="${LOG_DIR}/dashboard-install-tail.log"
+    out_verify_tail_root="${LOG_DIR}/dashboard-verify-tail.log"
     out_diag_tail_root="${LOG_DIR}/dashboard-diag-tail.log"
     out_journal_tail_root="${LOG_DIR}/dashboard-journal-tail.log"
     out_api_tail_root="${LOG_DIR}/dashboard-api.log"
 
     printf '%s\n' "${last_install_tail}" >"${out_install_tail_root}" 2>/dev/null || true
     chmod 644 "${out_install_tail_root}" 2>/dev/null || true
+
+    # Verify/repair log (tail) for the dashboard 'View: Verify/Repair' tab.
+    local verify_root_log
+    verify_root_log="${LOG_DIR}/service-logs/verify.log"
+    if [ -f "${verify_root_log}" ]; then
+        tail -n 260 "${verify_root_log}" >"${out_verify_tail_root}" 2>/dev/null || true
+    else
+        printf '%s\n' "Verify log not found yet at ${verify_root_log}." >"${out_verify_tail_root}" 2>/dev/null || true
+    fi
+    chmod 644 "${out_verify_tail_root}" 2>/dev/null || true
 
     local diag_src
     diag_src="${LOG_DIR}/diagnostics/diag-$(date +%Y-%m-%d).log"
@@ -5807,6 +5834,7 @@ JSON_EOF
         cp -f "${out_root}" "${out_user}" 2>/dev/null || true
         cp -f "${out_json_root}" "${out_user_json}" 2>/dev/null || true
         cp -f "${out_install_tail_root}" "${out_user_dir}/dashboard-install-tail.log" 2>/dev/null || true
+        cp -f "${out_verify_tail_root}" "${out_user_dir}/dashboard-verify-tail.log" 2>/dev/null || true
         cp -f "${out_diag_tail_root}" "${out_user_dir}/dashboard-diag-tail.log" 2>/dev/null || true
         cp -f "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
         cp -f "${out_api_tail_root}" "${out_user_dir}/dashboard-api.log" 2>/dev/null || true
@@ -5821,6 +5849,7 @@ JSON_EOF
         chown "${SUDO_USER}:${SUDO_USER}" \
             "${out_user}" "${out_user_json}" \
             "${out_user_dir}/dashboard-install-tail.log" \
+            "${out_user_dir}/dashboard-verify-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
             "${out_user_dir}/dashboard-api.log" \
@@ -5828,6 +5857,7 @@ JSON_EOF
             2>/dev/null || true
         chmod 644 "${out_user}" "${out_user_json}" \
             "${out_user_dir}/dashboard-install-tail.log" \
+            "${out_user_dir}/dashboard-verify-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
             "${out_user_dir}/dashboard-api.log" \
@@ -7900,15 +7930,13 @@ VERIFICATION_LAST_PROBLEMS_DETECTED=$PROBLEMS_DETECTED
 VERIFICATION_LAST_REMAINING=$VERIFICATION_FAILED
 
 if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null; then
-    echo "" | tee -a "${LOG_FILE}"
-    echo "==============================================" | tee -a "${LOG_FILE}"
-    echo "Verification Summary:" | tee -a "${LOG_FILE}"
-    echo "  - Checks performed: ${TOTAL_CHECKS}" | tee -a "${LOG_FILE}"
-    echo "  - Problems detected: $PROBLEMS_DETECTED" | tee -a "${LOG_FILE}"
-    echo "  - Problems auto-fixed: $PROBLEMS_FIXED" | tee -a "${LOG_FILE}"
-    echo "  - Remaining issues: $VERIFICATION_FAILED" | tee -a "${LOG_FILE}"
-    echo "==============================================" | tee -a "${LOG_FILE}"
-    echo "" | tee -a "${LOG_FILE}"
+    log_info "=============================================="
+    log_info "Verification Summary:"
+    log_info "  - Checks performed: ${TOTAL_CHECKS}"
+    log_info "  - Problems detected: ${PROBLEMS_DETECTED}"
+    log_info "  - Problems auto-fixed: ${PROBLEMS_FIXED}"
+    log_info "  - Remaining issues: ${VERIFICATION_FAILED}"
+    log_info "=============================================="
 
     if [ "$VERIFICATION_FAILED" -eq 0 ]; then
         log_success ">>> All verification checks passed! ✓"
@@ -7927,7 +7955,6 @@ if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null; then
         log_info "     - Verify DBUS session: echo \$DBUS_SESSION_BUS_ADDRESS"
         log_info "     - Re-run installation: sudo $0 install"
     fi
-    echo "" | tee -a "${LOG_FILE}"
 fi
 
 # Optionally notify the primary user when auto-repair fixed issues.
@@ -8003,20 +8030,17 @@ run_smart_verification() {
             # If the first attempt succeeded while summaries were suppressed,
             # print a compact summary so users still see "Checks performed".
             if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -eq 1 ] 2>/dev/null; then
-                echo "" | tee -a "${LOG_FILE}"
-                echo "==============================================" | tee -a "${LOG_FILE}"
-                echo "Verification Summary:" | tee -a "${LOG_FILE}"
-                echo "  - Checks performed: ${VERIFICATION_LAST_TOTAL_CHECKS:-unknown}" | tee -a "${LOG_FILE}"
-                echo "  - Problems detected: ${VERIFICATION_LAST_PROBLEMS_DETECTED:-?}" | tee -a "${LOG_FILE}"
-                echo "  - Problems auto-fixed: ${VERIFICATION_LAST_PROBLEMS_FIXED:-?}" | tee -a "${LOG_FILE}"
-                echo "  - Remaining issues: ${VERIFICATION_LAST_REMAINING:-?}" | tee -a "${LOG_FILE}"
-                echo "==============================================" | tee -a "${LOG_FILE}"
-                echo "" | tee -a "${LOG_FILE}"
+                log_info "=============================================="
+                log_info "Verification Summary:"
+                log_info "  - Checks performed: ${VERIFICATION_LAST_TOTAL_CHECKS:-unknown}"
+                log_info "  - Problems detected: ${VERIFICATION_LAST_PROBLEMS_DETECTED:-?}"
+                log_info "  - Problems auto-fixed: ${VERIFICATION_LAST_PROBLEMS_FIXED:-?}"
+                log_info "  - Remaining issues: ${VERIFICATION_LAST_REMAINING:-?}"
+                log_info "=============================================="
                 log_success ">>> All verification checks passed! ✓"
                 if [ "${VERIFICATION_LAST_PROBLEMS_FIXED:-0}" -gt 0 ] 2>/dev/null; then
                     log_success "  ✓ Auto-repair fixed ${VERIFICATION_LAST_PROBLEMS_FIXED} issue(s)"
                 fi
-                echo "" | tee -a "${LOG_FILE}"
             fi
 
             ZNH_SUPPRESS_VERIFICATION_SUMMARY=0
@@ -14026,12 +14050,10 @@ fi
 # Optional mode: run verification and auto-repair
 if [[ "${1:-}" == "--verify" || "${1:-}" == "--repair" || "${1:-}" == "--diagnose" ]]; then
     log_info "Verification and auto-repair mode requested"
-    echo "" | tee -a "${LOG_FILE}"
-    echo "==============================================" | tee -a "${LOG_FILE}"
-    echo "  Zypper Auto-Helper - Verification Mode" | tee -a "${LOG_FILE}"
-    echo "==============================================" | tee -a "${LOG_FILE}"
-    echo "" | tee -a "${LOG_FILE}"
-    
+    log_info "=============================================="
+    log_info "Zypper Auto-Helper - Verification Mode"
+    log_info "=============================================="
+
     # Set a flag to skip to verification section
     VERIFICATION_ONLY_MODE=1
     # We'll jump to the verification section after defining all variables
