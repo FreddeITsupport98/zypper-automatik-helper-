@@ -1287,10 +1287,12 @@ systemctl status zypper-autodownload.service
 - **Unreleased (next build):**
   - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
   - ⚡ **IMPROVED:** background services now also include **systemd resource caps** (CPU/IO weight + memory high/max) to further reduce performance spikes.
-  - ⚡ **IMPROVED:** downloader progress tracking uses **mtime-based smart polling** to avoid repeated full cache scans when nothing is changing.
-  - ⚡ **IMPROVED:** downloader mtime polling is now slightly cheaper (max-mtime via `awk` instead of `sort|tail`).
+  - ⚡ **IMPROVED:** downloader progress tracker is now **event-driven** when `inotifywait` is available (from `inotify-tools`). It sleeps indefinitely until cache files change (with a 300s timeout fallback).
+  - ⚡ **IMPROVED:** downloader metered-network checks are now **cached** (short TTL) to avoid calling `nmcli` on every minutely run when the network state is stable.
+  - ⚡ **IMPROVED:** cache cleanup is now **triggered** by real activity: a marker file is created after real downloads / successful installs, and `zypper-cache-cleanup.service` only runs when that marker exists.
   - ⚡ **IMPROVED:** dashboard sync worker now runs with **idle I/O priority** (`ionice -c3`) to minimize disk contention.
   - ⚡ **IMPROVED:** installer log cleanup trims uncompressed `install-*.log` files using a single directory scan (avoids repeated `find | wc -l` passes).
+  - 🧹 **IMPROVED:** `zypper-auto.sh` now passes `shellcheck -x` cleanly (removed `ls`-based file listings, removed truly-unused variables, and suppressed the one unavoidable config-source follow warning).
   - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:
     - First run occurs ~30 seconds after boot (instead of waiting a full interval)
     - Default interval is now **5 minutes**

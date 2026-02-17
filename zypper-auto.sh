@@ -14163,6 +14163,13 @@ DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
 # Skip running any downloads on metered connections.
 # We cannot rely on systemd's ConditionNotOnMeteredConnection everywhere,
 # so we enforce it inside the downloader as well.
+#
+# Optimization: cache the metered result for a short TTL so very frequent
+# timers (e.g. minutely) don't call nmcli every run when the network state
+# is stable.
+METERED_CACHE_FILE="${LOG_DIR}/metered-state.txt"
+METERED_CACHE_TTL_SECONDS=300
+
 is_metered() {
     command -v nmcli >/dev/null 2>&1 || return 1
 
@@ -14187,7 +14194,36 @@ is_metered() {
     return 1
 }
 
-if is_metered; then
+is_metered_cached() {
+    local force="${1:-0}" now ts state
+
+    # If nmcli is missing, treat as unmetered to avoid false skips.
+    command -v nmcli >/dev/null 2>&1 || return 1
+
+    now=$(date +%s 2>/dev/null || echo 0)
+
+    if [ "$force" != "1" ] && [ -f "${METERED_CACHE_FILE}" ]; then
+        read -r ts state <"${METERED_CACHE_FILE}" 2>/dev/null || true
+        if [[ "${ts:-}" =~ ^[0-9]+$ ]] && [ "${now:-0}" -gt 0 ] 2>/dev/null; then
+            if [ $((now - ts)) -lt "${METERED_CACHE_TTL_SECONDS}" ] 2>/dev/null; then
+                if [ "${state:-}" = "metered" ]; then
+                    return 0
+                fi
+                return 1
+            fi
+        fi
+    fi
+
+    if is_metered; then
+        printf '%s %s\n' "${now}" metered >"${METERED_CACHE_FILE}" 2>/dev/null || true
+        return 0
+    fi
+
+    printf '%s %s\n' "${now}" unmetered >"${METERED_CACHE_FILE}" 2>/dev/null || true
+    return 1
+}
+
+if is_metered_cached; then
     echo "Metered connection detected via nmcli; skipping downloader run." >&2
     dlog "Metered connection detected; skipping downloader run"
     # Reset status to idle so the user notifier doesn't get stuck showing stale stages.
@@ -14268,9 +14304,16 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     # At this point we know the error was not a simple lock. Classify it
     # as a network/repository problem so the notifier can surface a clear
     # error message instead of silently doing nothing.
-        if grep -qi "could not resolve host" "$REFRESH_ERR" || \
+    if grep -qi "could not resolve host" "$REFRESH_ERR" || \
        grep -qi "Failed to retrieve new repository metadata" "$REFRESH_ERR"; then
-        write_status "error:network"
+        # If network state changed mid-run and is now metered, treat this as a
+        # skip instead of an error to avoid noisy notifications.
+        if is_metered_cached 1; then
+            write_status "idle"
+            dlog "Network error during refresh but connection is now metered; treating as idle"
+        else
+            write_status "error:network"
+        fi
     else
         write_status "error:repo"
     fi
@@ -14299,7 +14342,12 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     # so the notifier can display a meaningful error notification.
     if grep -qi "could not resolve host" "$DRY_ERR" || \
        grep -qi "Failed to retrieve new repository metadata" "$DRY_ERR"; then
-        write_status "error:network"
+        if is_metered_cached 1; then
+            write_status "idle"
+            dlog "Network error during dry-run but connection is now metered; treating as idle"
+        else
+            write_status "error:network"
+        fi
     else
         write_status "error:repo"
     fi
@@ -14378,9 +14426,35 @@ get_cache_tree_mtime() {
 
 CACHE_MTIME_LAST=$(get_cache_tree_mtime)
 CURRENT_COUNT_CACHED=$BEFORE_COUNT
+
+wait_for_cache_event_or_timeout() {
+    # Event-driven wait (0% CPU when idle): sleep until the cache changes.
+    # Uses inotify-tools when available; otherwise falls back to sleep.
+    local timeout_s="${1:-300}"
+
+    if command -v inotifywait >/dev/null 2>&1; then
+        # Best-effort recursive watch. If there are too many repos/dirs and
+        # the watch fails, we fall back to a timed sleep.
+        set +e
+        inotifywait -qq -r -t "${timeout_s}" \
+            -e create,delete,moved_to,moved_from,close_write "${CACHE_DIR}" \
+            2>/dev/null
+        local rc=$?
+        set -e
+        case "${rc}" in
+            0|2) return 0 ;;  # 0=event, 2=timeout
+            *) : ;;
+        esac
+    fi
+
+    sleep 10
+}
+
 (
     while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
-        sleep 10  # Update every 10 seconds (lower overhead)
+        # Wait for a cache event OR a timeout (so the dashboard still updates
+        # occasionally even if downloads stall).
+        wait_for_cache_event_or_timeout 300
 
         CACHE_MTIME_NOW=$(get_cache_tree_mtime)
         if [ "${CACHE_MTIME_NOW}" != "${CACHE_MTIME_LAST}" ]; then
@@ -14452,6 +14526,13 @@ DURATION=$((END_TIME - START_TIME))
 #    so the notifier can tell the user that manual intervention is required
 #  - Otherwise, leave the previous status (e.g. idle or complete:0:0)
 if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
+    # Triggered maintenance marker: only request cache cleanup when we actually
+    # downloaded something.
+    touch "${LOG_DIR}/cleanup-needed.stamp" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl start zypper-cache-cleanup.service >/dev/null 2>&1 || true
+    fi
+
     write_status "complete:$DURATION:$ACTUAL_DOWNLOADED"
     dlog "Download complete: downloaded=${ACTUAL_DOWNLOADED} duration=${DURATION}s"
     trigger_notifier
@@ -14546,11 +14627,15 @@ log_debug "Writing service file: ${CLEANUP_SERVICE_FILE}"
 write_atomic "${CLEANUP_SERVICE_FILE}" << EOF
 [Unit]
 Description=Clean up old zypper cache packages
+# Only run when an update/download actually happened (marker created by
+# the downloader or the interactive install helper).
+ConditionPathExists=${LOG_DIR}/cleanup-needed.stamp
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/find /var/cache/zypp/packages -type f -name '*.rpm' -mtime +30 -delete
 ExecStart=/usr/bin/find /var/cache/zypp/packages -type d -empty -delete
+ExecStartPost=/usr/bin/rm -f ${LOG_DIR}/cleanup-needed.stamp
 StandardOutput=append:${LOG_DIR}/service-logs/cleanup.log
 StandardError=append:${LOG_DIR}/service-logs/cleanup-error.log
 EOF
@@ -18595,6 +18680,15 @@ RUN_UPDATE() {
     set +e
     execute_guarded "Clear downloader cache files (pkexec)" pkexec rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt || \
         execute_guarded "Clear downloader cache files (fallback rm)" rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt || true
+
+    # Triggered maintenance: request zypper cache cleanup only after a
+    # successful interactive update (no independent "clean nothing" scans).
+    if [ "${UPDATE_SUCCESS:-false}" = true ]; then
+        log "RUN_UPDATE: requesting post-update zypper cache cleanup"
+        pkexec touch /var/log/zypper-auto/cleanup-needed.stamp >/dev/null 2>&1 || true
+        pkexec systemctl start zypper-cache-cleanup.service >/dev/null 2>&1 || true
+    fi
+
     set -e
 
     # Keep the terminal open so the user can read the output, even if stdin
