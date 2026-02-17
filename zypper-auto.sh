@@ -151,15 +151,19 @@ __znh_start_dashboard_sync_worker() {
 
     local run_cmd
     run_cmd=$(cat <<'SYNC'
-IONICE_PREFIX=""
-if command -v ionice >/dev/null 2>&1; then
-  IONICE_PREFIX="ionice -c3 "
-fi
-
-# shellcheck disable=SC2086
-exec -a znh-dashboard-sync ${IONICE_PREFIX}bash -lc '
+exec -a znh-dashboard-sync bash -lc '
   dash_dir="$1";
   src_root="/var/log/zypper-auto";
+
+  # Best-effort background priority: idle IO + nice(19).
+  # Use -p $$ so we keep the custom argv0 (znh-dashboard-sync) intact.
+  if command -v ionice >/dev/null 2>&1; then
+    ionice -c3 -p $$ >/dev/null 2>&1 || true
+  fi
+  if command -v renice >/dev/null 2>&1; then
+    renice -n 19 -p $$ >/dev/null 2>&1 || true
+  fi
+
   while true; do
     # Copy updated files if present (best-effort). cp -u is "update if newer".
     cp -u "${src_root}/status-data.json" "${dash_dir}/status-data.json" 2>/dev/null || true
@@ -260,10 +264,10 @@ __znh_start_dashboard_perf_worker() {
 
     # Launch worker detached as the desktop user if known.
     if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
-        sudo -u "${user_name}" bash -lc "nohup bash -lc 'exec -a znh-dashboard-perf \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval 2 --max-samples 180 --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval 2 --max-samples 180 --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
     else
         # Fallback: run as current user.
-        nohup bash -lc 'exec -a znh-dashboard-perf "$@"' _ "${worker_bin}" --out-dir "${dash_dir}" --interval 2 --max-samples 180 --units "${units}" >/dev/null 2>&1 &
+        nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf "$@"' _ "${worker_bin}" --out-dir "${dash_dir}" --interval 2 --max-samples 180 --units "${units}" >/dev/null 2>&1 &
         echo $! >"${pid_file}" 2>/dev/null || true
     fi
 
@@ -716,7 +720,8 @@ PY
             if command -v python3 >/dev/null 2>&1; then
                 rm -f "${err_file}" 2>/dev/null || true
                 # Bind explicitly to localhost (privacy/safety) and detach so the server survives terminal close.
-                ( nohup python3 -m http.server --bind 127.0.0.1 --directory "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
+                # Run the server at background priority (nice + idle IO) so it never contends with foreground apps.
+                ( nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec python3 -m http.server --bind 127.0.0.1 --directory "$1" "$2"' _ "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
                 sleep 0.25
             else
                 echo "python3 not found; cannot start live dashboard server." >&2
@@ -8610,8 +8615,9 @@ PY
                 rm -f "${err_file}" 2>/dev/null || true
                 # Run the web server as the desktop user so file permissions + paths match.
                 # Use nohup so the server survives terminal close.
+                # Run at background priority (nice + idle IO) so it never contends with foreground apps.
                 sudo -u "${SUDO_USER}" \
-                    bash -lc "nohup python3 -m http.server --bind 127.0.0.1 --directory \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
+                    bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec python3 -m http.server --bind 127.0.0.1 --directory \"\$1\" \"\$2\"' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
                 sleep 0.25
             fi
         fi
@@ -19731,6 +19737,15 @@ EnvironmentFile=-/var/lib/zypper-auto/dashboard-api.env
 ExecStart=${DASH_API_BIN} --listen 127.0.0.1 --port 8766 --token-file ${DASH_API_TOKEN_FILE} --config ${CONFIG_FILE} --schema-file /var/lib/zypper-auto/dashboard-schema.json --log-file /var/log/zypper-auto/service-logs/dashboard-api.log --mirror-file=${DASH_API_MIRROR_FILE:-} --log-level ${DASH_API_LOG_LEVEL:-info}
 Restart=on-failure
 RestartSec=2
+
+# Background priority + caps (best-effort; ignored on older systemd / cgroup setups)
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=20
+IOWeight=20
+MemoryHigh=250M
+MemoryMax=400M
 
 # Basic hardening
 NoNewPrivileges=true
