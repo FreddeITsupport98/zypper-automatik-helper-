@@ -3837,6 +3837,67 @@ generate_dashboard() {
     </div>
 
     <div class="card">
+      <h2>🧰 Snapper Manager (Root)</h2>
+      <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
+        Runs Snapper menu actions (1–6) through the local Dashboard API. Requires confirmation for any change.
+      </div>
+
+      <div class="grid">
+        <div class="stat-box">
+          <span class="stat-label">Status (Option 1)</span>
+          <button class="pill" type="button" id="snapper-status-btn">Run status</button>
+        </div>
+
+        <div class="stat-box">
+          <span class="stat-label">List snapshots (Option 2)</span>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <input id="snapper-list-n" type="number" min="1" max="50" step="1" value="10" style="width:100px; padding:8px 10px; border-radius: 12px;" />
+            <button class="pill" type="button" id="snapper-list-btn">List</button>
+          </div>
+        </div>
+
+        <div class="stat-box">
+          <span class="stat-label">Create snapshot (Option 3)</span>
+          <input id="snapper-desc" type="text" placeholder="Description (optional)" style="width:100%; padding:8px 10px; border-radius: 12px;" />
+          <div style="margin-top:10px;">
+            <button class="pill" type="button" id="snapper-create-btn">Create</button>
+          </div>
+        </div>
+
+        <div class="stat-box">
+          <span class="stat-label">Full Cleanup (Option 4)</span>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <select id="snapper-cleanup-mode" style="padding:8px 10px; border-radius: 12px;">
+              <option value="all">all</option>
+              <option value="empty-pre-post">empty-pre-post</option>
+              <option value="timeline">timeline</option>
+              <option value="number">number</option>
+            </select>
+            <button class="pill" type="button" id="snapper-cleanup-btn" style="border-color: rgba(239,68,68,0.30);">Run cleanup</button>
+          </div>
+          <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
+            Warning: cleanup may delete snapshots.
+          </div>
+        </div>
+
+        <div class="stat-box">
+          <span class="stat-label">AUTO enable timers (Option 5)</span>
+          <button class="pill" type="button" id="snapper-auto-enable-btn">Enable</button>
+        </div>
+
+        <div class="stat-box">
+          <span class="stat-label">AUTO disable timers (Option 6)</span>
+          <button class="pill" type="button" id="snapper-auto-disable-btn" style="border-color: rgba(239,68,68,0.30);">Disable</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 14px;">
+        <div class="stat-label" style="text-transform:none;">Output</div>
+        <pre id="snapper-output" style="max-height: 420px;">(no snapper action run yet)</pre>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Service Health</h2>
       <div class="grid">
         <div class="stat-box">
@@ -4084,6 +4145,122 @@ generate_dashboard() {
         } catch (e) {
             return null;
         }
+    }
+
+    // --- Snapper Manager (dashboard -> root API) ---
+    function _snapperSetOut(text) {
+        var el = document.getElementById('snapper-output');
+        if (!el) return;
+        el.textContent = String(text || '');
+        highlightBlock('snapper-output');
+        try { el.scrollTop = el.scrollHeight; } catch (e) {}
+    }
+
+    function snapperRun(action, params, confirmAction) {
+        params = params || {};
+
+        function doRun(confirm_token, confirm_phrase) {
+            var body = { action: action, params: params };
+            if (confirm_token) body.confirm_token = confirm_token;
+            if (confirm_phrase) body.confirm_phrase = confirm_phrase;
+
+            _snapperSetOut('Running: ' + action + ' ...');
+            return _api('/api/snapper/run', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
+                _snapperSetOut(r.output || '(no output)');
+                toast('Snapper: ' + action, (r.rc === 0) ? 'OK' : ('rc=' + r.rc), (r.rc === 0) ? 'ok' : 'err');
+                _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
+                return r;
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'unknown error';
+                var payload = (e && e.payload) ? JSON.stringify(e.payload) : '';
+                _snapperSetOut('ERROR: ' + msg + (payload ? ('\n' + payload) : ''));
+                toast('Snapper failed', msg, 'err');
+                _settingsClientLog('warn', 'snapperRun failed', { action: action, error: msg });
+                return null;
+            });
+        }
+
+        // Read-only actions: no confirm.
+        if (!confirmAction) {
+            return doRun('', '');
+        }
+
+        // Confirm flow: request token + require typed phrase.
+        return _api('/api/snapper/confirm', { method: 'POST', body: JSON.stringify({ action: confirmAction, params: params }) }).then(function(r) {
+            var phrase = r.phrase || '';
+            var hint = r.hint || ('Type ' + phrase + ' to confirm');
+            var got = prompt(hint + "\n\nEnter confirmation phrase:", "");
+            if (!got) {
+                toast('Cancelled', 'No confirmation entered', 'err');
+                return null;
+            }
+            return doRun(r.confirm_token, got);
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'confirm failed';
+            toast('Confirm failed', msg, 'err');
+            _settingsClientLog('warn', 'snapper confirm failed', { action: action, error: msg });
+            return null;
+        });
+    }
+
+    function _wireSnapperUI() {
+        var b1 = document.getElementById('snapper-status-btn');
+        var b2 = document.getElementById('snapper-list-btn');
+        var b3 = document.getElementById('snapper-create-btn');
+        var b4 = document.getElementById('snapper-cleanup-btn');
+        var b5 = document.getElementById('snapper-auto-enable-btn');
+        var b6 = document.getElementById('snapper-auto-disable-btn');
+
+        if (b1) b1.addEventListener('click', function() {
+            _api('/api/snapper/status', { method: 'GET' }).then(function(r) {
+                _snapperSetOut(r.output || '(no output)');
+                toast('Snapper status', (r.rc === 0) ? 'OK' : ('rc=' + r.rc), (r.rc === 0) ? 'ok' : 'err');
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'failed';
+                _snapperSetOut('ERROR: ' + msg);
+                toast('Snapper status failed', msg, 'err');
+            });
+        });
+
+        if (b2) b2.addEventListener('click', function() {
+            var n = 10;
+            try {
+                var el = document.getElementById('snapper-list-n');
+                n = parseInt((el && el.value) ? el.value : '10', 10);
+                if (isNaN(n)) n = 10;
+                if (n < 1) n = 1;
+                if (n > 50) n = 50;
+            } catch (e) { n = 10; }
+
+            _api('/api/snapper/list?n=' + String(n), { method: 'GET' }).then(function(r) {
+                _snapperSetOut(r.output || '(no output)');
+                toast('Snapper list', (r.rc === 0) ? 'OK' : ('rc=' + r.rc), (r.rc === 0) ? 'ok' : 'err');
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'failed';
+                _snapperSetOut('ERROR: ' + msg);
+                toast('Snapper list failed', msg, 'err');
+            });
+        });
+
+        if (b3) b3.addEventListener('click', function() {
+            var desc = '';
+            try { desc = String((document.getElementById('snapper-desc') || {}).value || ''); } catch (e) { desc = ''; }
+            snapperRun('create', { desc: desc }, 'create');
+        });
+
+        if (b4) b4.addEventListener('click', function() {
+            var mode = 'all';
+            try { mode = String((document.getElementById('snapper-cleanup-mode') || {}).value || 'all'); } catch (e) { mode = 'all'; }
+            snapperRun('cleanup', { mode: mode }, 'cleanup');
+        });
+
+        if (b5) b5.addEventListener('click', function() {
+            snapperRun('auto-enable', {}, 'auto-enable');
+        });
+
+        if (b6) b6.addEventListener('click', function() {
+            snapperRun('auto-disable', {}, 'auto-disable');
+        });
     }
 
     function _renderSettingsForm(schema, cfg) {
@@ -4454,6 +4631,8 @@ generate_dashboard() {
 
     // Wire settings drawer once DOM is ready (we are at end of body).
     _wireSettingsUI();
+    // Wire Snapper manager UI.
+    _wireSnapperUI();
 
     // Ripple click effect on buttons
     function addRipple(el, x, y) {
@@ -18432,9 +18611,11 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 def _load_schema(schema_file: str) -> dict:
     with open(schema_file, "r", encoding="utf-8") as f:
@@ -18588,6 +18769,34 @@ def _write_managed_block(conf_path: str, values: dict) -> None:
     os.chmod(conf_path, 0o600)
 
 
+def _run_cmd(cmd: list[str], timeout_s: int, *, log=None) -> tuple[int, str]:
+    # Returns: (rc, combined_output)
+    # Keep it simple and deterministic: merge stderr into stdout.
+    env = os.environ.copy()
+    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    try:
+        if log:
+            log("debug", f"[snapper] exec: {' '.join(cmd)} timeout={timeout_s}s")
+        p = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_s,
+            env=env,
+            text=True,
+        )
+        out = p.stdout or ""
+        # Bound output to keep API responses sane.
+        if len(out) > 200_000:
+            out = out[:200_000] + "\n\n[... output truncated ...]\n"
+        return int(p.returncode), out
+    except subprocess.TimeoutExpired:
+        return 124, f"Timed out after {timeout_s}s"
+    except Exception as e:
+        return 1, f"Exception while running command: {e}"
+
+
 def _json_response(handler: BaseHTTPRequestHandler, code: int, obj: dict, origin: str | None = None):
     data = json.dumps(obj, indent=2).encode("utf-8")
     handler.send_response(code)
@@ -18661,11 +18870,51 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         origin = _allowed_origin(self.headers.get("Origin"))
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parse_qs(parsed.query or "")
         try:
             getattr(self.server, "_znh_log", lambda *_: None)("debug", f"GET {path} from {self.client_address[0]}")
         except Exception:
             pass
+
+        # Snapper endpoints always require auth (even for read-only status).
+        if path.startswith("/api/snapper/"):
+            if not self._auth_ok():
+                try:
+                    getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
+                except Exception:
+                    pass
+                return _json_response(self, 401, {"error": "unauthorized"}, origin)
+
+            if path == "/api/snapper/status":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "status"]
+                rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))
+                return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
+
+            if path == "/api/snapper/list":
+                n = "10"
+                try:
+                    n = (qs.get("n") or ["10"])[0]
+                except Exception:
+                    n = "10"
+                if not re.fullmatch(r"[0-9]+", str(n)):
+                    n = "10"
+                # Bound list size
+                try:
+                    nn = int(n)
+                except Exception:
+                    nn = 10
+                if nn < 1:
+                    nn = 1
+                if nn > 50:
+                    nn = 50
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "list", str(nn)]
+                rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))
+                return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
+
+            return _json_response(self, 404, {"error": "not found"}, origin)
+
         if path == "/api/schema":
             return _json_response(self, 200, {"schema": SCHEMA}, origin)
         if path == "/api/config":
@@ -18686,6 +18935,163 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return _json_response(self, 401, {"error": "unauthorized"}, origin)
+
+        # --- Snapper control (dashboard) ---
+        def _confirm_purge(now_ts: float):
+            try:
+                items = getattr(self.server, "confirm_tokens", {})
+                dead = []
+                for k, v in items.items():
+                    if float(v.get("exp", 0)) < now_ts:
+                        dead.append(k)
+                for k in dead:
+                    items.pop(k, None)
+            except Exception:
+                return
+
+        if path == "/api/snapper/confirm":
+            body = _read_json(self)
+            action = str(body.get("action", "")).strip()
+            params = body.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+
+            allowed = {
+                "create": "Type SNAPSHOT to confirm snapshot creation.",
+                "cleanup": "Type CLEANUP to confirm Snapper cleanup (may delete snapshots).",
+                "auto-enable": "Type ENABLE to confirm enabling Snapper timers.",
+                "auto-disable": "Type DISABLE to confirm disabling Snapper timers.",
+            }
+            if action not in allowed:
+                return _json_response(self, 400, {"error": f"unsupported confirm action: {action}"}, origin)
+
+            now_ts = time.time()
+            _confirm_purge(now_ts)
+
+            token = secrets.token_urlsafe(24)
+            exp = now_ts + 120.0
+            try:
+                if not hasattr(self.server, "confirm_tokens"):
+                    self.server.confirm_tokens = {}
+                self.server.confirm_tokens[token] = {
+                    "action": action,
+                    "params": params,
+                    "exp": exp,
+                }
+            except Exception:
+                return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
+
+            phrase = ""
+            if action == "create":
+                phrase = "SNAPSHOT"
+            elif action == "cleanup":
+                phrase = "CLEANUP"
+            elif action == "auto-enable":
+                phrase = "ENABLE"
+            elif action == "auto-disable":
+                phrase = "DISABLE"
+
+            return _json_response(self, 200, {
+                "confirm_token": token,
+                "expires_in_seconds": 120,
+                "phrase": phrase,
+                "hint": allowed[action],
+            }, origin)
+
+        if path == "/api/snapper/run":
+            body = _read_json(self)
+            action = str(body.get("action", "")).strip()
+            params = body.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+
+            # Determine if action requires confirmation.
+            needs_confirm = action in ("create", "cleanup", "auto-enable", "auto-disable")
+            if action in ("status", "list"):
+                needs_confirm = False
+
+            confirm_token = str(body.get("confirm_token", "")).strip()
+            confirm_phrase = str(body.get("confirm_phrase", "")).strip()
+
+            if needs_confirm:
+                now_ts = time.time()
+                _confirm_purge(now_ts)
+                items = getattr(self.server, "confirm_tokens", {})
+                meta = items.get(confirm_token)
+                if not meta:
+                    return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                if meta.get("action") != action:
+                    return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+
+                required_phrase = {
+                    "create": "SNAPSHOT",
+                    "cleanup": "CLEANUP",
+                    "auto-enable": "ENABLE",
+                    "auto-disable": "DISABLE",
+                }.get(action, "")
+
+                if required_phrase and confirm_phrase.upper() != required_phrase:
+                    return _json_response(self, 400, {"error": f"confirmation phrase mismatch (expected {required_phrase})"}, origin)
+
+                # One-time token.
+                try:
+                    items.pop(confirm_token, None)
+                except Exception:
+                    pass
+
+            # Map actions to helper subcommands.
+            cmd = None
+            timeout_s = 60
+
+            if action == "status":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "status"]
+                timeout_s = 30
+            elif action == "list":
+                n = str(params.get("n", "10"))
+                if not re.fullmatch(r"[0-9]+", n):
+                    n = "10"
+                nn = 10
+                try:
+                    nn = int(n)
+                except Exception:
+                    nn = 10
+                if nn < 1:
+                    nn = 1
+                if nn > 50:
+                    nn = 50
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "list", str(nn)]
+                timeout_s = 30
+            elif action == "create":
+                desc = str(params.get("desc", "")).strip()
+                # Bound description size.
+                if len(desc) > 200:
+                    desc = desc[:200]
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "create", desc]
+                timeout_s = 90
+            elif action == "cleanup":
+                mode = str(params.get("mode", "all")).strip()
+                if mode not in ("all", "number", "timeline", "empty-pre-post"):
+                    mode = "all"
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "cleanup", mode]
+                timeout_s = 600
+            elif action == "auto-enable":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "auto"]
+                timeout_s = 120
+            elif action == "auto-disable":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "auto-off"]
+                timeout_s = 120
+            else:
+                return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
+
+            # Best-effort "busy" guard: avoid running snapper actions if snapper is active.
+            if action in ("cleanup", "create"):
+                rc_busy, out_busy = _run_cmd(["/usr/bin/pgrep", "-x", "snapper"], timeout_s=2, log=None)
+                if rc_busy == 0:
+                    return _json_response(self, 409, {"error": "snapper appears to be running already; try again later"}, origin)
+
+            rc, out = _run_cmd(cmd, timeout_s=timeout_s, log=getattr(self.server, "_znh_log", None))
+            code = 200 if rc == 0 else 500
+            return _json_response(self, code, {"rc": rc, "output": out, "action": action}, origin)
 
         if path == "/api/client-log":
             body = _read_json(self)
@@ -18814,6 +19220,7 @@ def main():
     httpd.token = token
     httpd.conf_path = args.config
     httpd._znh_log = log
+    httpd.confirm_tokens = {}
     httpd.serve_forever()
 
 
