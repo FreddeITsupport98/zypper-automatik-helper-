@@ -202,6 +202,88 @@ __znh_stop_dashboard_sync_worker() {
     rm -f "${pid_file}" 2>/dev/null || true
 }
 
+__znh_pid_is_dashboard_perf_worker() {
+    local pid="$1" dash_dir="$2"
+    [[ "${pid:-}" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+    if command -v ps >/dev/null 2>&1; then
+        local args
+        args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
+        # We mark the process name via: exec -a znh-dashboard-perf ...
+        printf '%s' "${args}" | grep -q "znh-dashboard-perf" || return 1
+        # Ensure it's writing into the correct dashboard directory.
+        printf '%s' "${args}" | grep -qF "--out-dir ${dash_dir}" || return 1
+        return 0
+    fi
+    return 1
+}
+
+__znh_start_dashboard_perf_worker() {
+    # Writes perf-data.json into the served dashboard directory so the HTML can
+    # plot live CPU/memory/IO usage for helper-related services.
+    # Runs as the desktop user.
+    local dash_dir="$1" user_name="${2:-}" user_home="${3:-}"
+    local pid_file
+    pid_file="${dash_dir}/dashboard-perf.pid"
+
+    local worker_bin
+    worker_bin="/usr/local/bin/zypper-auto-dashboard-perf-worker"
+
+    # If binary missing, skip silently.
+    if [ ! -x "${worker_bin}" ]; then
+        return 0
+    fi
+
+    # If python3 missing, skip silently (dash-open already requires python3 for http.server).
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # If an existing worker is already running, keep it.
+    if [ -f "${pid_file}" ]; then
+        local old_pid
+        old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+        if __znh_pid_is_dashboard_perf_worker "${old_pid}" "${dash_dir}"; then
+            return 0
+        fi
+        rm -f "${pid_file}" 2>/dev/null || true
+    fi
+
+    local units
+    units="zypper-autodownload.service,zypper-auto-verify.service,zypper-auto-dashboard-api.service"
+
+    # Launch worker detached as the desktop user if known.
+    if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
+        sudo -u "${user_name}" bash -lc "nohup bash -lc 'exec -a znh-dashboard-perf \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval 2 --max-samples 180 --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+    else
+        # Fallback: run as current user.
+        nohup bash -lc 'exec -a znh-dashboard-perf "$@"' _ "${worker_bin}" --out-dir "${dash_dir}" --interval 2 --max-samples 180 --units "${units}" >/dev/null 2>&1 &
+        echo $! >"${pid_file}" 2>/dev/null || true
+    fi
+
+    chmod 600 "${pid_file}" 2>/dev/null || true
+    if [ -n "${user_name}" ] && [ -n "${user_home}" ]; then
+        chown "${user_name}:${user_name}" "${pid_file}" 2>/dev/null || true
+    fi
+}
+
+__znh_stop_dashboard_perf_worker() {
+    local dash_dir="$1"
+    local pid_file
+    pid_file="${dash_dir}/dashboard-perf.pid"
+    if [ ! -f "${pid_file}" ]; then
+        return 0
+    fi
+    local pid
+    pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+    if __znh_pid_is_dashboard_perf_worker "${pid}" "${dash_dir}"; then
+        kill "${pid}" 2>/dev/null || true
+        sleep 0.1
+        kill -9 "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${pid_file}" 2>/dev/null || true
+}
+
 __znh_install_polkit_policy() {
     # Installs a Polkit policy so 'pkexec' shows a trusted, human-friendly UI
     # instead of a generic "run /usr/local/bin/..." prompt.
@@ -497,6 +579,8 @@ if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
 
     # Stop sync worker first (best-effort)
     __znh_stop_dashboard_sync_worker "${dash_dir}" || true
+    # Stop perf worker (best-effort)
+    __znh_stop_dashboard_perf_worker "${dash_dir}" || true
 
     pid_file="${dash_dir}/dashboard-http.pid"
     port_file="${dash_dir}/dashboard-http.port"
@@ -650,6 +734,8 @@ PY
         # Start sync worker so status-data.json/log views keep updating even if
         # this dashboard tab stays open for days.
         __znh_start_dashboard_sync_worker "${dash_dir}" "${USER:-}" "${HOME:-}" || true
+        # Start perf worker for live service performance charts (best-effort)
+        __znh_start_dashboard_perf_worker "${dash_dir}" "${USER:-}" "${HOME:-}" || true
 
         # Ensure Desktop/app launcher exists (best-effort)
         __znh_ensure_dash_desktop_shortcut "${USER:-}" "${HOME:-}" || true
@@ -3664,7 +3750,7 @@ generate_dashboard() {
           <input type="checkbox" id="live-toggle" /> Live mode
         </label>
         <button class="pill" id="theme-toggle" type="button" title="Toggle theme (auto/light/dark)">Theme: Auto</button>
-        <span style="font-size:0.85rem; color: var(--muted);">Live polls <code>status-data.json</code> and <code>download-status.txt</code> (best via <code>http://</code>).</span>
+        <span style="font-size:0.85rem; color: var(--muted);">Live polls <code>status-data.json</code>, <code>download-status.txt</code>, and <code>perf-data.json</code> (best via <code>http://</code>).</span>
       </div>
 
       <div class="grid" style="margin-top: 18px;">
@@ -3921,6 +4007,25 @@ generate_dashboard() {
             <span class="stat-value ${nt_timer_class}" id="notifier-timer">${nt_timer}</span>
         </div>
       </div>
+    </div>
+
+    <div class="card" id="perf-card">
+      <h2>📈 Performance (Helper Services)</h2>
+      <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
+        Live mode reads <code>perf-data.json</code> (written by the dashboard perf worker started by <code>--dash-open</code>).
+      </div>
+      <div class="grid">
+        <div class="stat-box">
+            <span class="stat-label">CPU % (approx)</span>
+            <canvas id="perf-cpu" style="width:100%; height:150px; display:block;"></canvas>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Memory (MiB)</span>
+            <canvas id="perf-mem" style="width:100%; height:150px; display:block;"></canvas>
+        </div>
+      </div>
+      <div id="perf-legend" style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;"></div>
+      <div id="perf-now" style="margin-top:8px; font-size:0.9rem; color: var(--muted);"></div>
     </div>
 
     <div class="card">
@@ -5039,6 +5144,7 @@ generate_dashboard() {
             if (liveEnabled) {
                 pollLive();
                 pollDownloaderStatus();
+                pollPerf();
                 pollRecentActivityLog();
             }
         });
@@ -5116,6 +5222,215 @@ generate_dashboard() {
             .then(function(txt) {
                 var obj = parseDownloadStatus(txt);
                 updateDownloadUI(obj);
+            })
+            .catch(function() {
+                // ignore
+            });
+    }
+
+    // --- Realtime performance charts (helper services) ---
+    var _perfLastRaw = '';
+    var _perfLegendBuilt = false;
+
+    var PERF_UNITS = [
+        { unit: 'zypper-autodownload.service', label: 'Downloader', color: '#3498db' },
+        { unit: 'zypper-auto-verify.service', label: 'Verify', color: '#a78bfa' },
+        { unit: 'zypper-auto-dashboard-api.service', label: 'Dashboard API', color: '#f59e0b' }
+    ];
+
+    function _fmtMiB(bytes) {
+        try {
+            var b = parseFloat(bytes || '0');
+            if (!isFinite(b) || b <= 0) return '0';
+            return String(Math.round(b / (1024 * 1024)));
+        } catch (e) {
+            return '0';
+        }
+    }
+
+    function _canvasResizeToDisplaySize(canvas) {
+        if (!canvas) return;
+        var w = canvas.clientWidth || 0;
+        var h = canvas.clientHeight || 0;
+        if (!w || !h) return;
+        var dpr = window.devicePixelRatio || 1;
+        var tw = Math.floor(w * dpr);
+        var th = Math.floor(h * dpr);
+        if (canvas.width !== tw || canvas.height !== th) {
+            canvas.width = tw;
+            canvas.height = th;
+        }
+    }
+
+    function _drawChart(canvasId, seriesList, opts) {
+        var canvas = document.getElementById(canvasId);
+        if (!canvas) return;
+        _canvasResizeToDisplaySize(canvas);
+
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        var w = canvas.width;
+        var h = canvas.height;
+
+        // Background
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = 'rgba(0,0,0,0.06)';
+        ctx.fillRect(0, 0, w, h);
+
+        var padL = 40;
+        var padR = 10;
+        var padT = 12;
+        var padB = 18;
+
+        // Compute yMax
+        var yMax = 1;
+        for (var i = 0; i < seriesList.length; i++) {
+            var s = seriesList[i];
+            for (var j = 0; j < (s.points || []).length; j++) {
+                var v = s.points[j].v;
+                if (typeof v === 'number' && isFinite(v) && v > yMax) yMax = v;
+            }
+        }
+
+        if (opts && typeof opts.minYMax === 'number' && yMax < opts.minYMax) yMax = opts.minYMax;
+        // Add headroom
+        yMax = yMax * 1.15;
+
+        // Axes/grid
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.lineWidth = 1;
+
+        var gridN = 4;
+        for (var g = 0; g <= gridN; g++) {
+            var y = padT + (h - padT - padB) * (g / gridN);
+            ctx.beginPath();
+            ctx.moveTo(padL, y);
+            ctx.lineTo(w - padR, y);
+            ctx.stroke();
+
+            // Labels
+            var val = Math.round((yMax * (1 - (g / gridN))) * 10) / 10;
+            ctx.fillStyle = 'rgba(255,255,255,0.55)';
+            ctx.font = '12px ui-monospace, monospace';
+            ctx.fillText(String(val), 6, y + 4);
+        }
+
+        // Series lines
+        for (var i2 = 0; i2 < seriesList.length; i2++) {
+            var ss = seriesList[i2];
+            var pts = ss.points || [];
+            if (pts.length < 2) continue;
+
+            ctx.strokeStyle = ss.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (var k = 0; k < pts.length; k++) {
+                var x = padL + (w - padL - padR) * (k / (pts.length - 1));
+                var yv = pts[k].v;
+                if (!isFinite(yv)) yv = 0;
+                var y2 = padT + (h - padT - padB) * (1 - (yv / yMax));
+                if (k === 0) ctx.moveTo(x, y2);
+                else ctx.lineTo(x, y2);
+            }
+            ctx.stroke();
+        }
+
+        // Title
+        if (opts && opts.title) {
+            ctx.fillStyle = 'rgba(255,255,255,0.75)';
+            ctx.font = '13px ui-sans-serif, system-ui';
+            ctx.fillText(opts.title, padL, 14);
+        }
+    }
+
+    function _buildPerfLegend() {
+        if (_perfLegendBuilt) return;
+        var el = document.getElementById('perf-legend');
+        if (!el) return;
+        try {
+            for (var i = 0; i < PERF_UNITS.length; i++) {
+                var u = PERF_UNITS[i];
+                var b = document.createElement('span');
+                b.className = 'feat-badge';
+                b.innerHTML = '<span class="feat-dot" style="color:' + u.color + '">●</span> ' + u.label;
+                el.appendChild(b);
+            }
+            _perfLegendBuilt = true;
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    function _renderPerf(perf) {
+        _buildPerfLegend();
+
+        var cpuSeries = [];
+        var memSeries = [];
+        var nowLines = [];
+
+        for (var i = 0; i < PERF_UNITS.length; i++) {
+            var meta = PERF_UNITS[i];
+            var u = (perf && perf.units) ? perf.units[meta.unit] : null;
+            var samples = (u && u.samples) ? u.samples : [];
+            if (!samples || samples.length === 0) {
+                cpuSeries.push({ color: meta.color, points: [] });
+                memSeries.push({ color: meta.color, points: [] });
+                continue;
+            }
+
+            // Take last N points
+            var N = 60;
+            var slice = samples.slice(Math.max(0, samples.length - N));
+
+            var cpuPts = [];
+            var memPts = [];
+            for (var j = 0; j < slice.length; j++) {
+                var s = slice[j] || {};
+                cpuPts.push({ v: parseFloat(s.cpu || 0) });
+                memPts.push({ v: parseFloat(_fmtMiB(s.mem || 0)) });
+            }
+            cpuSeries.push({ color: meta.color, points: cpuPts });
+            memSeries.push({ color: meta.color, points: memPts });
+
+            var last = slice[slice.length - 1] || {};
+            var cpuNow = (typeof last.cpu === 'number') ? last.cpu : parseFloat(last.cpu || 0);
+            if (!isFinite(cpuNow)) cpuNow = 0;
+            var memNow = _fmtMiB(last.mem || 0);
+            var st = (last.active || '') + (last.sub ? '/' + last.sub : '');
+            var err = last.err ? (' • err: ' + String(last.err).slice(0, 90)) : '';
+            nowLines.push(meta.label + ': ' + cpuNow.toFixed(2) + '% CPU • ' + memNow + ' MiB' + (st ? ' • ' + st : '') + err);
+        }
+
+        _drawChart('perf-cpu', cpuSeries, { title: 'CPU % (systemd units)', minYMax: 5 });
+        _drawChart('perf-mem', memSeries, { title: 'Memory (MiB)', minYMax: 50 });
+
+        var nowEl = document.getElementById('perf-now');
+        if (nowEl) {
+            nowEl.textContent = nowLines.length ? nowLines.join(' | ') : 'No perf data yet.';
+        }
+    }
+
+    function pollPerf(force) {
+        if (!liveEnabled && !force) return;
+        fetch('perf-data.json?ts=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) {
+                if (r.status === 404 || r.status === 416) return null;
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.text();
+            })
+            .then(function(txt) {
+                if (!txt) {
+                    var nowEl = document.getElementById('perf-now');
+                    if (nowEl) nowEl.textContent = 'perf-data.json not available yet. Open via --dash-open to start the perf worker.';
+                    return;
+                }
+                if (txt === _perfLastRaw) return;
+                _perfLastRaw = txt;
+                var perf = null;
+                try { perf = JSON.parse(txt); } catch (e) { perf = null; }
+                if (!perf) return;
+                _renderPerf(perf);
             })
             .catch(function() {
                 // ignore
@@ -5278,9 +5593,11 @@ generate_dashboard() {
     // Live poll intervals
     setInterval(pollLive, 5000);
     setInterval(pollDownloaderStatus, 2000);
+    setInterval(pollPerf, 2000);
     setInterval(pollRecentActivityLog, 2000);
     pollLive();
     pollDownloaderStatus();
+    pollPerf(true);
     pollRecentActivityLog();
   </script>
 </body>
@@ -8143,6 +8460,8 @@ run_dash_stop_only() {
 
     # Stop sync worker first (best-effort)
     __znh_stop_dashboard_sync_worker "${dash_dir}" || true
+    # Stop perf worker (best-effort)
+    __znh_stop_dashboard_perf_worker "${dash_dir}" || true
 
     pid_file="${dash_dir}/dashboard-http.pid"
     port_file="${dash_dir}/dashboard-http.port"
@@ -8339,6 +8658,8 @@ PY
             local user_home
             user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
             __znh_start_dashboard_sync_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" || true
+            # Start perf worker for live service performance charts (best-effort)
+            __znh_start_dashboard_perf_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" || true
             # Ensure Desktop/app launcher exists (best-effort)
             __znh_ensure_dash_desktop_shortcut "${SUDO_USER}" "${user_home}" || true
         fi
@@ -12289,6 +12610,7 @@ run_uninstall_helper_only() {
         fi
         echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-diag-follow (diagnostics follower helper)" | tee -a "${LOG_FILE}"
+        echo "    /usr/local/bin/zypper-auto-dashboard-perf-worker (dashboard perf worker)" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
@@ -12385,7 +12707,8 @@ run_uninstall_helper_only() {
         /usr/local/bin/zypper-download-with-progress \
         /usr/local/bin/zypper-auto-helper \
         /usr/local/bin/zypper-auto-diag-follow \
-        /usr/local/bin/zypper-auto-dashboard-api || true
+        /usr/local/bin/zypper-auto-dashboard-api \
+        /usr/local/bin/zypper-auto-dashboard-perf-worker || true
 
     # 4. Remove user-level scripts, systemd units, and desktop/menu shortcuts
     if [ -n "${SUDO_USER_HOME:-}" ]; then
@@ -13926,7 +14249,8 @@ date +%s > "$START_TIME_FILE"
 
 # Refresh repos
 REFRESH_ERR=$(mktemp)
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"
+# Run with *low* CPU/IO priority so background checks don't cause interactive lag.
+/usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"
 ZYP_EXIT=$?
 if [ "$ZYP_EXIT" -ne 0 ]; then
     # If another zypper instance holds the lock, handle_lock_or_fail will
@@ -13957,7 +14281,7 @@ rm -f "$REFRESH_ERR"
 # Get update info
 DRY_OUTPUT=$(mktemp)
 DRY_ERR=$(mktemp)
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"
+/usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"
 ZYP_EXIT=$?
 if [ "$ZYP_EXIT" -ne 0 ]; then
     # Handle lock first; if it is just a lock, this will mark status idle
@@ -14022,15 +14346,17 @@ fi
 rm -f "$DRY_OUTPUT"
 
 # Count packages before download
-BEFORE_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
+# NOTE: limit depth to keep the scan cheap; cache layout is typically:
+#   /var/cache/zypp/packages/<repo>/<arch>/*.rpm
+BEFORE_COUNT=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null | wc -l)
 
 # Write initial downloading status so the tracker loop sees it immediately
 write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0"
-# Start background progress tracker
+# Start background progress tracker (coarse; avoids aggressive disk scans)
 (
     while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
-        sleep 2  # Update every 2 seconds
-        CURRENT_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
+        sleep 10  # Update every 10 seconds (lower overhead)
+        CURRENT_COUNT=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null | wc -l)
         DOWNLOADED=$((CURRENT_COUNT - BEFORE_COUNT))
         if [ $DOWNLOADED -lt 0 ]; then DOWNLOADED=0; fi
         if [ $DOWNLOADED -gt $PKG_COUNT ]; then DOWNLOADED=$PKG_COUNT; fi
@@ -14067,7 +14393,7 @@ fi
 # lock error to avoid noisy logs when another zypper instance is running.
 set +e
 DL_ERR=$(mktemp)
-/usr/bin/nice -n -20 /usr/bin/ionice -c1 -n0 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only $DUP_EXTRA_FLAGS >/dev/null 2>"$DL_ERR"
+/usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only $DUP_EXTRA_FLAGS >/dev/null 2>"$DL_ERR"
 ZYP_RET=$?
 if [ "$ZYP_RET" -ne 0 ]; then
     handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
@@ -14080,7 +14406,7 @@ kill $TRACKER_PID 2>/dev/null || true
 wait $TRACKER_PID 2>/dev/null || true
 
 # Count packages after download
-AFTER_COUNT=$(find "$CACHE_DIR" -name "*.rpm" 2>/dev/null | wc -l)
+AFTER_COUNT=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null | wc -l)
 ACTUAL_DOWNLOADED=$((AFTER_COUNT - BEFORE_COUNT))
 
 # Calculate duration
@@ -14122,9 +14448,10 @@ After=network-online.target nss-lookup.target
 
 [Service]
 Type=oneshot
-IOSchedulingClass=realtime
-IOSchedulingPriority=0
-Nice=-20
+# Run in the background with low CPU/IO priority to avoid interactive lag.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
 ExecStart=${DOWNLOADER_SCRIPT}
@@ -14137,6 +14464,8 @@ NoNewPrivileges=yes
 ReadWritePaths=/var/cache/zypp /var/log/zypper-auto
 EOF
 log_success "Downloader service file created"
+chmod 644 "${DL_SERVICE_FILE}" 2>/dev/null || true
+chown root:root "${DL_SERVICE_FILE}" 2>/dev/null || true
 
 # --- 6. Create/Update DOWNLOADER (Root Timer) ---
 log_info ">>> Creating (root) downloader timer: ${DL_TIMER_FILE}"
@@ -14154,6 +14483,8 @@ Persistent=true
 WantedBy=timers.target
 EOF
 log_success "Downloader timer file created"
+chmod 644 "${DL_TIMER_FILE}" 2>/dev/null || true
+chown root:root "${DL_TIMER_FILE}" 2>/dev/null || true
 
 log_info ">>> Enabling (root) downloader timer: ${DL_SERVICE_NAME}.timer"
 update_status "Enabling system downloader timer..."
@@ -14185,6 +14516,8 @@ StandardOutput=append:${LOG_DIR}/service-logs/cleanup.log
 StandardError=append:${LOG_DIR}/service-logs/cleanup-error.log
 EOF
 log_success "Cache cleanup service file created"
+chmod 644 "${CLEANUP_SERVICE_FILE}" 2>/dev/null || true
+chown root:root "${CLEANUP_SERVICE_FILE}" 2>/dev/null || true
 
 log_info ">>> Creating (root) cache cleanup timer: ${CLEANUP_TIMER_FILE}"
 log_debug "Writing timer file: ${CLEANUP_TIMER_FILE}"
@@ -14200,6 +14533,8 @@ Persistent=true
 WantedBy=timers.target
 EOF
 log_success "Cache cleanup timer file created"
+chmod 644 "${CLEANUP_TIMER_FILE}" 2>/dev/null || true
+chown root:root "${CLEANUP_TIMER_FILE}" 2>/dev/null || true
 
 log_info ">>> Enabling (root) cache cleanup timer: ${CLEANUP_SERVICE_NAME}.timer"
 update_status "Enabling cache cleanup timer..."
@@ -14218,7 +14553,7 @@ log_debug "Writing service file: ${VERIFY_SERVICE_FILE}"
 # Derive systemd schedule for the verification timer from
 # VERIFY_TIMER_INTERVAL_MINUTES. We mirror the downloader's
 # behaviour: minutely/hourly for 1/60, or "*:0/N" for other values.
-# High Priority: run shortly after boot instead of waiting a full interval.
+# Run shortly after boot instead of waiting a full interval.
 VERIFY_ONBOOTSEC="30s"
 VERIFY_ONCALENDAR="minutely"
 if [ "${VERIFY_TIMER_INTERVAL_MINUTES}" -eq 60 ]; then
@@ -14235,18 +14570,14 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-
-# --- HIGH PRIORITY SETTINGS ---
-Nice=-19
-IOSchedulingClass=realtime
-IOSchedulingPriority=0
-# ------------------------------
+# Run in the background with low CPU/IO priority.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 
 ExecStart=/usr/local/bin/zypper-auto-helper --verify
 StandardOutput=append:${LOG_DIR}/service-logs/verify.log
 StandardError=append:${LOG_DIR}/service-logs/verify-error.log
-Restart=on-failure
-RestartSec=1h
 
 # Hardening
 ProtectSystem=full
@@ -14256,6 +14587,8 @@ NoNewPrivileges=yes
 ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp
 EOF
 log_success "Verification service file created"
+chmod 644 "${VERIFY_SERVICE_FILE}" 2>/dev/null || true
+chown root:root "${VERIFY_SERVICE_FILE}" 2>/dev/null || true
 
 log_info ">>> Creating (root) verification timer: ${VERIFY_TIMER_FILE}"
 log_debug "Writing timer file: ${VERIFY_TIMER_FILE}"
@@ -14272,6 +14605,8 @@ Persistent=true
 WantedBy=timers.target
 EOF
 log_success "Verification timer file created"
+chmod 644 "${VERIFY_TIMER_FILE}" 2>/dev/null || true
+chown root:root "${VERIFY_TIMER_FILE}" 2>/dev/null || true
 
 log_info ">>> Enabling (root) verification timer: ${VERIFY_SERVICE_NAME}.timer"
 update_status "Enabling verification timer..."
@@ -15486,26 +15821,37 @@ Environment=ZNH_SNOOZE_LONG_HOURS=${SNOOZE_LONG_HOURS}
 ExecStart=/usr/bin/python3 ${NOTIFY_SCRIPT_PATH}
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_SERVICE_FILE}"
+chmod 644 "${NT_SERVICE_FILE}" 2>/dev/null || true
 log_success "User notifier service file created"
 
 # --- 9. Create/Update NOTIFIER (User Timer) ---
 log_info ">>> Creating (user) notifier timer: ${NT_TIMER_FILE}"
 log_debug "Writing user timer file: ${NT_TIMER_FILE}"
+
+# Derive schedule from NT_TIMER_INTERVAL_MINUTES (validated in load_config).
+NT_ONCALENDAR="minutely"
+if [ "${NT_TIMER_INTERVAL_MINUTES}" -eq 60 ]; then
+    NT_ONCALENDAR="hourly"
+elif [ "${NT_TIMER_INTERVAL_MINUTES}" -ne 1 ]; then
+    NT_ONCALENDAR="*:0/${NT_TIMER_INTERVAL_MINUTES}"
+fi
+
 write_atomic "${NT_TIMER_FILE}" << EOF
 [Unit]
-Description=Run ${NT_SERVICE_NAME} every minute to check for updates
+Description=Run ${NT_SERVICE_NAME} periodically to check for updates
 
 [Timer]
 # First run a few seconds after the user manager starts,
-# then re-run every minute.
+# then re-run on a simple calendar schedule.
 OnBootSec=5sec
-OnCalendar=minutely
+OnCalendar=${NT_ONCALENDAR}
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 chown "$SUDO_USER:$SUDO_USER" "${NT_TIMER_FILE}"
+chmod 644 "${NT_TIMER_FILE}" 2>/dev/null || true
 log_success "User notifier timer file created"
 
 # --- 10. Create/Update Notification Script (v47 Python with logging) ---
@@ -16955,13 +17301,13 @@ def main():
                                         msg = (
                                             f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
                                             f"{progress_text}\n"
-                                            f"{download_size} total • HIGH priority"
+                                            f"{download_size} total • background priority"
                                         )
                                     else:
                                         msg = (
                                             f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
                                             f"{progress_text}\n"
-                                            "HIGH priority"
+                                            "background priority"
                                         )
                                 else:
                                     # Manual or unknown total: avoid misleading "0 of 0" text
@@ -16969,13 +17315,13 @@ def main():
                                         msg = (
                                             "Downloading updates\n"
                                             f"{progress_text}\n"
-                                            f"{download_size} total • HIGH priority"
+                                            f"{download_size} total • background priority"
                                         )
                                     else:
                                         msg = (
                                             "Downloading updates\n"
                                             f"{progress_text}\n"
-                                            "HIGH priority"
+                                            "background priority"
                                         )
 
                                 n = Notify.Notification.new(
@@ -16997,7 +17343,7 @@ def main():
                                 log_info("Stage: Downloading packages")
                                 n = Notify.Notification.new(
                                     "Downloading updates...",
-                                    "Background download is in progress at HIGH priority.",
+                                    "Background download is in progress (background priority).",
                                     "emblem-downloads"
                                 )
                                 n.set_hint("value", GLib.Variant("i", 50))
@@ -17052,26 +17398,26 @@ def main():
                                             msg = (
                                                 f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
                                                 f"{progress_text}\n"
-                                                f"{download_size} total • HIGH priority"
+                                                f"{download_size} total • background priority"
                                             )
                                         else:
                                             msg = (
                                                 f"Downloading {pkg_downloaded} of {pkg_total} packages\n"
                                                 f"{progress_text}\n"
-                                                "HIGH priority"
+                                                "background priority"
                                             )
                                     else:
                                         if download_size and download_size not in ("unknown", "manual"):
                                             msg = (
                                                 "Downloading updates\n"
                                                 f"{progress_text}\n"
-                                                f"{download_size} total • HIGH priority"
+                                                f"{download_size} total • background priority"
                                             )
                                         else:
                                             msg = (
                                                 "Downloading updates\n"
                                                 f"{progress_text}\n"
-                                                "HIGH priority"
+                                                "background priority"
                                             )
 
                                     # Update the existing notification in place
@@ -19284,6 +19630,198 @@ PY
         date +%s%N
     fi | tr -d '\n' >"${DASH_API_TOKEN_FILE}" 2>/dev/null || true
     chmod 600 "${DASH_API_TOKEN_FILE}" 2>/dev/null || true
+fi
+
+# --- 11f. Install dashboard performance worker (user-space) ---
+# This worker writes perf-data.json into the user's dashboard directory so
+# status.html can show realtime service CPU/memory/IO charts when opened via
+# --dash-open.
+DASH_PERF_BIN="/usr/local/bin/zypper-auto-dashboard-perf-worker"
+
+log_info ">>> Installing dashboard performance worker (service perf charts)..."
+update_status "Installing dashboard performance worker..."
+
+if write_atomic "${DASH_PERF_BIN}" <<'PYEOF'
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from collections import deque
+from datetime import datetime, timezone
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+def _to_int(v, default=0):
+    try:
+        if v is None:
+            return default
+        s = str(v).strip()
+        if s == "":
+            return default
+        return int(s)
+    except Exception:
+        return default
+
+def _systemctl_show(unit: str) -> dict:
+    # Keep the set small + stable; only what we need for charts.
+    props = [
+        "CPUUsageNSec",
+        "MemoryCurrent",
+        "IOReadBytes",
+        "IOWriteBytes",
+        "ActiveState",
+        "SubState",
+        "ExecMainPID",
+        "ExecMainStatus",
+    ]
+    cmd = ["systemctl", "show", unit]
+    for p in props:
+        cmd.extend(["-p", p])
+
+    try:
+        p = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2,
+        )
+    except Exception as e:
+        return {"error": f"exec failed: {e}"}
+
+    if p.returncode != 0:
+        err = (p.stderr or "").strip()
+        out = (p.stdout or "").strip()
+        msg = err or out or f"systemctl show failed rc={p.returncode}"
+        return {"error": msg}
+
+    out = {}
+    for line in (p.stdout or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+def _atomic_write(path: str, data: dict):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    s = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(s)
+        f.write("\n")
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o644)
+    except Exception:
+        pass
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--max-samples", type=int, default=180)
+    ap.add_argument(
+        "--units",
+        default="zypper-autodownload.service,zypper-auto-verify.service,zypper-auto-dashboard-api.service",
+    )
+    args = ap.parse_args()
+
+    out_dir = os.path.abspath(os.path.expanduser(args.out_dir))
+    out_file = os.path.join(out_dir, "perf-data.json")
+
+    units = [u.strip() for u in str(args.units).split(",") if u.strip()]
+    if not units:
+        return 0
+
+    max_samples = max(10, int(args.max_samples))
+    interval = float(args.interval)
+    if interval < 0.5:
+        interval = 0.5
+
+    hist = {u: deque(maxlen=max_samples) for u in units}
+    prev_cpu = {u: None for u in units}
+    prev_t = {u: None for u in units}
+
+    while True:
+        now = time.time()
+        now_ms = int(now * 1000)
+
+        payload_units = {}
+        for u in units:
+            show = _systemctl_show(u)
+            if "error" in show:
+                # Still emit a point so the UI can show that collection failed.
+                hist[u].append({"t": now_ms, "cpu": 0.0, "mem": 0, "r": 0, "w": 0, "err": show.get("error")})
+                payload_units[u] = {"samples": list(hist[u])}
+                continue
+
+            cpu_ns = _to_int(show.get("CPUUsageNSec"), 0)
+            mem_b = _to_int(show.get("MemoryCurrent"), 0)
+            r_b = _to_int(show.get("IOReadBytes"), 0)
+            w_b = _to_int(show.get("IOWriteBytes"), 0)
+
+            cpu_pct = 0.0
+            if prev_cpu[u] is not None and prev_t[u] is not None:
+                dcpu = cpu_ns - int(prev_cpu[u])
+                dt = now - float(prev_t[u])
+                if dcpu < 0:
+                    dcpu = 0
+                if dt > 0:
+                    cpu_pct = (dcpu / (dt * 1e9)) * 100.0
+            prev_cpu[u] = cpu_ns
+            prev_t[u] = now
+
+            # Bound extreme spikes (multi-core can exceed 100; keep it sane for charts).
+            if cpu_pct < 0:
+                cpu_pct = 0.0
+            if cpu_pct > 4000:
+                cpu_pct = 4000.0
+
+            hist[u].append({
+                "t": now_ms,
+                "cpu": round(cpu_pct, 2),
+                "mem": mem_b,
+                "r": r_b,
+                "w": w_b,
+                "active": show.get("ActiveState", ""),
+                "sub": show.get("SubState", ""),
+                "pid": _to_int(show.get("ExecMainPID"), 0),
+                "status": _to_int(show.get("ExecMainStatus"), 0),
+            })
+            payload_units[u] = {"samples": list(hist[u])}
+
+        payload = {
+            "generated_iso": _iso_now(),
+            "interval_sec": interval,
+            "units": payload_units,
+        }
+
+        try:
+            _atomic_write(out_file, payload)
+        except Exception:
+            # Don't die just because the filesystem had a transient error.
+            pass
+
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(0)
+PYEOF
+then
+    execute_guarded "Set perf worker permissions (755)" chmod 755 "${DASH_PERF_BIN}" || true
+    log_success "Dashboard perf worker installed: ${DASH_PERF_BIN}"
+else
+    log_warn "Failed to install dashboard perf worker (non-fatal)"
 fi
 
 # --- 12. Final self-check ---

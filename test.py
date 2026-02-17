@@ -215,7 +215,7 @@ def _show_downloading_stage():
         msg_lines = [
             f"Downloading {downloaded} of {total_pkgs} packages",
             progress_text,
-            f"{download_size} total • HIGH priority",
+            f"{download_size} total • background priority",
         ]
         msg = "\n".join(msg_lines)
 

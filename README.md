@@ -54,7 +54,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * Background downloader writes precise status (`refreshing`, `downloading:TOTAL:SIZE:DOWNLOADED:PERCENT`, `complete`, `idle`)
 * Notifier shows a live-updating progress bar while downloads are in progress
 * Cache-aware logic skips fake progress when `zypper` reports everything is already in cache
-* High-priority downloads (nice -20, ionice realtime)
+* Background downloads run at low priority by default to avoid desktop performance spikes
 * **Smart Notification Management (v51–v56):** Prevents notification spam and keeps state consistent:
     * Synchronous notification IDs prevent duplicate popups
     * "No updates" notification shown only once until state changes
@@ -1190,6 +1190,7 @@ The dashboard also writes small sidecar files alongside the HTML:
 If you open the dashboard through a local web server (recommended), you can enable **Live mode** in the UI and it will:
 - poll `status-data.json` every ~5 seconds to update the cards
 - poll `download-status.txt` every ~2 seconds to show realtime background download progress
+- poll `perf-data.json` every ~2 seconds to show **performance charts** (CPU% + memory) for helper-related systemd services
 
 Quickstart (serve + open live):
 
@@ -1284,10 +1285,11 @@ systemctl status zypper-autodownload.service
 ### Version History
 
 - **Unreleased (next build):**
-  - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs in **High Priority Mode** by default:
+  - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
+  - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:
     - First run occurs ~30 seconds after boot (instead of waiting a full interval)
     - Default interval is now **5 minutes**
-    - The verification service runs with elevated CPU/I/O priority (Nice + realtime I/O)
+    - The verification service runs at low/background CPU/I/O priority to avoid desktop performance spikes
   - 🔐 **IMPROVED:** installing now also drops a Polkit action file so `pkexec` prompts for "System Verification and Repair" look trusted/official (instead of a generic "run /usr/local/bin/..." prompt). The uninstaller removes it.
   - 🩺 **IMPROVED:** `zypper-auto-helper --verify` now also verifies the dashboard desktop/start-menu shortcut and auto-regenerates it if it was deleted or is outdated.
   - 🖥️ **IMPROVED:** desktop/start-menu dashboard shortcut Quick Actions now have better UX:
@@ -1385,7 +1387,7 @@ systemctl status zypper-autodownload.service
   - 🎯 **NEW: Smart Cache Detection** - Doesn't notify about downloads if packages already cached
   - 🔄 **NEW: Manual Update Wrapper** - `sudo zypper dup` automatically runs post-update checks
   - 🚫 **NEW: Duplicate Prevention** - Synchronous notification IDs prevent popup spam
-  - ⚡ **IMPROVED: High-Priority Downloads** - nice -20 and ionice realtime for faster downloads
+  - ⚡ **IMPROVED: Background-Priority Downloads** - runs at low CPU/I/O priority to avoid desktop lag
   - 🛠️ **IMPROVED: Installation** - Fully automatic, no manual user service enabling required
   - 📊 **IMPROVED: Status Tracking** - Better progress reporting with percentage and package count
 - **v50** (2025-11-20): Added stage-based download notifications with package count display
