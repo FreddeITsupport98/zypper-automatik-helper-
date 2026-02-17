@@ -6626,6 +6626,60 @@ else
     VERIFICATION_FAILED=1
 fi
 
+# Extra auto-fix: Dashboard API service sandbox paths (prevents silent log loss + HTTP 500)
+log_debug "Checking dashboard API unit sandbox paths..."
+local DASH_API_UNIT_FILE expected_rw dash_api_changed
+DASH_API_UNIT_FILE="/etc/systemd/system/zypper-auto-dashboard-api.service"
+if [ -f "${DASH_API_UNIT_FILE}" ]; then
+    expected_rw="ReadWritePaths=${CONFIG_FILE} /var/lib/zypper-auto /var/log/zypper-auto /var/log/zypper-auto/service-logs"
+    dash_api_changed=0
+
+    # Ensure ProtectHome is compatible with reading user home paths (needed for snapper helper UX)
+    if grep -q '^ProtectHome=true$' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
+        execute_guarded "Patch dashboard API unit (ProtectHome=read-only)" \
+            sed -i 's/^ProtectHome=true$/ProtectHome=read-only/' "${DASH_API_UNIT_FILE}" || true
+        dash_api_changed=1
+    elif grep -q '^ProtectHome=' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
+        if ! grep -q '^ProtectHome=read-only$' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
+            execute_guarded "Normalize dashboard API unit (ProtectHome=read-only)" \
+                sed -i 's/^ProtectHome=.*/ProtectHome=read-only/' "${DASH_API_UNIT_FILE}" || true
+            dash_api_changed=1
+        fi
+    else
+        # Missing line; append (best-effort)
+        printf '%s\n' 'ProtectHome=read-only' >>"${DASH_API_UNIT_FILE}" 2>/dev/null || true
+        dash_api_changed=1
+    fi
+
+    # Ensure ReadWritePaths includes /var/log/zypper-auto so the service can create its log dirs/files.
+    if grep -q '^ReadWritePaths=' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
+        if ! grep -qF '/var/log/zypper-auto' "${DASH_API_UNIT_FILE}" 2>/dev/null \
+            || ! grep -qF '/var/log/zypper-auto/service-logs' "${DASH_API_UNIT_FILE}" 2>/dev/null \
+            || ! grep -qF '/var/lib/zypper-auto' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
+            execute_guarded "Patch dashboard API unit (ReadWritePaths)" \
+                sed -i "s|^ReadWritePaths=.*$|${expected_rw}|" "${DASH_API_UNIT_FILE}" || true
+            dash_api_changed=1
+        fi
+    else
+        printf '%s\n' "${expected_rw}" >>"${DASH_API_UNIT_FILE}" 2>/dev/null || true
+        dash_api_changed=1
+    fi
+
+    # If we changed anything, reload systemd and restart the service if it's running.
+    if [ "${dash_api_changed}" -eq 1 ]; then
+        execute_guarded "systemd daemon-reload (dashboard api auto-fix)" systemctl daemon-reload || true
+        if systemctl is-active zypper-auto-dashboard-api.service &>/dev/null; then
+            execute_guarded "Restart dashboard API (apply sandbox fix)" systemctl restart zypper-auto-dashboard-api.service || true
+        fi
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        log_success "  ✓ Auto-fixed dashboard API unit sandbox paths"
+    else
+        log_success "✓ Dashboard API unit sandbox paths look OK"
+    fi
+else
+    log_info "Dashboard API unit not installed (skipping)"
+fi
+
 # Check 10: Status file integrity (auto-fix enabled)
 log_debug "[10/${TOTAL_CHECKS}] Checking status file integrity..."
 local DL_STATUS_FILE
@@ -19894,8 +19948,8 @@ MemoryMax=400M
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto/service-logs
+ProtectHome=read-only
+ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto /var/log/zypper-auto/service-logs
 
 [Install]
 WantedBy=multi-user.target
