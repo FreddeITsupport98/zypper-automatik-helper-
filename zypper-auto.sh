@@ -763,8 +763,19 @@ PY
         fi
 
         # Verify server responds before opening browser (best-effort)
+        # Use a short retry loop so we don't emit a scary warning when the server
+        # is still starting up.
         if command -v curl >/dev/null 2>&1; then
-            if ! curl -fsS --max-time 1 "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+            ok=0
+            for _i in 1 2 3; do
+                if curl -fsS --max-time 1 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
+                    ok=1
+                    break
+                fi
+                sleep 0.2
+            done
+
+            if [ "${ok}" -ne 1 ] 2>/dev/null; then
                 echo "WARNING: dashboard server did not respond on port ${port}." >&2
                 if [ -s "${err_file}" ]; then
                     echo "--- dashboard server error (last 20 lines):" >&2
@@ -8865,8 +8876,20 @@ PY
         fi
 
         # Verify server responds before opening browser (best-effort)
+        # Use a short retry loop so we don't emit a scary warning when the server
+        # is still starting up.
         if command -v curl >/dev/null 2>&1; then
-            if ! curl -fsS --max-time 1 "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+            local ok
+            ok=0
+            for _i in 1 2 3; do
+                if curl -fsS --max-time 1 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
+                    ok=1
+                    break
+                fi
+                sleep 0.2
+            done
+
+            if [ "${ok}" -ne 1 ] 2>/dev/null; then
                 log_warn "Dashboard server did not respond on port ${port}"
                 if [ -s "${err_file}" ]; then
                     log_warn "--- dashboard server error (last 20 lines):"
