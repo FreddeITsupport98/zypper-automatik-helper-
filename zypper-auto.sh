@@ -762,27 +762,25 @@ PY
             fi
         fi
 
-        # Verify server responds before opening browser (best-effort)
+        # Verify server is listening before opening browser (best-effort)
         # Use a short retry loop so we don't emit a scary warning when the server
         # is still starting up.
-        if command -v curl >/dev/null 2>&1; then
-            ok=0
-            for _i in 1 2 3 4 5 6 7 8; do
-                if curl -fsS --max-time 2 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
-                    ok=1
-                    break
-                fi
-                sleep 0.25
-            done
+        ok=0
+        for _i in $(seq 1 50); do
+            if __znh_port_listen_in_use "${port}"; then
+                ok=1
+                break
+            fi
+            sleep 0.1
+        done
 
-            if [ "${ok}" -ne 1 ] 2>/dev/null; then
-                echo "WARNING: dashboard server did not respond on port ${port}." >&2
-                if [ -s "${err_file}" ]; then
-                    echo "--- dashboard server error (last 20 lines):" >&2
-                    tail -n 20 "${err_file}" >&2 || true
-                else
-                    echo "(no server error output captured)" >&2
-                fi
+        if [ "${ok}" -ne 1 ] 2>/dev/null; then
+            echo "WARNING: dashboard server did not respond on port ${port}." >&2
+            if [ -s "${err_file}" ]; then
+                echo "--- dashboard server error (last 20 lines):" >&2
+                tail -n 20 "${err_file}" >&2 || true
+            else
+                echo "(no server error output captured)" >&2
             fi
         fi
 
@@ -8875,26 +8873,24 @@ PY
             fi
         fi
 
-        # Verify server responds before opening browser (best-effort)
+        # Verify server is listening before opening browser (best-effort)
         # Use a short retry loop so we don't emit a scary warning when the server
         # is still starting up.
-        if command -v curl >/dev/null 2>&1; then
-            local ok
-            ok=0
-            for _i in 1 2 3 4 5 6 7 8; do
-                if curl -fsS --max-time 2 "http://127.0.0.1:${port}/status.html" >/dev/null 2>&1; then
-                    ok=1
-                    break
-                fi
-                sleep 0.25
-            done
+        local ok
+        ok=0
+        for _i in $(seq 1 50); do
+            if __znh_port_listen_in_use "${port}"; then
+                ok=1
+                break
+            fi
+            sleep 0.1
+        done
 
-            if [ "${ok}" -ne 1 ] 2>/dev/null; then
-                log_warn "Dashboard server did not respond on port ${port}"
-                if [ -s "${err_file}" ]; then
-                    log_warn "--- dashboard server error (last 20 lines):"
-                    tail -n 20 "${err_file}" 2>/dev/null | sed 's/^/[DASH_HTTP] /' | tee -a "${LOG_FILE}" || true
-                fi
+        if [ "${ok}" -ne 1 ] 2>/dev/null; then
+            log_warn "Dashboard server did not respond on port ${port}"
+            if [ -s "${err_file}" ]; then
+                log_warn "--- dashboard server error (last 20 lines):"
+                tail -n 20 "${err_file}" 2>/dev/null | sed 's/^/[DASH_HTTP] /' | tee -a "${LOG_FILE}" || true
             fi
         fi
 
