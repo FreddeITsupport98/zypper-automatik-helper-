@@ -6545,7 +6545,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=38
+    local TOTAL_CHECKS=41
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -6842,8 +6842,8 @@ else
     VERIFICATION_FAILED=1
 fi
 
-# Extra auto-fix: Dashboard API service sandbox paths (prevents silent log loss + HTTP 500)
-log_debug "Checking dashboard API unit sandbox paths..."
+# Check 10: Dashboard API unit sandbox paths (prevents silent log loss + HTTP 500)
+log_debug "[10/${TOTAL_CHECKS}] Checking dashboard API unit sandbox paths..."
 local DASH_API_UNIT_FILE expected_rw dash_api_changed
 DASH_API_UNIT_FILE="/etc/systemd/system/zypper-auto-dashboard-api.service"
 if [ -f "${DASH_API_UNIT_FILE}" ]; then
@@ -6896,9 +6896,9 @@ else
     log_info "Dashboard API unit not installed (skipping)"
 fi
 
-# Extra auto-fix: Dashboard freshness (apply new changes automatically)
+# Check 11: Dashboard artifacts freshness (apply new changes automatically)
 # If the installed helper is newer than the generated dashboard, regenerate it.
-log_debug "Checking dashboard artifacts freshness..."
+log_debug "[11/${TOTAL_CHECKS}] Checking dashboard artifacts freshness..."
 if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
     local helper_bin dash_root helper_mtime dash_mtime
     helper_bin="/usr/local/bin/zypper-auto-helper"
@@ -6919,10 +6919,10 @@ else
     log_debug "Dashboard generation disabled (DASHBOARD_ENABLED=false); skipping freshness check"
 fi
 
-# Extra auto-fix: Dashboard API runtime reload
+# Check 12: Dashboard API runtime reload
 # The API is a long-running service; after upgrades it may need a restart to
 # pick up new endpoints (e.g. /api/dashboard/refresh). We probe /api/ping.
-log_debug "Checking dashboard API runtime (/api/ping)..."
+log_debug "[12/${TOTAL_CHECKS}] Checking dashboard API runtime (/api/ping)..."
 if systemctl is-active --quiet zypper-auto-dashboard-api.service 2>/dev/null; then
     if command -v curl >/dev/null 2>&1; then
         if ! curl -fsS --max-time 1 http://127.0.0.1:8766/api/ping >/dev/null 2>&1; then
@@ -6943,8 +6943,8 @@ if systemctl is-active --quiet zypper-auto-dashboard-api.service 2>/dev/null; th
     fi
 fi
 
-# Check 10: Status file integrity (auto-fix enabled)
-log_debug "[10/${TOTAL_CHECKS}] Checking status file integrity..."
+# Check 13: Status file integrity (auto-fix enabled)
+log_debug "[13/${TOTAL_CHECKS}] Checking status file integrity..."
 local DL_STATUS_FILE
 DL_STATUS_FILE="/var/log/zypper-auto/download-status.txt"
 CURRENT_STATUS=""
@@ -7006,8 +7006,8 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
     fi
 fi
 
-# Check 11: zypp lock state (stale vs active)
-log_debug "[11/${TOTAL_CHECKS}] Checking for zypp lock file (stale vs active)..."
+# Check 14: zypp lock state (stale vs active)
+log_debug "[14/${TOTAL_CHECKS}] Checking for zypp lock file (stale vs active)..."
 if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
     ZYPP_LOCK_FILE="/run/zypp.pid"
     [ -f "/var/run/zypp.pid" ] && ZYPP_LOCK_FILE="/var/run/zypp.pid"
@@ -7041,39 +7041,41 @@ else
     log_debug "No zypp lock file present"
 fi
 
-# Check 12: Root filesystem free space and cleanup
-log_debug "[12/${TOTAL_CHECKS}] Checking root filesystem free space..."
+# Check 15: Root filesystem free space and cleanup
+log_debug "[15/${TOTAL_CHECKS}] Checking root filesystem free space..."
 ROOT_FREE_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
     log_warn "⚠ Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
     log_info "  → Attempting best-effort cleanup with 'zypper clean --all'..."
 
-    DISK_SPACE_CLEANED_ZYPPER=1
-    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-
     if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
         log_warn "  ⚠ Skipping 'zypper clean --all' because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
         DISK_SPACE_CRITICAL=1
-    elif execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
-        sleep 1
-        ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
-        if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
-            log_success "  ✓ Free space after cleanup: ${ROOT_FREE_MB_AFTER}MB (>= 1024MB)"
+    else
+        DISK_SPACE_CLEANED_ZYPPER=1
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+        if execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
+            sleep 1
+            ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
+            if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
+                log_success "  ✓ Free space after cleanup: ${ROOT_FREE_MB_AFTER}MB (>= 1024MB)"
+            else
+                log_warn "  ⚠ Still low on space after cleanup (currently ${ROOT_FREE_MB_AFTER:-unknown}MB)"
+                log_info "  → Advanced reclamation will run later (see Check 36)"
+                DISK_SPACE_CRITICAL=1
+            fi
         else
-            log_warn "  ⚠ Still low on space after cleanup (currently ${ROOT_FREE_MB_AFTER:-unknown}MB)"
-            log_info "  → Advanced reclamation will run later (see Check 32)"
+            log_warn "  ⚠ 'zypper clean --all' failed; advanced reclamation will run later (see Check 36)"
             DISK_SPACE_CRITICAL=1
         fi
-    else
-        log_warn "  ⚠ 'zypper clean --all' failed; advanced reclamation will run later (see Check 32)"
-        DISK_SPACE_CRITICAL=1
     fi
 else
     log_success "✓ Root filesystem has sufficient free space (${ROOT_FREE_MB:-unknown}MB)"
 fi
 
-# Check 13: RPM database integrity (best-effort)
-log_debug "[13/${TOTAL_CHECKS}] Checking RPM database integrity..."
+# Check 16: RPM database integrity (best-effort)
+log_debug "[16/${TOTAL_CHECKS}] Checking RPM database integrity..."
 RPM_DB_PATH=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
 if [ -z "${RPM_DB_PATH:-}" ]; then
     RPM_DB_PATH="/usr/lib/sysimage/rpm"
@@ -7099,7 +7101,7 @@ if [ -n "${RPMDB_VERIFY_BIN}" ] && [ -n "${RPM_DB_FILE}" ]; then
             log_success "✓ RPM database structural check passed"
         else
             log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
-            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 34)"
+            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 38)"
             RPMDB_STRUCTURAL_FAILED=1
         fi
     else
@@ -7107,7 +7109,7 @@ if [ -n "${RPMDB_VERIFY_BIN}" ] && [ -n "${RPM_DB_FILE}" ]; then
             log_success "✓ RPM database structural check passed"
         else
             log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
-            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 34)"
+            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 38)"
             RPMDB_STRUCTURAL_FAILED=1
         fi
     fi
@@ -7115,8 +7117,8 @@ else
     log_info "ℹ RPM DB structural check skipped (rpmdb_verify not found or db file not detected at ${RPM_DB_PATH})"
 fi
 
-# Check 14: Targeted RPM package verification (critical packages)
-log_debug "[14/${TOTAL_CHECKS}] Verifying critical system packages (rpm -V)..."
+# Check 17: Targeted RPM package verification (critical packages)
+log_debug "[17/${TOTAL_CHECKS}] Verifying critical system packages (rpm -V)..."
 (
     set +e
     critical_pkgs=(glibc systemd zypper libzypp rpm)
@@ -7138,8 +7140,8 @@ log_debug "[14/${TOTAL_CHECKS}] Verifying critical system packages (rpm -V)..."
     fi
 )
 
-# Check 15: Global systemd failed units (auto-fix enabled)
-log_debug "[15/${TOTAL_CHECKS}] Checking for failed systemd units (global)..."
+# Check 18: Global systemd failed units (auto-fix enabled)
+log_debug "[18/${TOTAL_CHECKS}] Checking for failed systemd units (global)..."
 FAILED_UNITS=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
 if [ -z "${FAILED_UNITS:-}" ]; then
     log_success "✓ No failed systemd units detected"
@@ -7164,8 +7166,8 @@ else
     fi
 fi
 
-# Check 16: Systemd flapping/stale service hint (restart counters)
-log_debug "[16/${TOTAL_CHECKS}] Checking systemd restart counters (flapping hint)..."
+# Check 19: Systemd flapping/stale service hint (restart counters)
+log_debug "[19/${TOTAL_CHECKS}] Checking systemd restart counters (flapping hint)..."
 flap_warned=0
 for unit in "${DL_SERVICE_NAME}.service" "${DL_SERVICE_NAME}.timer" "${VERIFY_SERVICE_NAME}.service" "${CLEANUP_SERVICE_NAME}.service"; do
     nr=$(systemctl show "$unit" -p NRestarts --value 2>/dev/null || echo "")
@@ -7185,8 +7187,8 @@ if [ "${flap_warned}" -eq 0 ] 2>/dev/null; then
     log_success "✓ No high restart counters detected on core units"
 fi
 
-# Check 17: DNS resolution for primary repo domain (auto-fix enabled)
-log_debug "[17/${TOTAL_CHECKS}] Checking DNS resolution for download.opensuse.org..."
+# Check 20: DNS resolution for primary repo domain (auto-fix enabled)
+log_debug "[20/${TOTAL_CHECKS}] Checking DNS resolution for download.opensuse.org..."
 if getent hosts download.opensuse.org >/dev/null 2>&1; then
     log_success "✓ DNS resolution OK for download.opensuse.org"
 else
@@ -7220,8 +7222,8 @@ else
     fi
 fi
 
-# Check 18: Repository accessibility (best-effort; network may be offline)
-log_debug "[18/${TOTAL_CHECKS}] Checking zypper repository configuration/readability..."
+# Check 21: Repository accessibility (best-effort; network may be offline)
+log_debug "[21/${TOTAL_CHECKS}] Checking zypper repository configuration/readability..."
 if zypper --non-interactive --quiet lr >/dev/null 2>&1; then
     log_success "✓ zypper repositories are readable (lr)"
 else
@@ -7229,7 +7231,7 @@ else
     VERIFICATION_FAILED=1
 fi
 
-log_debug "[18/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; auto-fix)..."
+log_debug "[21/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; auto-fix)..."
 
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping repo refresh check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
@@ -7287,8 +7289,8 @@ else
     fi
 fi
 
-# Check 19: Sudoers permissions hardening (auto-fix enabled)
-log_debug "[19/${TOTAL_CHECKS}] Checking sudoers permissions..."
+# Check 22: Sudoers permissions hardening (auto-fix enabled)
+log_debug "[22/${TOTAL_CHECKS}] Checking sudoers permissions..."
 bad_sudoers=0
 
 sudoers_mode=""
@@ -7335,8 +7337,8 @@ else
     fi
 fi
 
-# Check 20: Btrfs filesystem health (device error stats)
-log_debug "[20/${TOTAL_CHECKS}] Checking Btrfs device stats for / (if applicable)..."
+# Check 23: Btrfs filesystem health (device error stats)
+log_debug "[23/${TOTAL_CHECKS}] Checking Btrfs device stats for / (if applicable)..."
 root_fstype=""
 if command -v findmnt >/dev/null 2>&1; then
     root_fstype=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
@@ -7355,8 +7357,8 @@ else
     log_info "ℹ Btrfs device stats check skipped (fstype=${root_fstype:-unknown})"
 fi
 
-# Check 21: Snapper root config validation (best-effort)
-log_debug "[21/${TOTAL_CHECKS}] Checking Snapper root config (if available)..."
+# Check 24: Snapper root config validation (best-effort)
+log_debug "[24/${TOTAL_CHECKS}] Checking Snapper root config (if available)..."
 if command -v snapper >/dev/null 2>&1; then
     set +e
     # Newer snapper versions support '--last N'. Some older versions do not.
@@ -7386,8 +7388,8 @@ else
     log_info "ℹ Snapper not installed; skipping root snapshot validation"
 fi
 
-# Check 22: Cron conflicts (best-effort)
-log_debug "[22/${TOTAL_CHECKS}] Checking for cron jobs that run zypper (conflicts)..."
+# Check 25: Cron conflicts (best-effort)
+log_debug "[25/${TOTAL_CHECKS}] Checking for cron jobs that run zypper (conflicts)..."
 # Ignore comment-only mentions to avoid false positives from documentation lines.
 # (With -n, grep prefixes results with 'file:line:', so the comment check must happen after that prefix.)
 cron_hits=$(grep -R -n -E ':[0-9]+:[[:space:]]*[^#].*\<zypper\>' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null | head -n 20 || true)
@@ -7398,8 +7400,8 @@ else
     printf '%s\n' "$cron_hits" | tee -a "${LOG_FILE}"
 fi
 
-# Check 23: World-writable files in critical locations (best-effort)
-log_debug "[23/${TOTAL_CHECKS}] Scanning for world-writable files in /etc and /usr/local/bin..."
+# Check 26: World-writable files in critical locations (best-effort)
+log_debug "[26/${TOTAL_CHECKS}] Scanning for world-writable files in /etc and /usr/local/bin..."
 ww_hits=$(find /etc /usr/local/bin -xdev -type f -perm -0002 -print 2>/dev/null | head -n 10 || true)
 if [ -z "${ww_hits:-}" ]; then
     log_success "✓ No world-writable critical files found"
@@ -7408,8 +7410,8 @@ else
     printf '%s\n' "$ww_hits" | sed 's/^/  /' | tee -a "${LOG_FILE}"
 fi
 
-# Check 24: SSH configuration hardening (best-effort; only if sshd is active)
-log_debug "[24/${TOTAL_CHECKS}] Checking SSH hardening (PermitRootLogin / PermitEmptyPasswords)..."
+# Check 27: SSH configuration hardening (best-effort; only if sshd is active)
+log_debug "[27/${TOTAL_CHECKS}] Checking SSH hardening (PermitRootLogin / PermitEmptyPasswords)..."
 if systemctl is-active sshd.service >/dev/null 2>&1 || systemctl is-active sshd >/dev/null 2>&1; then
     ssh_warned=0
 
@@ -7443,8 +7445,8 @@ else
     log_info "ℹ SSH daemon not active; skipping SSH hardening check"
 fi
 
-# Check 25: Time synchronization (NTP)
-log_debug "[25/${TOTAL_CHECKS}] Verifying system clock synchronization (NTP)..."
+# Check 28: Time synchronization (NTP)
+log_debug "[28/${TOTAL_CHECKS}] Verifying system clock synchronization (NTP)..."
 if command -v timedatectl >/dev/null 2>&1; then
     ntp_sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "")
     if printf '%s' "$ntp_sync" | grep -qi '^yes$'; then
@@ -7468,8 +7470,8 @@ else
     log_info "ℹ timedatectl not available; skipping NTP synchronization check"
 fi
 
-# Check 26: Orphaned packages (best-effort)
-log_debug "[26/${TOTAL_CHECKS}] Checking for orphaned packages (no repository)..."
+# Check 29: Orphaned packages (best-effort)
+log_debug "[29/${TOTAL_CHECKS}] Checking for orphaned packages (no repository)..."
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping orphaned package check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
@@ -7499,8 +7501,8 @@ else
     log_info "ℹ zypper not available; skipping orphaned package check"
 fi
 
-# Check 27: Physical disk health (SMART) (best-effort)
-log_debug "[27/${TOTAL_CHECKS}] Checking SMART health (if smartctl is available)..."
+# Check 30: Physical disk health (SMART) (best-effort)
+log_debug "[30/${TOTAL_CHECKS}] Checking SMART health (if smartctl is available)..."
 if command -v smartctl >/dev/null 2>&1; then
     smart_failed=0
     smart_devices=$(smartctl --scan-open 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
@@ -7540,8 +7542,8 @@ else
     log_info "ℹ smartctl not installed; skipping SMART health check"
 fi
 
-# Check 28: Kernel taint state (best-effort)
-log_debug "[28/${TOTAL_CHECKS}] Checking kernel taint state..."
+# Check 31: Kernel taint state (best-effort)
+log_debug "[31/${TOTAL_CHECKS}] Checking kernel taint state..."
 if [ -r /proc/sys/kernel/tainted ]; then
     taint=$(cat /proc/sys/kernel/tainted 2>/dev/null || echo "")
     if [[ "${taint:-}" =~ ^[0-9]+$ ]] && [ "$taint" -ne 0 ] 2>/dev/null; then
@@ -7553,8 +7555,8 @@ else
     log_info "ℹ /proc/sys/kernel/tainted not available; skipping kernel taint check"
 fi
 
-# Check 29: Pending system reboot (runtime consistency)
-log_debug "[29/${TOTAL_CHECKS}] Checking if system reboot is required (zypper needs-reboot)..."
+# Check 32: Pending system reboot (runtime consistency)
+log_debug "[32/${TOTAL_CHECKS}] Checking if system reboot is required (zypper needs-reboot)..."
 if command -v zypper >/dev/null 2>&1; then
     set +e
     zypper needs-reboot >/dev/null 2>&1
@@ -7586,8 +7588,8 @@ else
     log_info "ℹ zypper not available; skipping reboot requirement check"
 fi
 
-# Check 30: Dashboard Shortcut Health (Start Menu & Desktop)
-log_debug "[30/${TOTAL_CHECKS}] Checking Shortcuts (Start Menu + Desktop)..."
+# Check 33: Dashboard Shortcut Health (Start Menu & Desktop)
+log_debug "[33/${TOTAL_CHECKS}] Checking Shortcuts (Start Menu + Desktop)..."
 
 # 1) Define paths
 local app_shortcut desktop_dir desk_shortcut shortcuts_ok
@@ -7657,8 +7659,8 @@ else
     fi
 fi
 
-# Check 31: Memory headroom (solver safety)
-log_debug "[31/${TOTAL_CHECKS}] Checking memory headroom for update solver..."
+# Check 34: Memory headroom (solver safety)
+log_debug "[34/${TOTAL_CHECKS}] Checking memory headroom for update solver..."
 mem_avail_mb=""
 if [ -r /proc/meminfo ]; then
     mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo "")
@@ -7706,8 +7708,8 @@ else
     log_info "ℹ Unable to determine available memory; skipping memory headroom check"
 fi
 
-# Check 32: AppArmor security status (auto-fix enabled)
-log_debug "[32/${TOTAL_CHECKS}] Verifying AppArmor security status..."
+# Check 35: AppArmor security status (auto-fix enabled)
+log_debug "[35/${TOTAL_CHECKS}] Verifying AppArmor security status..."
 if systemctl is-active apparmor.service >/dev/null 2>&1 || systemctl is-active apparmor >/dev/null 2>&1; then
     if command -v aa-status >/dev/null 2>&1; then
         set +e
@@ -7742,8 +7744,8 @@ else
     log_info "ℹ AppArmor is not active (disabled or not installed)"
 fi
 
-# Check 33: Proactive disk space reclamation (auto-fix)
-log_debug "[33/${TOTAL_CHECKS}] Verifying disk space headroom..."
+# Check 36: Proactive disk space reclamation (auto-fix)
+log_debug "[36/${TOTAL_CHECKS}] Verifying disk space headroom..."
 disk_avail=""
 disk_avail=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
 if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -gt 2000 ] 2>/dev/null; then
@@ -7768,7 +7770,7 @@ else
             fi
         fi
 
-        # Skip repeating zypper clean if we already did it in Check 12, or if
+        # Skip repeating zypper clean if we already did it in Check 15, or if
         # zypper appears to be running (lock held by a live process).
         if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null && [ "${ZYPPER_LOCK_ACTIVE:-0}" -ne 1 ] 2>/dev/null; then
             execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
@@ -7793,8 +7795,8 @@ else
     fi
 fi
 
-# Check 34: Zypper lock state (deadlock killer)
-log_debug "[34/${TOTAL_CHECKS}] Checking for zypper locks (stale vs active)..."
+# Check 37: Zypper lock state (deadlock killer)
+log_debug "[37/${TOTAL_CHECKS}] Checking for zypper locks (stale vs active)..."
 lock_found=0
 for zlock in /run/zypp.pid /var/run/zypp.pid; do
     if [ -f "$zlock" ]; then
@@ -7828,8 +7830,8 @@ if [ "$lock_found" -eq 0 ] 2>/dev/null; then
     log_success "✓ No zypper lock files detected"
 fi
 
-# Check 35: RPM database repair (nuclear option; best-effort)
-log_debug "[35/${TOTAL_CHECKS}] Verifying RPM database integrity and attempting repair if needed..."
+# Check 38: RPM database repair (nuclear option; best-effort)
+log_debug "[38/${TOTAL_CHECKS}] Verifying RPM database integrity and attempting repair if needed..."
 rpmdb_needs_repair=0
 
 # If earlier structural check failed, we already know we should repair.
@@ -7837,7 +7839,7 @@ if [ "${RPMDB_STRUCTURAL_FAILED:-0}" -eq 1 ] 2>/dev/null; then
     rpmdb_needs_repair=1
 fi
 
-# Re-evaluate DB path and verify again (defensive; does not assume Check 13 ran).
+# Re-evaluate DB path and verify again (defensive; does not assume Check 16 ran).
 RPM_DB_PATH2=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
 if [ -z "${RPM_DB_PATH2:-}" ]; then
     RPM_DB_PATH2="/usr/lib/sysimage/rpm"
@@ -7960,8 +7962,8 @@ if [ "$rpmdb_needs_repair" -eq 1 ] 2>/dev/null; then
     fi
 fi
 
-# Check 36: Dependency & package consistency (deep repair)
-log_debug "[36/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
+# Check 39: Dependency & package consistency (deep repair)
+log_debug "[39/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping dependency consistency check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
@@ -8013,8 +8015,8 @@ else
     log_info "ℹ zypper not available; skipping dependency consistency check"
 fi
 
-# Check 37: Btrfs metadata health (advanced repair)
-log_debug "[37/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
+# Check 40: Btrfs metadata health (advanced repair)
+log_debug "[40/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
 root_fstype2=""
 if command -v findmnt >/dev/null 2>&1; then
     root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
@@ -8088,8 +8090,8 @@ else
     log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
 fi
 
-# Check 38: GPG keyring/signature handling (deep repair)
-log_debug "[38/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
+# Check 41: GPG keyring/signature handling (deep repair)
+log_debug "[41/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping deep GPG check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
