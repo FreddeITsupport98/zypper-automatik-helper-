@@ -152,6 +152,10 @@ __znh_start_dashboard_sync_worker() {
     local run_cmd
     run_cmd=$(cat <<'SYNC'
 exec -a znh-dashboard-sync bash -lc '
+  # Lower IO priority so frequent cp -u checks don't contend with interactive disk IO.
+  if command -v ionice >/dev/null 2>&1; then
+    ionice -c3 -p $$ >/dev/null 2>&1 || true
+  fi
   dash_dir="$1";
   src_root="/var/log/zypper-auto";
   while true; do
@@ -14352,22 +14356,47 @@ BEFORE_COUNT=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null |
 
 # Write initial downloading status so the tracker loop sees it immediately
 write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0"
+
 # Start background progress tracker (coarse; avoids aggressive disk scans)
+# Optimization: only rescan the cache when the cache directory tree mtime changes.
+get_cache_tree_mtime() {
+    # Avoid a full rpm scan when nothing has changed.
+    # Note: CACHE_DIR mtime alone may not change for nested directory writes,
+    # so we include up to 2 directory levels as a low-cost approximation.
+    local newest
+    newest=$( {
+        stat -c %Y "$CACHE_DIR" 2>/dev/null || true
+        # Prefer directories only to keep this cheap even when rpms exist at unexpected paths.
+        stat -c %Y "$CACHE_DIR"/*/ 2>/dev/null || true
+        stat -c %Y "$CACHE_DIR"/*/*/ 2>/dev/null || true
+    } | sort -n | tail -1 2>/dev/null || true)
+    echo "${newest:-0}"
+}
+
+CACHE_MTIME_LAST=$(get_cache_tree_mtime)
+CURRENT_COUNT_CACHED=$BEFORE_COUNT
 (
     while [ -f "$STATUS_FILE" ] && grep -q "^downloading:" "$STATUS_FILE" 2>/dev/null; do
         sleep 10  # Update every 10 seconds (lower overhead)
-        CURRENT_COUNT=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null | wc -l)
+
+        CACHE_MTIME_NOW=$(get_cache_tree_mtime)
+        if [ "${CACHE_MTIME_NOW}" != "${CACHE_MTIME_LAST}" ]; then
+            CACHE_MTIME_LAST="${CACHE_MTIME_NOW}"
+            CURRENT_COUNT_CACHED=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null | wc -l)
+        fi
+
+        CURRENT_COUNT=$CURRENT_COUNT_CACHED
         DOWNLOADED=$((CURRENT_COUNT - BEFORE_COUNT))
         if [ $DOWNLOADED -lt 0 ]; then DOWNLOADED=0; fi
         if [ $DOWNLOADED -gt $PKG_COUNT ]; then DOWNLOADED=$PKG_COUNT; fi
-        
+
         # Calculate percentage
         if [ $PKG_COUNT -gt 0 ]; then
             PERCENT=$((DOWNLOADED * 100 / PKG_COUNT))
         else
             PERCENT=0
         fi
-        
+
         write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:$DOWNLOADED:$PERCENT"
     done
 ) &
@@ -14452,6 +14481,13 @@ Type=oneshot
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+
+# Resource caps (best-effort; ignored on older systemd / cgroup setups)
+CPUWeight=20
+IOWeight=20
+MemoryHigh=750M
+MemoryMax=1G
+
 StandardOutput=append:${LOG_DIR}/service-logs/downloader.log
 StandardError=append:${LOG_DIR}/service-logs/downloader-error.log
 ExecStart=${DOWNLOADER_SCRIPT}
@@ -14574,6 +14610,12 @@ Type=oneshot
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+
+# Resource caps (best-effort; ignored on older systemd / cgroup setups)
+CPUWeight=20
+IOWeight=20
+MemoryHigh=750M
+MemoryMax=1G
 
 ExecStart=/usr/local/bin/zypper-auto-helper --verify
 StandardOutput=append:${LOG_DIR}/service-logs/verify.log

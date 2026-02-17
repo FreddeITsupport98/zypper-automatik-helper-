@@ -1286,6 +1286,9 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
+  - ⚡ **IMPROVED:** background services now also include **systemd resource caps** (CPU/IO weight + memory high/max) to further reduce performance spikes.
+  - ⚡ **IMPROVED:** downloader progress tracking uses **mtime-based smart polling** to avoid repeated full cache scans when nothing is changing.
+  - ⚡ **IMPROVED:** dashboard sync worker now runs with **idle I/O priority** (`ionice -c3`) to minimize disk contention.
   - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:
     - First run occurs ~30 seconds after boot (instead of waiting a full interval)
     - Default interval is now **5 minutes**
