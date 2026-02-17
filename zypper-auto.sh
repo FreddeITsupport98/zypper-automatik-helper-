@@ -622,6 +622,14 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_path="${dash_dir}/status.html"
     dash_browser="${2:-${ZYPPER_AUTO_DASHBOARD_BROWSER:-${DASHBOARD_BROWSER:-}}}"
 
+    if [ ! -f "${dash_path}" ]; then
+        echo "Dashboard file not found yet: ${dash_path}" >&2
+        if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
+            echo "Generating dashboard now (sudo zypper-auto-helper --dashboard)..." >&2
+            sudo /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
+        fi
+    fi
+
     if [ -f "${dash_path}" ]; then
         echo "Dashboard path: ${dash_path}"
 
@@ -664,6 +672,27 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         url="http://127.0.0.1:${port}/status.html?live=1"
 
         mkdir -p "${dash_dir}" 2>/dev/null || true
+
+        # Best-effort: auto-refresh the dashboard if the helper command changed.
+        # This is how we "apply new changes" for users who just updated the helper
+        # but haven't re-generated status.html yet.
+        #
+        # Controls:
+        #   ZNH_DASH_OPEN_NO_REFRESH=1      -> disable auto-refresh
+        #   ZNH_DASH_OPEN_FORCE_REFRESH=1   -> always refresh (even if timestamps match)
+        if [ "${ZNH_DASH_OPEN_NO_REFRESH:-0}" -ne 1 ] 2>/dev/null \
+            && command -v sudo >/dev/null 2>&1 \
+            && [ -x /usr/local/bin/zypper-auto-helper ]; then
+
+            helper_mtime=$(stat -c %Y /usr/local/bin/zypper-auto-helper 2>/dev/null || echo 0)
+            dash_mtime=$(stat -c %Y "${dash_path}" 2>/dev/null || echo 0)
+
+            if [ "${ZNH_DASH_OPEN_FORCE_REFRESH:-0}" -eq 1 ] 2>/dev/null \
+                || [ "${helper_mtime:-0}" -gt "${dash_mtime:-0}" ] 2>/dev/null; then
+                echo "Dashboard appears outdated; refreshing first (sudo zypper-auto-helper --dashboard)..." >&2
+                sudo /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
+            fi
+        fi
 
         # Dashboard Settings API (localhost)
         # The Settings drawer in the dashboard talks to a root-only API on:
@@ -3890,6 +3919,10 @@ generate_dashboard() {
       <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
         These buttons copy a command to your clipboard (your browser will not run it automatically).
       </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom: 12px;">
+        <button class="pill" type="button" id="dash-refresh-run-btn" title="Regenerate the dashboard via the localhost API (requires Settings API running)">Run: Refresh Dashboard</button>
+        <span style="font-size:0.82rem; color: var(--muted);">Uses <code>127.0.0.1:8766</code>; your page will reload after refresh.</span>
+      </div>
       <div class="action-grid">
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --verify', this)">
             <span class="cmd-label">Verify & Fix</span>
@@ -4345,6 +4378,47 @@ generate_dashboard() {
         } catch (e) {
             return null;
         }
+    }
+
+    // --- Dashboard refresh (dashboard -> root API) ---
+    function dashboardRefreshRun() {
+        var btn = document.getElementById('dash-refresh-run-btn');
+        if (btn) btn.disabled = true;
+
+        toast('Refreshing dashboard…', 'Running sudo-free refresh via localhost API', 'ok');
+        _settingsClientLog('info', 'dashboard refresh requested', {});
+
+        return _api('/api/dashboard/refresh', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
+            toast('Dashboard refreshed', (r && r.rc === 0) ? 'OK (reloading soon)' : ('rc=' + String(r.rc || '?')), (r && r.rc === 0) ? 'ok' : 'err');
+            _settingsClientLog((r && r.rc === 0) ? 'info' : 'warn', 'dashboard refresh result', { rc: r.rc });
+
+            // The dashboard sync worker copies /var/log/zypper-auto/status.html -> ~/.local/share/zypper-notify/status.html every 10s.
+            // Reload after a short delay so most users see the refreshed HTML.
+            setTimeout(function() {
+                try { window.location.reload(); } catch (e) {}
+            }, 12000);
+
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'API not reachable';
+            toast('Refresh failed', msg, 'err');
+            _settingsClientLog('warn', 'dashboard refresh failed', { error: msg });
+            return null;
+        }).finally(function() {
+            if (btn) {
+                setTimeout(function() {
+                    try { btn.disabled = false; } catch (e) {}
+                }, 800);
+            }
+        });
+    }
+
+    function _wireDashboardRefreshUI() {
+        var btn = document.getElementById('dash-refresh-run-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function() {
+            dashboardRefreshRun();
+        });
     }
 
     // --- Snapper Manager (dashboard -> root API) ---
@@ -4829,6 +4903,8 @@ generate_dashboard() {
         });
     }
 
+    // Wire dashboard actions.
+    _wireDashboardRefreshUI();
     // Wire settings drawer once DOM is ready (we are at end of body).
     _wireSettingsUI();
     // Wire Snapper manager UI.
@@ -19486,7 +19562,7 @@ def _run_cmd(cmd: list[str], timeout_s: int, *, log=None) -> tuple[int, str]:
     env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     try:
         if log:
-            log("debug", f"[snapper] exec: {' '.join(cmd)} timeout={timeout_s}s")
+            log("debug", f"exec: {' '.join(cmd)} timeout={timeout_s}s")
         p = subprocess.run(
             cmd,
             check=False,
@@ -19645,6 +19721,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return _json_response(self, 401, {"error": "unauthorized"}, origin)
+
+        # --- Dashboard maintenance (safe) ---
+        if path == "/api/dashboard/refresh":
+            # Regenerate the root dashboard artifacts. The user's dashboard copy
+            # will be kept in sync by the dashboard sync worker started by --dash-open.
+            cmd = ["/usr/local/bin/zypper-auto-helper", "--dashboard"]
+            rc, out = _run_cmd(cmd, timeout_s=120, log=getattr(self.server, "_znh_log", None))
+            return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
 
         # --- Snapper control (dashboard) ---
         def _confirm_purge(now_ts: float):
