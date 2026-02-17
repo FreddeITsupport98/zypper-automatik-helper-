@@ -6799,6 +6799,53 @@ else
     log_info "Dashboard API unit not installed (skipping)"
 fi
 
+# Extra auto-fix: Dashboard freshness (apply new changes automatically)
+# If the installed helper is newer than the generated dashboard, regenerate it.
+log_debug "Checking dashboard artifacts freshness..."
+if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
+    local helper_bin dash_root helper_mtime dash_mtime
+    helper_bin="/usr/local/bin/zypper-auto-helper"
+    dash_root="${LOG_DIR}/status.html"
+
+    helper_mtime=$(stat -c %Y "${helper_bin}" 2>/dev/null || echo 0)
+    dash_mtime=$(stat -c %Y "${dash_root}" 2>/dev/null || echo 0)
+
+    if [ ! -f "${dash_root}" ] || [ "${helper_mtime:-0}" -gt "${dash_mtime:-0}" ] 2>/dev/null; then
+        log_info "Dashboard appears stale/missing; regenerating (apply new changes)..."
+        generate_dashboard || true
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        log_success "  ✓ Dashboard regenerated"
+    else
+        log_success "✓ Dashboard artifacts look fresh"
+    fi
+else
+    log_debug "Dashboard generation disabled (DASHBOARD_ENABLED=false); skipping freshness check"
+fi
+
+# Extra auto-fix: Dashboard API runtime reload
+# The API is a long-running service; after upgrades it may need a restart to
+# pick up new endpoints (e.g. /api/dashboard/refresh). We probe /api/ping.
+log_debug "Checking dashboard API runtime (/api/ping)..."
+if systemctl is-active --quiet zypper-auto-dashboard-api.service 2>/dev/null; then
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsS --max-time 1 http://127.0.0.1:8766/api/ping >/dev/null 2>&1; then
+            log_warn "Dashboard API is running but /api/ping is not responding; restarting service to apply upgrades..."
+            execute_guarded "Restart dashboard API (apply upgrades)" systemctl restart zypper-auto-dashboard-api.service || true
+            sleep 0.4
+            if curl -fsS --max-time 1 http://127.0.0.1:8766/api/ping >/dev/null 2>&1; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                log_success "  ✓ Dashboard API restarted and responding"
+            else
+                log_warn "  ⚠ Dashboard API still not responding to /api/ping (non-fatal)"
+            fi
+        else
+            log_success "✓ Dashboard API ping OK"
+        fi
+    else
+        log_debug "curl not available; skipping dashboard API ping check"
+    fi
+fi
+
 # Check 10: Status file integrity (auto-fix enabled)
 log_debug "[10/${TOTAL_CHECKS}] Checking status file integrity..."
 local DL_STATUS_FILE
@@ -19726,6 +19773,19 @@ class Handler(BaseHTTPRequestHandler):
                 return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
 
             return _json_response(self, 404, {"error": "not found"}, origin)
+
+        if path == "/api/ping":
+            # Unauthenticated health probe used by auto-repair to detect
+            # whether the running service has been restarted after upgrades.
+            return _json_response(self, 200, {
+                "ok": True,
+                "ts": time.time(),
+                "features": {
+                    "dashboard_refresh": True,
+                    "snapper": True,
+                    "settings": True,
+                },
+            }, origin)
 
         if path == "/api/schema":
             return _json_response(self, 200, {"schema": SCHEMA}, origin)

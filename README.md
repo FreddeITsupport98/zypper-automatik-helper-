@@ -1303,6 +1303,8 @@ systemctl status zypper-autodownload.service
     - dashboard API unit includes systemd CPU/IO/memory caps + low priority
     - dashboard HTTP server + sync/perf workers run with best-effort `ionice -c3` + `nice(19)` (when tools are available)
   - 🖥️ **IMPROVED:** `--dash-open` now auto-refreshes the dashboard when it is missing or outdated (so new dashboard/UI changes are applied automatically).
+  - 🧰 **IMPROVED:** auto-repair (`--verify`) now also detects stale/missing dashboard artifacts and regenerates the dashboard automatically.
+  - 🧰 **IMPROVED:** auto-repair (`--verify`) now probes the Dashboard API via `GET /api/ping` and will restart the API service if needed so new WebUI endpoints (like dashboard refresh) work immediately after upgrades.
   - 🖱️ **NEW:** dashboard Quick Actions now include **Run: Refresh Dashboard** (WebUI button) to regenerate dashboard artifacts through the localhost API.
   - 🐛 **FIXED:** dashboard API systemd hardening now allows safe logging + snapper actions:
     - `ProtectHome=read-only` (instead of `true`) so user home paths are visible when needed
