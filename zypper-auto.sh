@@ -810,8 +810,7 @@ SNOOZE_SHORT_HOURS="1"   # used by the "1h" snooze button
 SNOOZE_MEDIUM_HOURS="4"  # used by the "4h" snooze button
 SNOOZE_LONG_HOURS="24"   # used by the "1d" snooze button
 # Suppress duplicate "Updates Ready" popups while an interactive install is running.
-# Set to 0 to disable.
-INSTALL_CLICK_SUPPRESS_MINUTES="120"
+# Config key: INSTALL_CLICK_SUPPRESS_MINUTES (default 120; 0 disables)
 
 # Create log directory
 mkdir -p "${LOG_DIR}"
@@ -1399,6 +1398,7 @@ load_config() {
     if [ -f "${CONFIG_FILE}" ]; then
         log_info "Loading configuration from ${CONFIG_FILE}"
         # shellcheck source=/etc/zypper-auto.conf
+        # shellcheck disable=SC1091
         . "${CONFIG_FILE}"
     else
         log_info "No configuration found at ${CONFIG_FILE}; generating default config"
@@ -3223,9 +3223,8 @@ generate_dashboard() {
     fi
 
     last_install_log=""
-    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-        last_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
-    fi
+    last_install_log=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+        | sort -nr | head -1 | cut -f2- || true)
 
     last_install_tail=""
     if [ -n "${last_install_log}" ] && [ -f "${last_install_log}" ]; then
@@ -3241,15 +3240,16 @@ generate_dashboard() {
     flight_report_log=""
     flight_report_raw=""
 
-    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-        while IFS= read -r f; do
-            [ -n "${f:-}" ] || continue
-            if grep -q "ZYPPER-AUTO FLIGHT REPORT:" "$f" 2>/dev/null; then
-                flight_report_log="$f"
-                break
-            fi
-        done < <(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null || true)
-    fi
+    while IFS= read -r f; do
+        [ -n "${f:-}" ] || continue
+        if grep -q "ZYPPER-AUTO FLIGHT REPORT:" "$f" 2>/dev/null; then
+            flight_report_log="$f"
+            break
+        fi
+    done < <(
+        find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+            | sort -nr | cut -f2- || true
+    )
 
     if [ -n "${flight_report_log}" ] && [ -f "${flight_report_log}" ]; then
         flight_report_raw=$(awk '
@@ -6238,7 +6238,6 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    MAX_REPAIR_ATTEMPTS=3
     local TOTAL_CHECKS=38
 
     # Flags used to coordinate "later" repair stages so early checks don't
@@ -8905,9 +8904,8 @@ run_diag_logs_runner_only() {
     # Future installs will still be captured via TRACE_LOG mirroring.
     local latest_install_log
     latest_install_log=""
-    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-        latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
-    fi
+    latest_install_log=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+        | sort -nr | head -1 | cut -f2- || true)
     if [ -n "${latest_install_log}" ]; then
         follow_paths+=("${latest_install_log}")
     fi
@@ -9037,9 +9035,9 @@ run_diag_bundle_only() {
     local include_files=()
 
     # All diagnostics logs (already pruned to ~10 days)
-    if ls -1 "${diag_dir}"/diag-*.log >/dev/null 2>&1; then
+    mapfile -t __diag_logs < <(find "${diag_dir}" -maxdepth 1 -type f -name 'diag-*.log' -printf '%p\n' 2>/dev/null | sort || true)
+    if [ "${#__diag_logs[@]}" -gt 0 ]; then
         include_files+=("-C" "${diag_dir}")
-        mapfile -t __diag_logs < <(ls -1 "${diag_dir}"/diag-*.log 2>/dev/null || true)
         for __f in "${__diag_logs[@]}"; do
             include_files+=("$(basename "${__f}")")
         done
@@ -9051,16 +9049,15 @@ run_diag_bundle_only() {
     fi
 
     # Most recent installer logs (up to 3)
-    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-        local inst
-        inst=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -3 || true)
-        if [ -n "${inst}" ]; then
-            include_files+=("-C" "${LOG_DIR}")
-            while IFS= read -r __f; do
-                [ -n "${__f}" ] || continue
-                include_files+=("$(basename "${__f}")")
-            done <<<"${inst}"
-        fi
+    local inst
+    inst=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+        | sort -nr | head -3 | cut -f2- || true)
+    if [ -n "${inst}" ]; then
+        include_files+=("-C" "${LOG_DIR}")
+        while IFS= read -r __f; do
+            [ -n "${__f}" ] || continue
+            include_files+=("$(basename "${__f}")")
+        done <<<"${inst}"
     fi
 
     # High-volume TRACE_LOG (if present)
@@ -9069,16 +9066,15 @@ run_diag_bundle_only() {
     fi
 
     # Any pre-install environment snapshots captured during installation
-    if ls -1 "${LOG_DIR}"/pre-install-env-*.txt >/dev/null 2>&1; then
-        local envsnap
-        envsnap=$(ls -1t "${LOG_DIR}"/pre-install-env-*.txt 2>/dev/null || true)
-        if [ -n "${envsnap}" ]; then
-            include_files+=("-C" "${LOG_DIR}")
-            while IFS= read -r __f; do
-                [ -n "${__f}" ] || continue
-                include_files+=("$(basename "${__f}")")
-            done <<<"${envsnap}"
-        fi
+    local envsnap
+    envsnap=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'pre-install-env-*.txt' -printf '%T@\t%p\n' 2>/dev/null \
+        | sort -nr | cut -f2- || true)
+    if [ -n "${envsnap}" ]; then
+        include_files+=("-C" "${LOG_DIR}")
+        while IFS= read -r __f; do
+            [ -n "${__f}" ] || continue
+            include_files+=("$(basename "${__f}")")
+        done <<<"${envsnap}"
     fi
 
     # Notifier logs for user (including any per-run delta summaries)
@@ -9093,14 +9089,15 @@ run_diag_bundle_only() {
                 include_files+=("-C" "${ulogdir}" "last-run-status.txt")
             fi
             # Include recent package delta logs produced by the Ready-to-Install helper.
-            if ls -1 "${ulogdir}"/pkg-deltas/update-delta-*.log >/dev/null 2>&1; then
-                local udelta
-                mapfile -t __udelta_logs < <(ls -1t "${ulogdir}"/pkg-deltas/update-delta-*.log 2>/dev/null | head -5 || true)
-                for udelta in "${__udelta_logs[@]}"; do
-                    [ -n "${udelta}" ] || continue
-                    include_files+=("-C" "${ulogdir}/pkg-deltas" "$(basename "${udelta}")")
-                done
-            fi
+            local udelta
+            mapfile -t __udelta_logs < <(
+                find "${ulogdir}/pkg-deltas" -maxdepth 1 -type f -name 'update-delta-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+                    | sort -nr | head -5 | cut -f2- || true
+            )
+            for udelta in "${__udelta_logs[@]}"; do
+                [ -n "${udelta}" ] || continue
+                include_files+=("-C" "${ulogdir}/pkg-deltas" "$(basename "${udelta}")")
+            done
         fi
     fi
 
@@ -9121,9 +9118,9 @@ run_diag_bundle_only() {
         journalctl -k --grep="Out of memory" --since "2 days ago" --no-pager \
             > "${journal_dir}/oom_kills.txt" 2>&1 || true
     fi
-    if ls -1 "${journal_dir}"/* >/dev/null 2>&1; then
+    mapfile -t __jfiles < <(find "${journal_dir}" -maxdepth 1 -type f -printf '%p\n' 2>/dev/null | sort || true)
+    if [ "${#__jfiles[@]}" -gt 0 ]; then
         include_files+=("-C" "${journal_dir}")
-        mapfile -t __jfiles < <(ls -1 "${journal_dir}"/* 2>/dev/null || true)
         for __f in "${__jfiles[@]}"; do
             include_files+=("$(basename "${__f}")")
         done
@@ -10774,7 +10771,9 @@ run_snapper_menu_only() {
 
             # Collect installed kernels from module directories.
             local installed
-            installed=$(ls -1 /lib/modules /usr/lib/modules 2>/dev/null | sort -uV || true)
+            installed=$( {
+                find /lib/modules /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null || true
+            } | sort -uV || true)
 
             local keep_list=""
             if [ -n "${installed}" ]; then
@@ -11683,9 +11682,8 @@ run_debug_menu_only() {
                 # Fallback: tagged multi-source view mirroring --live-logs when
                 # no aggregated diagnostics file is available.
                 local latest_install_log=""
-                if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-                    latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
-                fi
+                latest_install_log=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+                    | sort -nr | head -1 | cut -f2- || true)
 
                 # Build list of tagged sources to follow (INS, SYS, USR, TRC)
                 local LIVE_SOURCES=()
@@ -11967,11 +11965,8 @@ run_debug_menu_only() {
                 log_info "[debug-menu] Showing last diagnostics snapshot info (path + tail)"
                 local _snap_dir _latest_snap
                 _snap_dir="${LOG_DIR}/diagnostics"
-                if ls -1 "${_snap_dir}"/diag-*.log >/dev/null 2>&1; then
-                    _latest_snap=$(ls -1t "${_snap_dir}"/diag-*.log 2>/dev/null | head -1 || true)
-                else
-                    _latest_snap=""
-                fi
+                _latest_snap=$(find "${_snap_dir}" -maxdepth 1 -type f -name 'diag-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+                    | sort -nr | head -1 | cut -f2- || true)
                 if [ -z "${_latest_snap}" ] || [ ! -f "${_latest_snap}" ]; then
                     echo "No diagnostics snapshot files found under ${_snap_dir}."
                     log_error "[debug-menu] No diagnostics snapshot files found under ${_snap_dir} when option 11 selected"
@@ -12087,11 +12082,12 @@ run_analyze_logs_only() {
 
     # Collect up to the 10 most recent installer logs.
     local log_files=()
-    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-        while IFS= read -r f; do
-            [ -n "${f}" ] && log_files+=("${f}")
-        done < <(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -10)
-    fi
+    while IFS= read -r f; do
+        [ -n "${f}" ] && log_files+=("${f}")
+    done < <(
+        find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+            | sort -nr | head -10 | cut -f2- || true
+    )
 
     if [ "${#log_files[@]}" -eq 0 ]; then
         echo "No installer logs found under ${LOG_DIR}." | tee -a "${LOG_FILE}"
@@ -12249,7 +12245,6 @@ run_rm_conflict_only() {
 
     # Ultimate safety net for manual mode: create a Snapper snapshot
     # before attempting any duplicate cleanup, if available.
-    local SNAPSHOT_DONE=0
     if command -v snapper >/dev/null 2>&1; then
         if pgrep -x snapper >/dev/null 2>&1; then
             printf '%b\n' "${YELLOW}   Snapper is already running; skipping pre-cleanup snapshot.${RESET}"
@@ -12281,7 +12276,6 @@ run_rm_conflict_only() {
             set -e
 
             if [ "${snap_rc:-1}" -eq 0 ] 2>/dev/null; then
-                SNAPSHOT_DONE=1
                 printf '%b\n' "${GREEN}   Created snapper snapshot before manual duplicate cleanup.${RESET}"
                 log_success "[rm-conflict][snapshot] Snapshot created successfully"
             elif [ "${snap_rc:-1}" -eq 124 ] 2>/dev/null || [ "${snap_rc:-1}" -eq 137 ] 2>/dev/null; then
@@ -13583,9 +13577,8 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
     fi
 
     latest_install_log=""
-    if ls -1 "${LOG_DIR}"/install-*.log >/dev/null 2>&1; then
-        latest_install_log=$(ls -1t "${LOG_DIR}"/install-*.log 2>/dev/null | head -1 || true)
-    fi
+    latest_install_log=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
+        | sort -nr | head -1 | cut -f2- || true)
 
     # Build list of tagged sources to follow. Each entry is TAG:path where
     # TAG is one of INS (installer), SYS (services), USR (notifier), TRC
@@ -13650,7 +13643,9 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
     fi
 
     cleanup_live_logs() {
+        # shellcheck disable=SC2317
         for pid in "${live_pids[@]}"; do
+            # shellcheck disable=SC2317
             kill "${pid}" 2>/dev/null || true
         done
     }
@@ -19918,10 +19913,6 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
     # Only run verification during installation, not in verify-only mode
     # (verify-only mode calls the function directly and exits)
     run_smart_verification_with_safety_net 1
-    VERIFICATION_EXIT_CODE=$?
-else
-    # Should never reach here - verify mode exits earlier
-    VERIFICATION_EXIT_CODE=0
 fi
 
 # --- 14b. Check for Optional Packages ---
