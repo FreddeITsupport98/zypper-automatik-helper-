@@ -3359,6 +3359,25 @@ generate_dashboard() {
     if [ "${verify_timer}" = "active" ]; then verify_timer_class="timer-active"; fi
     if [ "${nt_timer}" = "active" ]; then nt_timer_class="timer-active"; fi
 
+    # Last verification summary (auto-fix counters)
+    local verify_last_fixed verify_last_detected verify_last_remaining verify_last_ts verify_last_ts_esc
+    verify_last_fixed="0"
+    verify_last_detected="0"
+    verify_last_remaining="0"
+    verify_last_ts="unknown"
+    local verify_summary_file
+    verify_summary_file="${LOG_DIR}/last-verify-summary.txt"
+    if [ -f "${verify_summary_file}" ]; then
+        verify_last_fixed=$(grep -E '^fixed=' "${verify_summary_file}" 2>/dev/null | head -n 1 | cut -d= -f2- || echo 0)
+        verify_last_detected=$(grep -E '^detected=' "${verify_summary_file}" 2>/dev/null | head -n 1 | cut -d= -f2- || echo 0)
+        verify_last_remaining=$(grep -E '^remaining=' "${verify_summary_file}" 2>/dev/null | head -n 1 | cut -d= -f2- || echo 0)
+        verify_last_ts=$(grep -E '^ts_human=' "${verify_summary_file}" 2>/dev/null | head -n 1 | cut -d= -f2- || echo "unknown")
+    fi
+    if ! [[ "${verify_last_fixed:-}" =~ ^[0-9]+$ ]]; then verify_last_fixed="0"; fi
+    if ! [[ "${verify_last_detected:-}" =~ ^[0-9]+$ ]]; then verify_last_detected="0"; fi
+    if ! [[ "${verify_last_remaining:-}" =~ ^[0-9]+$ ]]; then verify_last_remaining="0"; fi
+    verify_last_ts_esc="$(_html_escape "${verify_last_ts}")"
+
     # Snapper timers (for dashboard snapper panel): enabled/partial/disabled/missing.
     local snapper_timeline_timer snapper_cleanup_timer snapper_boot_timer
     local snapper_timeline_class snapper_cleanup_class snapper_boot_class
@@ -3928,15 +3947,16 @@ generate_dashboard() {
     </div>
 
     <div class="card">
-      <h2>⚡ Quick Actions (Click to Copy)</h2>
+      <h2>⚡ Quick Actions</h2>
       <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
-        These buttons copy a command to your clipboard (your browser will not run it automatically). The refresh button below runs via the localhost API.
-      </div>
-      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom: 12px;">
-        <button class="pill" type="button" id="dash-refresh-run-btn" title="Regenerate the dashboard via the localhost API (requires Settings API running)">Run: Refresh Dashboard</button>
-        <span style="font-size:0.82rem; color: var(--muted);">Uses <code>127.0.0.1:8766</code>; your page will reload after refresh.</span>
+        Most buttons copy a command to your clipboard (your browser will not run it automatically). “Run: Refresh Dashboard” triggers a sudo-free refresh via the localhost API.
       </div>
       <div class="action-grid">
+        <button class="cmd-btn" id="dash-refresh-run-btn" type="button" title="Regenerate the dashboard via the localhost API (requires Settings API running)">
+            <span class="cmd-label">Run: Refresh Dashboard</span>
+            <span class="cmd-desc">Via localhost API (127.0.0.1:8766) • reloads after refresh</span>
+            <div class="cmd-copy-feedback">Refreshing…</div>
+        </button>
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --verify', this)">
             <span class="cmd-label">Verify & Fix</span>
             <span class="cmd-desc">Health checks + auto-repair (includes RPM DB repair)</span>
@@ -3968,8 +3988,8 @@ generate_dashboard() {
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --dashboard', this)">
-            <span class="cmd-label">Refresh Dashboard</span>
-            <span class="cmd-desc">Regenerate this page</span>
+            <span class="cmd-label">Copy: Refresh Dashboard</span>
+            <span class="cmd-desc">Regenerate this page (sudo)</span>
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
         <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --dash-open', this)">
@@ -4140,6 +4160,16 @@ generate_dashboard() {
         <div class="stat-box">
             <span class="stat-label">Verify/Repair Timer</span>
             <span class="stat-value ${verify_timer_class}" id="verify-timer">${verify_timer}</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-label">Auto-Repairs (last verify)</span>
+            <span class="stat-value" id="verify-last-fixed">${verify_last_fixed}</span>
+            <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
+              detected: <span id="verify-last-detected">${verify_last_detected}</span> • remaining: <span id="verify-last-remaining">${verify_last_remaining}</span>
+            </div>
+            <div style="margin-top:6px; font-size:0.82rem; color: var(--muted);">
+              at: <span id="verify-last-ts">${verify_last_ts_esc}</span>
+            </div>
         </div>
         <div class="stat-box">
             <span class="stat-label">User Notifier Timer</span>
@@ -4394,9 +4424,16 @@ generate_dashboard() {
     }
 
     // --- Dashboard refresh (dashboard -> root API) ---
-    function dashboardRefreshRun() {
-        var btn = document.getElementById('dash-refresh-run-btn');
-        if (btn) btn.disabled = true;
+    function dashboardRefreshRun(btnEl) {
+        var btn = btnEl || document.getElementById('dash-refresh-run-btn');
+        var fb = null;
+        try { fb = btn ? btn.querySelector('.cmd-copy-feedback') : null; } catch (e) { fb = null; }
+
+        if (btn) {
+            btn.disabled = true;
+            btn.classList.add('copied');
+        }
+        if (fb) fb.textContent = 'Refreshing…';
 
         toast('Refreshing dashboard…', 'Running sudo-free refresh via localhost API', 'ok');
         _settingsClientLog('info', 'dashboard refresh requested', {});
@@ -4404,6 +4441,8 @@ generate_dashboard() {
         return _api('/api/dashboard/refresh', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
             toast('Dashboard refreshed', (r && r.rc === 0) ? 'OK (reloading soon)' : ('rc=' + String(r.rc || '?')), (r && r.rc === 0) ? 'ok' : 'err');
             _settingsClientLog((r && r.rc === 0) ? 'info' : 'warn', 'dashboard refresh result', { rc: r.rc });
+
+            if (fb) fb.textContent = (r && r.rc === 0) ? 'OK ✓' : 'Done';
 
             // The dashboard sync worker copies /var/log/zypper-auto/status.html -> ~/.local/share/zypper-notify/status.html every 10s.
             // Reload after a short delay so most users see the refreshed HTML.
@@ -4416,12 +4455,15 @@ generate_dashboard() {
             var msg = (e && e.message) ? e.message : 'API not reachable';
             toast('Refresh failed', msg, 'err');
             _settingsClientLog('warn', 'dashboard refresh failed', { error: msg });
+            if (fb) fb.textContent = 'Failed';
             return null;
         }).finally(function() {
             if (btn) {
                 setTimeout(function() {
                     try { btn.disabled = false; } catch (e) {}
-                }, 800);
+                    try { btn.classList.remove('copied'); } catch (e) {}
+                    if (fb) fb.textContent = 'Refreshing…';
+                }, 900);
             }
         });
     }
@@ -4430,7 +4472,7 @@ generate_dashboard() {
         var btn = document.getElementById('dash-refresh-run-btn');
         if (!btn) return;
         btn.addEventListener('click', function() {
-            dashboardRefreshRun();
+            dashboardRefreshRun(btn);
         });
     }
 
@@ -5273,6 +5315,12 @@ generate_dashboard() {
         setText('verify-timer', d.verify_timer);
         setText('notifier-timer', d.nt_timer);
 
+        // Last verify summary (auto-repair stats)
+        if (d.verify_last_fixed !== undefined) setText('verify-last-fixed', d.verify_last_fixed);
+        if (d.verify_last_detected !== undefined) setText('verify-last-detected', d.verify_last_detected);
+        if (d.verify_last_remaining !== undefined) setText('verify-last-remaining', d.verify_last_remaining);
+        if (d.verify_last_ts !== undefined) setText('verify-last-ts', d.verify_last_ts);
+
         // Snapper timers (dashboard Snapper panel)
         if (d.snapper_timeline_timer !== undefined) setTimerState('snapper-timeline-timer', d.snapper_timeline_timer);
         if (d.snapper_cleanup_timer !== undefined) setTimerState('snapper-cleanup-timer', d.snapper_cleanup_timer);
@@ -5378,26 +5426,65 @@ generate_dashboard() {
         //  - idle
         //  - refreshing
         //  - downloading:PKGS:SIZE:DOWNLOADED:PCT
-        //  - complete:DOWNLOADED:TOTAL
+        //  - complete:DURATION_SEC:DOWNLOADED_PKGS
+        //  - error:network | error:repo | error:solver:RC
         var s = (raw || '').trim();
         if (!s) return { state: 'unknown', pct: 0, detail: '' };
 
+        function fmtDur(sec) {
+            var v = parseInt(sec || '0', 10);
+            if (isNaN(v) || v < 0) v = 0;
+            var m = Math.floor(v / 60);
+            var r = v % 60;
+            if (m > 0) return String(m) + 'm ' + String(r) + 's';
+            return String(r) + 's';
+        }
+
         if (s.indexOf('downloading:') === 0) {
             var parts = s.split(':');
-            var pkgs = parts[1] || '0';
+            var pkgs = parseInt(parts[1] || '0', 10);
+            if (isNaN(pkgs) || pkgs < 0) pkgs = 0;
             var size = parts[2] || 'unknown';
-            var done = parts[3] || '0';
+            var done = parseInt(parts[3] || '0', 10);
+            if (isNaN(done) || done < 0) done = 0;
             var pct = parseInt(parts[4] || '0', 10);
             if (isNaN(pct)) pct = 0;
-            return { state: 'downloading', pct: pct, detail: done + '/' + pkgs + ' pkgs • ' + size };
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+
+            if (pkgs > 0) {
+                return { state: 'downloading', pct: pct, detail: String(done) + '/' + String(pkgs) + ' pkgs • ' + size };
+            }
+            return { state: 'downloading', pct: pct, detail: 'Downloading updates • ' + size };
         }
 
         if (s.indexOf('complete:') === 0) {
             var parts2 = s.split(':');
-            var done2 = parts2[1] || '0';
-            var total2 = parts2[2] || '0';
-            return { state: 'complete', pct: 100, detail: done2 + '/' + total2 + ' downloaded' };
+            var dur = parts2[1] || '0';
+            var downloaded = parts2[2] || '0';
+
+            var dlN = parseInt(downloaded, 10);
+            if (isNaN(dlN) || dlN < 0) dlN = 0;
+
+            if (dlN === 0) {
+                return { state: 'complete', pct: 100, detail: 'No new downloads (already cached / detect-only)' };
+            }
+            return { state: 'complete', pct: 100, detail: 'Downloaded ' + String(dlN) + ' pkg(s) in ' + fmtDur(dur) };
         }
+
+        if (s.indexOf('error:') === 0) {
+            var parts3 = s.split(':');
+            var kind = parts3[1] || 'unknown';
+            var rc = parts3[2] || '';
+            var detail = kind;
+            if (kind === 'network') detail = 'Network error while checking repos';
+            else if (kind === 'repo') detail = 'Repository refresh error';
+            else if (kind === 'solver') detail = 'Solver/download error' + (rc ? (' (rc=' + rc + ')') : '');
+            return { state: 'error', pct: 100, detail: detail };
+        }
+
+        if (s === 'idle') return { state: 'idle', pct: 0, detail: '' };
+        if (s === 'refreshing') return { state: 'refreshing', pct: 10, detail: 'Refreshing repositories…' };
 
         return { state: s, pct: 0, detail: '' };
     }
@@ -5411,8 +5498,13 @@ generate_dashboard() {
         if (bar) {
             var pct = parseInt(obj.pct || '0', 10);
             if (isNaN(pct)) pct = 0;
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+
             bar.style.width = pct + '%';
-            if (pct >= 90) bar.style.backgroundColor = '#2ecc71';
+
+            if (obj.state === 'error') bar.style.backgroundColor = '#ef4444';
+            else if (obj.state === 'complete') bar.style.backgroundColor = '#2ecc71';
             else bar.style.backgroundColor = '#3498db';
         }
     }
@@ -5839,6 +5931,11 @@ EOF
   "dl_timer": "$(_json_escape "$dl_timer")",
   "verify_timer": "$(_json_escape "$verify_timer")",
   "nt_timer": "$(_json_escape "$nt_timer")",
+
+  "verify_last_fixed": ${verify_last_fixed},
+  "verify_last_detected": ${verify_last_detected},
+  "verify_last_remaining": ${verify_last_remaining},
+  "verify_last_ts": "$(_json_escape "$verify_last_ts")",
 
   "snapper_timeline_timer": "$(_json_escape "$snapper_timeline_timer")",
   "snapper_cleanup_timer": "$(_json_escape "$snapper_cleanup_timer")",
@@ -6852,10 +6949,10 @@ local DL_STATUS_FILE
 DL_STATUS_FILE="/var/log/zypper-auto/download-status.txt"
 CURRENT_STATUS=""
 
-# Helper status format: idle | refreshing | downloading:... | complete | complete:...
+# Helper status format: idle | refreshing | downloading:... | complete | complete:... | error:...
 __znh_validate_download_status_ok() {
     local s="$1"
-    printf '%s\n' "$s" | grep -qE '^(idle|refreshing|downloading:|complete($|:))'
+    printf '%s\n' "$s" | grep -qE '^(idle|refreshing|downloading:|complete($|:)|error:)'
 }
 
 if [ -s "${DL_STATUS_FILE}" ]; then
@@ -8064,6 +8161,21 @@ VERIFICATION_LAST_TOTAL_CHECKS=$TOTAL_CHECKS
 VERIFICATION_LAST_PROBLEMS_FIXED=$PROBLEMS_FIXED
 VERIFICATION_LAST_PROBLEMS_DETECTED=$PROBLEMS_DETECTED
 VERIFICATION_LAST_REMAINING=$VERIFICATION_FAILED
+
+# Persist last verification summary for the dashboard.
+# NOTE: do not source/execute this file; it's parsed as key=value.
+local verify_summary_file
+verify_summary_file="${LOG_DIR}/last-verify-summary.txt"
+{
+    echo "ts_iso=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
+    echo "ts_human=$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "run_id=${RUN_ID}"
+    echo "checks=${TOTAL_CHECKS}"
+    echo "detected=${PROBLEMS_DETECTED}"
+    echo "fixed=${PROBLEMS_FIXED}"
+    echo "remaining=${VERIFICATION_FAILED}"
+} >"${verify_summary_file}" 2>/dev/null || true
+chmod 644 "${verify_summary_file}" 2>/dev/null || true
 
 if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null; then
     log_info "=============================================="

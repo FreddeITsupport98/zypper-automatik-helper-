@@ -1195,6 +1195,7 @@ The dashboard also writes small sidecar files alongside the HTML:
 - `~/.local/share/zypper-notify/dashboard-live.log` (realtime log stream for Live mode)
 - `~/.local/share/zypper-notify/dashboard-verify-tail.log` (tail of auto-repair/verification service log for the Recent Activity view)
 - `~/.local/share/zypper-notify/dashboard-api.log` (Settings API log mirror for the UI)
+- `/var/log/zypper-auto/last-verify-summary.txt` (key=value summary so the dashboard can show the last verify/auto-repair counts)
 
 If you open the dashboard through a local web server (recommended), you can enable **Live mode** in the UI and it will:
 - poll `status-data.json` every ~5 seconds to update the cards
@@ -1295,6 +1296,8 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
+  - 🧰 **IMPROVED:** dashboard now shows the **last verify/auto-repair counts** (auto-repairs executed / remaining issues) in the Service Health panel.
+  - 🐛 **FIXED:** dashboard Live mode now parses downloader `complete:DURATION:PKGS` correctly and shows clearer text when no new downloads were needed (already cached / detect-only).
   - ⚡ **IMPROVED:** background services now also include **systemd resource caps** (CPU/IO weight + memory high/max) to further reduce performance spikes.
   - ⚡ **IMPROVED:** downloader progress tracker is now **event-driven** when `inotifywait` is available (from `inotify-tools`). It sleeps indefinitely until cache files change (with a 300s timeout fallback).
   - ⚡ **IMPROVED:** downloader metered-network checks are now **cached** (short TTL) to avoid calling `nmcli` on every minutely run when the network state is stable.
