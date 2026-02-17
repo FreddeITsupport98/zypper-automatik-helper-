@@ -3917,7 +3917,7 @@ generate_dashboard() {
     <div class="card">
       <h2>⚡ Quick Actions (Click to Copy)</h2>
       <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
-        These buttons copy a command to your clipboard (your browser will not run it automatically).
+        These buttons copy a command to your clipboard (your browser will not run it automatically). The refresh button below runs via the localhost API.
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom: 12px;">
         <button class="pill" type="button" id="dash-refresh-run-btn" title="Regenerate the dashboard via the localhost API (requires Settings API running)">Run: Refresh Dashboard</button>
