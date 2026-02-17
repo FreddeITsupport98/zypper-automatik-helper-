@@ -652,19 +652,21 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         port_file="${dash_dir}/dashboard-http.port"
         err_file="${dash_dir}/dashboard-http.err"
 
+        reuse_existing_server=0
+
         # If a previous server is already running, reuse its port.
         if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
             old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
             old_port=$(cat "${port_file}" 2>/dev/null || echo "")
             if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
                 port="${old_port}"
+                reuse_existing_server=1
             fi
         fi
 
         # If requested/default port is busy, pick a nearby free port.
-        if __znh_port_listen_in_use "${port}"; then
-            # If it's our own server, the pid logic above would have caught it.
-            # Otherwise, avoid broken UX by selecting another port.
+        # IMPORTANT: if the port is in use by *our own validated* server, keep it.
+        if __znh_port_listen_in_use "${port}" && [ "${reuse_existing_server}" -ne 1 ] 2>/dev/null; then
             port_pick="$(__znh_pick_free_port 8765 8790 2>/dev/null || true)"
             if [[ "${port_pick:-}" =~ ^[0-9]+$ ]]; then
                 port="${port_pick}"
@@ -8782,11 +8784,12 @@ run_dash_open_only() {
         echo "Open in browser: xdg-open ${dash_path}" | tee -a "${LOG_FILE}"
 
         # Start the live dashboard server (same safeguards as non-sudo fast path).
-        local port url pid_file port_file err_file
+        local port url pid_file port_file err_file reuse_existing_server
         port=8765
         pid_file="${dash_dir}/dashboard-http.pid"
         port_file="${dash_dir}/dashboard-http.port"
         err_file="${dash_dir}/dashboard-http.err"
+        reuse_existing_server=0
 
         mkdir -p "${dash_dir}" 2>/dev/null || true
         if [ -n "${SUDO_USER:-}" ]; then
@@ -8800,11 +8803,13 @@ run_dash_open_only() {
             old_port=$(cat "${port_file}" 2>/dev/null || echo "")
             if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}"; then
                 port="${old_port}"
+                reuse_existing_server=1
             fi
         fi
 
         # If requested/default port is busy, pick a nearby free port.
-        if __znh_port_listen_in_use "${port}"; then
+        # IMPORTANT: if the port is in use by *our own validated* server, keep it.
+        if __znh_port_listen_in_use "${port}" && [ "${reuse_existing_server}" -ne 1 ] 2>/dev/null; then
             local port_pick
             port_pick="$(__znh_pick_free_port 8765 8790 2>/dev/null || true)"
             if [[ "${port_pick:-}" =~ ^[0-9]+$ ]]; then
