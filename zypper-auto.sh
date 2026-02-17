@@ -151,11 +151,13 @@ __znh_start_dashboard_sync_worker() {
 
     local run_cmd
     run_cmd=$(cat <<'SYNC'
-exec -a znh-dashboard-sync bash -lc '
-  # Lower IO priority so frequent cp -u checks don't contend with interactive disk IO.
-  if command -v ionice >/dev/null 2>&1; then
-    ionice -c3 -p $$ >/dev/null 2>&1 || true
-  fi
+IONICE_PREFIX=""
+if command -v ionice >/dev/null 2>&1; then
+  IONICE_PREFIX="ionice -c3 "
+fi
+
+# shellcheck disable=SC2086
+exec -a znh-dashboard-sync ${IONICE_PREFIX}bash -lc '
   dash_dir="$1";
   src_root="/var/log/zypper-auto";
   while true; do
@@ -850,16 +852,22 @@ cleanup_old_logs() {
 
     # 3. Keep only the last MAX_LOG_FILES *uncompressed* install logs so that
     # the most recent sessions remain easy to browse without decompressing.
-    local log_count
-    log_count=$(find "${LOG_DIR}" -maxdepth 1 -name "install-*.log" -type f 2>/dev/null | wc -l || echo 0)
+    local log_paths=() log_count trim_n i old_log
+    # Gather the list once (oldest -> newest) so we don't scan the directory twice.
+    mapfile -t log_paths < <(
+        find "${LOG_DIR}" -maxdepth 1 -name "install-*.log" -type f -printf '%T@ %p\n' 2>/dev/null | \
+            sort -n | awk '{sub(/^[^ ]+ /, "", $0); print $0}' 2>/dev/null || true
+    )
+    log_count=${#log_paths[@]}
     if [ "${log_count}" -gt "${MAX_LOG_FILES}" ] 2>/dev/null; then
+        trim_n=$((log_count - MAX_LOG_FILES))
         log_info "Found ${log_count} uncompressed install logs; trimming to last ${MAX_LOG_FILES}"
-        find "${LOG_DIR}" -maxdepth 1 -name "install-*.log" -type f -printf '%T+ %p\n' | \
-            sort | head -n -"${MAX_LOG_FILES}" | cut -d' ' -f2- | \
-            while read -r old_log; do
-                log_debug "Removing old uncompressed log: ${old_log}"
-                rm -f "${old_log}" 2>/dev/null || true
-            done
+        for ((i = 0; i < trim_n; i++)); do
+            old_log="${log_paths[$i]}"
+            [ -n "${old_log}" ] || continue
+            log_debug "Removing old uncompressed log: ${old_log}"
+            rm -f "${old_log}" 2>/dev/null || true
+        done
     else
         log_debug "Uncompressed install log count (${log_count}) is within limit (${MAX_LOG_FILES})"
     fi
@@ -14369,7 +14377,7 @@ get_cache_tree_mtime() {
         # Prefer directories only to keep this cheap even when rpms exist at unexpected paths.
         stat -c %Y "$CACHE_DIR"/*/ 2>/dev/null || true
         stat -c %Y "$CACHE_DIR"/*/*/ 2>/dev/null || true
-    } | sort -n | tail -1 2>/dev/null || true)
+    } | awk 'BEGIN{m=0} {if($1>m)m=$1} END{print m}' 2>/dev/null || true)
     echo "${newest:-0}"
 }
 
