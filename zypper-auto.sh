@@ -6075,7 +6075,10 @@ generate_dashboard() {
         }
 
         if (inp) inp.addEventListener('input', updateInstallEnabled);
-        if (sim) sim.addEventListener('change', function() { _ru.simulate = !!sim.checked; });
+        if (sim) sim.addEventListener('change', function() {
+            _ru.simulate = !!sim.checked;
+            _ru.auto_simulate = _ru.simulate;
+        });
         updateInstallEnabled();
 
         _suUpdateProgress('Waiting', 0);
