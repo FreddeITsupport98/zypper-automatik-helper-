@@ -16,19 +16,60 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 
 -----
 
+<a id="reporting-issues-top"></a>
 ## 🐞 Reporting Issues?
 
 **If you need help, please include the relevant logs!** See the [Reporting Issues on GitHub](#reporting-issues-on-github) section for which logs to include.
 
 -----
 
+## 📌 Table of Contents
+
+- Getting started
+  - Reporting issues
+  - The goal
+  - Key features
+  - How it works (architecture)
+  - Installation / upgrading
+- User guides
+  - Self-update (CLI + WebUI)
+  - Configuration file (/etc/zypper-auto.conf)
+  - Duplicate RPM cleanup
+  - Usage
+  - Diagnostics
+  - Logging & monitoring
+  - Additional resources
+  - Uninstallation
+
+### Quick links (clickable)
+
+- [Reporting issues](#reporting-issues-top)
+- [The goal](#goal)
+- [Key features](#key-features)
+- [How it works (architecture)](#architecture)
+- [Installation / upgrading](#installation-upgrading)
+- [Self-update (CLI + WebUI)](#self-update)
+- [Configuration file (/etc/zypper-auto.conf)](#configuration)
+- [Duplicate RPM cleanup](#duplicate-rpm-cleanup)
+- [Usage](#usage)
+- [Diagnostics](#diagnostics)
+- [Logging & monitoring](#logging-monitoring)
+- [Additional resources](#additional-resources)
+- [Uninstallation](#uninstallation)
+
+-----
+
+<a id="goal"></a>
 ## 🎯 The Goal
 
 On a rolling-release distribution like Tumbleweed, updates are frequent and can be large. This script automates the most time-consuming part: the **download**.
 
 It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
 
+<a id="key-features"></a>
 ## ✨ Key Features (v58 Architecture)
+
+### 🧱 Safety-first updates
 
 * **Safe Duplicate RPM Cleanup (Wrapper + CLI):** Automatically and manually cleans up broken duplicate RPMs that block `zypper dup`, with:
     * **Whitelist mode** for known-problematic third‑party apps (default: `insync`).
@@ -40,6 +81,8 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Modern Reboot Detection:** After `zypper dup`, the wrapper runs `zypper ps -s` to show services using old libraries **and** calls `zypper needs-reboot` to tell you explicitly whether a system reboot is required (with an optional `notify-send` desktop alert).
 * **Fish-Safe `sudo zypper`:** A small Fish `sudo` wrapper transparently redirects `sudo zypper ...` to the safe `zypper-with-ps` wrapper, so both `zypper dup` and `sudo zypper dup` always benefit from the same safety logic.
 
+### 🧰 Command-line interface & verification
+
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
     * Shell aliases automatically configured for Bash, Zsh, and Fish
@@ -50,6 +93,9 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * Deep health checks: active + enabled + triggers scheduled
     * Nuclear options for complete service resets when needed
     * Accessible via `zypper-auto-helper --verify` after installation
+
+### 🔔 Notifications & background services
+
 * **Real-Time Download Progress (v51–v56):** Enhanced progress tracking with visual feedback:
 * Background downloader writes precise status (`refreshing`, `downloading:TOTAL:SIZE:DOWNLOADED:PERCENT`, `complete`, `idle`)
 * Notifier shows a live-updating progress bar while downloads are in progress
@@ -60,6 +106,9 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
     * "No updates" notification shown only once until state changes
     * Download status notifications replace each other smoothly
 * **Robust Zypper Error Handling (v54–v57):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications. Zypper locks are detected via both the canonical error message *and* zypp lockfiles, so the downloader/notifier will gracefully back off (and retry later) when a manual `zypper` or YaST is running. When the background downloader hits a solver conflict it preserves any downloaded RPMs in the cache and triggers a persistent "updates require your decision" notification with an **Install Now** action, showing how many updates are pending and a short package preview once a transaction can be summarised.
+
+### 🧩 Optional ecosystem integrations
+
 * **Soar / Flatpak / Snap / Homebrew / pipx Integration (v55–v61):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), a Homebrew `brew update` followed by conditional `brew upgrade`, **and** (when enabled) `pipx upgrade-all` so that system packages, runtimes, Soar-managed apps, Homebrew formulae, and pipx‑managed Python CLI tools stay aligned after system updates. Optional helper commands are provided via `zypper-auto-helper --soar`, `zypper-auto-helper --brew`, and `zypper-auto-helper --pip-package` (alias: `--pipx`).
 * **Snap/Flatpak Setup Helper (v62+):** `zypper-auto-helper --setup-SF` installs/configures Snapd and Flatpak (including common Flatpak remotes like Flathub) and, when `discover6` (KDE Discover) is present, optionally removes it with a detailed explanation so that only the zypper-based helper manages system updates and offline upgrades.
 * **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
@@ -90,6 +139,9 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 * **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
 * **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v58) to ensure a clean migration.
 * **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing (**default Yes / recommended**). It also recommends installing `ShellCheck` (optional) for safer maintenance of the bash scripts.
+
+### 🗑️ Uninstallation & cleanup
+
 * **Safe Scripted Uninstaller (v58+):** New `--uninstall-zypper-helper` mode (alias: `--uninstall-zypper`) in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
 *  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
 *  * `--dry-run` – show exactly what would be removed without making any changes
@@ -100,6 +152,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 -----
 
+<a id="architecture"></a>
 ## 🛠️ How It Works: The v64 Architecture
 
 This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
@@ -194,6 +247,7 @@ This Python script is the core of the system, run by the `zypper-notify-user.ser
 
 -----
 
+<a id="installation-upgrading"></a>
 ## 🚀 Installation / Upgrading
 
 The script is idempotent. You can run this on a fresh install *or* on a PC with an older version.
@@ -267,6 +321,9 @@ zypper-auto-helper --test-notify    # Send a test desktop notification to verify
 zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
 
+<a id="self-update"></a>
+### 🔄 Self-update
+
 Self-update notes:
 - Default channel is `stable`.
 - `--self-update` follows **GitHub refs**, not the internal `# VERSION` header:
@@ -280,6 +337,8 @@ Self-update notes:
 - In the stable channel, if a `.sha256`/`.sha256sum` file is published for the release, it will verify SHA256 before installing.
 - After installing, it runs a safe post-update self-test (`--help` and `--check` when possible). If that fails, it automatically rolls back to the previous version.
 - **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
+
+#### 🖥️ Dashboard WebUI self-update
 
 Dashboard WebUI self-update:
 - In the dashboard (`status.html`), under **Features & Config**, you can:
@@ -308,6 +367,7 @@ Restart your shell (or start a new terminal) after installing/upgrading.
 
 You normally run `zypper-auto-helper` **without** `sudo`; it will prompt for elevation internally when needed.
 
+<a id="configuration"></a>
 ### Configuration File: `/etc/zypper-auto.conf`
 
 The installer reads an optional config file at `/etc/zypper-auto.conf` on every run.
@@ -320,6 +380,27 @@ because it can contain secrets such as `WEBHOOK_URL`.
 
 Key options include:
 
+#### Configuration quick navigation
+
+- [Post-update helpers](#cfg-post-update-helpers)
+- [Timer intervals](#cfg-timer-intervals)
+- [Self-update](#cfg-self-update)
+- [Zypper Turbo (performance)](#cfg-zypper-turbo)
+- [Journal auto-vacuum (hygiene)](#cfg-journal-auto-vacuum)
+- [Snapper safety (retention optimizer caps)](#cfg-snapper-safety)
+- [Snapper cleanup safety](#cfg-snapper-cleanup-safety)
+- [Snapper cleanup Deep Clean](#cfg-snapper-deep-clean)
+- [System Deep Scrub (Option 4 extras)](#cfg-system-deep-scrub)
+- [System Health Automator (Option 5 extras)](#cfg-system-health-automator)
+- [Boot menu hygiene](#cfg-boot-menu-hygiene)
+- [Kernel package cleanup](#cfg-kernel-package-cleanup)
+- [Caching / snooze](#cfg-caching-snooze)
+- [Zypper solver flags](#cfg-zypper-solver-flags)
+- [Lock handling & downloader behaviour](#cfg-lock-handling)
+
+<a id="cfg-post-update-helpers"></a>
+#### Post-update helpers
+
 - **Post-update helpers**
   - `ENABLE_FLATPAK_UPDATES` / `ENABLE_SNAP_UPDATES` / `ENABLE_SOAR_UPDATES` /
     `ENABLE_BREW_UPDATES` / `ENABLE_PIPX_UPDATES` – `true` / `false` flags to
@@ -327,6 +408,10 @@ Key options include:
     `zypper dup`. When `ENABLE_PIPX_UPDATES=true` and `pipx` is installed, the
     wrapper and Ready‑to‑Install helper automatically run `pipx upgrade-all`
     after system updates to keep Python command‑line tools up to date.
+
+
+<a id="cfg-timer-intervals"></a>
+#### Timer intervals
 
 - **Timer intervals**
   - `DL_TIMER_INTERVAL_MINUTES` – how often the root downloader runs
@@ -339,16 +424,32 @@ Key options include:
 - The installer converts these into appropriate `OnCalendar` values, e.g.
   `*:0/10` for every 10 minutes or `hourly` for 60.
 
+
+<a id="cfg-self-update"></a>
+#### Self-update
+
 - **Self-update**
   - `SELF_UPDATE_CHANNEL` – controls which channel is used by `sudo zypper-auto-helper --self-update` (allowed: `rolling` or `stable`).
     - `rolling` downloads from the latest commit on the `main` branch.
     - `stable` downloads from the latest GitHub Release tag.
 
+
+<a id="cfg-zypper-turbo"></a>
+#### Zypper Turbo (performance)
+
 - **Zypper Turbo (performance)**
   - `ZYPPER_TURBO_TUNER_ENABLED` – when `true`, verification can tune `/etc/zypp/zypp.conf` for faster downloads (parallel connections + DownloadInAdvance).
 
+
+<a id="cfg-journal-auto-vacuum"></a>
+#### Journal auto-vacuum (hygiene)
+
 - **Journal auto-vacuum (hygiene)**
   - `VERIFY_JOURNAL_AUTO_VACUUM_ENABLED` – when `true` (default), verification will vacuum the systemd journal if `/var/log/journal` grows beyond ~500MB.
+
+
+<a id="cfg-snapper-safety"></a>
+#### Snapper safety (retention optimizer caps)
 
 - **Snapper safety (retention optimizer caps)**
   - `SNAP_RETENTION_OPTIMIZER_ENABLED` – when `true` (default), running
@@ -361,6 +462,10 @@ Key options include:
       `SNAP_RETENTION_MAX_NUMBER_LIMIT=15`, it becomes `NUMBER_LIMIT="2-15"`.
     - Setting a cap higher effectively disables capping for that key.
     - `SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0` means “keep no yearly snapshots”.
+
+
+<a id="cfg-snapper-cleanup-safety"></a>
+#### Snapper cleanup safety
 
 - **Snapper cleanup safety**
   - `SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED` – when `true` (default), Snapper cleanup
@@ -378,6 +483,10 @@ Key options include:
     Kernel purge and boot-entry pruning also show KEEP/REMOVE plans in color when
     run interactively.
 
+
+<a id="cfg-snapper-deep-clean"></a>
+#### Snapper cleanup Deep Clean (Emergency Space Recovery)
+
 - **Snapper cleanup Deep Clean (Emergency Space Recovery)**
   - `SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED` – when `true`, Snapper menu cleanup can run an
     extra “broken snapshot hunter” step to find and delete snapshots whose descriptions
@@ -388,6 +497,10 @@ Key options include:
     `true`).
   - When btrfs is available and cleanup reclaimed >~1GB, the helper prints a **tip**
     suggesting a btrfs balance command (it does not run balance automatically).
+
+
+<a id="cfg-system-deep-scrub"></a>
+#### System Deep Scrub (Option 4 extras: caches, logs, apps)
 
 - **System Deep Scrub (Option 4 extras: caches, logs, apps)**
   - **Audit reports:** Option 4 can write an additional “what happened” report under
@@ -410,6 +523,10 @@ Key options include:
     `USER_THUMBNAILS_CLEAN_CONFIRM` – optionally delete cached thumbnails for the
     desktop user. When days is set, only removes files not accessed recently.
 
+
+<a id="cfg-system-health-automator"></a>
+#### System Health Automator (Option 5 extras: btrfs maintenance + SSD health)
+
 - **System Health Automator (Option 5 extras: btrfs maintenance + SSD health)**
   - **Health Score diagnostics:** Option 5 prints a best-effort “System Health Score” (0–100)
     before and after applying changes, listing any detected issues.
@@ -421,6 +538,10 @@ Key options include:
   - `BTRFS_MAINTENANCE_TUNE_ENABLED` / `BTRFS_MAINTENANCE_TUNE_CONFIRM` – optionally tune
     `/etc/sysconfig/btrfsmaintenance` (best-effort) to reduce desktop slowdowns from
     overly-frequent balance/scrub schedules.
+
+
+<a id="cfg-boot-menu-hygiene"></a>
+#### Boot menu hygiene (auto-clean old kernel entries)
 
 - **Boot menu hygiene (auto-clean old kernel entries)**
   - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
@@ -434,6 +555,10 @@ Key options include:
   - `BOOT_ENTRY_CLEANUP_ENTRIES_DIR` – optional override of the BLS entries directory.
   - `BOOT_ENTRY_CLEANUP_CONFIRM` – ask once for confirmation before pruning entries.
 
+
+<a id="cfg-kernel-package-cleanup"></a>
+#### Kernel package cleanup (purge old kernels via zypper purge-kernels)
+
 - **Kernel package cleanup (purge old kernels via zypper purge-kernels)**
   - `KERNEL_PURGE_ENABLED` – when `true`, Snapper cleanup also runs
     `zypper purge-kernels` to remove old kernel *packages*.
@@ -446,12 +571,20 @@ Key options include:
   - `KERNEL_PURGE_DETAILS` – when `true`, adds `--details` for a more verbose summary.
   - `KERNEL_PURGE_TIMEOUT_SECONDS` – best-effort timeout for the purge step.
 
+
+<a id="cfg-caching-snooze"></a>
+#### Caching / snooze
+
 - **Caching / snooze**
   - `CACHE_EXPIRY_MINUTES` – how long a cached `zypper dup --dry-run` result
     is considered valid before forcing a fresh check.
   - `SNOOZE_SHORT_HOURS`, `SNOOZE_MEDIUM_HOURS`, `SNOOZE_LONG_HOURS` – actual
     durations used by the `1h` / `4h` / `1d` snooze buttons in the desktop
     notification.
+
+
+<a id="cfg-zypper-solver-flags"></a>
+#### Zypper solver flags
 
 - **Zypper solver flags**
   - `DUP_EXTRA_FLAGS` – extra arguments appended to every `zypper dup` invocation
@@ -460,6 +593,10 @@ Key options include:
     as `--allow-vendor-change` or `--from <repo>` without editing the scripts.
   - Do **not** include `--non-interactive`, `--download-only`, or `--dry-run` here;
     those are added automatically by the helper where appropriate.
+
+
+<a id="cfg-lock-handling"></a>
+#### Lock handling & downloader behaviour
 
 - **Lock handling & downloader behaviour**
   - `LOCK_RETRY_MAX_ATTEMPTS` – how many times the Ready-to-Install helper should
@@ -535,6 +672,7 @@ and comments.
 
 -----
 
+<a id="duplicate-rpm-cleanup"></a>
 ## 🛡️ Safe Duplicate RPM Cleanup & Conflict Resolution
 
 Broken third‑party RPMs (especially those with buggy `%preun`/`%postun` scripts) can block `zypper dup` with errors like "failed to execute /usr/bin/fish" or "package specifies multiple versions". The helper includes a **two‑layer duplicate cleanup system** designed to fix these problems safely.
@@ -633,6 +771,7 @@ post‑update helpers, and reboot guidance as with plain `zypper ...`.
 
 -----
 
+<a id="usage"></a>
 ## 🏃 Usage
 
 1.  **Wait.** The services run in the background. By default, both the downloader and notifier run every minute. You can change their frequency via `/etc/zypper-auto.conf` (`DL_TIMER_INTERVAL_MINUTES` / `NT_TIMER_INTERVAL_MINUTES`) and re-run `sudo ./zypper-auto.sh install`.
@@ -703,6 +842,7 @@ systemctl --user restart zypper-notify-user.timer
 
 -----
 
+<a id="dev-testing"></a>
 ## 👩‍💻 Developer / Contributor Testing
 
 This repository includes two small helpers designed to make reproducing and
@@ -811,10 +951,19 @@ run repeatedly on development systems.
 
 -----
 
+<a id="diagnostics"></a>
 ## 🧪 Advanced Diagnostics & CLI Tools
 
 The helper includes a small diagnostics toolkit built around aggregated log followers, one-shot snapshots, and compact bundles. These tools are especially useful when filing bug reports or debugging tricky issues.
 
+### Diagnostics quick navigation
+
+- [Core diagnostics commands](#diag-core-commands)
+- [Logging & monitoring](#logging-monitoring)
+- [Reporting issues on GitHub](#reporting-issues)
+- [Troubleshooting common issues](#troubleshooting)
+
+<a id="diag-core-commands"></a>
 ### Core Diagnostics Commands
 
 - `zypper-auto-helper --logs`
@@ -886,6 +1035,7 @@ The helper includes a small diagnostics toolkit built around aggregated log foll
 
 These tools do **not** modify your configuration or timers; they only read logs, inspect status, and, in the case of the follower, create additional diagnostics log files under `/var/log/zypper-auto/diagnostics/`.
 
+<a id="logging-monitoring"></a>
 ## 📊 Logging & Monitoring (v47)
 
 Version 47 introduces comprehensive logging to help you understand what's happening without needing to run commands.
@@ -1275,8 +1425,10 @@ When you run the helper manually in a terminal, it also prints a readable, color
 
 -----
 
+<a id="additional-resources"></a>
 ## 📚 Additional Resources
 
+<a id="reporting-issues"></a>
 ### Reporting Issues on GitHub
 
 **If you encounter a problem, please include these logs in your GitHub issue:**
@@ -1322,6 +1474,7 @@ systemctl status zypper-autodownload.service
 
 **⚠️ IMPORTANT:** Please **redact any personal information** (usernames, hostnames, network names) before posting logs publicly!
 
+<a id="troubleshooting"></a>
 ### Troubleshooting Common Issues
 
 **Problem: Updates not being downloaded**
@@ -1500,8 +1653,16 @@ systemctl status zypper-autodownload.service
 
 -----
 
+<a id="uninstallation"></a>
 ## 🗑️ Uninstallation
 
+### Uninstallation quick navigation
+
+- [Recommended: Scripted Uninstaller](#uninstall-scripted)
+- [Advanced uninstall flags](#uninstall-advanced-flags)
+- [Manual uninstall (advanced / legacy)](#uninstall-manual)
+
+<a id="uninstall-scripted"></a>
 ### Recommended: Scripted Uninstaller (v58+)
 
 Use the built-in uninstaller to safely remove all helper components:
@@ -1528,6 +1689,7 @@ By default this will:
 - Remove `/boot/do_purge_kernels` marker (if it was created by the helper)
 - Reload both system and user systemd daemons and clear any "failed" states
 
+<a id="uninstall-advanced-flags"></a>
 #### Advanced Uninstall Flags
 
 You can customise the behaviour with optional flags:
@@ -1555,6 +1717,7 @@ sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --disable-maintenance-time
 sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run --keep-logs --keep-hooks
 ```
 
+<a id="uninstall-manual"></a>
 ### Manual Uninstall (Advanced / Legacy)
 
 If you prefer or need to remove components manually, the equivalent steps are:
