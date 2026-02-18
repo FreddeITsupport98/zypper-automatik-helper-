@@ -853,6 +853,7 @@ ENABLE_PIPX_UPDATES="true"  # new: pipx-based Python CLI updates
 #
 # When true, optional refresh steps run after every successful zypper dup,
 # even if there were no system updates.
+# shellcheck disable=SC2034  # used by generated helper scripts + dashboard API job script
 OPTIONAL_UPDATES_ALWAYS_REFRESH="false"
 
 # Extensibility / remote monitoring (may be overridden by CONFIG_FILE)
