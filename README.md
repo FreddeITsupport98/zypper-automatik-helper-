@@ -408,6 +408,12 @@ Key options include:
     `zypper dup`. When `ENABLE_PIPX_UPDATES=true` and `pipx` is installed, the
     wrapper and Ready‑to‑Install helper automatically run `pipx upgrade-all`
     after system updates to keep Python command‑line tools up to date.
+  - `OPTIONAL_UPDATES_ALWAYS_REFRESH` – `true` / `false` (default: `false`).
+    Controls whether the optional app refresh steps above run:
+    - `false` (recommended): only run them when `zypper dup` actually changed
+      system packages (skips when zypper prints "Nothing to do.")
+    - `true`: always run them after a successful `zypper dup`, even if there
+      were no system updates
 
 
 <a id="cfg-timer-intervals"></a>
@@ -1518,6 +1524,9 @@ systemctl status zypper-autodownload.service
     - Quick Action: **“Simulate: System Update (Dry-run)”** opens the wizard with simulation pre-selected.
     - URL auto-open: `status.html?live=1&ru=1&ru_dry=1` (opens wizard in dry-run simulation mode).
   - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
+  - ⚡ **NEW:** optional post-update app refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when no system updates occurred:
+    - New config: `OPTIONAL_UPDATES_ALWAYS_REFRESH` (and WebUI Settings toggle)
+    - Default: only run optional app refresh steps when `zypper dup` actually changed system packages (skips when zypper prints "Nothing to do.")
   - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
   - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.
   - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).

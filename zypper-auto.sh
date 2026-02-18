@@ -846,6 +846,15 @@ ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
 ENABLE_PIPX_UPDATES="true"  # new: pipx-based Python CLI updates
 
+# OPTIONAL_UPDATES_ALWAYS_REFRESH
+# When false (recommended / default), optional post-update refresh steps
+# (Flatpak/Snap/Soar/Brew/pipx) only run when system packages were actually
+# updated by zypper (i.e. not when zypper prints "Nothing to do.").
+#
+# When true, optional refresh steps run after every successful zypper dup,
+# even if there were no system updates.
+OPTIONAL_UPDATES_ALWAYS_REFRESH="false"
+
 # Extensibility / remote monitoring (may be overridden by CONFIG_FILE)
 WEBHOOK_URL=""            # Remote monitoring endpoint (Discord/Slack/ntfy/etc.)
 HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
@@ -1493,6 +1502,7 @@ __znh_write_dashboard_schema_json() {
     "ENABLE_SOAR_UPDATES": {"type": "bool", "default": "true"},
     "ENABLE_BREW_UPDATES": {"type": "bool", "default": "true"},
     "ENABLE_PIPX_UPDATES": {"type": "bool", "default": "true"},
+    "OPTIONAL_UPDATES_ALWAYS_REFRESH": {"type": "bool", "default": "false"},
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
@@ -1585,6 +1595,15 @@ ENABLE_BREW_UPDATES=true
 # ansible, httpie, etc.) are upgraded in their isolated environments.
 # When false, pipx-based tools are left entirely to the user.
 ENABLE_PIPX_UPDATES=true
+
+# OPTIONAL_UPDATES_ALWAYS_REFRESH
+# Controls optional post-update refresh steps (Flatpak/Snap/Soar/Brew/pipx).
+#
+# - false (recommended): only run optional refresh steps when system packages
+#   were actually updated by zypper (not when zypper prints "Nothing to do.").
+# - true : always run optional refresh steps after a successful zypper dup,
+#   even if there were no system updates.
+OPTIONAL_UPDATES_ALWAYS_REFRESH=false
 
 # ---------------------------------------------------------------------
 # Remote monitoring (webhooks)
@@ -4742,6 +4761,7 @@ generate_dashboard() {
         { key: 'ENABLE_SOAR_UPDATES', type: 'bool', label: 'Soar updates' },
         { key: 'ENABLE_BREW_UPDATES', type: 'bool', label: 'Homebrew updates' },
         { key: 'ENABLE_PIPX_UPDATES', type: 'bool', label: 'pipx upgrade-all' },
+        { key: 'OPTIONAL_UPDATES_ALWAYS_REFRESH', type: 'bool', label: 'Always refresh optional app updates (Flatpak/Snap/Soar/Brew/pipx) even when no system updates' },
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
@@ -18421,6 +18441,7 @@ ENABLE_SNAP_UPDATES="true"
 ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
 ENABLE_PIPX_UPDATES="true"
+OPTIONAL_UPDATES_ALWAYS_REFRESH="false"
 
 if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
@@ -18944,8 +18965,14 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # Run the actual zypper command. If it fails specifically due to the
     # system management lock (exit code 7), we will show a clearer message
     # afterwards instead of leaving only the raw zypper error.
-    sudo /usr/bin/zypper "$@"
-    EXIT_CODE=$?
+    ZYPPER_OUT_FILE="$(mktemp /tmp/znh-zypper-with-ps.XXXXXX 2>/dev/null || echo /tmp/znh-zypper-with-ps.$$)"
+    sudo /usr/bin/zypper "$@" 2>&1 | tee "$ZYPPER_OUT_FILE"
+    EXIT_CODE=${PIPESTATUS[0]}
+    DID_UPDATES=1
+    if grep -q "Nothing to do\." "$ZYPPER_OUT_FILE" 2>/dev/null; then
+        DID_UPDATES=0
+    fi
+    rm -f "$ZYPPER_OUT_FILE" 2>/dev/null || true
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         run_hooks "post" || true
@@ -18974,14 +19001,25 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
 
     generate_dashboard || true
 
-    # Always run Flatpak and Snap updates after dup, even if dup had no updates or failed
-    echo ""
-    echo "=========================================="
-    echo "  Flatpak Updates"
-    echo "=========================================="
-    echo ""
-    
-    if [[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]]; then
+    # Optional post-update app refresh steps (Flatpak/Snap/Soar/Brew/pipx).
+    # Controlled by OPTIONAL_UPDATES_ALWAYS_REFRESH:
+    #   - true  : run even if zypper printed "Nothing to do."
+    #   - false : only run when system packages actually changed (recommended)
+    SHOULD_RUN_OPTIONAL=0
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        if [[ "${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}" == "true" ]] || [ "${DID_UPDATES:-1}" -eq 1 ]; then
+            SHOULD_RUN_OPTIONAL=1
+        fi
+    fi
+
+    if [ "$SHOULD_RUN_OPTIONAL" -eq 1 ]; then
+        echo ""
+        echo "=========================================="
+        echo "  Flatpak Updates"
+        echo "=========================================="
+        echo ""
+        
+        if [[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]]; then
         if command -v flatpak >/dev/null 2>&1; then
             if sudo flatpak update -y; then
                 echo "✅ Flatpak updates completed."
@@ -19239,6 +19277,15 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     fi
 
     echo ""
+    else
+        echo ""
+        if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "ℹ️  Skipping optional app updates because zypper dup failed (rc=$EXIT_CODE)."
+        else
+            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional app updates to conserve CPU."
+        fi
+        echo ""
+    fi
 
     # Always show service restart info, even if zypper reported errors
     echo "=========================================="
@@ -21816,6 +21863,7 @@ ENABLE_SNAP_UPDATES="true"
 ENABLE_SOAR_UPDATES="true"
 ENABLE_BREW_UPDATES="true"
 ENABLE_PIPX_UPDATES="true"
+OPTIONAL_UPDATES_ALWAYS_REFRESH="false"
 
 # Enterprise extensions (can be overridden by CONFIG_FILE)
 HOOKS_ENABLED="true"
@@ -22087,6 +22135,16 @@ RUN_UPDATE() {
             log "RUN_UPDATE: WARNING: failed to capture post-update package snapshot (see log); skipping delta"
         fi
         rm -f "${PKG_PRE_FILE}" "${PKG_POST_FILE}" 2>/dev/null || true
+
+        # Determine whether system packages actually changed. If the delta file
+        # contains no lines after the header, treat this as "Nothing to do".
+        DID_UPDATES=1
+        if [ -f "${DELTA_FILE}" ]; then
+            if ! tail -n +2 "${DELTA_FILE}" 2>/dev/null | grep -q .; then
+                DID_UPDATES=0
+            fi
+        fi
+        log "RUN_UPDATE: DID_UPDATES=${DID_UPDATES} (from ${DELTA_FILE})"
     fi
 
     if [ "$rc" -eq 0 ]; then
@@ -22113,10 +22171,22 @@ RUN_UPDATE() {
     echo "=========================================="
     echo ""
     
-    # Post-update integrations (Flatpak, Snap, Soar, Homebrew) are controlled
-    # by flags in /etc/zypper-auto.conf.
-    echo "=========================================="
-    echo "  Flatpak Updates"
+    # Post-update integrations (Flatpak, Snap, Soar, Homebrew, pipx) are
+    # controlled by flags in /etc/zypper-auto.conf.
+    #
+    # Optional refresh steps are further controlled by OPTIONAL_UPDATES_ALWAYS_REFRESH:
+    #   - true  : run even if there were no system package changes
+    #   - false : run only when system packages actually changed (recommended)
+    DO_OPTIONAL=0
+    if [ "$rc" -eq 0 ]; then
+        if [[ "${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}" == "true" ]] || [ "${DID_UPDATES:-1}" -eq 1 ]; then
+            DO_OPTIONAL=1
+        fi
+    fi
+
+    if [ "$DO_OPTIONAL" -eq 1 ]; then
+        echo "=========================================="
+        echo "  Flatpak Updates"
     echo "=========================================="
     echo ""
     
@@ -22281,8 +22351,7 @@ RUN_UPDATE() {
         echo "ℹ️  Homebrew updates are disabled in /etc/zypper-auto.conf (ENABLE_BREW_UPDATES=false)."
         echo "    You can still run 'brew update' / 'brew upgrade' manually."
         echo ""
-        return
-    fi
+    else
 
     # Try to detect Homebrew in PATH or the default Linuxbrew prefix
     if command -v brew >/dev/null 2>&1 || [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
@@ -22318,6 +22387,7 @@ RUN_UPDATE() {
             echo "    To install via helper: zypper-auto-helper --brew"
         fi
     fi
+    fi
 
     echo ""
     echo "=========================================="
@@ -22344,6 +22414,20 @@ RUN_UPDATE() {
     fi
 
     echo ""
+    else
+        echo ""
+        if [ "$rc" -ne 0 ]; then
+            if [ "${LOCKED_DURING_UPDATE:-0}" -eq 1 ]; then
+                echo "ℹ️  Skipping optional app updates because system management was locked; no system updates were applied."
+            else
+                echo "ℹ️  Skipping optional app updates because zypper dup failed (rc=$rc)."
+            fi
+        else
+            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional app updates to conserve CPU."
+        fi
+        echo ""
+    fi
+
     echo "Checking which services need to be restarted..."
     echo ""
     
@@ -22373,7 +22457,7 @@ RUN_UPDATE() {
         if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
             echo "⚠  Zypper could not run because system management is locked by another tool. No system packages were changed."
         else
-            echo "⚠️  Zypper dup reported errors (see above), but Flatpak/Snap updates were attempted."
+            echo "⚠️  Zypper dup reported errors (see above). Optional app updates were skipped."
         fi
         echo ""
     fi
@@ -23905,6 +23989,32 @@ class Handler(BaseHTTPRequestHandler):
                     "set -euo pipefail",
                     f"LOG={shlex.quote(log_path)}",
                     "mkdir -p /var/log/zypper-auto/service-logs || true",
+
+                    # Load config toggles for optional post-update refresh.
+                    "CONFIG=/etc/zypper-auto.conf",
+                    "ENABLE_FLATPAK_UPDATES=\"true\"",
+                    "ENABLE_SNAP_UPDATES=\"true\"",
+                    "ENABLE_SOAR_UPDATES=\"true\"",
+                    "ENABLE_BREW_UPDATES=\"true\"",
+                    "ENABLE_PIPX_UPDATES=\"true\"",
+                    "OPTIONAL_UPDATES_ALWAYS_REFRESH=\"false\"",
+                    "if [ -r \"$CONFIG\" ]; then . \"$CONFIG\"; fi",
+
+                    # Best-effort: detect a non-root desktop user for user-scoped tools.
+                    "RUN_USER=\"\"",
+                    "if command -v loginctl >/dev/null 2>&1; then RUN_USER=\"$(loginctl list-users --no-legend 2>/dev/null | awk '$1 != 0 {print $2; exit}')\"; fi",
+                    "RUN_HOME=\"\"",
+                    "if [ -n \"${RUN_USER}\" ]; then RUN_HOME=\"$(getent passwd \"${RUN_USER}\" 2>/dev/null | cut -d: -f6)\"; fi",
+                    "USER_PATH=\"${RUN_HOME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin\"",
+
+                    "run_user_cmd() {",
+                    "  if [ -n \"${RUN_USER}\" ] && command -v runuser >/dev/null 2>&1; then",
+                    "    runuser -u \"${RUN_USER}\" -- env HOME=\"${RUN_HOME}\" PATH=\"${USER_PATH}\" \"$@\"",
+                    "    return $?",
+                    "  fi",
+                    "  env PATH=\"${USER_PATH}\" \"$@\"",
+                    "}",
+
                     "echo \"==========================================\" >>\"$LOG\"",
                     "echo \" Rocket Update Wizard: zypper dup \" >>\"$LOG\"",
                     "echo \"==========================================\" >>\"$LOG\"",
@@ -23912,15 +24022,116 @@ class Handler(BaseHTTPRequestHandler):
                     "echo \"\" >>\"$LOG\"",
                     f"echo \"CMD: {zcmd}\" >>\"$LOG\"",
                     "echo \"\" >>\"$LOG\"",
-                    # Run zypper and append output.
-                    f"( {zcmd} ) 2>&1 | tee -a \"$LOG\"",
-                    "rc=${PIPESTATUS[0]}",
+
+                    # Run zypper and append output (without tee/PIPESTATUS so rc is always captured).
+                    "TMP_OUT=\"$(mktemp /tmp/znh-webui-dup.XXXXXX 2>/dev/null || echo /tmp/znh-webui-dup.$$)\"",
+                    "set +e",
+                    f"( {zcmd} ) >\"$TMP_OUT\" 2>&1",
+                    "rc=$?",
+                    "set -e",
+                    "cat \"$TMP_OUT\" >>\"$LOG\" 2>/dev/null || true",
+                    "did_updates=1",
+                    "if grep -q \"Nothing to do.\" \"$TMP_OUT\" 2>/dev/null; then did_updates=0; fi",
+                    "rm -f \"$TMP_OUT\" 2>/dev/null || true",
                     "echo \"\" >>\"$LOG\"",
                     "echo \"[webui] zypper dup rc=${rc}\" >>\"$LOG\"",
+
+                    # Optional app updates only run on real installs (not simulation) and only when
+                    # updates occurred, unless OPTIONAL_UPDATES_ALWAYS_REFRESH=true.
                     "if [ ${rc} -eq 0 ] && [ \"${SIMULATE:-0}\" != \"1\" ]; then",
+                    "  do_optional=0",
+                    "  if [ \"${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}\" = \"true\" ]; then do_optional=1; fi",
+                    "  if [ ${did_updates} -eq 1 ]; then do_optional=1; fi",
+                    "  if [ ${do_optional} -eq 1 ]; then",
+                    "    echo \"\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"  Optional App Updates (Flatpak/Snap/Soar/Brew/pipx)\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"RUN_USER=${RUN_USER:-unknown}\" >>\"$LOG\"",
+                    "    echo \"\" >>\"$LOG\"",
+
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"  Flatpak Updates\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    if [ \"${ENABLE_FLATPAK_UPDATES,,}\" = \"true\" ]; then",
+                    "      if command -v flatpak >/dev/null 2>&1; then",
+                    "        run_user_cmd flatpak update -y >>\"$LOG\" 2>&1 || echo \"[WARN] flatpak update failed (continuing)\" >>\"$LOG\"",
+                    "      else",
+                    "        echo \"[INFO] flatpak not installed; skipping\" >>\"$LOG\"",
+                    "      fi",
+                    "    else",
+                    "      echo \"[INFO] Flatpak updates disabled (ENABLE_FLATPAK_UPDATES=false)\" >>\"$LOG\"",
+                    "    fi",
+                    "    echo \"\" >>\"$LOG\"",
+
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"  Snap Updates\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    if [ \"${ENABLE_SNAP_UPDATES,,}\" = \"true\" ]; then",
+                    "      if command -v snap >/dev/null 2>&1; then",
+                    "        snap refresh >>\"$LOG\" 2>&1 || echo \"[WARN] snap refresh failed (continuing)\" >>\"$LOG\"",
+                    "      else",
+                    "        echo \"[INFO] snap not installed; skipping\" >>\"$LOG\"",
+                    "      fi",
+                    "    else",
+                    "      echo \"[INFO] Snap updates disabled (ENABLE_SNAP_UPDATES=false)\" >>\"$LOG\"",
+                    "    fi",
+                    "    echo \"\" >>\"$LOG\"",
+
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"  Soar Updates (optional)\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    if [ \"${ENABLE_SOAR_UPDATES,,}\" = \"true\" ]; then",
+                    "      if run_user_cmd bash -lc 'command -v soar >/dev/null 2>&1'; then",
+                    "        run_user_cmd bash -lc 'soar sync' >>\"$LOG\" 2>&1 || echo \"[WARN] soar sync failed (continuing)\" >>\"$LOG\"",
+                    "        run_user_cmd bash -lc 'soar update' >>\"$LOG\" 2>&1 || echo \"[WARN] soar update failed (continuing)\" >>\"$LOG\"",
+                    "      else",
+                    "        echo \"[INFO] soar not installed for user; skipping\" >>\"$LOG\"",
+                    "      fi",
+                    "    else",
+                    "      echo \"[INFO] Soar updates disabled (ENABLE_SOAR_UPDATES=false)\" >>\"$LOG\"",
+                    "    fi",
+                    "    echo \"\" >>\"$LOG\"",
+
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"  Homebrew (brew) Updates (optional)\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    if [ \"${ENABLE_BREW_UPDATES,,}\" = \"true\" ]; then",
+                    "      if run_user_cmd bash -lc 'command -v brew >/dev/null 2>&1'; then",
+                    "        run_user_cmd bash -lc 'brew update' >>\"$LOG\" 2>&1 || echo \"[WARN] brew update failed (continuing)\" >>\"$LOG\"",
+                    "        run_user_cmd bash -lc 'OUTDATED=$(brew outdated --quiet 2>/dev/null || true); n=$(printf %s "${OUTDATED}" | sed "/^$/d" | wc -l | tr -d " "); if [ "${n:-0}" -gt 0 ]; then echo "brew: ${n} outdated formulae"; brew upgrade; else echo "brew: already up to date"; fi' >>\"$LOG\" 2>&1 || echo \"[WARN] brew upgrade step failed (continuing)\" >>\"$LOG\"",
+                    "      else",
+                    "        echo \"[INFO] brew not installed for user; skipping\" >>\"$LOG\"",
+                    "      fi",
+                    "    else",
+                    "      echo \"[INFO] Homebrew updates disabled (ENABLE_BREW_UPDATES=false)\" >>\"$LOG\"",
+                    "    fi",
+                    "    echo \"\" >>\"$LOG\"",
+
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    echo \"  Python (pipx) Updates (optional)\" >>\"$LOG\"",
+                    "    echo \"==========================================\" >>\"$LOG\"",
+                    "    if [ \"${ENABLE_PIPX_UPDATES,,}\" = \"true\" ]; then",
+                    "      if run_user_cmd bash -lc 'command -v pipx >/dev/null 2>&1'; then",
+                    "        run_user_cmd bash -lc 'pipx upgrade-all' >>\"$LOG\" 2>&1 || echo \"[WARN] pipx upgrade-all failed (continuing)\" >>\"$LOG\"",
+                    "      else",
+                    "        echo \"[INFO] pipx not installed for user; skipping\" >>\"$LOG\"",
+                    "      fi",
+                    "    else",
+                    "      echo \"[INFO] pipx updates disabled (ENABLE_PIPX_UPDATES=false)\" >>\"$LOG\"",
+                    "    fi",
+                    "    echo \"\" >>\"$LOG\"",
+                    "  else",
+                    "    echo \"\" >>\"$LOG\"",
+                    "    echo \"[webui] No system updates were applied (Nothing to do). Skipping optional app updates to conserve CPU.\" >>\"$LOG\"",
+                    "  fi",
+                    "fi",
+
+                    # Restart check: only meaningful when system packages changed.
+                    "if [ ${rc} -eq 0 ] && [ ${did_updates} -eq 1 ] && [ \"${SIMULATE:-0}\" != \"1\" ]; then",
                     "  echo \"\" >>\"$LOG\"",
                     "  echo \"=== ZYPPER PS -s (restart check) ===\" >>\"$LOG\"",
-                    f"  {ZYPPER_BIN} ps -s 2>&1 | tee -a \"$LOG\" || true",
+                    f"  {ZYPPER_BIN} ps -s >>\"$LOG\" 2>&1 || true",
                     "fi",
                     "exit ${rc}",
                 ])
