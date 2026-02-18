@@ -852,7 +852,8 @@ HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
 DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
 DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. firefox)
 # Self-update channel used by --self-update (rolling=latest commit, stable=GitHub releases)
-SELF_UPDATE_CHANNEL="rolling"
+# Default: stable (tags). Rolling is still available if you want "always latest".
+SELF_UPDATE_CHANNEL="stable"
 
 # Zypper Turbo tuner (optional): tune /etc/zypp/zypp.conf for faster downloads.
 # Default is false because it modifies a core system config file.
@@ -1481,7 +1482,7 @@ __znh_write_dashboard_schema_json() {
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
-    "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "rolling"},
+    "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
     "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
     "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED": {"type": "bool", "default": "true"},
 
@@ -1625,7 +1626,8 @@ DASHBOARD_BROWSER=""
 # Allowed values:
 #   - rolling : updates to the latest commit on the main branch (GitHub)
 #   - stable  : updates to the latest GitHub Release
-SELF_UPDATE_CHANNEL="rolling"
+# Default: stable
+SELF_UPDATE_CHANNEL="stable"
 
 # ZYPPER_TURBO_TUNER_ENABLED
 # When true, verification (and the periodic verify timer) may tune /etc/zypp/zypp.conf
@@ -2307,7 +2309,7 @@ EOF
     validate_allowed_set AUTO_DUPLICATE_RPM_MODE whitelist "whitelist,thirdparty,both"
     validate_allowed_set CLEANUP_REPORT_FORMAT both "text,json,both"
     validate_allowed_set BOOT_ENTRY_CLEANUP_MODE backup "backup,delete"
-    validate_allowed_set SELF_UPDATE_CHANNEL rolling "rolling,stable"
+    validate_allowed_set SELF_UPDATE_CHANNEL stable "rolling,stable"
 
     # Snapper knobs (bounded ints + bools)
     validate_bool_flag SNAP_RETENTION_OPTIMIZER_ENABLED true
@@ -4092,11 +4094,13 @@ generate_dashboard() {
         <span class="stat-label" style="text-transform:none;">Self-Update Channel</span>
         <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
           <div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Channel: <strong id="self-update-channel">(loading)</strong></div>
+          <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Update: <strong id="self-update-status">(checking…)</strong></div>
           <button class="pill" type="button" id="self-update-toggle-btn" title="Toggle update channel (rolling/stable)">Toggle channel</button>
+          <button class="pill" type="button" id="self-update-run-btn" title="Install the latest build from this channel (requires confirmation phrase)" disabled>Update</button>
           <button class="pill" type="button" id="self-update-changelog-btn" title="Fetch latest changelog from GitHub">Fetch changelog</button>
         </div>
         <div style="margin-top:10px;">
-          <pre id="self-update-changelog" style="max-height: 280px;">(click “Fetch changelog”)</pre>
+          <pre id="self-update-changelog" style="max-height: 280px;">(tip: click “Fetch changelog”, then “Update” if a newer build is available)</pre>
         </div>
       </div>
 
@@ -4774,11 +4778,11 @@ generate_dashboard() {
     var GITHUB_REPO = 'zypper-automatik-helper-';
 
     function _selfUpdateGetChannel(cfg) {
-        var ch = 'rolling';
+        var ch = 'stable';
         try {
-            ch = (cfg && cfg.SELF_UPDATE_CHANNEL != null) ? String(cfg.SELF_UPDATE_CHANNEL).trim() : 'rolling';
-        } catch (e) { ch = 'rolling'; }
-        if (ch !== 'rolling' && ch !== 'stable') ch = 'rolling';
+            ch = (cfg && cfg.SELF_UPDATE_CHANNEL != null) ? String(cfg.SELF_UPDATE_CHANNEL).trim() : 'stable';
+        } catch (e) { ch = 'stable'; }
+        if (ch !== 'rolling' && ch !== 'stable') ch = 'stable';
         return ch;
     }
 
@@ -4806,6 +4810,131 @@ generate_dashboard() {
                 }
                 return j;
             });
+        });
+    }
+
+    function _selfUpdateSetStatus(text) {
+        var el = document.getElementById('self-update-status');
+        if (!el) return;
+        el.textContent = String(text || '');
+    }
+
+    function _selfUpdateSetRunBtn(enabled, label) {
+        var btn = document.getElementById('self-update-run-btn');
+        if (!btn) return;
+        btn.textContent = String(label || 'Update');
+        btn.disabled = !enabled;
+    }
+
+    function selfUpdateFetchStatus(showToast) {
+        var ch = _selfUpdateGetChannel(_settingsConfig || {});
+        _selfUpdateSetStatus('Checking…');
+        _selfUpdateSetRunBtn(false, 'Checking…');
+
+        return _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).then(function(r) {
+            // r: { channel, installed_ref, remote_ref, up_to_date, update_available, remote_is_older, known_installed, error }
+            if (!r) {
+                _selfUpdateSetStatus('Unknown');
+                _selfUpdateSetRunBtn(true, 'Install latest');
+                return null;
+            }
+
+            if (r.error) {
+                _selfUpdateSetStatus('Error');
+                _selfUpdateSetRunBtn(true, 'Install latest');
+                if (showToast) toast('Self-update check failed', String(r.error), 'err');
+                return r;
+            }
+
+            if (r.remote_is_older) {
+                _selfUpdateSetStatus('Remote older (no downgrade)');
+                _selfUpdateSetRunBtn(false, 'No downgrade');
+                return r;
+            }
+
+            if (r.up_to_date) {
+                _selfUpdateSetStatus('Up to date');
+                _selfUpdateSetRunBtn(false, 'Up to date');
+                return r;
+            }
+
+            if (r.update_available) {
+                _selfUpdateSetStatus('Update available');
+                _selfUpdateSetRunBtn(true, 'Update now');
+                if (showToast) toast('Update available', String(r.remote_ref || ''), 'ok');
+                return r;
+            }
+
+            // Unknown installed ref: still allow installing latest.
+            _selfUpdateSetStatus('Install available');
+            _selfUpdateSetRunBtn(true, 'Install latest');
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'API not reachable';
+            _selfUpdateSetStatus('API not reachable');
+            _selfUpdateSetRunBtn(false, 'API down');
+            if (showToast) toast('Self-update check failed', msg, 'err');
+            return null;
+        });
+    }
+
+    function selfUpdateRun(btnEl) {
+        var btn = btnEl || document.getElementById('self-update-run-btn');
+        var ch = _selfUpdateGetChannel(_settingsConfig || {});
+
+        if (btn) btn.disabled = true;
+        toast('Self-update starting…', 'Channel=' + ch + ' (confirmation required)', 'ok');
+
+        return _api('/api/self-update/confirm', { method: 'POST', body: JSON.stringify({ channel: ch }) }).then(function(r) {
+            var phrase = (r && r.phrase) ? String(r.phrase) : 'UPDATE';
+            var hint = (r && r.hint) ? String(r.hint) : ('Type ' + phrase + ' to confirm');
+            var got = prompt(hint + "\n\nEnter confirmation phrase:", "");
+            if (!got) {
+                toast('Cancelled', 'No confirmation entered', 'err');
+                return null;
+            }
+            return _api('/api/self-update/run', {
+                method: 'POST',
+                body: JSON.stringify({
+                    channel: ch,
+                    confirm_token: r.confirm_token,
+                    confirm_phrase: got
+                })
+            });
+        }).then(function(res) {
+            if (!res) return null;
+
+            var out = (res.output != null) ? String(res.output) : '';
+            if (out) {
+                _selfUpdateSetChangelog('Self-update output (rc=' + String(res.rc) + '):\n\n' + out);
+            }
+
+            toast('Self-update finished', 'rc=' + String(res.rc), (res.rc === 0) ? 'ok' : 'err');
+
+            // Re-check status after a short delay.
+            setTimeout(function() {
+                try { selfUpdateFetchStatus(false); } catch (e) {}
+            }, 1500);
+
+            // If update succeeded, regenerate dashboard and reload shortly.
+            if (res.rc === 0) {
+                try {
+                    _api('/api/dashboard/refresh', { method: 'POST', body: JSON.stringify({}) });
+                } catch (e) {}
+                setTimeout(function() {
+                    try { window.location.reload(); } catch (e) {}
+                }, 12000);
+            }
+
+            return res;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'failed';
+            toast('Self-update failed', msg, 'err');
+            _settingsClientLog('warn', 'self-update run failed', { error: msg });
+            return null;
+        }).finally(function() {
+            if (btn) btn.disabled = false;
+            try { selfUpdateFetchStatus(false); } catch (e) {}
         });
     }
 
@@ -4877,6 +5006,7 @@ generate_dashboard() {
             // Keep local config in sync and re-render.
             _settingsConfig = (r && r.config) ? r.config : _settingsConfig;
             selfUpdateRender();
+            try { selfUpdateFetchStatus(false); } catch (e) {}
 
             // If settings drawer is open, update the select value too.
             try {
@@ -4903,23 +5033,33 @@ generate_dashboard() {
 
     function _wireSelfUpdateUI() {
         var chEl = document.getElementById('self-update-channel');
+        var statusEl = document.getElementById('self-update-status');
         var toggleBtn = document.getElementById('self-update-toggle-btn');
+        var runBtn = document.getElementById('self-update-run-btn');
         var clBtn = document.getElementById('self-update-changelog-btn');
 
-        if (!chEl && !toggleBtn && !clBtn) return;
+        if (!chEl && !statusEl && !toggleBtn && !runBtn && !clBtn) return;
 
         if (toggleBtn) toggleBtn.addEventListener('click', function(ev) {
             try { addRipple(toggleBtn, ev.clientX, ev.clientY); } catch (e) {}
             selfUpdateToggleChannel(toggleBtn);
         });
 
-        if (clBtn) clBtn.addEventListener('click', function(ev) {
-            try { addRipple(clBtn, ev.clientX, ev.clientY); } catch (e) {}
-            selfUpdateFetchChangelog(clBtn);
+        if (runBtn) runBtn.addEventListener('click', function(ev) {
+            try { addRipple(runBtn, ev.clientX, ev.clientY); } catch (e) {}
+            selfUpdateRun(runBtn);
         });
 
-        // Initial render (will be refreshed on settingsLoad too)
+        if (clBtn) clBtn.addEventListener('click', function(ev) {
+            try { addRipple(clBtn, ev.clientX, ev.clientY); } catch (e) {}
+            selfUpdateFetchChangelog(clBtn).finally(function() {
+                try { selfUpdateFetchStatus(false); } catch (e2) {}
+            });
+        });
+
+        // Initial render + status probe (best-effort)
         try { selfUpdateRender(); } catch (e) {}
+        try { selfUpdateFetchStatus(false); } catch (e) {}
     }
 
     function _renderSettingsForm(schema, cfg) {
@@ -14064,15 +14204,15 @@ run_self_update_only() {
         shift || true
     done
 
-    channel="${requested_channel:-${SELF_UPDATE_CHANNEL:-rolling}}"
+    channel="${requested_channel:-${SELF_UPDATE_CHANNEL:-stable}}"
     channel="${channel,,}"
     case "${channel}" in
         rolling|stable)
             :
             ;;
         *)
-            log_warn "Unknown self-update channel '${channel}'; falling back to rolling"
-            channel="rolling"
+            log_warn "Unknown self-update channel '${channel}'; falling back to stable"
+            channel="stable"
             ;;
     esac
 
@@ -14218,6 +14358,21 @@ run_self_update_only() {
                 log_success "✓ Already up-to-date (rolling ${installed_ref:0:12}). Use --force to reinstall."
             fi
             return 0
+        fi
+    fi
+
+    # Stable downgrade guard: if your installed build appears newer than the latest stable tag,
+    # do not downgrade unless you explicitly pass --force.
+    if [ "${channel}" = "stable" ] && [ "${force}" -ne 1 ] 2>/dev/null && [ -n "${installed_ref:-}" ] && [ -n "${remote_ref:-}" ]; then
+        local installed_n remote_n
+        installed_n=$(printf '%s' "${installed_ref}" | sed -nE 's/^v([0-9]+)$/\1/p' 2>/dev/null || true)
+        remote_n=$(printf '%s' "${remote_ref}" | sed -nE 's/^v([0-9]+)$/\1/p' 2>/dev/null || true)
+        if [[ "${installed_n:-}" =~ ^[0-9]+$ ]] && [[ "${remote_n:-}" =~ ^[0-9]+$ ]]; then
+            if [ "${remote_n}" -lt "${installed_n}" ] 2>/dev/null; then
+                log_warn "[self-update] Latest stable tag (${remote_ref}) is older than installed (${installed_ref}); refusing to downgrade."
+                log_info "Use: sudo zypper-auto-helper --self-update stable --force  (if you really want to downgrade)"
+                return 0
+            fi
         fi
     fi
 
@@ -21187,6 +21342,8 @@ import secrets
 import socketserver
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -21421,6 +21578,62 @@ def _allowed_origin(origin: str | None) -> str | None:
     return None
 
 
+# --- Self-update helpers (dashboard API) ---
+GITHUB_OWNER = "FreddeITsupport98"
+GITHUB_REPO = "zypper-automatik-helper-"
+HELPER_BIN = "/usr/local/bin/zypper-auto-helper"
+SELF_UPDATE_STATE_FILE = "/var/lib/zypper-auto/self-update-state.json"
+
+
+def _github_get_json(path: str, timeout_s: int = 10) -> dict:
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}{path}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "znh-dashboard-api",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        data = r.read().decode("utf-8", errors="replace")
+    return json.loads(data)
+
+
+def _tag_to_int(tag: str) -> int | None:
+    # Supports tags like: v65
+    m = re.fullmatch(r"v([0-9]+)", (tag or "").strip())
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _read_installed_version_header(path: str) -> int:
+    # Parse: #       VERSION 65 - ...
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 200:
+                    break
+                m = re.match(r"^#\s*VERSION\s+([0-9]+)", line)
+                if m:
+                    return int(m.group(1))
+    except Exception:
+        return 0
+    return 0
+
+
+def _read_self_update_state() -> dict:
+    try:
+        with open(SELF_UPDATE_STATE_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ZNH-Dashboard-API/1.0"
 
@@ -21453,8 +21666,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper endpoints always require auth (even for read-only status).
-        if path.startswith("/api/snapper/"):
+        # Snapper and self-update endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -21489,6 +21702,82 @@ class Handler(BaseHTTPRequestHandler):
                 return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
 
             return _json_response(self, 404, {"error": "not found"}, origin)
+
+        # --- Self-update status (dashboard) ---
+        if path == "/api/self-update/status":
+            # Query: ?channel=stable|rolling (optional)
+            eff, _warnings, _invalid = _read_conf(self.server.conf_path)
+            ch = ""
+            try:
+                ch = str((qs.get("channel") or [""])[0]).strip().lower()
+            except Exception:
+                ch = ""
+            if ch not in ("stable", "rolling"):
+                ch = str(eff.get("SELF_UPDATE_CHANNEL", "stable")).strip().lower()
+            if ch not in ("stable", "rolling"):
+                ch = "stable"
+
+            state = _read_self_update_state()
+            installed_stable = str(state.get("stable_tag", "") or "").strip()
+            installed_rolling = str(state.get("rolling_sha", "") or "").strip()
+
+            installed_ref = installed_stable if ch == "stable" else installed_rolling
+            known_installed = bool(installed_ref)
+            guessed = False
+
+            installed_ver = _read_installed_version_header(HELPER_BIN)
+            if ch == "stable" and not installed_ref and installed_ver > 0:
+                installed_ref = f"v{installed_ver}"
+                known_installed = True
+                guessed = True
+
+            remote_ref = ""
+            err = ""
+            try:
+                if ch == "stable":
+                    j = _github_get_json("/releases/latest", timeout_s=10)
+                    remote_ref = str(j.get("tag_name", "") or "").strip()
+                else:
+                    j = _github_get_json("/commits/main", timeout_s=10)
+                    remote_ref = str(j.get("sha", "") or "").strip()
+            except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as e:
+                err = str(e)
+            except Exception as e:
+                err = str(e)
+
+            up_to_date = False
+            update_available = False
+            remote_is_older = False
+
+            if installed_ref and remote_ref:
+                if installed_ref == remote_ref:
+                    up_to_date = True
+                elif ch == "stable":
+                    iv = _tag_to_int(installed_ref)
+                    rv = _tag_to_int(remote_ref)
+                    if iv is not None and rv is not None and rv < iv:
+                        remote_is_older = True
+                    else:
+                        update_available = True
+                else:
+                    update_available = True
+            elif remote_ref:
+                # Unknown installed ref but remote exists: allow "install latest".
+                update_available = True
+
+            return _json_response(self, 200, {
+                "channel": ch,
+                "known_installed": known_installed,
+                "guessed_from_version": guessed,
+                "installed_ref": installed_ref,
+                "remote_ref": remote_ref,
+                "installed_version_header": installed_ver,
+                "up_to_date": up_to_date,
+                "update_available": update_available,
+                "remote_is_older": remote_is_older,
+                "state_file": SELF_UPDATE_STATE_FILE,
+                "error": err,
+            }, origin)
 
         if path == "/api/ping":
             # Unauthenticated health probe used by auto-repair to detect
@@ -21532,7 +21821,7 @@ class Handler(BaseHTTPRequestHandler):
             rc, out = _run_cmd(cmd, timeout_s=120, log=getattr(self.server, "_znh_log", None))
             return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
 
-        # --- Snapper control (dashboard) ---
+        # --- Confirmation token cache (shared) ---
         def _confirm_purge(now_ts: float):
             try:
                 items = getattr(self.server, "confirm_tokens", {})
@@ -21544,6 +21833,74 @@ class Handler(BaseHTTPRequestHandler):
                     items.pop(k, None)
             except Exception:
                 return
+
+        # --- Self-update control (dashboard) ---
+        if path == "/api/self-update/confirm":
+            body = _read_json(self)
+            ch = str(body.get("channel", "") or "").strip().lower()
+            if ch not in ("stable", "rolling"):
+                ch = "stable"
+
+            now_ts = time.time()
+            _confirm_purge(now_ts)
+
+            token = secrets.token_urlsafe(24)
+            exp = now_ts + 120.0
+            try:
+                if not hasattr(self.server, "confirm_tokens"):
+                    self.server.confirm_tokens = {}
+                self.server.confirm_tokens[token] = {
+                    "action": "self-update",
+                    "channel": ch,
+                    "exp": exp,
+                }
+            except Exception:
+                return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
+
+            return _json_response(self, 200, {
+                "confirm_token": token,
+                "expires_in_seconds": 120,
+                "phrase": "UPDATE",
+                "hint": "Type UPDATE to confirm self-update (downloads code and replaces /usr/local/bin/zypper-auto-helper).",
+            }, origin)
+
+        if path == "/api/self-update/run":
+            body = _read_json(self)
+            ch = str(body.get("channel", "") or "").strip().lower()
+            if ch not in ("stable", "rolling"):
+                ch = "stable"
+
+            confirm_token = str(body.get("confirm_token", "") or "").strip()
+            confirm_phrase = str(body.get("confirm_phrase", "") or "").strip().upper()
+
+            now_ts = time.time()
+            _confirm_purge(now_ts)
+            items = getattr(self.server, "confirm_tokens", {})
+            meta = items.get(confirm_token)
+            if not meta:
+                return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+            if meta.get("action") != "self-update":
+                return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+            if meta.get("channel") != ch:
+                return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
+            if float(meta.get("exp", 0)) < now_ts:
+                return _json_response(self, 400, {"error": "confirm token expired"}, origin)
+            if confirm_phrase != "UPDATE":
+                return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+
+            cmd = [HELPER_BIN, "--self-update", ch]
+            rc, out = _run_cmd(cmd, timeout_s=300, log=getattr(self.server, "_znh_log", None))
+
+            # Best-effort: regenerate dashboard after updating.
+            dash_rc = -1
+            if rc == 0:
+                dash_rc, _dash_out = _run_cmd([HELPER_BIN, "--dashboard"], timeout_s=120, log=getattr(self.server, "_znh_log", None))
+
+            return _json_response(self, 200 if rc == 0 else 500, {
+                "rc": rc,
+                "output": out,
+                "dashboard_refresh_rc": dash_rc,
+            }, origin)
 
         if path == "/api/snapper/confirm":
             body = _read_json(self)
