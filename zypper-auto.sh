@@ -13932,6 +13932,97 @@ run_status_only() {
     update_status "SUCCESS: Status report generated"
 }
 
+# --- Self-update: state helpers (root-owned) ---
+# Stores last installed stable tag and rolling commit SHA so update decisions do
+# not depend on the script's internal VERSION header.
+__znh_self_update_state_file() {
+    printf '%s\n' "/var/lib/zypper-auto/self-update-state.json"
+}
+
+__znh_self_update_state_get() {
+    local key="$1"
+    local file
+    file="$(__znh_self_update_state_file)"
+
+    if [ -z "${key:-}" ] || [ ! -f "${file}" ]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    local val
+    val=""
+
+    # Prefer python3 JSON parsing when available; keep a best-effort fallback.
+    if command -v python3 >/dev/null 2>&1; then
+        val=$(python3 - "${file}" "${key}" <<'PY' 2>/dev/null || true
+import json,sys
+path=sys.argv[1]
+key=sys.argv[2]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data=json.load(f)
+    v=data.get(key, "")
+    if v is None:
+        v=""
+    if not isinstance(v, str):
+        v=str(v)
+    print(v)
+except Exception:
+    print("")
+PY
+)
+    else
+        # Fallback for environments without python3:
+        # expects simple JSON: "key": "value"
+        val=$(grep -E "\"${key}\"[[:space:]]*:[[:space:]]*\"" "${file}" 2>/dev/null \
+            | head -n 1 \
+            | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/' 2>/dev/null || true)
+    fi
+
+    printf '%s' "${val}"
+}
+
+__znh_self_update_state_write() {
+    local stable_tag="$1"
+    local rolling_sha="$2"
+    local last_channel="$3"
+    local last_ref="$4"
+
+    local file dir tmp ts
+    file="$(__znh_self_update_state_file)"
+    dir="$(dirname "${file}")"
+
+    mkdir -p "${dir}" 2>/dev/null || true
+    chown root:root "${dir}" 2>/dev/null || true
+    chmod 700 "${dir}" 2>/dev/null || true
+
+    tmp="$(mktemp "${dir}/.znh-self-update-state.XXXXXX")"
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    {
+        echo '{'
+        echo '  "schema_version": 1,'
+        echo "  \"stable_tag\": \"${stable_tag}\","
+        echo "  \"rolling_sha\": \"${rolling_sha}\","
+        echo "  \"last_update_channel\": \"${last_channel}\","
+        echo "  \"last_update_ref\": \"${last_ref}\","
+        echo "  \"last_update_at_utc\": \"${ts}\""
+        echo '}'
+    } >"${tmp}" 2>/dev/null || true
+
+    chown root:root "${tmp}" 2>/dev/null || true
+    chmod 600 "${tmp}" 2>/dev/null || true
+
+    if ! mv -f "${tmp}" "${file}" 2>/dev/null; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    chown root:root "${file}" 2>/dev/null || true
+    chmod 600 "${file}" 2>/dev/null || true
+    return 0
+}
+
 # --- Helper: Self-update (CLI) ---
 run_self_update_only() {
     log_info ">>> Self-update mode requested"
@@ -14016,14 +14107,34 @@ run_self_update_only() {
         log_info "[self-update] Running from a git working tree; will NOT modify the repo checkout"
     fi
 
-    # 1) Determine URL(s) (rolling vs stable)
-    local repo api_url tag raw_url_asset raw_url_tag raw_url
+    # Self-update state file (tracks installed stable tag + rolling commit SHA)
+    local state_file installed_stable_tag installed_rolling_sha
+    state_file="$(__znh_self_update_state_file)"
+    installed_stable_tag="$(__znh_self_update_state_get stable_tag)"
+    installed_rolling_sha="$(__znh_self_update_state_get rolling_sha)"
+
+    # 1) Determine remote ref and URL(s) (rolling vs stable)
+    local repo api_url tag remote_sha raw_url_asset raw_url_tag raw_url
+    local remote_ref installed_ref
+    local current_line current_ver
+
     repo="FreddeITsupport98/zypper-automatik-helper-"
 
     tag=""
+    remote_sha=""
     raw_url=""
     raw_url_asset=""
     raw_url_tag=""
+    remote_ref=""
+    installed_ref=""
+
+    # Best-effort: get current installed VERSION header for logging/bootstrap only.
+    current_ver="0"
+    if [ -f "${dest}" ]; then
+        current_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${dest}" 2>/dev/null || true)
+        current_ver=$(printf '%s' "${current_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "0")
+    fi
+    if ! [[ "${current_ver:-}" =~ ^[0-9]+$ ]]; then current_ver=0; fi
 
     if [ "${channel}" = "stable" ]; then
         api_url="https://api.github.com/repos/${repo}/releases/latest"
@@ -14048,8 +14159,78 @@ run_self_update_only() {
         raw_url_asset="https://github.com/${repo}/releases/download/${tag}/zypper-auto.sh"
         raw_url_tag="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
         log_info "[self-update] Stable tag detected: ${tag}"
+
+        installed_ref="${installed_stable_tag:-}"
+        remote_ref="${tag}"
+
+        # Bootstrap: if state file doesn't exist yet, map local VERSION -> tag pattern
+        # (only to seed state; tag controls update decisions going forward).
+        if [ -z "${installed_ref:-}" ] && [ "${current_ver}" -gt 0 ] 2>/dev/null; then
+            local guess_tag
+            guess_tag=""
+            if [[ "${tag}" =~ ^v[0-9]+$ ]]; then
+                guess_tag="v${current_ver}"
+            elif [[ "${tag}" =~ ^[0-9]+$ ]]; then
+                guess_tag="${current_ver}"
+            fi
+
+            if [ -n "${guess_tag}" ]; then
+                log_info "[self-update] Bootstrapping state file from installed VERSION header: stable_tag=${guess_tag}"
+                __znh_self_update_state_write "${guess_tag}" "${installed_rolling_sha}" "bootstrap" "${guess_tag}" >/dev/null 2>&1 || true
+                installed_stable_tag="${guess_tag}"
+                installed_ref="${guess_tag}"
+            fi
+        fi
     else
-        raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
+        api_url="https://api.github.com/repos/${repo}/commits/main"
+
+        # Rolling: compare commit SHA on main. Pin download to the resolved SHA.
+        if command -v python3 >/dev/null 2>&1; then
+            remote_sha=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+                | python3 -c 'import json,sys; print((json.load(sys.stdin).get("sha") or "").strip())' 2>/dev/null || true)
+        fi
+        if [ -z "${remote_sha:-}" ]; then
+            # Fallback (best-effort)
+            remote_sha=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+                | grep -m1 '"sha"' | cut -d '"' -f4 || true)
+        fi
+
+        if [ -n "${remote_sha:-}" ]; then
+            raw_url="https://raw.githubusercontent.com/${repo}/${remote_sha}/zypper-auto.sh"
+        else
+            raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
+        fi
+
+        installed_ref="${installed_rolling_sha:-}"
+        remote_ref="${remote_sha:-}"
+
+        if [ -z "${remote_ref:-}" ] && [ "${force}" -ne 1 ] 2>/dev/null; then
+            log_error "[self-update] Could not determine latest rolling commit SHA from GitHub. Use --force to install anyway."
+            return 1
+        fi
+    fi
+
+    # 1b) Skip download when already up-to-date (based on stable tag or rolling SHA)
+    if [ "${force}" -ne 1 ] 2>/dev/null && [ -n "${installed_ref:-}" ] && [ -n "${remote_ref:-}" ]; then
+        if [ "${installed_ref}" = "${remote_ref}" ]; then
+            if [ "${channel}" = "stable" ]; then
+                log_success "✓ Already up-to-date (stable ${installed_ref}). Use --force to reinstall."
+            else
+                log_success "✓ Already up-to-date (rolling ${installed_ref:0:12}). Use --force to reinstall."
+            fi
+            return 0
+        fi
+    fi
+
+    if [ "${channel}" = "stable" ]; then
+        log_info "[self-update] Update available (stable tag ${installed_ref:-unknown} -> ${remote_ref})"
+    else
+        local installed_short remote_short
+        installed_short="${installed_ref:-unknown}"
+        remote_short="${remote_ref:-unknown}"
+        installed_short="${installed_short:0:12}"
+        remote_short="${remote_short:0:12}"
+        log_info "[self-update] Update available (rolling sha ${installed_short} -> ${remote_short})"
     fi
 
     # 2) Download into a temp file on the SAME filesystem as the destination.
@@ -14098,13 +14279,72 @@ run_self_update_only() {
         return 1
     fi
 
-    # C) Must look like a bash script
+    # C) Optional SHA256 verification (stable channel only, best-effort)
+    # If a checksum file is available, we enforce it. If not available, we proceed.
+    if [ "${channel}" = "stable" ]; then
+        local chk_url chk_file expected actual
+        chk_url=""
+        chk_file="${tmp}.sha256"
+        expected=""
+        actual=""
+
+        # Candidate checksum URLs (try in order)
+        # - prefer release asset checksum (if you publish it)
+        # - then try raw tag checksum (if repo contains it)
+        for chk_url in \
+            "${raw_url_asset}.sha256" \
+            "${raw_url_asset}.sha256sum" \
+            "${raw_url_tag}.sha256" \
+            "${raw_url_tag}.sha256sum" \
+            "https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh.sha256" \
+            "https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh.sha256sum"; do
+
+            if curl -sL --fail --connect-timeout 10 --max-time 20 "${chk_url}" -o "${chk_file}" 2>/dev/null; then
+                break
+            fi
+            chk_url=""
+        done
+
+        if [ -n "${chk_url:-}" ] && [ -s "${chk_file}" ]; then
+            expected=$(grep -Eo '[0-9a-fA-F]{64}' "${chk_file}" 2>/dev/null | head -n 1 | tr 'A-F' 'a-f' || true)
+
+            if [ -z "${expected:-}" ]; then
+                log_error "[self-update] Checksum file downloaded but no SHA256 hash could be parsed: ${chk_url}"
+                rm -f "${chk_file}" 2>/dev/null || true
+                return 1
+            fi
+
+            if command -v sha256sum >/dev/null 2>&1; then
+                actual=$(sha256sum "${tmp}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
+            elif command -v openssl >/dev/null 2>&1; then
+                actual=$(openssl dgst -sha256 "${tmp}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
+            else
+                log_warn "[self-update] No sha256 tool found (sha256sum/openssl); cannot verify checksum"
+                actual=""
+            fi
+
+            if [ -n "${actual:-}" ] && [ "${actual}" = "${expected}" ]; then
+                log_success "[self-update] SHA256 verified (${expected})"
+            else
+                log_error "[self-update] SHA256 mismatch. Expected=${expected}, got=${actual:-unknown}"
+                rm -f "${chk_file}" 2>/dev/null || true
+                return 1
+            fi
+
+            rm -f "${chk_file}" 2>/dev/null || true
+        else
+            rm -f "${chk_file}" 2>/dev/null || true
+            log_info "[self-update] No checksum file found for this release; proceeding without checksum verification"
+        fi
+    fi
+
+    # D) Must look like a bash script
     if ! head -n 1 "${tmp}" 2>/dev/null | grep -qE '^#!/bin/bash|^#!/usr/bin/env bash'; then
         log_error "Downloaded update does not look like a bash script (missing shebang)"
         return 1
     fi
 
-    # D) Sanity markers so we don't install the wrong repo/file by mistake
+    # E) Sanity markers so we don't install the wrong repo/file by mistake
     if ! grep -qE '^#\s*VERSION\s+[0-9]+' "${tmp}" 2>/dev/null; then
         log_error "Update failed: downloaded file does not contain a VERSION header"
         return 1
@@ -14114,35 +14354,33 @@ run_self_update_only() {
         return 1
     fi
 
-    # E) Syntax check (crucial for self-updating scripts)
+    # F) Syntax check (crucial for self-updating scripts)
     if ! bash -n "${tmp}" >/dev/null 2>&1; then
         log_error "Downloaded update failed 'bash -n' syntax check; refusing to install"
         return 1
     fi
 
-    # 4) Version comparison (best-effort)
-    local ver_line new_ver current_line current_ver
+    # 4) Extract VERSION header for logging only (do NOT use for update decisions)
+    local ver_line new_ver
     ver_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${tmp}" 2>/dev/null || true)
     new_ver=$(printf '%s' "${ver_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "0")
-
-    current_ver="0"
-    if [ -f "${dest}" ]; then
-        current_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${dest}" 2>/dev/null || true)
-        current_ver=$(printf '%s' "${current_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "0")
-    fi
-
-    # Normalize to integers when possible.
-    if ! [[ "${current_ver:-}" =~ ^[0-9]+$ ]]; then current_ver=0; fi
     if ! [[ "${new_ver:-}" =~ ^[0-9]+$ ]]; then new_ver=0; fi
 
-    if [ "${force}" -ne 1 ] 2>/dev/null; then
-        if [ "${new_ver}" -le "${current_ver}" ] 2>/dev/null; then
-            log_success "✓ Already up-to-date (current v${current_ver}, remote v${new_ver}). Use --force to reinstall."
-            return 0
+    # Extra sanity: if stable tag looks like vNN and VERSION doesn't match, warn but continue.
+    if [ "${channel}" = "stable" ] && [[ "${tag:-}" =~ ^v([0-9]+)$ ]] && [ "${new_ver}" -gt 0 ] 2>/dev/null; then
+        if [ "${BASH_REMATCH[1]}" != "${new_ver}" ]; then
+            log_warn "[self-update] Downloaded VERSION header (${new_ver}) does not match release tag (${tag}); proceeding (tag controls update decisions)."
         fi
     fi
 
-    log_info "[self-update] Update available: v${current_ver} -> v${new_ver} (${channel}${tag:+ tag=${tag}})"
+    if [ "${channel}" = "stable" ]; then
+        log_info "[self-update] Installing stable ${tag} (downloaded VERSION=${new_ver:-0})"
+    else
+        local remote_short
+        remote_short="${remote_sha:-unknown}"
+        remote_short="${remote_short:0:12}"
+        log_info "[self-update] Installing rolling ${remote_short} (downloaded VERSION=${new_ver:-0})"
+    fi
 
     # 5) Prepare permissions/ownership on the temp file before the swap.
     chmod 755 "${tmp}" 2>/dev/null || true
@@ -14188,6 +14426,7 @@ run_self_update_only() {
     # 7) Post-install self-test + automatic rollback
     log_info "[self-update] Running post-update self-test..."
 
+    local goto_rollback
     if ! bash -n "${dest}" >/dev/null 2>&1; then
         log_error "⚠ CRITICAL: Installed script fails bash -n. Rolling back..."
         goto_rollback=1
@@ -14235,8 +14474,42 @@ run_self_update_only() {
     # Cleanup the same-filesystem backup copy (keep archive under /var/backups)
     rm -f "${backup_samefs}" 2>/dev/null || true
 
-    log_success "✓ Update complete (v${new_ver})"
-    update_status "SUCCESS: Self-update installed (v${new_ver})"
+    # 9) Persist installed ref (stable tag / rolling commit SHA) so we don't rely on VERSION for decisions.
+    local new_state_stable new_state_rolling last_ref
+    new_state_stable="${installed_stable_tag:-}"
+    new_state_rolling="${installed_rolling_sha:-}"
+    last_ref=""
+
+    if [ "${channel}" = "stable" ]; then
+        new_state_stable="${tag}"
+        last_ref="${tag}"
+    else
+        if [ -n "${remote_sha:-}" ]; then
+            new_state_rolling="${remote_sha}"
+            last_ref="${remote_sha}"
+        fi
+    fi
+
+    if [ -n "${last_ref:-}" ]; then
+        if __znh_self_update_state_write "${new_state_stable}" "${new_state_rolling}" "${channel}" "${last_ref}"; then
+            log_info "[self-update] State updated: $(__znh_self_update_state_file)"
+        else
+            log_warn "[self-update] Failed to write update state file (non-fatal): $(__znh_self_update_state_file)"
+        fi
+    else
+        log_warn "[self-update] Remote ref unknown; state file not updated"
+    fi
+
+    if [ "${channel}" = "stable" ]; then
+        log_success "✓ Update complete (stable ${tag}, VERSION=${new_ver:-0})"
+        update_status "SUCCESS: Self-update installed (stable ${tag})"
+    else
+        local remote_short
+        remote_short="${remote_sha:-unknown}"
+        remote_short="${remote_short:0:12}"
+        log_success "✓ Update complete (rolling ${remote_short}, VERSION=${new_ver:-0})"
+        update_status "SUCCESS: Self-update installed (rolling ${remote_short})"
+    fi
 
     echo ""
     echo "Self-update complete. To apply all updated units/scripts, run:"
@@ -14629,9 +14902,14 @@ run_uninstall_helper_only() {
             execute_guarded "Remove /boot/do_purge_kernels marker" rm -f -- /boot/do_purge_kernels || true
         fi
 
-        # Remove dashboard API token (best-effort)
+        # Remove dashboard API artifacts (best-effort)
         if [ -d /var/lib/zypper-auto ]; then
-            execute_guarded "Remove dashboard API token" rm -f -- /var/lib/zypper-auto/dashboard-api.token 2>/dev/null || true
+            execute_guarded "Remove dashboard API artifacts" rm -f -- \
+                /var/lib/zypper-auto/dashboard-api.token \
+                /var/lib/zypper-auto/dashboard-api.env \
+                /var/lib/zypper-auto/dashboard-schema.json \
+                /var/lib/zypper-auto/self-update-state.json \
+                2>/dev/null || true
             rmdir /var/lib/zypper-auto 2>/dev/null || true
         fi
     fi

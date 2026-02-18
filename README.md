@@ -267,10 +267,14 @@ zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's servic
 ```
 
 Self-update notes:
-- `--self-update` checks the remote VERSION and skips reinstall when you’re already up-to-date (use `--force` to reinstall anyway).
+- `--self-update` follows **GitHub refs**, not the internal `# VERSION` header:
+  - `stable` compares the installed **GitHub Release tag** (`tag_name`, e.g. `v65`) with the latest release tag.
+  - `rolling` compares the installed **commit SHA on `main`** with the latest commit SHA.
+- The installed ref is stored in a root-owned state file: `/var/lib/zypper-auto/self-update-state.json`.
 - It creates a timestamped backup before overwriting the destination script, and also keeps an archive copy under `/var/backups/zypper-auto/self-update/`.
 - It downloads into a temp file and then swaps it in with an atomic `mv` rename (so updating the currently-running script won’t corrupt execution).
 - It refuses to install empty downloads or HTML error pages (GitHub 404/403), and runs `bash -n` syntax checks before installing.
+- In the stable channel, if a `.sha256`/`.sha256sum` file is published for the release, it will verify SHA256 before installing.
 - After installing, it runs a safe post-update self-test (`--help` and `--check` when possible). If that fails, it automatically rolls back to the previous version.
 - **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
 
