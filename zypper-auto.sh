@@ -14108,8 +14108,7 @@ run_self_update_only() {
     fi
 
     # Self-update state file (tracks installed stable tag + rolling commit SHA)
-    local state_file installed_stable_tag installed_rolling_sha
-    state_file="$(__znh_self_update_state_file)"
+    local installed_stable_tag installed_rolling_sha
     installed_stable_tag="$(__znh_self_update_state_get stable_tag)"
     installed_rolling_sha="$(__znh_self_update_state_get rolling_sha)"
 
