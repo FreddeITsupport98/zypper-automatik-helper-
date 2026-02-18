@@ -8664,7 +8664,7 @@ log_debug "[10/${TOTAL_CHECKS}] Checking dashboard API unit sandbox paths..."
 local DASH_API_UNIT_FILE expected_rw dash_api_changed
 DASH_API_UNIT_FILE="/etc/systemd/system/zypper-auto-dashboard-api.service"
 if [ -f "${DASH_API_UNIT_FILE}" ]; then
-    expected_rw="ReadWritePaths=${CONFIG_FILE} /var/lib/zypper-auto /var/log/zypper-auto /var/log/zypper-auto/service-logs"
+    expected_rw="ReadWritePaths=${CONFIG_FILE} /var/lib/zypper-auto /var/log/zypper-auto /var/log/zypper-auto/service-logs /run /var/run"
     dash_api_changed=0
 
     # Ensure ProtectHome is compatible with reading user home paths (needed for snapper helper UX)
@@ -8688,7 +8688,9 @@ if [ -f "${DASH_API_UNIT_FILE}" ]; then
     if grep -q '^ReadWritePaths=' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
         if ! grep -qF '/var/log/zypper-auto' "${DASH_API_UNIT_FILE}" 2>/dev/null \
             || ! grep -qF '/var/log/zypper-auto/service-logs' "${DASH_API_UNIT_FILE}" 2>/dev/null \
-            || ! grep -qF '/var/lib/zypper-auto' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
+            || ! grep -qF '/var/lib/zypper-auto' "${DASH_API_UNIT_FILE}" 2>/dev/null \
+            || ! grep -qF '/run' "${DASH_API_UNIT_FILE}" 2>/dev/null \
+            || ! grep -qF '/var/run' "${DASH_API_UNIT_FILE}" 2>/dev/null; then
             execute_guarded "Patch dashboard API unit (ReadWritePaths)" \
                 sed -i "s|^ReadWritePaths=.*$|${expected_rw}|" "${DASH_API_UNIT_FILE}" || true
             dash_api_changed=1
@@ -23551,6 +23553,42 @@ class Handler(BaseHTTPRequestHandler):
 
             used_systemd_run = True
             rc, out = _run_cmd(sys_cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
+
+            # Some systems appear to have issues with `systemd-run --pipe` (or transient unit start)
+            # and may error with strings like:
+            #   "Failed to start transient service unit: Connection reset by peer"
+            # In that case, retry without --pipe and capture output via StandardOutput to a log file.
+            if rc != 0:
+                lower = (out or "").lower()
+                if (
+                    "failed to start transient service unit" in lower
+                    or "connection reset by peer" in lower
+                    or "failed to connect to bus" in lower
+                ):
+                    preview_log = f"/var/log/zypper-auto/service-logs/webui-dup-preview-{secrets.token_hex(4)}.log"
+                    unit2 = f"znh-webui-dup-preview2-{secrets.token_hex(4)}"
+                    sys_cmd2 = [
+                        "systemd-run",
+                        "--quiet",
+                        "--wait",
+                        "--collect",
+                        "--unit",
+                        unit2,
+                        "--property",
+                        f"StandardOutput=append:{preview_log}",
+                        "--property",
+                        f"StandardError=append:{preview_log}",
+                        "--",
+                    ] + cmd
+                    rc2, out2 = _run_cmd(sys_cmd2, timeout_s=240, log=getattr(self.server, "_znh_log", None))
+                    # Prefer reading the captured log output (best-effort)
+                    try:
+                        with open(preview_log, "r", encoding="utf-8", errors="replace") as f:
+                            out = f.read()
+                    except Exception:
+                        out = out2
+                    rc = rc2
+
             if rc != 0 and ("systemd-run" in (out or "").lower() or "no such file" in (out or "").lower()):
                 # Fallback: run directly (may fail under sandbox, but still best-effort).
                 used_systemd_run = False
@@ -24684,7 +24722,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto /var/log/zypper-auto/service-logs
+ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto /var/log/zypper-auto/service-logs /run /var/run
 
 [Install]
 WantedBy=multi-user.target
