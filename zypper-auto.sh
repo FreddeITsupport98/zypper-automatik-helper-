@@ -24041,8 +24041,8 @@ class Handler(BaseHTTPRequestHandler):
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
                     'echo "" >>"$LOG"',
                     'echo "[webui] zypper dup rc=$rc" >>"$LOG"',
-                    'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional app updates." >>"$LOG"; fi',
-                    'if [ ${rc} -ne 0 ]; then echo "[webui] zypper dup failed; skipping optional app updates." >>"$LOG"; fi',
+                    'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional updates." >>"$LOG"; fi',
+                    'if [ ${rc} -ne 0 ]; then echo "[webui] zypper dup failed; skipping optional updates." >>"$LOG"; fi',
 
                     # Optional app updates only run on real installs (not simulation) and only when
                     # updates occurred, unless OPTIONAL_UPDATES_ALWAYS_REFRESH=true.
@@ -24133,7 +24133,7 @@ class Handler(BaseHTTPRequestHandler):
                     '    echo "" >>"$LOG"',
                     '  else',
                     '    echo "" >>"$LOG"',
-                    '    echo "[webui] No system updates were applied (Nothing to do). Skipping optional app updates to conserve CPU." >>"$LOG"',
+                    '    echo "[webui] No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU." >>"$LOG"',
                     '  fi',
                     'fi',
 
