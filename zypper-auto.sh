@@ -24290,7 +24290,7 @@ class Handler(BaseHTTPRequestHandler):
                 with lock:
                     j = jobs.get(job_id)
                     if j:
-                        j["rc"] = int(finished_rc or 1)
+                        j["rc"] = int(finished_rc if finished_rc is not None else 1)
                         j["running"] = False
                         j["done"] = True
                         j["finished_at"] = time.time()
