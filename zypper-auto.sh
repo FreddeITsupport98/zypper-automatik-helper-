@@ -1091,19 +1091,33 @@ _log_write() {
     # as plain text (same structured line format) so it can be tailed/grepped.
     local dash_live_root
     dash_live_root="${LOG_DIR}/dashboard-live.log"
-    echo "${line}" >> "${dash_live_root}" 2>/dev/null || true
-    chmod 644 "${dash_live_root}" 2>/dev/null || true
+    {
+        echo "${line}" >> "${dash_live_root}"
+        chmod 644 "${dash_live_root}"
+    } 2>/dev/null || true
 
     # Also mirror to the user's dashboard directory (best-effort) so the user
     # can run a local web server without needing access to /var/log.
+    #
+    # IMPORTANT: some systemd hardening profiles use ProtectHome=read-only, and
+    # on some systems /home may be mounted read-only during certain operations.
+    # Redirection errors happen in the *shell* before the command runs, so we
+    # must silence stderr for the whole block.
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -n "${SUDO_USER:-}" ]; then
         local dash_live_user_dir dash_live_user
         dash_live_user_dir="${SUDO_USER_HOME}/.local/share/zypper-notify"
         dash_live_user="${dash_live_user_dir}/dashboard-live.log"
-        mkdir -p "${dash_live_user_dir}" 2>/dev/null || true
-        echo "${line}" >> "${dash_live_user}" 2>/dev/null || true
-        chown "${SUDO_USER}:${SUDO_USER}" "${dash_live_user}" 2>/dev/null || true
-        chmod 644 "${dash_live_user}" 2>/dev/null || true
+        {
+            mkdir -p "${dash_live_user_dir}"
+
+            # If the directory is not writable, skip mirroring quietly.
+            # (Even root can get EROFS under ProtectHome / read-only mounts.)
+            if [ -w "${dash_live_user_dir}" ] 2>/dev/null || [ -w "${dash_live_user}" ] 2>/dev/null; then
+                echo "${line}" >> "${dash_live_user}"
+                chown "${SUDO_USER}:${SUDO_USER}" "${dash_live_user}" 2>/dev/null || true
+                chmod 644 "${dash_live_user}" 2>/dev/null || true
+            fi
+        } 2>/dev/null || true
     fi
 
     # 3) Also emit to the system journal (best-effort).
@@ -11720,9 +11734,35 @@ run_snapper_menu_only() {
         __znh_snapper_list_last_root 1 || true
 
         echo ""
-        echo "-- snapper systemd timers (unit files) --"
-        # Show unit-file state if available (enabled/disabled/static).
-        systemctl list-unit-files --no-legend 'snapper-*.timer' 2>/dev/null || echo "(no snapper timers found via systemd)"
+        echo "-- snapper systemd timers (enabled vs active) --"
+
+        # IMPORTANT: `systemctl list-unit-files` prints:
+        #   UNIT FILE  STATE  PRESET
+        # So output like "enabled disabled" means:
+        #   STATE=enabled, PRESET=disabled (the distro default),
+        # NOT "enabled=no".
+        local u enabled active preset
+        for u in snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer; do
+            if __znh_unit_file_exists_system "${u}"; then
+                enabled=$(systemctl is-enabled "${u}" 2>/dev/null || echo "unknown")
+                active=$(systemctl is-active "${u}" 2>/dev/null || echo "unknown")
+                preset=$(systemctl list-unit-files --no-legend "${u}" 2>/dev/null | awk 'NR==1 {print $3}' || true)
+                preset="${preset:-unknown}"
+                printf '  %-22s enabled=%-8s active=%-8s preset=%s\n' "${u}" "${enabled}" "${active}" "${preset}"
+
+                if [ "${enabled}" = "enabled" ] 2>/dev/null && [ "${active}" != "active" ] 2>/dev/null; then
+                    echo "    NOTE: timer is enabled but not active. Try: sudo systemctl start ${u}"
+                elif [ "${enabled}" != "enabled" ] 2>/dev/null && [ "${enabled}" != "static" ] 2>/dev/null; then
+                    echo "    TIP: enable it with: sudo systemctl enable --now ${u}"
+                fi
+            else
+                printf '  %-22s %s\n' "${u}" "missing"
+            fi
+        done
+
+        echo ""
+        echo "-- snapper timer schedule (systemctl list-timers) --"
+        systemctl --no-pager list-timers 'snapper-*.timer' 2>/dev/null || true
 
         echo ""
         echo "Tip: openSUSE typically provides these timers (if installed):"

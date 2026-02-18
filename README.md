@@ -1354,6 +1354,8 @@ systemctl status zypper-autodownload.service
   - 🧵 **IMPROVED:** Dashboard Settings API is now **multi-threaded** so slow requests (large logs, Snapper actions) don’t freeze the whole dashboard UI.
   - 🧷 **FIXED:** Dashboard API command output decoding is now forced to UTF‑8 with replacement to avoid crashes on weird/binary log data.
   - 🐛 **FIXED:** self-update overlay readability (proper modal background, improved scrolling, and consistent warning banner styling).
+  - 🐛 **FIXED:** suppressed noisy "Read-only file system" errors when mirroring `dashboard-live.log` into the user dashboard directory (best-effort under systemd hardening / read-only home mounts).
+  - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
   - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
   - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.
   - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
