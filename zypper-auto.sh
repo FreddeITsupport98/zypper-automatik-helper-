@@ -6545,7 +6545,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=42
+    local TOTAL_CHECKS=46
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -8308,6 +8308,183 @@ elif command -v zypper >/dev/null 2>&1; then
     fi
 else
     log_info "ℹ zypper not available; skipping deep GPG check"
+fi
+
+# Check 43: Stale zypper lock file detection (edge-case)
+# NOTE: Other checks already manage locks, but this final pass catches
+# lingering legacy /var/run/zypp.pid issues.
+log_debug "[43/${TOTAL_CHECKS}] Checking for stale zypper locks (final pass)..."
+local had_errexit stale_removed active_seen
+had_errexit=0
+[[ "$-" == *e* ]] && had_errexit=1
+
+set +e
+stale_removed=0
+active_seen=0
+
+# Prefer checking both common paths.
+local zypp_lock lock_pid
+for zypp_lock in /run/zypp.pid /var/run/zypp.pid; do
+    [ -f "${zypp_lock}" ] || continue
+
+    lock_pid=$(cat "${zypp_lock}" 2>/dev/null || echo "")
+
+    if [[ "${lock_pid:-}" =~ ^[0-9]+$ ]]; then
+        if kill -0 "${lock_pid}" 2>/dev/null; then
+            active_seen=1
+            log_info "ℹ zypper lock is active at ${zypp_lock} (PID ${lock_pid}); leaving it in place"
+            continue
+        fi
+
+        # PID is numeric but not running.
+        if pgrep -x zypper >/dev/null 2>&1; then
+            # Extremely defensive: if any zypper process is running, do not
+            # remove lock files even if the PID inside looks stale.
+            active_seen=1
+            log_warn "⚠ zypp lock at ${zypp_lock} looks stale (PID ${lock_pid} not running) but zypper is running; NOT removing lock"
+            continue
+        fi
+
+        log_warn "⚠ Found stale zypper lock file at ${zypp_lock} (PID ${lock_pid} not running)"
+        if execute_guarded "Remove stale zypper lock file (${zypp_lock})" rm -f "${zypp_lock}"; then
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            stale_removed=1
+        fi
+    else
+        # Invalid PID content
+        if pgrep -x zypper >/dev/null 2>&1; then
+            active_seen=1
+            log_warn "⚠ Invalid zypp lock file at ${zypp_lock} but zypper is running; NOT removing lock"
+            continue
+        fi
+
+        log_warn "⚠ Found invalid zypper lock file at ${zypp_lock} (PID content: '${lock_pid:-empty}')"
+        if execute_guarded "Remove invalid zypper lock file (${zypp_lock})" rm -f "${zypp_lock}"; then
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            stale_removed=1
+        fi
+    fi
+done
+
+[ "$had_errexit" -eq 1 ] 2>/dev/null && set -e
+
+if [ "${stale_removed}" -eq 1 ] 2>/dev/null; then
+    log_success "✓ Stale/invalid zypper lock(s) cleaned up"
+elif [ "${active_seen}" -eq 1 ] 2>/dev/null; then
+    log_info "ℹ zypper lock(s) appear active; no changes made"
+else
+    log_success "✓ No zypper lock files detected"
+fi
+
+# Check 44: Boot partition capacity
+# Kernel/initrd updates can fail when /boot is nearly full.
+log_debug "[44/${TOTAL_CHECKS}] Checking /boot partition space..."
+boot_usage=""
+boot_usage=$(df --output=pcent /boot 2>/dev/null | tail -n 1 | tr -d '%[:space:]' || true)
+if [[ "${boot_usage:-}" =~ ^[0-9]+$ ]]; then
+    if [ "${boot_usage}" -ge 90 ] 2>/dev/null; then
+        log_warn "⚠ /boot partition is critically full (${boot_usage}%)"
+
+        # Auto-repair: attempt kernel purge ONLY when explicitly enabled.
+        # Guard: never run zypper-based cleanup when a lock is active.
+        if [[ "${KERNEL_PURGE_ENABLED,,}" == "true" ]]; then
+            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+                log_warn "  ⚠ Skipping kernel purge because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            else
+                # Respect the interactive confirmation guard if present.
+                if [ "${KERNEL_PURGE_CONFIRM:-true}" = "true" ] && [ ! -t 0 ]; then
+                    log_warn "  ⚠ Refusing kernel purge without a TTY while KERNEL_PURGE_CONFIRM=true"
+                else
+                    log_info "  → Auto-repair: running kernel purge to free /boot space..."
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+                    if execute_guarded "Emergency kernel purge (zypper purge-kernels)" zypper --non-interactive purge-kernels; then
+                        new_usage=$(df --output=pcent /boot 2>/dev/null | tail -n 1 | tr -d '%[:space:]' || true)
+                        if [[ "${new_usage:-}" =~ ^[0-9]+$ ]] && [ "${new_usage}" -lt 90 ] 2>/dev/null; then
+                            log_success "  ✓ /boot space reclaimed (now ${new_usage}%)"
+                        else
+                            log_warn "  ⚠ Kernel purge ran, but /boot is still high (${new_usage:-unknown}%)"
+                        fi
+                    else
+                        log_error "  ✗ Kernel purge failed"
+                        VERIFICATION_FAILED=1
+                    fi
+                fi
+            fi
+        else
+            log_warn "  → Enable KERNEL_PURGE_ENABLED=true in /etc/zypper-auto.conf to auto-fix this"
+            if [ "${boot_usage}" -ge 100 ] 2>/dev/null; then
+                log_error "✗ /boot is 100% full; updates may fail"
+                VERIFICATION_FAILED=1
+            fi
+        fi
+    else
+        log_success "✓ /boot space is healthy (${boot_usage}%)"
+    fi
+else
+    log_warn "⚠ Unable to determine /boot usage (df parsing failed); skipping"
+fi
+
+# Check 45: System time synchronization (NTP)
+# SSL/repo metadata verification can fail if the clock drifts.
+log_debug "[45/${TOTAL_CHECKS}] Verifying time synchronization (NTP)..."
+if command -v timedatectl >/dev/null 2>&1; then
+    ntp_status=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "unknown")
+
+    if printf '%s' "${ntp_status}" | grep -qi '^yes$'; then
+        log_success "✓ System clock is synchronized"
+    else
+        log_warn "⚠ System clock is NOT synchronized (SSL/cert errors may occur)"
+        log_info "  → Attempting auto-repair: enabling NTP + restarting time sync services..."
+
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        execute_optional "Enable NTP (timedatectl set-ntp true)" timedatectl set-ntp true || true
+
+        # Best-effort: restart whichever service exists.
+        if __znh_unit_file_exists_system chronyd.service; then
+            execute_optional "Restart chronyd" systemctl restart chronyd.service || true
+        elif __znh_unit_file_exists_system chrony.service; then
+            execute_optional "Restart chrony" systemctl restart chrony.service || true
+        elif __znh_unit_file_exists_system systemd-timesyncd.service; then
+            execute_optional "Restart systemd-timesyncd" systemctl restart systemd-timesyncd.service || true
+        fi
+
+        sleep 2
+        ntp_status2=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "unknown")
+        if printf '%s' "${ntp_status2}" | grep -qi '^yes$'; then
+            log_success "  ✓ Time synchronization restored"
+        else
+            log_error "  ✗ Time is still not synchronized (network/time service issue?)"
+            # Soft failure: warn loudly but do not hard-fail verification.
+        fi
+    fi
+else
+    log_info "ℹ timedatectl not available; skipping time sync check"
+fi
+
+# Check 46: Systemd degraded state (final health)
+# If other services are failed, updates/networking can break in subtle ways.
+log_debug "[46/${TOTAL_CHECKS}] Checking overall systemd health (is-system-running)..."
+sys_state=$(systemctl is-system-running 2>/dev/null || echo "unknown")
+if printf '%s' "${sys_state}" | grep -qE '^(running|degraded)$'; then
+    failed_units=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+
+    if [ -n "${failed_units:-}" ]; then
+        log_warn "⚠ Systemd state is '${sys_state}'. Failed unit(s) detected:"
+        printf '%s\n' "${failed_units}" | sed 's/^/  - /' | tee -a "${LOG_FILE}"
+
+        log_info "  → Auto-repair: resetting failed unit states (best-effort)..."
+        if execute_guarded "Reset failed systemd units (final health)" systemctl reset-failed; then
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            log_success "  ✓ Failed unit states cleared (monitor if they fail again)"
+        else
+            log_warn "  ⚠ Failed to reset failed unit states"
+        fi
+    else
+        log_success "✓ Systemd reports healthy state (${sys_state})"
+    fi
+else
+    log_info "ℹ Systemd state is '${sys_state}'; skipping failed-unit health check"
 fi
 
 # Calculate repair statistics
