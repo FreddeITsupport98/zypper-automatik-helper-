@@ -1514,6 +1514,9 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** suppressed noisy "Read-only file system" errors when mirroring `dashboard-live.log` into the user dashboard directory (best-effort under systemd hardening / read-only home mounts).
   - 🐛 **FIXED:** Soar detection in `zypper-with-ps` now works correctly when the wrapper is launched via `sudo`/`pkexec` (detects per-user installs under `~/.local/bin` / `~/pkgforge` and runs Soar as the invoking user).
   - 🚀 **NEW:** Command Center rocket button is now **animated** in Live mode (downloading / complete / error states) and opens a **Rocket Update Wizard**: preview `zypper dup --dry-run --details`, confirm via checkbox + phrase, stream install logs + progress, then show `zypper ps -s` restart check.
+  - 🧪 **NEW:** Rocket Update Wizard supports an explicit **Dry-run simulation** mode in the WebUI:
+    - Quick Action: **“Simulate: System Update (Dry-run)”** opens the wizard with simulation pre-selected.
+    - URL auto-open: `status.html?live=1&ru=1&ru_dry=1` (opens wizard in dry-run simulation mode).
   - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
   - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
   - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.

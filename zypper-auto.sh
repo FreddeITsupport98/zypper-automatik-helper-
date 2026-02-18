@@ -4436,6 +4436,11 @@ generate_dashboard() {
               <span class="cmd-desc">Blocking overlay + MIT license + live logs/progress (no install)</span>
               <div class="cmd-copy-feedback">Opening…</div>
           </button>
+          <button class="cmd-btn" id="rocket-update-sim-run-btn" type="button" title="Open Rocket Update Wizard in SAFE simulation mode (zypper dup --dry-run; no install)">
+              <span class="cmd-label">Simulate: System Update (Dry-run)</span>
+              <span class="cmd-desc">Rocket Wizard preview + live logs/progress (no install)</span>
+              <div class="cmd-copy-feedback">Opening…</div>
+          </button>
         </div>
       </details>
     </div>
@@ -5735,6 +5740,28 @@ generate_dashboard() {
         }, 400);
     }
 
+    function rocketUpdateAutoQueryInit() {
+        // URL query allows opening the Rocket Update Wizard automatically.
+        // Example: status.html?live=1&ru=1&ru_dry=1
+        var sp = null;
+        try { sp = new URLSearchParams(window.location.search || ''); } catch (e) { sp = null; }
+        if (!sp) return;
+
+        // If self-update auto-open is requested too, prefer self-update to avoid two overlays fighting.
+        var su = String(sp.get('su') || sp.get('selfupdate') || sp.get('self-update') || '').toLowerCase();
+        if (su === '1' || su === 'true' || su === 'yes') return;
+
+        var ru = String(sp.get('ru') || sp.get('rocket') || sp.get('systemupdate') || sp.get('system-update') || sp.get('dup') || '').toLowerCase();
+        if (ru !== '1' && ru !== 'true' && ru !== 'yes') return;
+
+        var dry = String(sp.get('ru_dry') || sp.get('ru_sim') || sp.get('simulate') || '').toLowerCase();
+        var autoSim = (dry === '1' || dry === 'true' || dry === 'yes');
+
+        setTimeout(function() {
+            try { rocketUpdateWizardOpen({ auto_simulate: autoSim }); } catch (e2) {}
+        }, 450);
+    }
+
     function selfUpdateFetchChangelog(btnEl) {
         var btn = btnEl || document.getElementById('self-update-changelog-btn');
         if (btn) btn.disabled = true;
@@ -5876,6 +5903,7 @@ generate_dashboard() {
         poll_timer: null,
         running: false,
         simulate: false,
+        auto_simulate: false,
         last_preview: null
     };
 
@@ -5887,6 +5915,7 @@ generate_dashboard() {
         _ru.job_id = '';
         _ru.running = false;
         _ru.simulate = false;
+        _ru.auto_simulate = false;
         _ru.last_preview = null;
         if (_ru.poll_timer) {
             try { clearInterval(_ru.poll_timer); } catch (e) {}
@@ -5922,6 +5951,7 @@ generate_dashboard() {
             (cmd ? ('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command: <code style="font-size:0.85rem;">' + cmd.replace(/</g,'&lt;') + '</code></div>') : ''),
             '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
             '  <button class="pill" type="button" id="ru-refresh-preview">Refresh preview</button>',
+            '  <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="ru-auto-sim" /> Simulation only (dry-run; no install)</label>',
             '  <div style="color: var(--muted); font-size:0.88rem;">rc=' + String(isNaN(rc) ? '?' : rc) + (p.used_systemd_run ? ' • via systemd-run' : '') + '</div>',
             '</div>',
             '<pre class="overlay-pre" id="ru-preview-out" style="max-height: 360px;">' + (out ? out.replace(/</g,'&lt;') : '(no output)') + '</pre>',
@@ -5929,7 +5959,7 @@ generate_dashboard() {
             '<div style="color: var(--muted); font-size:0.88rem;">Tip: if zypper reports conflicts / manual decisions in the preview, the wizard may fail in non-interactive mode. In that case, use the normal terminal-based install flow.</div>'
         ].join('\n');
 
-        _ruSetHeader('Preview', 'Step 1/3', 'Install system updates');
+        _ruSetHeader('Preview', 'Step 1/3', _ru.auto_simulate ? 'Simulate system updates (dry-run)' : 'Install system updates');
 
         _suSetButtons({
             show_cancel: true,
@@ -5957,10 +5987,21 @@ generate_dashboard() {
             });
         }
 
+        var simPrev = document.getElementById('ru-auto-sim');
+        if (simPrev) {
+            try { simPrev.checked = !!_ru.auto_simulate; } catch (e2) {}
+            simPrev.addEventListener('change', function() {
+                _ru.auto_simulate = !!simPrev.checked;
+                // Keep confirm-step checkbox in sync.
+                _ru.simulate = !!simPrev.checked;
+                _ruSetHeader('Preview', 'Step 1/3', _ru.auto_simulate ? 'Simulate system updates (dry-run)' : 'Install system updates');
+            });
+        }
+
         var rb = document.getElementById('ru-refresh-preview');
         if (rb) rb.addEventListener('click', function(ev) {
             try { addRipple(rb, ev.clientX, ev.clientY); } catch (e2) {}
-            rocketUpdateWizardOpen();
+            rocketUpdateWizardOpen({ auto_simulate: !!_ru.auto_simulate });
         });
 
         try { highlightBlock('ru-preview-out'); } catch (e3) {}
@@ -5996,7 +6037,7 @@ generate_dashboard() {
             '<div style="color: var(--muted); font-size:0.88rem;">The wizard streams output from a dedicated systemd unit into this window. If it fails due to conflicts, run the terminal-based installer for manual decisions.</div>'
         ].join('\n');
 
-        _ruSetHeader('Confirm', 'Step 2/3', 'Install system updates');
+        _ruSetHeader('Confirm', 'Step 2/3', _ru.auto_simulate ? 'Simulate system updates (dry-run)' : 'Install system updates');
 
         _suSetButtons({
             show_cancel: true,
@@ -6010,6 +6051,12 @@ generate_dashboard() {
 
         var inp = document.getElementById('ru-phrase');
         var sim = document.getElementById('ru-simulate');
+
+        // When opened in simulation mode, pre-select simulate for safety.
+        if (sim && _ru.auto_simulate) {
+            try { sim.checked = true; } catch (e) {}
+            _ru.simulate = true;
+        }
 
         function updateInstallEnabled() {
             var ok = false;
@@ -6154,13 +6201,29 @@ generate_dashboard() {
         _ru.poll_timer = setInterval(tick, 800);
     }
 
-    function rocketUpdateWizardOpen() {
+    function rocketUpdateWizardOpen(arg) {
+        var opts = {};
+        try {
+            // If called from a click handler, arg may be a DOM element.
+            if (arg && typeof arg === 'object' && arg.nodeType) {
+                opts = {};
+            } else {
+                opts = arg || {};
+            }
+        } catch (e0) { opts = {}; }
+
+        var autoSim = false;
+        try {
+            autoSim = !!(opts && (opts.auto_simulate || opts.auto_dry_run || opts.simulate || opts.dry_run));
+        } catch (e1) { autoSim = false; }
+
         // Ensure any self-update timers are stopped so flows don't fight.
         try { _suReset(); } catch (e) {}
         _ruReset();
+        _ru.auto_simulate = autoSim;
 
         _suShow(true);
-        _ruSetHeader('Preview', 'Step 1/3', 'Install system updates');
+        _ruSetHeader('Preview', 'Step 1/3', autoSim ? 'Simulate system updates (dry-run)' : 'Install system updates');
 
         // Fetch preview output.
         var e = _suEls();
@@ -6459,6 +6522,7 @@ generate_dashboard() {
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
             try { selfUpdateAutoQueryInit(); } catch (e) {}
+            try { rocketUpdateAutoQueryInit(); } catch (e) {}
 
             var inv = (c.invalid_keys || []);
             var warn = (c.warnings || []);
@@ -6610,8 +6674,11 @@ generate_dashboard() {
     _wireSettingsUI();
     function _wireRocketUI() {
         var btn = document.getElementById('rocket-btn');
-        if (!btn) return;
-        btn.addEventListener('click', function(ev) {
+        var simBtn = document.getElementById('rocket-update-sim-run-btn');
+
+        if (!btn && !simBtn) return;
+
+        if (btn) btn.addEventListener('click', function(ev) {
             try { addRipple(btn, ev.clientX, ev.clientY); } catch (e) {}
             try {
                 if (typeof rocketUpdateWizardOpen === 'function') {
@@ -6622,6 +6689,20 @@ generate_dashboard() {
             } catch (e2) {
                 var msg = (e2 && e2.message) ? e2.message : 'failed';
                 toast('Rocket action failed', msg, 'err');
+            }
+        });
+
+        if (simBtn) simBtn.addEventListener('click', function(ev) {
+            try { addRipple(simBtn, ev.clientX, ev.clientY); } catch (e) {}
+            try {
+                if (typeof rocketUpdateWizardOpen === 'function') {
+                    rocketUpdateWizardOpen({ auto_simulate: true });
+                } else {
+                    toast('Update wizard not ready', 'Reload dashboard after reinstall', 'err');
+                }
+            } catch (e2) {
+                var msg = (e2 && e2.message) ? e2.message : 'failed';
+                toast('Rocket simulation failed', msg, 'err');
             }
         });
     }
