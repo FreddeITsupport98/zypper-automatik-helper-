@@ -10066,6 +10066,7 @@ run_diag_logs_runner_only() {
         echo "===== Zypper Auto-Helper Diagnostics Session Start: $(date '+%Y-%m-%d %H:%M:%S') ====="
         echo "Host: $(hostname 2>/dev/null || echo 'unknown')"
         if [ -f /etc/os-release ]; then
+            # shellcheck disable=SC1091
             . /etc/os-release 2>/dev/null || true
             echo "OS: ${NAME:-unknown} ${VERSION:-} (ID=${ID:-?}, VARIANT_ID=${VARIANT_ID:--})"
         fi
@@ -13802,15 +13803,8 @@ run_self_update_only() {
         api_url="https://api.github.com/repos/${repo}/releases/latest"
 
         if command -v python3 >/dev/null 2>&1; then
-            tag=$(curl -fsSL "${api_url}" 2>/dev/null | python3 - <<'PY'
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    print((data.get("tag_name") or "").strip())
-except Exception:
-    print("")
-PY
-)
+            # Prefer real JSON parsing; swallow errors and fall back below if needed.
+            tag=$(curl -fsSL "${api_url}" 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin).get("tag_name") or "").strip())' 2>/dev/null || true)
         else
             # Fallback (best-effort, no strict JSON parsing)
             tag=$(curl -fsSL "${api_url}" 2>/dev/null | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
@@ -15282,6 +15276,7 @@ if command -v uname >/dev/null 2>&1; then
         echo "Host: $(hostname 2>/dev/null || echo 'unknown')"
         echo "Kernel: $(uname -srmo 2>/dev/null || echo 'unknown')"
         if [ -f /etc/os-release ]; then
+            # shellcheck disable=SC1091
             . /etc/os-release 2>/dev/null || true
             echo "OS: ${NAME:-unknown} ${VERSION:-} (ID=${ID:-?}, VARIANT_ID=${VARIANT_ID:--})"
         fi

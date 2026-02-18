@@ -229,6 +229,11 @@ zypper-auto-helper install          # Reinstall/upgrade
 zypper-auto-helper --reset-config   # Reset /etc/zypper-auto.conf to documented defaults (with backup)
 zypper-auto-helper --reset-downloads  # Clear cached download/notifier state and restart timers (alias: --reset-state)
 
+# Self-update (updates the helper script itself)
+sudo zypper-auto-helper --self-update          # Update using SELF_UPDATE_CHANNEL (default: rolling)
+sudo zypper-auto-helper --self-update rolling  # Rolling channel: latest commit on main
+sudo zypper-auto-helper --self-update stable   # Stable channel: latest GitHub Release
+
 # Optional helpers
 zypper-auto-helper --soar           # Install/upgrade the optional Soar CLI helper
 zypper-auto-helper --brew           # Install/upgrade Homebrew (brew) for the system/user
@@ -256,6 +261,11 @@ zypper-auto-helper --test-notify    # Send a test desktop notification to verify
 # Scripted uninstaller
 zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
 ```
+
+Self-update notes:
+- `--self-update` creates a timestamped backup before overwriting the destination script.
+- It runs a `bash -n` syntax check on the downloaded script before installing.
+- **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
 
 ### Shell tab completion
 
@@ -296,8 +306,13 @@ Key options include:
     allowed set and behaviour as above).
   - `VERIFY_TIMER_INTERVAL_MINUTES` – how often the root verification/auto‑repair
     service runs (again, allowed **only**: `1,5,10,15,30,60`).
-  - The installer converts these into appropriate `OnCalendar` values, e.g.
-    `*:0/10` for every 10 minutes or `hourly` for 60.
+- The installer converts these into appropriate `OnCalendar` values, e.g.
+  `*:0/10` for every 10 minutes or `hourly` for 60.
+
+- **Self-update**
+  - `SELF_UPDATE_CHANNEL` – controls which channel is used by `sudo zypper-auto-helper --self-update` (allowed: `rolling` or `stable`).
+    - `rolling` downloads from the latest commit on the `main` branch.
+    - `stable` downloads from the latest GitHub Release tag.
 
 - **Snapper safety (retention optimizer caps)**
   - `SNAP_RETENTION_OPTIMIZER_ENABLED` – when `true` (default), running
@@ -1096,6 +1111,7 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Color-coded status badge (success/active vs errors)
 - Pending updates count (parsed from the cached dry-run output: `/var/log/zypper-auto/dry-run-last.txt`)
 - Visual feature toggles (Flatpak/Snap/Soar/Brew/Pipx on/off)
+- A **Self-Update** panel to show/toggle the update channel (**rolling** vs **stable**) and fetch the latest changelog from GitHub
 - A **Settings drawer** (slide-open panel) that lets you toggle common options, timer intervals, and **Snapper safety caps** (retention/timeline limits + deep-clean safety) without editing `/etc/zypper-auto.conf` by hand (auto-saves changes; failures show a prompt offering Factory Reset)
 - A **Snapper Manager** panel (root actions via localhost API) that exposes Snapper menu options **1–6**:
   - Status, list recent snapshots, create snapshot, full cleanup, AUTO enable timers, AUTO disable timers
