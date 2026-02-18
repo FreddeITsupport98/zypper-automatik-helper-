@@ -23995,6 +23995,7 @@ class Handler(BaseHTTPRequestHandler):
                     'set -euo pipefail',
                     f'LOG={shlex.quote(log_path)}',
                     'mkdir -p /var/log/zypper-auto/service-logs || true',
+                    f'SIMULATE={"1" if simulate else "0"}',
 
                     # Load config toggles for optional post-update refresh.
                     'CONFIG=/etc/zypper-auto.conf',
