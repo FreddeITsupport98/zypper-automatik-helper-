@@ -3778,6 +3778,76 @@ generate_dashboard() {
         gap: 10px;
     }
 
+    /* Rocket button (header) */
+    .rocket-btn {
+        font: inherit;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 12px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        position: relative;
+        user-select: none;
+        transition: transform 150ms ease, background 150ms ease, border-color 150ms ease;
+    }
+    .rocket-btn:hover {
+        background: rgba(37,99,235,0.10);
+        border-color: rgba(37,99,235,0.28);
+        transform: translateY(-1px);
+    }
+    .rocket-btn:active { transform: translateY(0) scale(0.98); }
+    .rocket-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
+
+    @keyframes rocketThrust {
+        0% { transform: translateY(0) rotate(-1deg); filter: saturate(1); }
+        50% { transform: translateY(-2px) rotate(2deg); filter: saturate(1.25); }
+        100% { transform: translateY(0) rotate(-1deg); filter: saturate(1); }
+    }
+    @keyframes rocketReady {
+        0% { transform: translateY(0); filter: drop-shadow(0 0 0 rgba(34,197,94,0.0)); }
+        50% { transform: translateY(-1px); filter: drop-shadow(0 0 10px rgba(34,197,94,0.35)); }
+        100% { transform: translateY(0); filter: drop-shadow(0 0 0 rgba(34,197,94,0.0)); }
+    }
+    @keyframes rocketShake {
+        0% { transform: translateX(0) rotate(0deg); }
+        25% { transform: translateX(-1px) rotate(-4deg); }
+        50% { transform: translateX(1px) rotate(4deg); }
+        75% { transform: translateX(-1px) rotate(-3deg); }
+        100% { transform: translateX(0) rotate(0deg); }
+    }
+
+    .rocket-btn.rocket-downloading { animation: rocketThrust 850ms ease-in-out infinite; }
+    .rocket-btn.rocket-complete { animation: rocketReady 1600ms ease-in-out infinite; }
+    .rocket-btn.rocket-error { animation: rocketShake 420ms ease-in-out infinite; }
+
+    /* Simple flame effect (only when downloading) */
+    .rocket-btn.rocket-downloading::after {
+        content: '';
+        position: absolute;
+        width: 10px;
+        height: 14px;
+        left: 50%;
+        top: 22px;
+        transform: translateX(-50%);
+        border-radius: 999px;
+        background: radial-gradient(circle at 50% 10%, rgba(255,255,255,0.85), rgba(250,204,21,0.65) 35%, rgba(249,115,22,0.15) 70%, rgba(249,115,22,0.0) 100%);
+        filter: blur(0.3px);
+        opacity: 0.95;
+        animation: flame 650ms ease-in-out infinite;
+        pointer-events: none;
+    }
+    @keyframes flame {
+        0% { height: 12px; opacity: 0.85; }
+        50% { height: 18px; opacity: 1; }
+        100% { height: 12px; opacity: 0.85; }
+    }
+
     h2 {
         font-size: 1.02rem;
         margin: 0 0 14px 0;
@@ -4160,7 +4230,10 @@ generate_dashboard() {
   <div class="container">
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
-          <h1>🚀 Zypper Auto Command Center</h1>
+          <h1>
+            <button class="rocket-btn" id="rocket-btn" type="button" title="Install system updates (wizard)">🚀</button>
+            <span>Zypper Auto Command Center</span>
+          </h1>
           <span class="status-badge" id="status-badge">${last_status_esc}</span>
       </div>
       <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">
@@ -5793,6 +5866,375 @@ generate_dashboard() {
         try { selfUpdateFetchStatus(false); } catch (e) {}
     }
 
+    // --- Rocket Update Wizard (system updates via zypper dup) ---
+    var _ru = {
+        step: 1,
+        accepted: false,
+        confirm: null,
+        required_phrase: 'INSTALL',
+        job_id: '',
+        poll_timer: null,
+        running: false,
+        simulate: false,
+        last_preview: null
+    };
+
+    function _ruReset() {
+        _ru.step = 1;
+        _ru.accepted = false;
+        _ru.confirm = null;
+        _ru.required_phrase = 'INSTALL';
+        _ru.job_id = '';
+        _ru.running = false;
+        _ru.simulate = false;
+        _ru.last_preview = null;
+        if (_ru.poll_timer) {
+            try { clearInterval(_ru.poll_timer); } catch (e) {}
+            _ru.poll_timer = null;
+        }
+    }
+
+    function _ruSetHeader(mode, stepText, title) {
+        var e = _suEls();
+        if (e.title) e.title.textContent = String(title || 'Install Updates');
+        if (e.mode) e.mode.textContent = String(mode || 'Preview');
+        if (e.step) e.step.textContent = String(stepText || '');
+    }
+
+    function _ruRenderPreview(preview) {
+        var e = _suEls();
+        if (!e.body) return;
+        var p = preview || {};
+        _ru.last_preview = p;
+
+        var out = (p.output != null) ? String(p.output) : '';
+        var rc = (p.rc != null) ? parseInt(p.rc, 10) : -1;
+        var cmd = (p.cmd != null) ? String(p.cmd) : '';
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Preview first (safe)</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This is a <code>zypper dup --dry-run --details</code> preview. No packages are installed in this step.</div>',
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.92rem;">',
+            '  <strong>What the Rocket Wizard does next:</strong> if you continue and confirm, it will run <code>zypper dup</code> in a dedicated systemd unit and stream the output here, then run <code>zypper ps -s</code> to show what needs restarting.',
+            '</div>',
+            (cmd ? ('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command: <code style="font-size:0.85rem;">' + cmd.replace(/</g,'&lt;') + '</code></div>') : ''),
+            '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+            '  <button class="pill" type="button" id="ru-refresh-preview">Refresh preview</button>',
+            '  <div style="color: var(--muted); font-size:0.88rem;">rc=' + String(isNaN(rc) ? '?' : rc) + (p.used_systemd_run ? ' • via systemd-run' : '') + '</div>',
+            '</div>',
+            '<pre class="overlay-pre" id="ru-preview-out" style="max-height: 360px;">' + (out ? out.replace(/</g,'&lt;') : '(no output)') + '</pre>',
+            '<label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="ru-accept" /> I reviewed the preview and I want to continue.</label>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Tip: if zypper reports conflicts / manual decisions in the preview, the wizard may fail in non-interactive mode. In that case, use the normal terminal-based install flow.</div>'
+        ].join('\n');
+
+        _ruSetHeader('Preview', 'Step 1/3', 'Install system updates');
+
+        _suSetButtons({
+            show_cancel: true,
+            show_back: false,
+            show_next: true,
+            show_install: false,
+            show_close: false,
+            next_disabled: true,
+            footer_center: false
+        });
+
+        var acc = document.getElementById('ru-accept');
+        if (acc) {
+            acc.addEventListener('change', function() {
+                _ru.accepted = !!acc.checked;
+                _suSetButtons({
+                    show_cancel: true,
+                    show_back: false,
+                    show_next: true,
+                    show_install: false,
+                    show_close: false,
+                    next_disabled: !_ru.accepted,
+                    footer_center: false
+                });
+            });
+        }
+
+        var rb = document.getElementById('ru-refresh-preview');
+        if (rb) rb.addEventListener('click', function(ev) {
+            try { addRipple(rb, ev.clientX, ev.clientY); } catch (e2) {}
+            rocketUpdateWizardOpen();
+        });
+
+        try { highlightBlock('ru-preview-out'); } catch (e3) {}
+    }
+
+    function _ruRenderConfirm(confirmInfo) {
+        var e = _suEls();
+        if (!e.body) return;
+        _ru.confirm = confirmInfo || null;
+        _ru.required_phrase = (confirmInfo && confirmInfo.phrase) ? String(confirmInfo.phrase) : 'INSTALL';
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Final confirmation</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This will run <code>zypper dup</code> as root (non-interactive). Make sure you read the preview first.</div>',
+            '</div>',
+            '<div class="overlay-kv">',
+            '  <div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Confirmation phrase: <strong>' + String(_ru.required_phrase) + '</strong></div>',
+            '  <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Safety: <strong>no click, no install</strong></div>',
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.92rem;">To proceed, type the confirmation phrase exactly. This prevents accidental installs.</div>',
+            '<div style="display:grid; gap:10px;">',
+            '  <input id="ru-phrase" type="text" placeholder="Type confirmation phrase…" style="width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />',
+            '  <label class="pill" style="gap:10px; justify-content:flex-start;">',
+            '    <input id="ru-simulate" type="checkbox" /> Simulation mode (dry-run only; does NOT install packages)',
+            '  </label>',
+            '</div>',
+            '<div class="overlay-progress">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Waiting</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="su-live-log" style="max-height: 280px;">(logs will appear here during install)</pre>',
+            '<div style="color: var(--muted); font-size:0.88rem;">The wizard streams output from a dedicated systemd unit into this window. If it fails due to conflicts, run the terminal-based installer for manual decisions.</div>'
+        ].join('\n');
+
+        _ruSetHeader('Confirm', 'Step 2/3', 'Install system updates');
+
+        _suSetButtons({
+            show_cancel: true,
+            show_back: true,
+            show_next: false,
+            show_install: true,
+            show_close: false,
+            install_disabled: true,
+            footer_center: true
+        });
+
+        var inp = document.getElementById('ru-phrase');
+        var sim = document.getElementById('ru-simulate');
+
+        function updateInstallEnabled() {
+            var ok = false;
+            try {
+                ok = inp && String(inp.value || '').trim().toUpperCase() === String(_ru.required_phrase).toUpperCase();
+            } catch (e2) { ok = false; }
+            _suSetButtons({
+                show_cancel: true,
+                show_back: true,
+                show_next: false,
+                show_install: true,
+                show_close: false,
+                install_disabled: !ok,
+                footer_center: true
+            });
+        }
+
+        if (inp) inp.addEventListener('input', updateInstallEnabled);
+        if (sim) sim.addEventListener('change', function() { _ru.simulate = !!sim.checked; });
+        updateInstallEnabled();
+
+        _suUpdateProgress('Waiting', 0);
+        _suSetLog('');
+    }
+
+    function _ruRenderDone(title, subtitle, logText, restartText) {
+        var e = _suEls();
+        if (!e.body) return;
+
+        var safe = function(s) { return String(s || '').replace(/</g, '&lt;'); };
+
+        _ruSetHeader('Result', 'Complete', String(title || 'Done'));
+        if (e.title) e.title.textContent = String(title || 'Done');
+
+        var restartBlock = '';
+        if (restartText && String(restartText).trim()) {
+            restartBlock = [
+                '<div style="font-weight:950; margin-top: 14px; margin-bottom: 8px;">Restart check (<code>zypper ps -s</code>)</div>',
+                '<pre class="overlay-pre" style="max-height: 260px;">' + safe(restartText) + '</pre>'
+            ].join('\n');
+        } else {
+            restartBlock = '<div style="color: var(--muted); font-size:0.9rem; margin-top: 12px;">No restart-check output captured.</div>';
+        }
+
+        e.body.innerHTML = [
+            '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
+            '<div class="overlay-scroll">',
+            '  <div style="font-weight:950; margin-bottom: 8px;">Install log (tail)</div>',
+            '  <pre class="overlay-pre" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
+            restartBlock,
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
+        ].join('\n');
+
+        if (e.close) e.close.textContent = 'OK';
+        _suSetButtons({
+            show_cancel: false,
+            show_back: false,
+            show_next: false,
+            show_install: false,
+            show_close: true,
+            close_disabled: false,
+            footer_center: true
+        });
+
+        if (e.close) e.close.onclick = function() { _suShow(false); };
+    }
+
+    function _ruPollJob(job_id) {
+        _ru.job_id = job_id;
+        _ru.running = true;
+
+        _suSetButtons({
+            show_cancel: false,
+            show_back: false,
+            show_next: false,
+            show_install: true,
+            show_close: false,
+            install_disabled: true,
+            footer_center: true
+        });
+
+        var installBtn = _suEls().install;
+        if (installBtn) installBtn.textContent = _ru.simulate ? 'Testing…' : 'Installing…';
+
+        function tick() {
+            return _api('/api/system/dup/job?job_id=' + encodeURIComponent(job_id), { method: 'GET' }).then(function(j) {
+                if (!j) return null;
+                _suUpdateProgress(j.stage || 'Running', parseInt(j.progress || 0, 10) || 0);
+                if (j.output != null) _suSetLog(String(j.output));
+
+                if (j.done) {
+                    if (_ru.poll_timer) {
+                        try { clearInterval(_ru.poll_timer); } catch (e) {}
+                        _ru.poll_timer = null;
+                    }
+                    _ru.running = false;
+                    var rc = (j.rc != null) ? parseInt(j.rc, 10) : -1;
+
+                    var logText = '';
+                    try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e2) { logText = ''; }
+
+                    if (rc === 0) {
+                        toast('Update finished', _ru.simulate ? 'Dry-run OK (no install)' : 'Installed OK', 'ok');
+                        _suUpdateProgress(_ru.simulate ? 'Dry-run done' : 'Done', 100);
+                        _ruRenderDone(
+                            _ru.simulate ? 'Simulation complete' : 'System updates installed',
+                            _ru.simulate ? 'No changes were made (dry-run).' : 'Install completed. Review restart check below.',
+                            logText,
+                            j.restart_check_output || ''
+                        );
+                    } else {
+                        toast('Update failed', 'rc=' + String(rc), 'err');
+                        _ruRenderDone('Update failed', 'zypper dup returned a non-zero exit code (see log).', logText, j.restart_check_output || '');
+                    }
+                }
+
+                return j;
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'job poll failed';
+                _suSetLog('ERROR polling job: ' + msg);
+                toast('Update polling failed', msg, 'err');
+                if (_ru.poll_timer) {
+                    try { clearInterval(_ru.poll_timer); } catch (ee) {}
+                    _ru.poll_timer = null;
+                }
+                _ru.running = false;
+                _suSetButtons({
+                    show_cancel: false,
+                    show_back: false,
+                    show_next: false,
+                    show_install: false,
+                    show_close: true,
+                    close_disabled: false,
+                    footer_center: true
+                });
+                return null;
+            });
+        }
+
+        tick();
+        _ru.poll_timer = setInterval(tick, 800);
+    }
+
+    function rocketUpdateWizardOpen() {
+        // Ensure any self-update timers are stopped so flows don't fight.
+        try { _suReset(); } catch (e) {}
+        _ruReset();
+
+        _suShow(true);
+        _ruSetHeader('Preview', 'Step 1/3', 'Install system updates');
+
+        // Fetch preview output.
+        var e = _suEls();
+        if (e.body) {
+            e.body.innerHTML = '<div style="color: var(--muted); font-weight:900;">Loading preview (zypper dup --dry-run --details)…</div>';
+        }
+
+        _suSetButtons({
+            show_cancel: true,
+            show_back: false,
+            show_next: false,
+            show_install: false,
+            show_close: false,
+            footer_center: false
+        });
+
+        _api('/api/system/dup/preview', { method: 'GET' }).then(function(r) {
+            _ruRenderPreview(r || {});
+        }).catch(function(err) {
+            var msg = (err && err.message) ? err.message : 'preview failed';
+            _ruRenderPreview({ rc: 1, output: 'ERROR: ' + msg, cmd: '' });
+        });
+
+        // Wire overlay buttons for this flow.
+        if (e.cancel) e.cancel.onclick = function() {
+            if (_ru.running) return;
+            _suShow(false);
+        };
+        if (e.back) e.back.onclick = function() {
+            if (_ru.running) return;
+            _ruRenderPreview(_ru.last_preview || {});
+        };
+        if (e.next) e.next.onclick = function() {
+            if (!_ru.accepted || _ru.running) return;
+            toast('Preparing install…', 'Requesting confirmation token', 'ok');
+            _api('/api/system/dup/confirm', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
+                _ruRenderConfirm(r || {});
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'confirm failed';
+                toast('Confirm failed', msg, 'err');
+            });
+        };
+        if (e.install) e.install.onclick = function() {
+            if (_ru.running) return;
+            var phraseInp = document.getElementById('ru-phrase');
+            var got = '';
+            try { got = String((phraseInp && phraseInp.value) ? phraseInp.value : '').trim(); } catch (ee) { got = ''; }
+
+            var confirmToken = (_ru.confirm && _ru.confirm.confirm_token) ? String(_ru.confirm.confirm_token) : '';
+            if (!confirmToken) {
+                toast('Error', 'Missing confirm token (go back and try again)', 'err');
+                return;
+            }
+
+            toast('Update starting…', _ru.simulate ? 'Simulation (dry-run only)' : 'Installing updates', 'ok');
+
+            _api('/api/system/dup/start', {
+                method: 'POST',
+                body: JSON.stringify({
+                    confirm_token: confirmToken,
+                    confirm_phrase: got,
+                    simulate: !!_ru.simulate
+                })
+            }).then(function(res) {
+                if (!res || !res.job_id) throw new Error('missing job_id');
+                _ruPollJob(String(res.job_id));
+                return res;
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'failed';
+                toast('Update start failed', msg, 'err');
+            });
+        };
+    }
+
     function _renderSettingsForm(schema, cfg) {
         var form = document.getElementById('settings-form');
         if (!form) return;
@@ -6166,10 +6608,30 @@ generate_dashboard() {
     _wireDashboardRefreshUI();
     // Wire settings drawer once DOM is ready (we are at end of body).
     _wireSettingsUI();
+    function _wireRocketUI() {
+        var btn = document.getElementById('rocket-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function(ev) {
+            try { addRipple(btn, ev.clientX, ev.clientY); } catch (e) {}
+            try {
+                if (typeof rocketUpdateWizardOpen === 'function') {
+                    rocketUpdateWizardOpen();
+                } else {
+                    toast('Update wizard not ready', 'Reload dashboard after reinstall', 'err');
+                }
+            } catch (e2) {
+                var msg = (e2 && e2.message) ? e2.message : 'failed';
+                toast('Rocket action failed', msg, 'err');
+            }
+        });
+    }
+
     // Wire self-update UI (channel toggle + changelog fetch).
     _wireSelfUpdateUI();
     // Wire Snapper manager UI.
     _wireSnapperUI();
+    // Wire rocket button (system update wizard).
+    _wireRocketUI();
 
     // Ripple click effect on buttons
     function addRipple(el, x, y) {
@@ -6695,6 +7157,25 @@ generate_dashboard() {
         return { state: s, pct: 0, detail: '' };
     }
 
+    // Rocket (header) animation state driven by downloader status.
+    var _rocketLastClass = '';
+    function _rocketSetClass(kind) {
+        // kind: '' | 'downloading' | 'complete' | 'error'
+        var btn = document.getElementById('rocket-btn');
+        if (!btn) return;
+
+        var next = '';
+        if (kind === 'downloading') next = 'rocket-downloading';
+        else if (kind === 'complete') next = 'rocket-complete';
+        else if (kind === 'error') next = 'rocket-error';
+
+        if (_rocketLastClass === next) return;
+
+        btn.classList.remove('rocket-downloading', 'rocket-complete', 'rocket-error');
+        if (next) btn.classList.add(next);
+        _rocketLastClass = next;
+    }
+
     function updateDownloadUI(obj) {
         var st = document.getElementById('downloader-status');
         var det = document.getElementById('downloader-detail');
@@ -6712,6 +7193,19 @@ generate_dashboard() {
             if (obj.state === 'error') bar.style.backgroundColor = '#ef4444';
             else if (obj.state === 'complete') bar.style.backgroundColor = '#2ecc71';
             else bar.style.backgroundColor = '#3498db';
+        }
+
+        // Rocket animation mapping.
+        if (!obj || !obj.state) {
+            _rocketSetClass('');
+        } else if (obj.state === 'downloading' || obj.state === 'refreshing') {
+            _rocketSetClass('downloading');
+        } else if (obj.state === 'complete') {
+            _rocketSetClass('complete');
+        } else if (obj.state === 'error') {
+            _rocketSetClass('error');
+        } else {
+            _rocketSetClass('');
         }
     }
 
@@ -22218,6 +22712,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import socketserver
 import subprocess
 import threading
@@ -22470,6 +22965,20 @@ GITHUB_REPO = "zypper-automatik-helper-"
 HELPER_BIN = "/usr/local/bin/zypper-auto-helper"
 SELF_UPDATE_STATE_FILE = "/var/lib/zypper-auto/self-update-state.json"
 
+# --- System update helpers (Rocket Update Wizard) ---
+ZYPPER_BIN = "/usr/bin/zypper"
+
+
+def _parse_extra_flags(raw: str) -> list[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        return [str(x) for x in shlex.split(raw) if str(x).strip()]
+    except Exception:
+        # Fallback: whitespace split (best-effort)
+        return [p for p in raw.split() if p.strip()]
+
 
 def _github_get_json(path: str, timeout_s: int = 10) -> dict:
     url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}{path}"
@@ -22566,6 +23075,44 @@ def _job_update_progress(job: dict, line: str) -> None:
     job["progress"] = prog
 
 
+def _job_update_progress_dup(job: dict, line: str) -> None:
+    """Best-effort progress estimation for system updates (zypper dup).
+
+    This is heuristic: zypper output varies by version/locale.
+    """
+    l = (line or "").lower()
+    stage = job.get("stage") or "Starting"
+    prog = int(job.get("progress") or 0)
+
+    def bump(p: int, st: str):
+        nonlocal stage, prog
+        if p > prog:
+            prog = p
+        stage = st
+
+    if "dry run" in l or "dry-run" in l:
+        bump(10, "Dry-run")
+    elif "loading repository data" in l or "retrieving" in l or "refreshing" in l:
+        bump(15, "Refreshing")
+    elif "computing distribution upgrade" in l or "computing" in l:
+        bump(28, "Computing")
+    elif "overall download size" in l or "downloading" in l or "download" in l:
+        bump(60, "Downloading")
+    elif "installing" in l:
+        bump(78, "Installing")
+    elif "removing" in l:
+        bump(82, "Removing")
+    elif "committing" in l or "verifying" in l:
+        bump(88, "Committing")
+    elif "restart check" in l or "zypper ps" in l:
+        bump(96, "Restart check")
+    elif "done" in l or "complete" in l or "finished" in l:
+        bump(100, "Done")
+
+    job["stage"] = stage
+    job["progress"] = prog
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ZNH-Dashboard-API/1.0"
 
@@ -22598,8 +23145,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper and self-update endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/"):
+        # Snapper, self-update, and system-update endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -22744,8 +23291,10 @@ class Handler(BaseHTTPRequestHandler):
                         tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                         return _json_response(self, 200, {
                             "job_id": job_id,
+                            "type": job.get("type"),
                             "channel": job.get("channel"),
                             "dry_run": bool(job.get("dry_run")),
+                            "simulate": bool(job.get("simulate")),
                             "running": bool(job.get("running")),
                             "done": bool(job.get("done")),
                             "rc": job.get("rc"),
@@ -22753,6 +23302,7 @@ class Handler(BaseHTTPRequestHandler):
                             "progress": int(job.get("progress") or 0),
                             "output": tail,
                             "output_truncated": bool(job.get("output_truncated")),
+                            "restart_check_output": job.get("restart_check_output"),
                         }, origin)
                 else:
                     job = jobs.get(job_id)
@@ -22762,8 +23312,10 @@ class Handler(BaseHTTPRequestHandler):
                     tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                     return _json_response(self, 200, {
                         "job_id": job_id,
+                        "type": job.get("type"),
                         "channel": job.get("channel"),
                         "dry_run": bool(job.get("dry_run")),
+                        "simulate": bool(job.get("simulate")),
                         "running": bool(job.get("running")),
                         "done": bool(job.get("done")),
                         "rc": job.get("rc"),
@@ -22771,6 +23323,100 @@ class Handler(BaseHTTPRequestHandler):
                         "progress": int(job.get("progress") or 0),
                         "output": tail,
                         "output_truncated": bool(job.get("output_truncated")),
+                        "restart_check_output": job.get("restart_check_output"),
+                    }, origin)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"job lookup failed: {e}"}, origin)
+
+        # --- System update (Rocket) preview ---
+        if path == "/api/system/dup/preview":
+            eff, _warnings, _invalid = _read_conf(self.server.conf_path)
+            extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
+
+            cmd = [ZYPPER_BIN, "--non-interactive", "dup", "--dry-run", "--details"] + extra_flags
+
+            # Prefer running via systemd-run so the zypper process is not confined
+            # by this API service's sandbox (ProtectSystem=strict).
+            unit = f"znh-webui-dup-preview-{secrets.token_hex(4)}"
+            sys_cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "--"] + cmd
+
+            used_systemd_run = True
+            rc, out = _run_cmd(sys_cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
+            if rc != 0 and ("systemd-run" in (out or "").lower() or "no such file" in (out or "").lower()):
+                # Fallback: run directly (may fail under sandbox, but still best-effort).
+                used_systemd_run = False
+                rc, out = _run_cmd(cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
+
+            return _json_response(self, 200 if rc == 0 else 500, {
+                "rc": rc,
+                "output": out,
+                "cmd": " ".join(cmd),
+                "used_systemd_run": used_systemd_run,
+            }, origin)
+
+        # --- System update (Rocket) job status ---
+        if path == "/api/system/dup/job":
+            job_id = ""
+            try:
+                job_id = str((qs.get("job_id") or [""])[0]).strip()
+            except Exception:
+                job_id = ""
+            if not job_id:
+                return _json_response(self, 400, {"error": "job_id required"}, origin)
+
+            now_ts = time.time()
+            try:
+                lock = getattr(self.server, "jobs_lock", None)
+                jobs = getattr(self.server, "jobs", {})
+                if lock:
+                    with lock:
+                        # purge old jobs
+                        dead = []
+                        for k, j in jobs.items():
+                            if not isinstance(j, dict):
+                                dead.append(k)
+                                continue
+                            if j.get("done") and (now_ts - float(j.get("finished_at", 0))) > JOB_TTL_SECONDS:
+                                dead.append(k)
+                        for k in dead:
+                            jobs.pop(k, None)
+
+                        job = jobs.get(job_id)
+                        if not job:
+                            return _json_response(self, 404, {"error": "job not found"}, origin)
+                        out = str(job.get("output", ""))
+                        tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                        return _json_response(self, 200, {
+                            "job_id": job_id,
+                            "type": job.get("type"),
+                            "simulate": bool(job.get("simulate")),
+                            "running": bool(job.get("running")),
+                            "done": bool(job.get("done")),
+                            "rc": job.get("rc"),
+                            "stage": job.get("stage"),
+                            "progress": int(job.get("progress") or 0),
+                            "output": tail,
+                            "output_truncated": bool(job.get("output_truncated")),
+                            "restart_check_output": job.get("restart_check_output"),
+                        }, origin)
+                else:
+                    job = jobs.get(job_id)
+                    if not job:
+                        return _json_response(self, 404, {"error": "job not found"}, origin)
+                    out = str(job.get("output", ""))
+                    tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                    return _json_response(self, 200, {
+                        "job_id": job_id,
+                        "type": job.get("type"),
+                        "simulate": bool(job.get("simulate")),
+                        "running": bool(job.get("running")),
+                        "done": bool(job.get("done")),
+                        "rc": job.get("rc"),
+                        "stage": job.get("stage"),
+                        "progress": int(job.get("progress") or 0),
+                        "output": tail,
+                        "output_truncated": bool(job.get("output_truncated")),
+                        "restart_check_output": job.get("restart_check_output"),
                     }, origin)
             except Exception as e:
                 return _json_response(self, 500, {"error": f"job lookup failed: {e}"}, origin)
@@ -23062,6 +23708,285 @@ class Handler(BaseHTTPRequestHandler):
                 "dashboard_refresh_rc": dash_rc,
                 "dry_run": dry_run,
             }, origin)
+
+        # --- System update (Rocket) control ---
+        if path == "/api/system/dup/confirm":
+            now_ts = time.time()
+            _confirm_purge(now_ts)
+
+            token = secrets.token_urlsafe(24)
+            exp = now_ts + 120.0
+            try:
+                if not hasattr(self.server, "confirm_tokens"):
+                    self.server.confirm_tokens = {}
+                self.server.confirm_tokens[token] = {
+                    "action": "system-dup",
+                    "exp": exp,
+                }
+            except Exception:
+                return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
+
+            return _json_response(self, 200, {
+                "confirm_token": token,
+                "expires_in_seconds": 120,
+                "phrase": "INSTALL",
+                "hint": "Type INSTALL to confirm installing system updates (runs zypper dup).",
+            }, origin)
+
+        if path == "/api/system/dup/start":
+            body = _read_json(self)
+            simulate = bool(body.get("simulate", False))
+            confirm_token = str(body.get("confirm_token", "") or "").strip()
+            confirm_phrase = str(body.get("confirm_phrase", "") or "").strip().upper()
+
+            now_ts = time.time()
+            _confirm_purge(now_ts)
+            items = getattr(self.server, "confirm_tokens", {})
+            meta = items.get(confirm_token)
+            if not meta:
+                return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+            if meta.get("action") != "system-dup":
+                return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+            if float(meta.get("exp", 0)) < now_ts:
+                return _json_response(self, 400, {"error": "confirm token expired"}, origin)
+            if confirm_phrase != "INSTALL":
+                return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+
+            # One-time token.
+            try:
+                items.pop(confirm_token, None)
+            except Exception:
+                pass
+
+            # Compute dup flags from config at start time so the job is deterministic.
+            eff, _warnings, _invalid = _read_conf(self.server.conf_path)
+            extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
+
+            job_id = secrets.token_urlsafe(18)
+            unit = f"znh-webui-dup-{job_id[:8]}"
+            log_path = f"/var/log/zypper-auto/service-logs/webui-dup-{job_id[:10]}.log"
+
+            job = {
+                "job_id": job_id,
+                "type": "system-dup",
+                "simulate": simulate,
+                "running": True,
+                "done": False,
+                "rc": None,
+                "stage": "Starting",
+                "progress": 0,
+                "output": "",
+                "output_truncated": False,
+                "started_at": now_ts,
+                "finished_at": 0,
+                "unit": unit,
+                "log_path": log_path,
+                "restart_check_output": "",
+            }
+
+            lock = getattr(self.server, "jobs_lock", None)
+            jobs = getattr(self.server, "jobs", None)
+            if jobs is None:
+                self.server.jobs = {}
+                jobs = self.server.jobs
+            if lock is None:
+                self.server.jobs_lock = threading.Lock()
+                lock = self.server.jobs_lock
+
+            with lock:
+                jobs[job_id] = job
+
+            def worker():
+                # Compose a shell script for the transient unit.
+                # We run outside this API service's sandbox by using systemd-run.
+                # Output is written into /var/log/zypper-auto where the dashboard already reads.
+                extra = " ".join(shlex.quote(x) for x in extra_flags)
+                if simulate:
+                    zcmd = f"{ZYPPER_BIN} --non-interactive dup --dry-run --details {extra}".strip()
+                else:
+                    zcmd = f"{ZYPPER_BIN} --non-interactive dup -y {extra}".strip()
+
+                script = "\n".join([
+                    "set -euo pipefail",
+                    f"LOG={shlex.quote(log_path)}",
+                    "mkdir -p /var/log/zypper-auto/service-logs || true",
+                    "echo \"==========================================\" >>\"$LOG\"",
+                    "echo \" Rocket Update Wizard: zypper dup \" >>\"$LOG\"",
+                    "echo \"==========================================\" >>\"$LOG\"",
+                    "date >>\"$LOG\" || true",
+                    "echo \"\" >>\"$LOG\"",
+                    f"echo \"CMD: {zcmd}\" >>\"$LOG\"",
+                    "echo \"\" >>\"$LOG\"",
+                    # Run zypper and append output.
+                    f"( {zcmd} ) 2>&1 | tee -a \"$LOG\"",
+                    "rc=${PIPESTATUS[0]}",
+                    "echo \"\" >>\"$LOG\"",
+                    "echo \"[webui] zypper dup rc=${rc}\" >>\"$LOG\"",
+                    "if [ ${rc} -eq 0 ] && [ \"${SIMULATE:-0}\" != \"1\" ]; then",
+                    "  echo \"\" >>\"$LOG\"",
+                    "  echo \"=== ZYPPER PS -s (restart check) ===\" >>\"$LOG\"",
+                    f"  {ZYPPER_BIN} ps -s 2>&1 | tee -a \"$LOG\" || true",
+                    "fi",
+                    "exit ${rc}",
+                ])
+
+                env = os.environ.copy()
+                env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                env["SIMULATE"] = "1" if simulate else "0"
+
+                # Start transient unit
+                sys_cmd = [
+                    "systemd-run",
+                    "--quiet",
+                    "--collect",
+                    "--unit",
+                    unit,
+                    "--property",
+                    "After=network-online.target",
+                    "--property",
+                    "Wants=network-online.target",
+                    "--",
+                    "/usr/bin/bash",
+                    "-lc",
+                    script,
+                ]
+
+                try:
+                    with lock:
+                        j = jobs.get(job_id)
+                        if j:
+                            _job_output_append(j, f"[dashboard-api] Starting system update unit: {unit}\n")
+                            _job_update_progress_dup(j, "starting")
+
+                    p = subprocess.run(
+                        sys_cmd,
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        env=env,
+                    )
+                    if p.returncode != 0:
+                        with lock:
+                            j = jobs.get(job_id)
+                            if j:
+                                _job_output_append(j, f"[dashboard-api] systemd-run failed rc={p.returncode}\n")
+                                if p.stdout:
+                                    _job_output_append(j, p.stdout + "\n")
+                        raise RuntimeError(f"systemd-run failed rc={p.returncode}")
+
+                except Exception as e:
+                    with lock:
+                        j = jobs.get(job_id)
+                        if j:
+                            j["rc"] = 1
+                            j["running"] = False
+                            j["done"] = True
+                            j["finished_at"] = time.time()
+                            j["stage"] = "Failed"
+                            _job_output_append(j, f"\n[dashboard-api] Failed to start update: {e}\n")
+                    return
+
+                # Stream the log file + poll unit state.
+                offset = 0
+                start_ts = time.time()
+                finished_rc = None
+
+                while True:
+                    # Append new log output (best-effort)
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                            f.seek(offset)
+                            chunk = f.read()
+                            offset = f.tell()
+                        if chunk:
+                            for ln in chunk.splitlines(True):
+                                with lock:
+                                    j = jobs.get(job_id)
+                                    if j:
+                                        _job_output_append(j, ln)
+                                        _job_update_progress_dup(j, ln)
+                    except Exception:
+                        pass
+
+                    # Poll unit state
+                    rc_show, out_show = _run_cmd(
+                        ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus"],
+                        timeout_s=3,
+                        log=None,
+                    )
+                    props = {}
+                    for line in (out_show or "").splitlines():
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            props[k.strip()] = v.strip()
+                    active = props.get("ActiveState", "")
+                    sub = props.get("SubState", "")
+
+                    if active == "inactive" and sub in ("dead", "failed", "exited"):
+                        try:
+                            finished_rc = int(props.get("ExecMainStatus", "1") or "1")
+                        except Exception:
+                            finished_rc = 1
+                        break
+
+                    # Safety timeout
+                    if (time.time() - start_ts) > 4 * 60 * 60:
+                        finished_rc = 124
+                        with lock:
+                            j = jobs.get(job_id)
+                            if j:
+                                _job_output_append(j, "\n[dashboard-api] Timed out waiting for system update unit to finish.\n")
+                                j["stage"] = "Timed out"
+                        break
+
+                    time.sleep(0.35)
+
+                # Final read to capture remainder
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(offset)
+                        chunk2 = f.read()
+                        offset = f.tell()
+                    if chunk2:
+                        with lock:
+                            j = jobs.get(job_id)
+                            if j:
+                                _job_output_append(j, chunk2)
+                except Exception:
+                    pass
+
+                # Extract restart check section (best-effort)
+                restart_out = ""
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        full = f.read()
+                    marker = "=== ZYPPER PS -s (restart check) ==="
+                    if marker in full:
+                        restart_out = full.split(marker, 1)[1].strip()
+                        if len(restart_out) > 60_000:
+                            restart_out = restart_out[-60_000:]
+                except Exception:
+                    restart_out = ""
+
+                with lock:
+                    j = jobs.get(job_id)
+                    if j:
+                        j["rc"] = int(finished_rc or 1)
+                        j["running"] = False
+                        j["done"] = True
+                        j["finished_at"] = time.time()
+                        j["restart_check_output"] = restart_out
+                        if j["rc"] == 0:
+                            j["progress"] = 100
+                            j["stage"] = "Done" if not simulate else "Dry-run done"
+                        else:
+                            j["stage"] = "Failed"
+
+            threading.Thread(target=worker, daemon=True).start()
+            return _json_response(self, 200, {"job_id": job_id}, origin)
 
         if path == "/api/snapper/confirm":
             body = _read_json(self)
