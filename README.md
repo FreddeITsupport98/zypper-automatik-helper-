@@ -264,7 +264,8 @@ zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's servic
 
 Self-update notes:
 - `--self-update` creates a timestamped backup before overwriting the destination script.
-- It runs a `bash -n` syntax check on the downloaded script before installing.
+- It downloads into a temp file and then swaps it in with an atomic `mv` rename (so updating the currently-running script won’t corrupt execution).
+- It refuses to install empty downloads or HTML error pages (GitHub 404/403), and runs `bash -n` syntax checks before installing.
 - **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
 
 ### Shell tab completion

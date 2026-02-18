@@ -13778,9 +13778,15 @@ run_self_update_only() {
         return 1
     fi
 
+    if ! command -v mktemp >/dev/null 2>&1; then
+        log_error "mktemp is required for --self-update"
+        return 1
+    fi
+
     local requested_channel channel
     requested_channel="${1:-}"
     channel="${requested_channel:-${SELF_UPDATE_CHANNEL:-rolling}}"
+    channel="${channel,,}"
     case "${channel}" in
         rolling|stable)
             :
@@ -13792,56 +13798,6 @@ run_self_update_only() {
     esac
 
     update_status "Self-updating (${channel})..."
-
-    local repo api_url raw_url tag
-    repo="FreddeITsupport98/zypper-automatik-helper-"
-
-    raw_url=""
-    tag=""
-
-    if [ "${channel}" = "stable" ]; then
-        api_url="https://api.github.com/repos/${repo}/releases/latest"
-
-        if command -v python3 >/dev/null 2>&1; then
-            # Prefer real JSON parsing; swallow errors and fall back below if needed.
-            tag=$(curl -fsSL "${api_url}" 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin).get("tag_name") or "").strip())' 2>/dev/null || true)
-        else
-            # Fallback (best-effort, no strict JSON parsing)
-            tag=$(curl -fsSL "${api_url}" 2>/dev/null | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
-        fi
-
-        if [ -z "${tag:-}" ]; then
-            log_error "Could not determine latest stable release tag from GitHub"
-            return 1
-        fi
-
-        raw_url="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
-    else
-        raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
-    fi
-
-    local tmp
-    tmp="$(mktemp)"
-
-    if ! curl -fsSL "${raw_url}" -o "${tmp}"; then
-        log_error "Failed to download update from ${raw_url}"
-        rm -f "${tmp}" 2>/dev/null || true
-        return 1
-    fi
-
-    # Basic integrity: must look like a bash script.
-    if ! head -n 1 "${tmp}" 2>/dev/null | grep -q '^#!/bin/bash'; then
-        log_error "Downloaded update does not look like a bash script (missing shebang)"
-        rm -f "${tmp}" 2>/dev/null || true
-        return 1
-    fi
-
-    # Syntax check before installing.
-    if ! bash -n "${tmp}" >/dev/null 2>&1; then
-        log_error "Downloaded update failed 'bash -n' syntax check; refusing to install"
-        rm -f "${tmp}" 2>/dev/null || true
-        return 1
-    fi
 
     # Install destination: prefer the installed command path.
     local script_path dest installed_path
@@ -13865,7 +13821,6 @@ run_self_update_only() {
         log_warn "Detected git worktree at ${git_top}."
         log_error "Refusing to self-update a git working copy file: ${dest}"
         log_info "To update your working folder safely, use: git -C \"${git_top}\" pull"
-        rm -f "${tmp}" 2>/dev/null || true
         return 1
     fi
 
@@ -13873,6 +13828,100 @@ run_self_update_only() {
         log_info "[self-update] Running from a git working tree; will NOT modify the repo checkout"
     fi
 
+    # 1) Determine URL (rolling vs stable)
+    local repo api_url raw_url tag
+    repo="FreddeITsupport98/zypper-automatik-helper-"
+
+    raw_url=""
+    tag=""
+
+    if [ "${channel}" = "stable" ]; then
+        api_url="https://api.github.com/repos/${repo}/releases/latest"
+
+        # Prefer real JSON parsing, but keep fallback logic so we don't hard-fail on missing python.
+        if command -v python3 >/dev/null 2>&1; then
+            tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+                | python3 -c 'import json,sys; print((json.load(sys.stdin).get("tag_name") or "").strip())' 2>/dev/null || true)
+        fi
+        if [ -z "${tag:-}" ]; then
+            # Fallback (best-effort, no strict JSON parsing)
+            tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+                | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
+        fi
+
+        if [ -z "${tag:-}" ]; then
+            log_error "Could not determine latest stable release tag from GitHub (API rate limit or repo not reachable?)"
+            return 1
+        fi
+
+        raw_url="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
+        log_info "[self-update] Stable tag detected: ${tag}"
+    else
+        raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
+    fi
+
+    # 2) Download into a temp file on the SAME filesystem as the destination.
+    # This makes the final swap an atomic rename (mv), preventing "script replaced while running" crashes.
+    local dest_dir tmp
+    dest_dir="$(dirname "${dest}")"
+    tmp="$(mktemp "${dest_dir}/.znh-selfupdate.${channel}.XXXXXX")"
+
+    # Ensure the trap does not leak outside this function (it clears itself after running once).
+    trap 'rm -f "${tmp}" 2>/dev/null || true; trap - RETURN' RETURN
+
+    log_info "[self-update] Downloading update from: ${raw_url}"
+    if ! curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+        log_error "Failed to download update from ${raw_url}"
+        return 1
+    fi
+
+    # 3) Verification
+
+    # A) Empty download guard
+    if [ ! -s "${tmp}" ]; then
+        log_error "Update failed: downloaded file is empty"
+        return 1
+    fi
+
+    # B) HTML error page guard (GitHub 404/403)
+    if head -n 25 "${tmp}" 2>/dev/null | grep -qiE '<!doctype html|<html'; then
+        log_error "Update failed: downloaded file looks like an HTML error page (404/403)"
+        log_info "Debug head: $(head -n 1 "${tmp}" 2>/dev/null || true)"
+        return 1
+    fi
+
+    # C) Must look like a bash script
+    if ! head -n 1 "${tmp}" 2>/dev/null | grep -qE '^#!/bin/bash|^#!/usr/bin/env bash'; then
+        log_error "Downloaded update does not look like a bash script (missing shebang)"
+        return 1
+    fi
+
+    # D) Sanity markers so we don't install the wrong repo/file by mistake
+    if ! grep -qE '^#\s*VERSION\s+[0-9]+' "${tmp}" 2>/dev/null; then
+        log_error "Update failed: downloaded file does not contain a VERSION header"
+        return 1
+    fi
+    if ! grep -q "zypper-auto-helper" "${tmp}" 2>/dev/null; then
+        log_error "Update failed: downloaded file does not look like zypper-auto-helper"
+        return 1
+    fi
+
+    # E) Syntax check (crucial for self-updating scripts)
+    if ! bash -n "${tmp}" >/dev/null 2>&1; then
+        log_error "Downloaded update failed 'bash -n' syntax check; refusing to install"
+        return 1
+    fi
+
+    # 4) Display version info (best-effort)
+    local ver_line new_ver
+    ver_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${tmp}" 2>/dev/null || true)
+    new_ver=$(printf '%s' "${ver_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || true)
+
+    # 5) Prepare permissions/ownership on the temp file before the swap.
+    chmod 755 "${tmp}" 2>/dev/null || true
+    chown root:root "${tmp}" 2>/dev/null || true
+
+    # 6) Backup + atomic move swap
     local backup ts
     ts="$(date +%Y%m%d-%H%M%S)"
     backup="${dest}.bak.${ts}"
@@ -13883,20 +13932,22 @@ run_self_update_only() {
         log_info "Backup created: ${backup}"
     fi
 
-    if cp -f "${tmp}" "${dest}"; then
+    # IMPORTANT: use mv (atomic rename) instead of cp to prevent the running bash process
+    # from reading partially overwritten content.
+    if mv -f "${tmp}" "${dest}"; then
         chmod 755 "${dest}" 2>/dev/null || true
-        log_success "Self-update installed to ${dest} (${channel}${tag:+ tag=${tag}})"
-        update_status "SUCCESS: Self-update installed (${channel}${tag:+ ${tag}})"
+        chown root:root "${dest}" 2>/dev/null || true
+
+        log_success "Self-update installed to ${dest} (${channel}${tag:+ tag=${tag}}${new_ver:+ version=${new_ver}})"
+        update_status "SUCCESS: Self-update installed (${channel}${tag:+ ${tag}}${new_ver:+ v${new_ver}})"
     else
         log_error "Failed to install self-update to ${dest}"
-        rm -f "${tmp}" 2>/dev/null || true
         return 1
     fi
 
-    rm -f "${tmp}" 2>/dev/null || true
+    # Disable cleanup trap (file already moved); keep it best-effort.
+    trap - RETURN
 
-    # NOTE: We intentionally do NOT auto-run a full install here, because installs
-    # can be interactive (dependency prompts, etc.).
     echo ""
     echo "Self-update complete. To apply all updated units/scripts, run:"
     echo "  sudo ${installed_path} install"
