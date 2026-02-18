@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 64 - Dashboard Command Center, diagnostics, and hardened update automation
+#       VERSION 65 - Enterprise Edition: dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -42,7 +42,7 @@ esac
 # '-reset'.
 if [[ $# -gt 0 ]]; then
     case "${1:-}" in
-        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|\
+        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--rollback|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
@@ -853,6 +853,14 @@ DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
 DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. firefox)
 # Self-update channel used by --self-update (rolling=latest commit, stable=GitHub releases)
 SELF_UPDATE_CHANNEL="rolling"
+
+# Zypper Turbo tuner (optional): tune /etc/zypp/zypp.conf for faster downloads.
+# Default is false because it modifies a core system config file.
+ZYPPER_TURBO_TUNER_ENABLED="false"
+
+# Verification hygiene: auto-vacuum the systemd journal when it grows too large.
+VERIFY_JOURNAL_AUTO_VACUUM_ENABLED="true"
+
 HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
@@ -1384,6 +1392,69 @@ log_command() {
     execute_guarded "$cmd" bash -lc "$cmd"
 }
 
+# --- Helper: Zypper Turbo tuner (zypp.conf safe edits) ---
+__znh_escape_ere() {
+    # Escape most ERE metacharacters so a literal string can be embedded in grep/sed -E patterns.
+    # shellcheck disable=SC2001
+    printf '%s' "${1:-}" | sed -e 's/[.[\\^$*+?()|{}]/\\&/g'
+}
+
+__znh_zypp_conf_set_kv() {
+    # Ensure a key=value is present (uncomment if needed). Uses a conservative "replace line" rule.
+    # Usage: __znh_zypp_conf_set_kv /etc/zypp/zypp.conf commit.downloadMode DownloadInAdvance
+    local file="$1" key="$2" value="$3"
+    [ -n "${file:-}" ] || return 1
+    [ -n "${key:-}" ] || return 1
+
+    local k
+    k="$(__znh_escape_ere "${key}")"
+
+    if grep -qE "^[[:space:]]*#?[[:space:]]*${k}[[:space:]]*=" "${file}" 2>/dev/null; then
+        sed -i -E "s|^[[:space:]]*#?[[:space:]]*${k}[[:space:]]*=.*|${key} = ${value}|" "${file}" 2>/dev/null
+    else
+        {
+            echo ""
+            echo "${key} = ${value}"
+        } >>"${file}" 2>/dev/null
+    fi
+
+    return 0
+}
+
+tune_zypper_performance() {
+    log_info "🚀 Tuning Zypper for maximum performance..."
+
+    local zconf
+    zconf="/etc/zypp/zypp.conf"
+    if [ ! -f "${zconf}" ]; then
+        log_warn "[zypper-turbo] ${zconf} not found; skipping"
+        return 1
+    fi
+
+    local backup_dir ts backup
+    backup_dir="/var/backups/zypper-auto"
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="${backup_dir}/zypp.conf.bak.${ts}"
+
+    mkdir -p "${backup_dir}" 2>/dev/null || true
+
+    if execute_guarded "Backup ${zconf} -> ${backup}" cp -a "${zconf}" "${backup}"; then
+        chmod 600 "${backup}" 2>/dev/null || true
+        log_info "[zypper-turbo] Backup created: ${backup}"
+    else
+        log_warn "[zypper-turbo] Could not create backup (continuing cautiously)"
+    fi
+
+    # 1) Enable parallel downloads
+    __znh_zypp_conf_set_kv "${zconf}" "download.max_concurrent_connections" "10" || true
+
+    # 2) Download mode: safer for flaky connections
+    __znh_zypp_conf_set_kv "${zconf}" "commit.downloadMode" "DownloadInAdvance" || true
+
+    log_success "  ✓ Zypper Turbo tuning applied (max_concurrent_connections=10, DownloadInAdvance)"
+    return 0
+}
+
 # --- Dashboard Settings Schema (single source of truth) ---
 # This schema drives:
 #  - the HTML dashboard Settings drawer predefined choices
@@ -1411,6 +1482,8 @@ __znh_write_dashboard_schema_json() {
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "rolling"},
+    "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
+    "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED": {"type": "bool", "default": "true"},
 
     "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
     "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
@@ -1553,6 +1626,21 @@ DASHBOARD_BROWSER=""
 #   - rolling : updates to the latest commit on the main branch (GitHub)
 #   - stable  : updates to the latest GitHub Release
 SELF_UPDATE_CHANNEL="rolling"
+
+# ZYPPER_TURBO_TUNER_ENABLED
+# When true, verification (and the periodic verify timer) may tune /etc/zypp/zypp.conf
+# to improve download performance:
+#  - download.max_concurrent_connections = 10
+#  - commit.downloadMode = DownloadInAdvance
+#
+# Default: false (because it modifies a core zypper config file).
+ZYPPER_TURBO_TUNER_ENABLED=false
+
+# VERIFY_JOURNAL_AUTO_VACUUM_ENABLED
+# When true, verification may vacuum systemd journal logs if /var/log/journal grows too large.
+# This keeps disk usage bounded on rolling releases.
+# Default: true
+VERIFY_JOURNAL_AUTO_VACUUM_ENABLED=true
 
 # ---------------------------------------------------------------------
 # Timer intervals for downloader / notifier / verification
@@ -2206,6 +2294,8 @@ EOF
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
+    validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
+    validate_bool_flag VERIFY_JOURNAL_AUTO_VACUUM_ENABLED true
 
     # Timers: exact allowed list
     validate_allowed_set DL_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
@@ -2521,6 +2611,8 @@ EOF
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
+    _mark_missing_key "ZYPPER_TURBO_TUNER_ENABLED"
+    _mark_missing_key "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED"
 
     # Snapper retention optimizer knobs
     _mark_missing_key "SNAP_RETENTION_OPTIMIZER_ENABLED"
@@ -2637,6 +2729,12 @@ EOF
                     ;;
                 SELF_UPDATE_CHANNEL)
                     log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
+                    ;;
+                ZYPPER_TURBO_TUNER_ENABLED)
+                    log_info "  - ZYPPER_TURBO_TUNER_ENABLED: when true, verification can tune /etc/zypp/zypp.conf for faster zypper downloads (parallel connections + DownloadInAdvance)."
+                    ;;
+                VERIFY_JOURNAL_AUTO_VACUUM_ENABLED)
+                    log_info "  - VERIFY_JOURNAL_AUTO_VACUUM_ENABLED: when true, verification may vacuum systemd journal logs when /var/log/journal grows too large."
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
@@ -4415,6 +4513,8 @@ generate_dashboard() {
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
+        { key: 'ZYPPER_TURBO_TUNER_ENABLED', type: 'bool', label: 'Zypper Turbo tuner (optimize /etc/zypp/zypp.conf)' },
+        { key: 'VERIFY_JOURNAL_AUTO_VACUUM_ENABLED', type: 'bool', label: 'Auto vacuum system journal when huge (verification)' },
 
         // Snapper safety (affects /etc/snapper/configs/* only when you run snapper tools)
         { key: 'SNAP_RETENTION_OPTIMIZER_ENABLED', type: 'bool', label: 'Snapper retention optimizer (cap overly high limits)' },
@@ -6778,7 +6878,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=50
+    local TOTAL_CHECKS=52
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -8878,6 +8978,74 @@ if [ -d /var/cache/zypp ]; then
     fi
 else
     log_info "ℹ /var/cache/zypp not present; skipping cache garbage check"
+fi
+
+# Check 51: Zypper Turbo tuner (optional)
+log_debug "[51/${TOTAL_CHECKS}] Checking Zypper Turbo tuning (/etc/zypp/zypp.conf)..."
+if [ -f /etc/zypp/zypp.conf ]; then
+    local cur_conns cur_mode turbo_ok
+
+    # Determine current effective values (best-effort).
+    cur_conns=$(grep -E '^[[:space:]]*download\.max_concurrent_connections[[:space:]]*=' /etc/zypp/zypp.conf 2>/dev/null | tail -n 1 | cut -d '=' -f2- | tr -d $' "\t\r' || true)
+    cur_mode=$(grep -E '^[[:space:]]*commit\.downloadMode[[:space:]]*=' /etc/zypp/zypp.conf 2>/dev/null | tail -n 1 | cut -d '=' -f2- | tr -d $' "\t\r' || true)
+
+    turbo_ok=0
+    if [[ "${cur_conns:-}" =~ ^[0-9]+$ ]] && [ "${cur_conns}" -ge 10 ] 2>/dev/null && [ "${cur_mode:-}" = "DownloadInAdvance" ]; then
+        turbo_ok=1
+    fi
+
+    if [ "${turbo_ok}" -eq 1 ] 2>/dev/null; then
+        log_success "✓ Zypper Turbo is already tuned (connections=${cur_conns}, downloadMode=${cur_mode})"
+    else
+        log_warn "⚠ Zypper Turbo tuning not applied (connections=${cur_conns:-unset}, downloadMode=${cur_mode:-unset})"
+
+        if [[ "${ZYPPER_TURBO_TUNER_ENABLED,,}" == "true" ]]; then
+            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+                log_warn "  ⚠ Skipping zypp.conf tuning because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            else
+                log_info "  → Auto-repair: applying Zypper Turbo tuning..."
+                if execute_guarded "Tune zypper performance (zypp.conf)" tune_zypper_performance; then
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                    log_success "  ✓ Zypper Turbo tuning applied"
+                else
+                    log_warn "  ⚠ Failed to apply Zypper Turbo tuning (non-fatal)"
+                fi
+            fi
+        else
+            log_info "  → To enable auto-tuning: set ZYPPER_TURBO_TUNER_ENABLED=true in ${CONFIG_FILE}"
+        fi
+    fi
+else
+    log_info "ℹ /etc/zypp/zypp.conf not present; skipping Zypper Turbo check"
+fi
+
+# Check 52: Automatic journal vacuuming (hygiene)
+log_debug "[52/${TOTAL_CHECKS}] Checking system journal size (journalctl vacuum)..."
+if [[ "${VERIFY_JOURNAL_AUTO_VACUUM_ENABLED,,}" != "true" ]]; then
+    log_info "ℹ Journal auto-vacuum disabled (VERIFY_JOURNAL_AUTO_VACUUM_ENABLED=false)"
+else
+    if command -v journalctl >/dev/null 2>&1 && [ -d /var/log/journal ]; then
+        local journal_size
+        journal_size=$(du -sm /var/log/journal 2>/dev/null | cut -f1 | tr -d ' ' || true)
+        if ! [[ "${journal_size:-}" =~ ^[0-9]+$ ]]; then
+            journal_size=0
+        fi
+
+        if [ "${journal_size}" -gt 500 ] 2>/dev/null; then
+            log_warn "⚠ System journal is huge (${journal_size}MB)"
+            log_info "  → Auto-repair: vacuuming journal to 200MB..."
+            if execute_guarded "Vacuum Journal (journalctl --vacuum-size=200M)" journalctl --vacuum-size=200M; then
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                log_success "  ✓ Journal vacuum completed"
+            else
+                log_warn "  ⚠ Failed to vacuum journal (non-fatal)"
+            fi
+        else
+            log_success "✓ Journal size is healthy (${journal_size}MB)"
+        fi
+    else
+        log_info "ℹ journalctl or /var/log/journal not available; skipping journal vacuum check"
+    fi
 fi
 
 # Dashboard UX: surface reboot-required state as a top-level status so users
@@ -13955,6 +14123,82 @@ run_self_update_only() {
     return 0
 }
 
+# --- Helper: Rollback Wizard (CLI) ---
+run_rollback_wizard_only() {
+    log_info ">>> Snapper Rollback Wizard requested"
+
+    if [ "${EUID:-1}" -ne 0 ] 2>/dev/null; then
+        log_error "--rollback must be run as root (use sudo)"
+        return 1
+    fi
+
+    if ! command -v snapper >/dev/null 2>&1; then
+        log_error "snapper is required for --rollback"
+        return 1
+    fi
+
+    if [ ! -t 0 ]; then
+        log_error "Rollback wizard requires an interactive terminal (TTY)"
+        return 1
+    fi
+
+    if pgrep -x snapper >/dev/null 2>&1; then
+        log_warn "Snapper appears to be running already; refusing rollback to avoid conflicts"
+        return 1
+    fi
+
+    echo "==========================================" | tee -a "${LOG_FILE}"
+    echo " ⏪ SNAPPER ROLLBACK WIZARD " | tee -a "${LOG_FILE}"
+    echo "==========================================" | tee -a "${LOG_FILE}"
+    echo "Listing recent number snapshots (likely updates):" | tee -a "${LOG_FILE}"
+
+    # List last 10 number snapshots.
+    __znh_snapper_cmd_timeout 20 -c root list --type number --last 10 2>&1 | tee -a "${LOG_FILE}" || true
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Enter the Snapshot ID you want to REVERT TO." | tee -a "${LOG_FILE}"
+    echo "WARNING: This changes your root filesystem state and will reboot the machine." | tee -a "${LOG_FILE}"
+
+    local snap_id
+    read -p "Snapshot ID > " -r snap_id
+
+    if ! [[ "${snap_id:-}" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid snapshot ID; aborting."
+        return 1
+    fi
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "⚠ FINAL WARNING ⚠" | tee -a "${LOG_FILE}"
+    echo "You are about to run: snapper rollback ${snap_id}" | tee -a "${LOG_FILE}"
+    echo "Type ROLLBACK to confirm:" | tee -a "${LOG_FILE}"
+
+    local confirm
+    read -p "Confirm > " -r confirm
+    confirm="${confirm^^}"
+
+    if [ "${confirm}" != "ROLLBACK" ]; then
+        log_warn "Rollback cancelled (confirmation not entered)."
+        return 1
+    fi
+
+    log_info "Initiating rollback to snapshot #${snap_id}..."
+
+    # Rollback can take time; guard it with a timeout.
+    if __znh_snapper_cmd_timeout 600 -c root rollback "${snap_id}" 2>&1 | tee -a "${LOG_FILE}"; then
+        log_success "Rollback applied. Rebooting in 5 seconds..."
+        sleep 5
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl reboot || reboot
+        else
+            reboot
+        fi
+        return 0
+    fi
+
+    log_error "Rollback failed. Review snapper output above."
+    return 1
+}
+
 # --- Helper: Soar-only installation mode (CLI) ---
 run_soar_install_only() {
     update_status "Running Soar installation helper..."
@@ -14872,6 +15116,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
     echo "  --self-update            Self-update the installed helper script from GitHub (rolling/stable channel)"
+    echo "  --rollback               Open Snapper rollback wizard (DANGEROUS: reverts system snapshot and reboots)"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
@@ -14939,6 +15184,10 @@ elif [[ "${1:-}" == "--self-update" ]]; then
     log_info "Self-update mode requested"
     shift || true
     run_self_update_only "${1:-}"
+    exit $?
+elif [[ "${1:-}" == "--rollback" ]]; then
+    log_info "Rollback wizard mode requested"
+    run_rollback_wizard_only
     exit $?
 elif [[ "${1:-}" == "--setup-SF" ]]; then
     log_info "Snapd/Flatpak setup helper-only mode requested"
@@ -17195,7 +17444,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --self-update --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
+ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --self-update --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -17275,7 +17524,7 @@ EOF
 local -a _znh_cmds
 _znh_cmds=(
   install debug snapper
-  --verify --repair --diagnose --check --self-check --self-update
+  --verify --repair --diagnose --check --self-check --self-update --rollback
   --soar --brew --pip-package --pipx --setup-SF
   --reset-config --reset-downloads --reset-state --rm-conflict
   --logs --log --live-logs --analyze --health
@@ -17339,7 +17588,7 @@ EOF
 complete -c zypper-auto-helper -f -a "install debug snapper"
 
 # common option-like commands
-complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --debug"
+complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --rollback --debug"
 complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
 complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
 complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
