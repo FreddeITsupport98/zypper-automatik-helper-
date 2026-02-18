@@ -1512,6 +1512,7 @@ systemctl status zypper-autodownload.service
   - 🧷 **FIXED:** Dashboard API command output decoding is now forced to UTF‑8 with replacement to avoid crashes on weird/binary log data.
   - 🐛 **FIXED:** self-update overlay readability (proper modal background, improved scrolling, and consistent warning banner styling).
   - 🐛 **FIXED:** suppressed noisy "Read-only file system" errors when mirroring `dashboard-live.log` into the user dashboard directory (best-effort under systemd hardening / read-only home mounts).
+  - 🐛 **FIXED:** Soar detection in `zypper-with-ps` now works correctly when the wrapper is launched via `sudo`/`pkexec` (detects per-user installs under `~/.local/bin` / `~/pkgforge` and runs Soar as the invoking user).
   - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
   - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
   - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.
