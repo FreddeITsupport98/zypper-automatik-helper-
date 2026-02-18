@@ -13951,8 +13951,28 @@ run_self_update_only() {
         return 1
     fi
 
-    local requested_channel channel
-    requested_channel="${1:-}"
+    # Args: [rolling|stable] [--force]
+    local requested_channel channel force
+    requested_channel=""
+    force=0
+
+    while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
+            rolling|stable)
+                requested_channel="$1"
+                ;;
+            --force)
+                force=1
+                ;;
+            *)
+                log_error "Unknown argument for --self-update: $1"
+                log_info "Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force]"
+                return 1
+                ;;
+        esac
+        shift || true
+    done
+
     channel="${requested_channel:-${SELF_UPDATE_CHANNEL:-rolling}}"
     channel="${channel,,}"
     case "${channel}" in
@@ -13996,12 +14016,14 @@ run_self_update_only() {
         log_info "[self-update] Running from a git working tree; will NOT modify the repo checkout"
     fi
 
-    # 1) Determine URL (rolling vs stable)
-    local repo api_url raw_url tag
+    # 1) Determine URL(s) (rolling vs stable)
+    local repo api_url tag raw_url_asset raw_url_tag raw_url
     repo="FreddeITsupport98/zypper-automatik-helper-"
 
-    raw_url=""
     tag=""
+    raw_url=""
+    raw_url_asset=""
+    raw_url_tag=""
 
     if [ "${channel}" = "stable" ]; then
         api_url="https://api.github.com/repos/${repo}/releases/latest"
@@ -14022,7 +14044,9 @@ run_self_update_only() {
             return 1
         fi
 
-        raw_url="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
+        # Prefer a release asset if you ever publish one, but fall back to raw from tag (works today).
+        raw_url_asset="https://github.com/${repo}/releases/download/${tag}/zypper-auto.sh"
+        raw_url_tag="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
         log_info "[self-update] Stable tag detected: ${tag}"
     else
         raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
@@ -14037,10 +14061,26 @@ run_self_update_only() {
     # Ensure the trap does not leak outside this function (it clears itself after running once).
     trap 'rm -f "${tmp}" 2>/dev/null || true; trap - RETURN' RETURN
 
-    log_info "[self-update] Downloading update from: ${raw_url}"
-    if ! curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
-        log_error "Failed to download update from ${raw_url}"
-        return 1
+    if [ "${channel}" = "stable" ]; then
+        log_info "[self-update] Downloading update from GitHub release (asset preferred)…"
+
+        # Try asset URL first (if it exists), then fall back to raw tag URL.
+        if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url_asset}" -o "${tmp}"; then
+            raw_url="${raw_url_asset}"
+        else
+            log_warn "[self-update] Release asset download failed; falling back to raw tag URL"
+            raw_url="${raw_url_tag}"
+            if ! curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+                log_error "Failed to download update from ${raw_url}"
+                return 1
+            fi
+        fi
+    else
+        log_info "[self-update] Downloading update from: ${raw_url}"
+        if ! curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+            log_error "Failed to download update from ${raw_url}"
+            return 1
+        fi
     fi
 
     # 3) Verification
@@ -14080,41 +14120,123 @@ run_self_update_only() {
         return 1
     fi
 
-    # 4) Display version info (best-effort)
-    local ver_line new_ver
+    # 4) Version comparison (best-effort)
+    local ver_line new_ver current_line current_ver
     ver_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${tmp}" 2>/dev/null || true)
-    new_ver=$(printf '%s' "${ver_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || true)
+    new_ver=$(printf '%s' "${ver_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "0")
+
+    current_ver="0"
+    if [ -f "${dest}" ]; then
+        current_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${dest}" 2>/dev/null || true)
+        current_ver=$(printf '%s' "${current_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "0")
+    fi
+
+    # Normalize to integers when possible.
+    if ! [[ "${current_ver:-}" =~ ^[0-9]+$ ]]; then current_ver=0; fi
+    if ! [[ "${new_ver:-}" =~ ^[0-9]+$ ]]; then new_ver=0; fi
+
+    if [ "${force}" -ne 1 ] 2>/dev/null; then
+        if [ "${new_ver}" -le "${current_ver}" ] 2>/dev/null; then
+            log_success "✓ Already up-to-date (current v${current_ver}, remote v${new_ver}). Use --force to reinstall."
+            return 0
+        fi
+    fi
+
+    log_info "[self-update] Update available: v${current_ver} -> v${new_ver} (${channel}${tag:+ tag=${tag}})"
 
     # 5) Prepare permissions/ownership on the temp file before the swap.
     chmod 755 "${tmp}" 2>/dev/null || true
     chown root:root "${tmp}" 2>/dev/null || true
 
-    # 6) Backup + atomic move swap
-    local backup ts
+    # 6) Safety backups + atomic swap
+    local ts backup_samefs backup_dir backup_archive
     ts="$(date +%Y%m%d-%H%M%S)"
-    backup="${dest}.bak.${ts}"
+    backup_samefs="${dest}.bak.${ts}"
+
+    backup_dir="/var/backups/zypper-auto/self-update"
+    mkdir -p "${backup_dir}" 2>/dev/null || true
+    backup_archive="${backup_dir}/$(basename "${dest}").bak.${ts}"
 
     if [ -f "${dest}" ]; then
-        cp -a "${dest}" "${backup}" 2>/dev/null || true
-        chmod 600 "${backup}" 2>/dev/null || true
-        log_info "Backup created: ${backup}"
+        # Backup on same filesystem so rollback can be atomic.
+        if cp -a "${dest}" "${backup_samefs}" 2>/dev/null; then
+            chmod 600 "${backup_samefs}" 2>/dev/null || true
+            chown root:root "${backup_samefs}" 2>/dev/null || true
+            log_info "Backup created: ${backup_samefs}"
+
+            # Keep a historical copy outside /usr/local/bin as well (best-effort).
+            cp -a "${backup_samefs}" "${backup_archive}" 2>/dev/null || true
+            chmod 600 "${backup_archive}" 2>/dev/null || true
+            chown root:root "${backup_archive}" 2>/dev/null || true
+        else
+            log_warn "[self-update] Could not create backup; proceeding (rollback may be impossible)"
+        fi
     fi
 
     # IMPORTANT: use mv (atomic rename) instead of cp to prevent the running bash process
     # from reading partially overwritten content.
-    if mv -f "${tmp}" "${dest}"; then
-        chmod 755 "${dest}" 2>/dev/null || true
-        chown root:root "${dest}" 2>/dev/null || true
-
-        log_success "Self-update installed to ${dest} (${channel}${tag:+ tag=${tag}}${new_ver:+ version=${new_ver}})"
-        update_status "SUCCESS: Self-update installed (${channel}${tag:+ ${tag}}${new_ver:+ v${new_ver}})"
-    else
+    if ! mv -f "${tmp}" "${dest}"; then
         log_error "Failed to install self-update to ${dest}"
         return 1
     fi
+    chmod 755 "${dest}" 2>/dev/null || true
+    chown root:root "${dest}" 2>/dev/null || true
 
-    # Disable cleanup trap (file already moved); keep it best-effort.
+    # Disable cleanup trap (file already moved).
     trap - RETURN
+
+    # 7) Post-install self-test + automatic rollback
+    log_info "[self-update] Running post-update self-test..."
+
+    if ! bash -n "${dest}" >/dev/null 2>&1; then
+        log_error "⚠ CRITICAL: Installed script fails bash -n. Rolling back..."
+        goto_rollback=1
+    else
+        goto_rollback=0
+    fi
+
+    if [ "${goto_rollback}" -eq 0 ] 2>/dev/null; then
+        if ! "${dest}" --help >/dev/null 2>&1; then
+            log_error "⚠ CRITICAL: Installed script failed to run (--help). Rolling back..."
+            goto_rollback=1
+        fi
+    fi
+
+    # Optional deeper self-check (safe): only when python3 is available.
+    if [ "${goto_rollback}" -eq 0 ] 2>/dev/null && command -v python3 >/dev/null 2>&1; then
+        if ! "${dest}" --check >/dev/null 2>&1; then
+            log_error "⚠ CRITICAL: Installed script failed self-check (--check). Rolling back..."
+            goto_rollback=1
+        fi
+    fi
+
+    if [ "${goto_rollback}" -eq 1 ] 2>/dev/null; then
+        if [ -f "${backup_samefs}" ]; then
+            local bad_path
+            bad_path="${dest}.bad.${ts}"
+            mv -f "${dest}" "${bad_path}" 2>/dev/null || true
+            mv -f "${backup_samefs}" "${dest}" 2>/dev/null || true
+            chmod 755 "${dest}" 2>/dev/null || true
+            chown root:root "${dest}" 2>/dev/null || true
+
+            log_success "↺ Rollback successful. Previous version v${current_ver} restored."
+            log_warn "Please report this issue. Bad build saved at: ${bad_path}"
+        else
+            log_error "✗ Rollback failed (no backup found). Manual recovery may be required."
+        fi
+        return 1
+    fi
+
+    # 8) Best-effort reload (safe)
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+
+    # Cleanup the same-filesystem backup copy (keep archive under /var/backups)
+    rm -f "${backup_samefs}" 2>/dev/null || true
+
+    log_success "✓ Update complete (v${new_ver})"
+    update_status "SUCCESS: Self-update installed (v${new_ver})"
 
     echo ""
     echo "Self-update complete. To apply all updated units/scripts, run:"
@@ -15116,6 +15238,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
     echo "  --self-update            Self-update the installed helper script from GitHub (rolling/stable channel)"
+    echo "                         Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force]"
     echo "  --rollback               Open Snapper rollback wizard (DANGEROUS: reverts system snapshot and reboots)"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
@@ -15183,7 +15306,7 @@ elif [[ "${1:-}" == "--pip-package" || "${1:-}" == "--pipx" ]]; then
 elif [[ "${1:-}" == "--self-update" ]]; then
     log_info "Self-update mode requested"
     shift || true
-    run_self_update_only "${1:-}"
+    run_self_update_only "$@"
     exit $?
 elif [[ "${1:-}" == "--rollback" ]]; then
     log_info "Rollback wizard mode requested"

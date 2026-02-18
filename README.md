@@ -230,9 +230,10 @@ zypper-auto-helper --reset-config   # Reset /etc/zypper-auto.conf to documented 
 zypper-auto-helper --reset-downloads  # Clear cached download/notifier state and restart timers (alias: --reset-state)
 
 # Self-update (updates the helper script itself)
-sudo zypper-auto-helper --self-update          # Update using SELF_UPDATE_CHANNEL (default: rolling)
-sudo zypper-auto-helper --self-update rolling  # Rolling channel: latest commit on main
-sudo zypper-auto-helper --self-update stable   # Stable channel: latest GitHub Release
+sudo zypper-auto-helper --self-update                  # Update using SELF_UPDATE_CHANNEL (default: rolling)
+sudo zypper-auto-helper --self-update rolling          # Rolling channel: latest commit on main
+sudo zypper-auto-helper --self-update stable           # Stable channel: latest GitHub Release
+sudo zypper-auto-helper --self-update stable --force   # Force reinstall even if versions match
 
 # Rollback Wizard (DANGEROUS)
 sudo zypper-auto-helper --rollback             # Interactive Snapper rollback wizard (reboots after rollback)
@@ -266,9 +267,11 @@ zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's servic
 ```
 
 Self-update notes:
-- `--self-update` creates a timestamped backup before overwriting the destination script.
+- `--self-update` checks the remote VERSION and skips reinstall when you’re already up-to-date (use `--force` to reinstall anyway).
+- It creates a timestamped backup before overwriting the destination script, and also keeps an archive copy under `/var/backups/zypper-auto/self-update/`.
 - It downloads into a temp file and then swaps it in with an atomic `mv` rename (so updating the currently-running script won’t corrupt execution).
 - It refuses to install empty downloads or HTML error pages (GitHub 404/403), and runs `bash -n` syntax checks before installing.
+- After installing, it runs a safe post-update self-test (`--help` and `--check` when possible). If that fails, it automatically rolls back to the previous version.
 - **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
 
 ### Shell tab completion
