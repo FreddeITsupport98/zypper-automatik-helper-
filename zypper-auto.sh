@@ -6246,6 +6246,14 @@ generate_dashboard() {
         _api('/api/system/dup/preview', { method: 'GET' }).then(function(r) {
             _ruRenderPreview(r || {});
         }).catch(function(err) {
+            // If server returned JSON (rc/output), surface it instead of hiding it behind HTTP 500.
+            try {
+                if (err && err.payload && (err.payload.output != null || err.payload.rc != null)) {
+                    _ruRenderPreview(err.payload || {});
+                    return;
+                }
+            } catch (e0) {}
+
             var msg = (err && err.message) ? err.message : 'preview failed';
             _ruRenderPreview({ rc: 1, output: 'ERROR: ' + msg, cmd: '' });
         });
@@ -23431,7 +23439,10 @@ class Handler(BaseHTTPRequestHandler):
                 used_systemd_run = False
                 rc, out = _run_cmd(cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
 
-            return _json_response(self, 200 if rc == 0 else 500, {
+            # IMPORTANT: Always return HTTP 200 so the WebUI can display the full zypper output,
+            # even when zypper returns a non-zero rc (lock/conflict/manual decision/etc.).
+            return _json_response(self, 200, {
+                "ok": (rc == 0),
                 "rc": rc,
                 "output": out,
                 "cmd": " ".join(cmd),
