@@ -42,7 +42,7 @@ esac
 # '-reset'.
 if [[ $# -gt 0 ]]; then
     case "${1:-}" in
-        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|\
+        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
@@ -851,6 +851,8 @@ WEBHOOK_URL=""            # Remote monitoring endpoint (Discord/Slack/ntfy/etc.)
 HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
 DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
 DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. firefox)
+# Self-update channel used by --self-update (rolling=latest commit, stable=GitHub releases)
+SELF_UPDATE_CHANNEL="rolling"
 HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
@@ -1408,6 +1410,7 @@ __znh_write_dashboard_schema_json() {
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
+    "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "rolling"},
 
     "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
     "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
@@ -1542,6 +1545,14 @@ DASHBOARD_ENABLED=true
 # Leave empty to use the system default (xdg-open).
 # Examples: "firefox", "google-chrome", "chromium"
 DASHBOARD_BROWSER=""
+
+# SELF_UPDATE_CHANNEL
+# Controls which update channel is used by default when you run:
+#   sudo zypper-auto-helper --self-update
+# Allowed values:
+#   - rolling : updates to the latest commit on the main branch (GitHub)
+#   - stable  : updates to the latest GitHub Release
+SELF_UPDATE_CHANNEL="rolling"
 
 # ---------------------------------------------------------------------
 # Timer intervals for downloader / notifier / verification
@@ -2206,6 +2217,7 @@ EOF
     validate_allowed_set AUTO_DUPLICATE_RPM_MODE whitelist "whitelist,thirdparty,both"
     validate_allowed_set CLEANUP_REPORT_FORMAT both "text,json,both"
     validate_allowed_set BOOT_ENTRY_CLEANUP_MODE backup "backup,delete"
+    validate_allowed_set SELF_UPDATE_CHANNEL rolling "rolling,stable"
 
     # Snapper knobs (bounded ints + bools)
     validate_bool_flag SNAP_RETENTION_OPTIMIZER_ENABLED true
@@ -2508,6 +2520,7 @@ EOF
     _mark_missing_key "HOOKS_BASE_DIR"
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
+    _mark_missing_key "SELF_UPDATE_CHANNEL"
 
     # Snapper retention optimizer knobs
     _mark_missing_key "SNAP_RETENTION_OPTIMIZER_ENABLED"
@@ -2621,6 +2634,9 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
+                    ;;
+                SELF_UPDATE_CHANNEL)
+                    log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
@@ -3974,6 +3990,18 @@ generate_dashboard() {
         <div class="feat-badge"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
       </div>
 
+      <div style="margin-top: 14px;">
+        <span class="stat-label" style="text-transform:none;">Self-Update Channel</span>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+          <div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Channel: <strong id="self-update-channel">(loading)</strong></div>
+          <button class="pill" type="button" id="self-update-toggle-btn" title="Toggle update channel (rolling/stable)">Toggle channel</button>
+          <button class="pill" type="button" id="self-update-changelog-btn" title="Fetch latest changelog from GitHub">Fetch changelog</button>
+        </div>
+        <div style="margin-top:10px;">
+          <pre id="self-update-changelog" style="max-height: 280px;">(click “Fetch changelog”)</pre>
+        </div>
+      </div>
+
       <details id="settings-drawer" style="margin-top: 16px;">
         <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Settings (edit /etc/zypper-auto.conf)</summary>
         <div style="margin-top: 12px; color: var(--muted); font-size: 0.9rem;">
@@ -4386,6 +4414,7 @@ generate_dashboard() {
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
+        { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
 
         // Snapper safety (affects /etc/snapper/configs/* only when you run snapper tools)
         { key: 'SNAP_RETENTION_OPTIMIZER_ENABLED', type: 'bool', label: 'Snapper retention optimizer (cap overly high limits)' },
@@ -4640,6 +4669,159 @@ generate_dashboard() {
         });
     }
 
+    // --- Self-update (dashboard UI) ---
+    var GITHUB_OWNER = 'FreddeITsupport98';
+    var GITHUB_REPO = 'zypper-automatik-helper-';
+
+    function _selfUpdateGetChannel(cfg) {
+        var ch = 'rolling';
+        try {
+            ch = (cfg && cfg.SELF_UPDATE_CHANNEL != null) ? String(cfg.SELF_UPDATE_CHANNEL).trim() : 'rolling';
+        } catch (e) { ch = 'rolling'; }
+        if (ch !== 'rolling' && ch !== 'stable') ch = 'rolling';
+        return ch;
+    }
+
+    function selfUpdateRender() {
+        var el = document.getElementById('self-update-channel');
+        if (!el) return;
+        var ch = _selfUpdateGetChannel(_settingsConfig || {});
+        el.textContent = ch;
+    }
+
+    function _selfUpdateSetChangelog(text) {
+        var el = document.getElementById('self-update-changelog');
+        if (!el) return;
+        el.textContent = String(text || '');
+        highlightBlock('self-update-changelog');
+        try { el.scrollTop = 0; } catch (e) {}
+    }
+
+    function _githubApiJson(url) {
+        return fetch(url, { cache: 'no-store' }).then(function(r) {
+            return r.json().then(function(j) {
+                if (!r.ok) {
+                    var msg = (j && (j.message || j.error)) ? (j.message || j.error) : ('HTTP ' + r.status);
+                    throw new Error(msg);
+                }
+                return j;
+            });
+        });
+    }
+
+    function selfUpdateFetchChangelog(btnEl) {
+        var btn = btnEl || document.getElementById('self-update-changelog-btn');
+        if (btn) btn.disabled = true;
+        _selfUpdateSetChangelog('Loading changelog from GitHub…');
+
+        var ch = _selfUpdateGetChannel(_settingsConfig || {});
+        var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
+
+        if (ch === 'stable') {
+            return _githubApiJson(base + '/releases/latest').then(function(j) {
+                var out = [];
+                out.push('Stable channel (GitHub Releases)');
+                out.push('Tag: ' + String(j.tag_name || 'unknown'));
+                if (j.published_at) out.push('Published: ' + String(j.published_at));
+                out.push('');
+                out.push(String(j.body || '(no release notes)'));
+                _selfUpdateSetChangelog(out.join('\n'));
+                toast('Changelog loaded', 'Stable release notes fetched', 'ok');
+                return j;
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'failed';
+                _selfUpdateSetChangelog('ERROR: ' + msg);
+                toast('Changelog failed', msg, 'err');
+                return null;
+            }).finally(function() {
+                if (btn) btn.disabled = false;
+            });
+        }
+
+        // rolling: show latest commits on main
+        return _githubApiJson(base + '/commits?per_page=12').then(function(arr) {
+            var out2 = [];
+            out2.push('Rolling channel (latest commits on main)');
+            out2.push('');
+            (arr || []).forEach(function(c) {
+                var sha = (c && c.sha) ? String(c.sha).slice(0, 7) : '???????';
+                var msg = '';
+                try { msg = String(((c || {}).commit || {}).message || ''); } catch (e) { msg = ''; }
+                msg = msg.split('\n')[0];
+                var dt = '';
+                try { dt = String((((c || {}).commit || {}).author || {}).date || ''); } catch (e) { dt = ''; }
+                out2.push('- ' + sha + (dt ? (' ' + dt) : '') + ' ' + msg);
+            });
+            _selfUpdateSetChangelog(out2.join('\n'));
+            toast('Changelog loaded', 'Recent commits fetched', 'ok');
+            return arr;
+        }).catch(function(e) {
+            var msg2 = (e && e.message) ? e.message : 'failed';
+            _selfUpdateSetChangelog('ERROR: ' + msg2);
+            toast('Changelog failed', msg2, 'err');
+            return null;
+        }).finally(function() {
+            if (btn) btn.disabled = false;
+        });
+    }
+
+    function selfUpdateToggleChannel(btnEl) {
+        var btn = btnEl || document.getElementById('self-update-toggle-btn');
+        var cur = _selfUpdateGetChannel(_settingsConfig || {});
+        var next = (cur === 'rolling') ? 'stable' : 'rolling';
+
+        if (btn) btn.disabled = true;
+        toast('Switching channel…', 'Setting SELF_UPDATE_CHANNEL=' + next, 'ok');
+
+        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: { SELF_UPDATE_CHANNEL: next } }) }).then(function(r) {
+            // Keep local config in sync and re-render.
+            _settingsConfig = (r && r.config) ? r.config : _settingsConfig;
+            selfUpdateRender();
+
+            // If settings drawer is open, update the select value too.
+            try {
+                var form = document.getElementById('settings-form');
+                var sel = form ? form.querySelector('select[data-key="SELF_UPDATE_CHANNEL"]') : null;
+                if (sel) sel.value = next;
+            } catch (e) {}
+
+            _settingsClientLog('info', 'self-update channel toggled', { from: cur, to: next });
+            toast('Channel updated', 'Now: ' + next, 'ok');
+
+            // Reload config + schema to ensure we reflect any server-side healing.
+            try { settingsLoad(false); } catch (e) {}
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'failed';
+            toast('Toggle failed', msg, 'err');
+            _settingsClientLog('warn', 'self-update channel toggle failed', { error: msg });
+            return null;
+        }).finally(function() {
+            if (btn) btn.disabled = false;
+        });
+    }
+
+    function _wireSelfUpdateUI() {
+        var chEl = document.getElementById('self-update-channel');
+        var toggleBtn = document.getElementById('self-update-toggle-btn');
+        var clBtn = document.getElementById('self-update-changelog-btn');
+
+        if (!chEl && !toggleBtn && !clBtn) return;
+
+        if (toggleBtn) toggleBtn.addEventListener('click', function(ev) {
+            try { addRipple(toggleBtn, ev.clientX, ev.clientY); } catch (e) {}
+            selfUpdateToggleChannel(toggleBtn);
+        });
+
+        if (clBtn) clBtn.addEventListener('click', function(ev) {
+            try { addRipple(clBtn, ev.clientX, ev.clientY); } catch (e) {}
+            selfUpdateFetchChangelog(clBtn);
+        });
+
+        // Initial render (will be refreshed on settingsLoad too)
+        try { selfUpdateRender(); } catch (e) {}
+    }
+
     function _renderSettingsForm(schema, cfg) {
         var form = document.getElementById('settings-form');
         if (!form) return;
@@ -4861,6 +5043,7 @@ generate_dashboard() {
         }).then(function(c) {
             _settingsConfig = c.config;
             _renderSettingsForm(_settingsSchema, _settingsConfig);
+            try { selfUpdateRender(); } catch (e) {}
 
             var inv = (c.invalid_keys || []);
             var warn = (c.warnings || []);
@@ -5010,6 +5193,8 @@ generate_dashboard() {
     _wireDashboardRefreshUI();
     // Wire settings drawer once DOM is ready (we are at end of body).
     _wireSettingsUI();
+    // Wire self-update UI (channel toggle + changelog fetch).
+    _wireSelfUpdateUI();
     // Wire Snapper manager UI.
     _wireSnapperUI();
 
@@ -13578,6 +13763,153 @@ run_status_only() {
     update_status "SUCCESS: Status report generated"
 }
 
+# --- Helper: Self-update (CLI) ---
+run_self_update_only() {
+    log_info ">>> Self-update mode requested"
+
+    if [ "${EUID}" -ne 0 ] 2>/dev/null; then
+        log_error "--self-update must be run as root (use sudo)"
+        return 1
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        log_error "curl is required for --self-update"
+        return 1
+    fi
+
+    local requested_channel channel
+    requested_channel="${1:-}"
+    channel="${requested_channel:-${SELF_UPDATE_CHANNEL:-rolling}}"
+    case "${channel}" in
+        rolling|stable)
+            :
+            ;;
+        *)
+            log_warn "Unknown self-update channel '${channel}'; falling back to rolling"
+            channel="rolling"
+            ;;
+    esac
+
+    update_status "Self-updating (${channel})..."
+
+    local repo api_url raw_url tag
+    repo="FreddeITsupport98/zypper-automatik-helper-"
+
+    raw_url=""
+    tag=""
+
+    if [ "${channel}" = "stable" ]; then
+        api_url="https://api.github.com/repos/${repo}/releases/latest"
+
+        if command -v python3 >/dev/null 2>&1; then
+            tag=$(curl -fsSL "${api_url}" 2>/dev/null | python3 - <<'PY'
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print((data.get("tag_name") or "").strip())
+except Exception:
+    print("")
+PY
+)
+        else
+            # Fallback (best-effort, no strict JSON parsing)
+            tag=$(curl -fsSL "${api_url}" 2>/dev/null | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
+        fi
+
+        if [ -z "${tag:-}" ]; then
+            log_error "Could not determine latest stable release tag from GitHub"
+            return 1
+        fi
+
+        raw_url="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
+    else
+        raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+
+    if ! curl -fsSL "${raw_url}" -o "${tmp}"; then
+        log_error "Failed to download update from ${raw_url}"
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    # Basic integrity: must look like a bash script.
+    if ! head -n 1 "${tmp}" 2>/dev/null | grep -q '^#!/bin/bash'; then
+        log_error "Downloaded update does not look like a bash script (missing shebang)"
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    # Syntax check before installing.
+    if ! bash -n "${tmp}" >/dev/null 2>&1; then
+        log_error "Downloaded update failed 'bash -n' syntax check; refusing to install"
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    # Install destination: prefer the installed command path.
+    local script_path dest installed_path
+    installed_path="/usr/local/bin/zypper-auto-helper"
+    script_path="$(realpath "$0" 2>/dev/null || echo "$0")"
+
+    dest="${installed_path}"
+    if [ ! -f "${dest}" ]; then
+        dest="${script_path}"
+        log_warn "Installed helper not found at ${installed_path}; attempting to update the current script path instead: ${dest}"
+    fi
+
+    # Git worktree safety: never overwrite a git working tree file (developer checkout).
+    local git_top
+    git_top=""
+    if command -v git >/dev/null 2>&1; then
+        git_top=$(git -C "$(dirname "${script_path}")" rev-parse --show-toplevel 2>/dev/null || true)
+    fi
+
+    if [ -n "${git_top:-}" ] && [[ "${dest}" == "${git_top}"* ]]; then
+        log_warn "Detected git worktree at ${git_top}."
+        log_error "Refusing to self-update a git working copy file: ${dest}"
+        log_info "To update your working folder safely, use: git -C \"${git_top}\" pull"
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    if [ -n "${git_top:-}" ] && [[ "${script_path}" == "${git_top}"* ]]; then
+        log_info "[self-update] Running from a git working tree; will NOT modify the repo checkout"
+    fi
+
+    local backup ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="${dest}.bak.${ts}"
+
+    if [ -f "${dest}" ]; then
+        cp -a "${dest}" "${backup}" 2>/dev/null || true
+        chmod 600 "${backup}" 2>/dev/null || true
+        log_info "Backup created: ${backup}"
+    fi
+
+    if cp -f "${tmp}" "${dest}"; then
+        chmod 755 "${dest}" 2>/dev/null || true
+        log_success "Self-update installed to ${dest} (${channel}${tag:+ tag=${tag}})"
+        update_status "SUCCESS: Self-update installed (${channel}${tag:+ ${tag}})"
+    else
+        log_error "Failed to install self-update to ${dest}"
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    rm -f "${tmp}" 2>/dev/null || true
+
+    # NOTE: We intentionally do NOT auto-run a full install here, because installs
+    # can be interactive (dependency prompts, etc.).
+    echo ""
+    echo "Self-update complete. To apply all updated units/scripts, run:"
+    echo "  sudo ${installed_path} install"
+
+    return 0
+}
+
 # --- Helper: Soar-only installation mode (CLI) ---
 run_soar_install_only() {
     update_status "Running Soar installation helper..."
@@ -14494,6 +14826,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --self-check            Same as --check (alias)"
     echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
+    echo "  --self-update            Self-update the installed helper script from GitHub (rolling/stable channel)"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
@@ -14556,6 +14889,11 @@ elif [[ "${1:-}" == "--brew" ]]; then
 elif [[ "${1:-}" == "--pip-package" || "${1:-}" == "--pipx" ]]; then
     log_info "pipx helper-only mode requested"
     run_pipx_helper_only
+    exit $?
+elif [[ "${1:-}" == "--self-update" ]]; then
+    log_info "Self-update mode requested"
+    shift || true
+    run_self_update_only "${1:-}"
     exit $?
 elif [[ "${1:-}" == "--setup-SF" ]]; then
     log_info "Snapd/Flatpak setup helper-only mode requested"
@@ -16811,7 +17149,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-    ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
+ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --self-update --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -16891,7 +17229,7 @@ EOF
 local -a _znh_cmds
 _znh_cmds=(
   install debug snapper
-  --verify --repair --diagnose --check --self-check
+  --verify --repair --diagnose --check --self-check --self-update
   --soar --brew --pip-package --pipx --setup-SF
   --reset-config --reset-downloads --reset-state --rm-conflict
   --logs --log --live-logs --analyze --health
@@ -16955,7 +17293,7 @@ EOF
 complete -c zypper-auto-helper -f -a "install debug snapper"
 
 # common option-like commands
-complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --debug"
+complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --debug"
 complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
 complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
 complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
