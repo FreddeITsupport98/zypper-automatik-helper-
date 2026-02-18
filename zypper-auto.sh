@@ -2996,6 +2996,54 @@ update_status() {
     log_info "[status] ${status}"
 }
 
+# Helper: determine whether a system reboot is required.
+# Used to surface a "Reboot Required" status in the dashboard, since rolling
+# releases frequently update the kernel and core libraries.
+check_reboot_required() {
+    # Returns 0 if a reboot is required, 1 otherwise.
+
+    local had_errexit rc_nr
+    had_errexit=0
+    [[ "$-" == *e* ]] && had_errexit=1
+
+    # 1) Prefer zypper's own hint when available.
+    if command -v zypper >/dev/null 2>&1; then
+        set +e
+        zypper needs-reboot >/dev/null 2>&1
+        rc_nr=$?
+        [ "$had_errexit" -eq 1 ] 2>/dev/null && set -e
+
+        # On openSUSE, rc=1 means reboot needed.
+        if [ "$rc_nr" -eq 1 ] 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # 2) Marker files used by various tools.
+    if [ -f /run/reboot-needed ] || [ -f /var/run/reboot-needed ] || [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then
+        return 0
+    fi
+
+    # 3) Kernel package version heuristic (best-effort).
+    local running_kernel installed_pkg installed_ver
+    running_kernel=$(uname -r 2>/dev/null || echo "")
+
+    if command -v rpm >/dev/null 2>&1; then
+        installed_pkg=$(rpm -q --last kernel-default kernel-preempt kernel-rt 2>/dev/null | head -n 1 | awk '{print $1}' || true)
+        if [ -n "${installed_pkg:-}" ] && [[ "${installed_pkg}" == kernel-*-* ]]; then
+            installed_ver=${installed_pkg#kernel-default-}
+            installed_ver=${installed_ver#kernel-preempt-}
+            installed_ver=${installed_ver#kernel-rt-}
+
+            if [ -n "${installed_ver:-}" ] && [ -n "${running_kernel:-}" ] && [[ "${running_kernel}" != *"${installed_ver}"* ]]; then
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
 # --- Remote monitoring: Webhooks (best-effort) ---
 _json_escape() {
     # Minimal JSON escaping for safe webhook payloads and dashboard JSON blobs.
@@ -6563,6 +6611,10 @@ run_verification_only() {
     ZYPPER_LOCK_ACTIVE=0
     ZYPPER_LOCK_PID_ACTIVE=""
 
+    # If we have to perform a critical repair (e.g. restart the dashboard API),
+    # schedule a one-off follow-up verification soon so we can confirm the fix held.
+    FOLLOWUP_SOON=0
+
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
 
@@ -6931,6 +6983,7 @@ if systemctl is-active --quiet zypper-auto-dashboard-api.service 2>/dev/null; th
             sleep 0.4
             if curl -fsS --max-time 1 http://127.0.0.1:8766/api/ping >/dev/null 2>&1; then
                 REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                FOLLOWUP_SOON=1
                 log_success "  ✓ Dashboard API restarted and responding"
             else
                 log_warn "  ⚠ Dashboard API still not responding to /api/ping (non-fatal)"
@@ -8050,6 +8103,7 @@ if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
                         sleep 2
                         api_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "${dash_api_url}" 2>/dev/null || echo "000")
                         if [ "${api_code}" = "200" ] 2>/dev/null; then
+                            FOLLOWUP_SOON=1
                             log_success "  ✓ Auto-repair successful: API is now responding"
                         else
                             log_error "  ✗ API restart did not resolve connectivity (HTTP ${api_code})"
@@ -8082,6 +8136,7 @@ if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
             if attempt_repair "start dashboard settings API" \
                 "systemctl enable --now ${dash_api_unit}" \
                 "systemctl is-active ${dash_api_unit}"; then
+                FOLLOWUP_SOON=1
                 log_success "  ✓ Dashboard Settings API service started"
             else
                 log_error "  ✗ Failed to start Dashboard Settings API service"
@@ -8146,6 +8201,7 @@ PY
                 chmod 600 "${token_path}" 2>/dev/null || true
                 chown root:root "${token_path}" 2>/dev/null || true
                 execute_guarded "Restart dashboard settings API (new token)" systemctl restart "${dash_api_unit}" || true
+                FOLLOWUP_SOON=1
                 log_success "  ✓ Token regenerated and API restarted"
             fi
         else
@@ -8165,6 +8221,7 @@ PY
             chmod 600 "${token_path}" 2>/dev/null || true
             chown root:root "${token_path}" 2>/dev/null || true
             execute_guarded "Restart dashboard settings API (token created)" systemctl restart "${dash_api_unit}" || true
+            FOLLOWUP_SOON=1
             log_success "  ✓ Token created and API restarted"
         fi
     else
@@ -8485,6 +8542,28 @@ if printf '%s' "${sys_state}" | grep -qE '^(running|degraded)$'; then
     fi
 else
     log_info "ℹ Systemd state is '${sys_state}'; skipping failed-unit health check"
+fi
+
+# Dashboard UX: surface reboot-required state as a top-level status so users
+# don't forget to reboot after kernel/core library updates.
+if check_reboot_required; then
+    log_warn "⚠ Reboot required to fully apply updates (kernel/core libs)."
+    if [ "${VERIFICATION_FAILED}" -eq 0 ] 2>/dev/null; then
+        update_status "Reboot Required"
+    else
+        update_status "FAILED: Reboot Required"
+    fi
+fi
+
+# If we performed a critical repair (e.g. restarted the dashboard API), run a
+# one-off follow-up verification soon so we can confirm the fix held.
+if [ "${FOLLOWUP_SOON:-0}" -eq 1 ] 2>/dev/null || [ "${VERIFICATION_FAILED}" -gt 0 ] 2>/dev/null; then
+    if command -v systemd-run >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
+        # Use a fixed unit name so repeated calls don't create a spam storm.
+        log_info "Problems were found/fixed. Scheduling follow-up verification in 5 minutes..."
+        systemd-run --on-active=5m --unit=zypper-auto-verify-followup \
+            /usr/local/bin/zypper-auto-helper --verify >/dev/null 2>&1 || true
+    fi
 fi
 
 # Calculate repair statistics
@@ -19921,6 +20000,7 @@ import json
 import os
 import re
 import secrets
+import socketserver
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -20094,6 +20174,8 @@ def _run_cmd(cmd: list[str], timeout_s: int, *, log=None) -> tuple[int, str]:
             timeout=timeout_s,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         out = p.stdout or ""
         # Bound output to keep API responses sane.
@@ -20545,13 +20627,34 @@ def main():
     # Log startup
     log("info", f"Starting dashboard API on {args.listen}:{args.port} (config={args.config})")
 
+    # API FIX: Use a multi-threaded HTTP server so slow requests (large logs,
+    # snapper commands, etc.) don't freeze the entire dashboard.
+    class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
     token = _load_token(args.token_file)
-    httpd = HTTPServer((args.listen, args.port), Handler)
+
+    try:
+        httpd = ThreadingHTTPServer((args.listen, args.port), Handler)
+    except OSError as e:
+        log("error", f"FATAL: Could not bind dashboard API to {args.listen}:{args.port}: {e}")
+        raise SystemExit(1)
+
     httpd.token = token
     httpd.conf_path = args.config
     httpd._znh_log = log
     httpd.confirm_tokens = {}
-    httpd.serve_forever()
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        log("info", "Stopping dashboard API (KeyboardInterrupt)")
+    finally:
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
