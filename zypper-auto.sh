@@ -12210,6 +12210,33 @@ run_snapper_menu_only() {
             echo "  - Detected timers enabled: timeline=${timeline_enabled} boot=${boot_enabled}"
         fi
 
+        # If the filesystem is read-only, we cannot safely create backups or apply
+        # config tuning. This can happen on systems mounted read-only (unexpected)
+        # or immutable/transactional setups (expected).
+        local snapper_cfg_dir snapper_cfg_ro
+        snapper_cfg_dir="/etc/snapper/configs"
+        snapper_cfg_ro=0
+        if command -v findmnt >/dev/null 2>&1; then
+            if findmnt -n -o OPTIONS -T "${snapper_cfg_dir}" 2>/dev/null | grep -qE '(^|,)ro(,|$)'; then
+                snapper_cfg_ro=1
+            fi
+        elif [ -r /proc/mounts ]; then
+            # Best-effort: if / is mounted read-only, /etc is too.
+            local root_opts
+            root_opts=$(grep -E '^[^ ]+ / ' /proc/mounts 2>/dev/null | head -n 1 | cut -d' ' -f4)
+            if printf ',%s,' "${root_opts:-}" | grep -q ',ro,'; then
+                snapper_cfg_ro=1
+            fi
+        fi
+
+        if [ "${snapper_cfg_ro}" -eq 1 ] 2>/dev/null; then
+            log_warn "[snapper][config] ${snapper_cfg_dir} appears to be on a read-only filesystem; skipping config sync/tuning"
+            echo "  [skip] ${snapper_cfg_dir} is read-only; cannot backup or tune Snapper configs."
+            echo "  [hint] If this is unexpected, your root filesystem may be mounted read-only (or you are using an immutable/transactional setup)."
+            echo "  [hint] Fix/remount as read-write, then re-run this Snapper enable action."
+            return 0
+        fi
+
         for conf in "${configs[@]}"; do
             cfg_file="/etc/snapper/configs/${conf}"
             [ -f "${cfg_file}" ] || continue
@@ -12271,10 +12298,10 @@ run_snapper_menu_only() {
             if ! cmp -s "${cfg_file}" "${tmp}" 2>/dev/null; then
                 log_info "[snapper][config] Updating: ${cfg_file}"
                 execute_guarded "Backup snapper config (${cfg_file})" cp -a "${cfg_file}" "${bak}" || true
-                mv -f "${tmp}" "${cfg_file}" 2>/dev/null || {
+                if ! execute_guarded "Write snapper config (${cfg_file})" mv -f "${tmp}" "${cfg_file}"; then
                     rm -f "${tmp}" 2>/dev/null || true
                     continue
-                }
+                fi
                 chmod "${mode}" "${cfg_file}" 2>/dev/null || true
                 chown "${uid}:${gid}" "${cfg_file}" 2>/dev/null || true
 
@@ -23984,6 +24011,9 @@ class Handler(BaseHTTPRequestHandler):
             def worker():
                 # Compose a shell script for the transient unit.
                 # We run outside this API service's sandbox by using systemd-run.
+                # IMPORTANT: write the script to disk (instead of passing a huge inline string
+                # via argv) to avoid systemd-run / D-Bus message-size / argv-length issues on
+                # some systems.
                 # Output is written into /var/log/zypper-auto where the dashboard already reads.
                 extra = " ".join(shlex.quote(x) for x in extra_flags)
                 if simulate:
@@ -23991,7 +24021,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     zcmd = f"{ZYPPER_BIN} --non-interactive dup -y {extra}".strip()
 
-                script = "\n".join([
+                script_text = "\n".join([
                     'set -euo pipefail',
                     f'LOG={shlex.quote(log_path)}',
                     'mkdir -p /var/log/zypper-auto/service-logs || true',
@@ -24147,6 +24177,22 @@ class Handler(BaseHTTPRequestHandler):
                     'exit ${rc}',
                 ])
 
+                # Write unit script to disk (inside the API service sandbox).
+                script_file = f"/var/lib/zypper-auto/webui-dup-{job_id[:10]}.sh"
+                try:
+                    os.makedirs("/var/lib/zypper-auto", exist_ok=True)
+                    with open(script_file, "w", encoding="utf-8") as f:
+                        f.write("#!/usr/bin/env bash\n")
+                        f.write(script_text)
+                        f.write("\n")
+                    os.chmod(script_file, 0o700)
+                except Exception as e:
+                    with lock:
+                        j = jobs.get(job_id)
+                        if j:
+                            _job_output_append(j, f"[dashboard-api] Failed to write unit script: {e}\n")
+                    raise
+
                 env = os.environ.copy()
                 env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 env["SIMULATE"] = "1" if simulate else "0"
@@ -24164,8 +24210,7 @@ class Handler(BaseHTTPRequestHandler):
                     "Wants=network-online.target",
                     "--",
                     "/usr/bin/bash",
-                    "-lc",
-                    script,
+                    script_file,
                 ]
 
                 try:
@@ -24173,6 +24218,7 @@ class Handler(BaseHTTPRequestHandler):
                         j = jobs.get(job_id)
                         if j:
                             _job_output_append(j, f"[dashboard-api] Starting system update unit: {unit}\n")
+                            _job_output_append(j, f"[dashboard-api] Unit script: {script_file}\n")
                             _job_update_progress_dup(j, "starting")
 
                     p = subprocess.run(

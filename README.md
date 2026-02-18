@@ -1513,7 +1513,10 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
-- **Unreleased (next build):**
+- **v70** (2026-02-18): **Revolutionary: Rocket Update Wizard + Smart Optional Updates**
+  - 🧾 **Release notes page:** `~/Desktop/v70`
+  - 🚀 **Revolutionary:** Rocket Update Wizard (preview → confirm → run → stream logs → restart check) + dedicated Dry-run simulation mode.
+  - ⚡ **Revolutionary:** Optional post-update refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when there are no system updates (`OPTIONAL_UPDATES_ALWAYS_REFRESH=false` by default).
   - 🧵 **IMPROVED:** Dashboard Settings API is now **multi-threaded** so slow requests (large logs, Snapper actions) don’t freeze the whole dashboard UI.
   - 🧷 **FIXED:** Dashboard API command output decoding is now forced to UTF‑8 with replacement to avoid crashes on weird/binary log data.
   - 🐛 **FIXED:** self-update overlay readability (proper modal background, improved scrolling, and consistent warning banner styling).
@@ -1536,7 +1539,7 @@ systemctl status zypper-autodownload.service
   - ⚡ **IMPROVED:** downloader progress tracker is now **event-driven** when `inotifywait` is available (from `inotify-tools`). It sleeps indefinitely until cache files change (with a 300s timeout fallback).
   - ⚡ **IMPROVED:** downloader metered-network checks are now **cached** (short TTL) to avoid calling `nmcli` on every minutely run when the network state is stable.
   - ⚡ **IMPROVED:** cache cleanup is now **triggered** by real activity: a marker file is created after real downloads / successful installs, and `zypper-cache-cleanup.service` only runs when that marker exists.
-- ⚡ **IMPROVED:** dashboard components are now true "background" priority:
+  - ⚡ **IMPROVED:** dashboard components are now true "background" priority:
     - dashboard API unit includes systemd CPU/IO/memory caps + low priority
     - dashboard HTTP server + sync/perf workers run with best-effort `ionice -c3` + `nice(19)` (when tools are available)
   - 🖥️ **IMPROVED:** `--dash-open` now auto-refreshes the dashboard when it is missing or outdated (so new dashboard/UI changes are applied automatically).
@@ -1578,6 +1581,10 @@ systemctl status zypper-autodownload.service
   - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
   - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
+
+- **Unreleased (next build):**
+  - 🐛 **FIXED:** Rocket Update Wizard now writes the transient-unit script to disk before calling `systemd-run` (avoids potential argv/D-Bus size issues that can cause errors like "Failed to start transient service unit: Connection reset by peer" on some systems).
+  - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
