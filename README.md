@@ -234,6 +234,7 @@ sudo zypper-auto-helper --self-update                  # Update using SELF_UPDAT
 sudo zypper-auto-helper --self-update stable           # Stable channel: latest GitHub Release
 sudo zypper-auto-helper --self-update rolling          # Rolling channel: latest commit on main
 sudo zypper-auto-helper --self-update stable --force   # Force reinstall even if refs match / force downgrade
+sudo zypper-auto-helper --self-update stable --dry-run  # SAFE test: download + verify only (does not replace installed helper)
 
 # Rollback Wizard (DANGEROUS)
 sudo zypper-auto-helper --rollback             # Interactive Snapper rollback wizard (reboots after rollback)
@@ -284,8 +285,15 @@ Dashboard WebUI self-update:
 - In the dashboard (`status.html`), under **Features & Config**, you can:
   - Toggle the self-update channel (stable/rolling).
   - Fetch the changelog.
-  - Click **Update** (runs self-update via the localhost Dashboard API after you type a confirmation phrase).
+  - Click **Update**.
+- Clicking **Update** opens a **blocking overlay** (it covers the page and prevents clicking other elements) where you must:
+  - Read a long disclosure explaining the selected channel (stable vs rolling) and accept the MIT license.
+  - Type a confirmation phrase.
+  - Click **Install**.
+- While installing, the overlay shows a scrollable live log view and a progress bar.
+- Safe testing: you can enable “Dry-run test” in the overlay to download + verify without replacing the installed helper.
 - The Update button will be disabled when the latest stable release tag is older than your installed build (no downgrade by default).
+- After a successful update + reload, the dashboard auto-fetches and shows the full latest stable release notes.
 
 ### Shell tab completion
 
