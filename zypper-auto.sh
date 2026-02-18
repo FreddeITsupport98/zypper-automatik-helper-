@@ -4036,23 +4036,29 @@ generate_dashboard() {
     .log-error { color: #e06c75; font-weight: 900; }
 
     /* Self-update overlay (blocking modal) */
-    body.overlay-open { overflow: hidden; }
+    body.overlay-open {
+        overflow: hidden;
+        overscroll-behavior: contain;
+    }
     .overlay {
         position: fixed;
         inset: 0;
-        background: rgba(0,0,0,0.65);
+        background: rgba(0,0,0,0.72);
         display: flex;
         align-items: center;
         justify-content: center;
-        z-index: 9999;
+        z-index: 20000; /* must be above toasts */
         padding: 12px;
+        backdrop-filter: blur(2px) saturate(0.9);
+        -webkit-backdrop-filter: blur(2px) saturate(0.9);
     }
     .overlay.hidden { display: none; }
     .overlay-card {
         width: min(920px, calc(100vw - 24px));
         max-height: calc(100vh - 24px);
-        background: var(--card);
-        border: 1px solid rgba(255,255,255,0.14);
+        background: var(--card-bg); /* IMPORTANT: previously used undefined --card -> transparent */
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: var(--radius);
         box-shadow: 0 30px 80px rgba(0,0,0,0.45);
         overflow: hidden;
@@ -4061,44 +4067,70 @@ generate_dashboard() {
     }
     .overlay-head {
         padding: 14px 16px;
-        border-bottom: 1px solid rgba(255,255,255,0.10);
+        border-bottom: 1px solid var(--border);
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
         background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
     }
-    .overlay-title { font-weight: 950; letter-spacing: 0.2px; }
+    .overlay-title {
+        font-weight: 950;
+        letter-spacing: 0.2px;
+        font-size: 1.02rem;
+    }
     .overlay-step { color: var(--muted); font-size: 0.85rem; font-weight: 800; }
-    .overlay-body { padding: 16px; display: grid; gap: 12px; }
-    .overlay-scroll {
-        max-height: 360px;
+    .overlay-body {
+        padding: 16px;
+        display: grid;
+        gap: 14px;
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
-        padding: 12px;
+    }
+    .overlay-scroll {
+        max-height: min(560px, calc(100vh - 320px));
+        overflow-y: auto;
+        padding: 14px;
         border-radius: 14px;
         background: var(--subtle);
         border: 1px solid var(--border);
         color: var(--text);
-        line-height: 1.35;
+        line-height: 1.55;
+        font-size: 0.95rem;
     }
     .overlay-scroll p { margin: 10px 0; }
     .overlay-scroll ul { margin: 10px 0 10px 18px; }
     .overlay-scroll li { margin: 6px 0; }
     .overlay-kv { display:flex; gap:10px; flex-wrap:wrap; }
-    .overlay-kv .feat-badge { font-size: 0.82rem; }
+    .overlay-kv .feat-badge { font-size: 0.84rem; }
+
+    .overlay-alert {
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--subtle);
+        font-weight: 950;
+        color: var(--text);
+        line-height: 1.35;
+    }
+    .overlay-alert-warn {
+        border-color: rgba(250,204,21,0.45);
+        background: rgba(250,204,21,0.12);
+    }
 
     .overlay-footer {
         padding: 14px 16px;
-        border-top: 1px solid rgba(255,255,255,0.10);
+        border-top: 1px solid var(--border);
         display: flex;
         justify-content: space-between;
         gap: 10px;
         flex-wrap: wrap;
-        background: rgba(0,0,0,0.10);
+        background: var(--subtle);
     }
     .overlay-footer.center { justify-content: center; }
     .overlay-pre {
-        max-height: 320px;
+        max-height: min(360px, calc(100vh - 420px));
         overflow-y: auto;
     }
     .overlay-progress {
@@ -5153,7 +5185,7 @@ generate_dashboard() {
 
         var warn = '';
         if (st.remote_is_older) {
-            warn = '<div style="padding:10px 12px; border-radius: 12px; border:1px solid rgba(250,204,21,0.40); background: rgba(250,204,21,0.10); font-weight: 900;">Remote stable tag is older than your installed build. Downgrades are blocked by default.</div>';
+            warn = '<div class="overlay-alert overlay-alert-warn">Remote stable tag is older than your installed build. Downgrades are blocked by default.</div>';
         }
 
         var d = _suLongDisclosureHtml(ch);
