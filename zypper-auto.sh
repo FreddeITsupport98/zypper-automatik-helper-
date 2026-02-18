@@ -19015,6 +19015,11 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
 
     if [ "$SHOULD_RUN_OPTIONAL" -eq 1 ]; then
         echo ""
+        echo "ℹ️  Running optional updates (Flatpak/Snap/Soar/Brew/pipx)..."
+        if [[ "${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}" == "true" ]] && [ "${DID_UPDATES:-1}" -eq 0 ]; then
+            echo "ℹ️  No system updates were applied, but OPTIONAL_UPDATES_ALWAYS_REFRESH=true so optional updates will run."
+        fi
+        echo ""
         echo "=========================================="
         echo "  Flatpak Updates"
         echo "=========================================="
@@ -19281,9 +19286,9 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     else
         echo ""
         if [ "$EXIT_CODE" -ne 0 ]; then
-            echo "ℹ️  Skipping optional app updates because zypper dup failed (rc=$EXIT_CODE)."
+            echo "ℹ️  Skipping optional updates because zypper dup failed (rc=$EXIT_CODE)."
         else
-            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional app updates to conserve CPU."
+            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU."
         fi
         echo ""
     fi
@@ -22419,12 +22424,12 @@ RUN_UPDATE() {
         echo ""
         if [ "$rc" -ne 0 ]; then
             if [ "${LOCKED_DURING_UPDATE:-0}" -eq 1 ]; then
-                echo "ℹ️  Skipping optional app updates because system management was locked; no system updates were applied."
+                echo "ℹ️  Skipping optional updates because system management was locked; no system updates were applied."
             else
-                echo "ℹ️  Skipping optional app updates because zypper dup failed (rc=$rc)."
+                echo "ℹ️  Skipping optional updates because zypper dup failed (rc=$rc)."
             fi
         else
-            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional app updates to conserve CPU."
+            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU."
         fi
         echo ""
     fi
@@ -24035,7 +24040,9 @@ class Handler(BaseHTTPRequestHandler):
                     'if grep -q "Nothing to do\\." "$TMP_OUT" 2>/dev/null; then did_updates=0; fi',
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
                     'echo "" >>"$LOG"',
-                    'echo "[webui] zypper dup rc=${rc}" >>"$LOG"',
+                    'echo "[webui] zypper dup rc=$rc" >>"$LOG"',
+                    'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional app updates." >>"$LOG"; fi',
+                    'if [ ${rc} -ne 0 ]; then echo "[webui] zypper dup failed; skipping optional app updates." >>"$LOG"; fi',
 
                     # Optional app updates only run on real installs (not simulation) and only when
                     # updates occurred, unless OPTIONAL_UPDATES_ALWAYS_REFRESH=true.
@@ -24045,8 +24052,10 @@ class Handler(BaseHTTPRequestHandler):
                     '  if [ ${did_updates} -eq 1 ]; then do_optional=1; fi',
                     '  if [ ${do_optional} -eq 1 ]; then',
                     '    echo "" >>"$LOG"',
+                    '    if [ ${did_updates} -eq 1 ]; then echo "[webui] System updates were applied; running optional updates." >>"$LOG"; fi',
+                    '    if [ ${did_updates} -eq 0 ] && [ "${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}" = "true" ]; then echo "[webui] No system updates were applied, but OPTIONAL_UPDATES_ALWAYS_REFRESH=true so optional updates will run." >>"$LOG"; fi',
                     '    echo "==========================================" >>"$LOG"',
-                    '    echo "  Optional App Updates (Flatpak/Snap/Soar/Brew/pipx)" >>"$LOG"',
+                    '    echo "  Optional Updates (Flatpak/Snap/Soar/Brew/pipx)" >>"$LOG"',
                     '    echo "==========================================" >>"$LOG"',
                     '    echo "RUN_USER=${RUN_USER:-unknown}" >>"$LOG"',
                     '    echo "" >>"$LOG"',
