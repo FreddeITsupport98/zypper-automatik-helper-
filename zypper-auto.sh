@@ -6545,7 +6545,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=41
+    local TOTAL_CHECKS=42
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -8015,8 +8015,167 @@ else
     log_info "ℹ zypper not available; skipping dependency consistency check"
 fi
 
-# Check 40: Btrfs metadata health (advanced repair)
-log_debug "[40/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
+# Check 40: Dashboard Settings API Health (deep verify)
+# This is a functional check (HTTP probe), plus token security/integrity.
+log_debug "[40/${TOTAL_CHECKS}] Verifying Dashboard Settings API (deep)..."
+if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
+    local dash_api_unit dash_api_unit_file dash_api_url api_code
+    dash_api_unit="zypper-auto-dashboard-api.service"
+    dash_api_unit_file="/etc/systemd/system/${dash_api_unit}"
+    dash_api_url="http://127.0.0.1:8766/api/ping"
+
+    if [ -f "${dash_api_unit_file}" ] || systemctl list-unit-files "${dash_api_unit}" >/dev/null 2>&1; then
+        if systemctl is-active --quiet "${dash_api_unit}" 2>/dev/null; then
+            if command -v curl >/dev/null 2>&1; then
+                api_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "${dash_api_url}" 2>/dev/null || echo "000")
+                if [ "${api_code}" = "200" ] 2>/dev/null; then
+                    log_success "✓ Dashboard Settings API is responding (HTTP 200)"
+                else
+                    log_warn "⚠ Dashboard Settings API is active but unhealthy (HTTP ${api_code})"
+
+                    # Diagnostic: check if port 8766 is actually listening
+                    if command -v ss >/dev/null 2>&1; then
+                        if ! ss -ltn 2>/dev/null | grep -qE '[:.]8766[[:space:]]'; then
+                            log_warn "  ⚠ Port 8766 is NOT listening, despite the service being active"
+                        fi
+                    fi
+
+                    log_info "  → Attempting auto-repair: restarting Dashboard Settings API..."
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+                    # Reset failed state first (best-effort)
+                    systemctl reset-failed "${dash_api_unit}" >/dev/null 2>&1 || true
+
+                    if execute_guarded "Restart dashboard settings API" systemctl restart "${dash_api_unit}"; then
+                        sleep 2
+                        api_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "${dash_api_url}" 2>/dev/null || echo "000")
+                        if [ "${api_code}" = "200" ] 2>/dev/null; then
+                            log_success "  ✓ Auto-repair successful: API is now responding"
+                        else
+                            log_error "  ✗ API restart did not resolve connectivity (HTTP ${api_code})"
+                            VERIFICATION_FAILED=1
+
+                            log_info "  [API service logs] (last 15 lines):"
+                            if command -v timeout >/dev/null 2>&1; then
+                                timeout 3 journalctl -u "${dash_api_unit}" -n 15 --no-pager 2>/dev/null | sed 's/^/    /' | tee -a "${LOG_FILE}" || true
+                            else
+                                journalctl -u "${dash_api_unit}" -n 15 --no-pager 2>/dev/null | sed 's/^/    /' | tee -a "${LOG_FILE}" || true
+                            fi
+                        fi
+                    else
+                        log_error "  ✗ Failed to restart Dashboard Settings API (systemctl error)"
+                        VERIFICATION_FAILED=1
+                    fi
+                fi
+            else
+                log_info "ℹ curl not available; skipping functional HTTP probe for Dashboard Settings API"
+            fi
+        else
+            log_warn "⚠ Dashboard Settings API service is NOT active"
+
+            # Reset failed state which can prevent normal starts
+            if systemctl is-failed --quiet "${dash_api_unit}" 2>/dev/null; then
+                log_info "  → Service is in failed state; resetting..."
+                systemctl reset-failed "${dash_api_unit}" >/dev/null 2>&1 || true
+            fi
+
+            if attempt_repair "start dashboard settings API" \
+                "systemctl enable --now ${dash_api_unit}" \
+                "systemctl is-active ${dash_api_unit}"; then
+                log_success "  ✓ Dashboard Settings API service started"
+            else
+                log_error "  ✗ Failed to start Dashboard Settings API service"
+                VERIFICATION_FAILED=1
+
+                log_info "  [API startup failure logs] (last 10 lines):"
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 3 journalctl -u "${dash_api_unit}" -n 10 --no-pager 2>/dev/null | sed 's/^/    /' | tee -a "${LOG_FILE}" || true
+                else
+                    journalctl -u "${dash_api_unit}" -n 10 --no-pager 2>/dev/null | sed 's/^/    /' | tee -a "${LOG_FILE}" || true
+                fi
+            fi
+        fi
+
+        # Token file security & integrity
+        local token_path token_dir perms owner dperms downer
+        token_path="/var/lib/zypper-auto/dashboard-api.token"
+        token_dir="$(dirname "${token_path}")"
+
+        # Ensure token directory perms are strict
+        if [ -d "${token_dir}" ]; then
+            dperms=$(stat -c %a "${token_dir}" 2>/dev/null || echo "")
+            downer=$(stat -c %U:%G "${token_dir}" 2>/dev/null || echo "")
+            if [ "${dperms}" != "700" ] 2>/dev/null || [ "${downer}" != "root:root" ] 2>/dev/null; then
+                log_warn "⚠ Dashboard API token directory has insecure perms (${dperms:-?} ${downer:-?}); hardening"
+                chmod 700 "${token_dir}" 2>/dev/null || true
+                chown root:root "${token_dir}" 2>/dev/null || true
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                log_success "  ✓ Token directory hardened (700 root:root)"
+            fi
+        fi
+
+        if [ -f "${token_path}" ]; then
+            perms=$(stat -c %a "${token_path}" 2>/dev/null || echo "")
+            owner=$(stat -c %U:%G "${token_path}" 2>/dev/null || echo "")
+
+            # Enforce 600 root:root
+            if [ "${perms}" != "600" ] 2>/dev/null || [ "${owner}" != "root:root" ] 2>/dev/null; then
+                log_warn "⚠ Insecure dashboard API token permissions detected (${perms:-?} ${owner:-?})"
+                log_info "  → Auto-repair: fixing token permissions (600 root:root)..."
+                chmod 600 "${token_path}" 2>/dev/null || true
+                chown root:root "${token_path}" 2>/dev/null || true
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                log_success "  ✓ Token permissions secured"
+            fi
+
+            # Ensure token is not empty
+            if [ ! -s "${token_path}" ]; then
+                log_warn "⚠ Dashboard API token file is empty"
+                log_info "  → Auto-repair: regenerating token and restarting API..."
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+                if command -v python3 >/dev/null 2>&1; then
+                    python3 - <<'PY' >"${token_path}" 2>/dev/null
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+                else
+                    date +%s%N | sha256sum 2>/dev/null | head -c 32 >"${token_path}" 2>/dev/null || true
+                fi
+
+                chmod 600 "${token_path}" 2>/dev/null || true
+                chown root:root "${token_path}" 2>/dev/null || true
+                execute_guarded "Restart dashboard settings API (new token)" systemctl restart "${dash_api_unit}" || true
+                log_success "  ✓ Token regenerated and API restarted"
+            fi
+        else
+            log_warn "⚠ Dashboard API token file is missing"
+            log_info "  → Auto-repair: creating token and restarting API..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+            mkdir -p "${token_dir}" 2>/dev/null || true
+            if command -v python3 >/dev/null 2>&1; then
+                python3 - <<'PY' >"${token_path}" 2>/dev/null
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+            else
+                date +%s%N | sha256sum 2>/dev/null | head -c 32 >"${token_path}" 2>/dev/null || true
+            fi
+            chmod 600 "${token_path}" 2>/dev/null || true
+            chown root:root "${token_path}" 2>/dev/null || true
+            execute_guarded "Restart dashboard settings API (token created)" systemctl restart "${dash_api_unit}" || true
+            log_success "  ✓ Token created and API restarted"
+        fi
+    else
+        log_info "ℹ Dashboard Settings API unit not installed; skipping deep API check"
+    fi
+else
+    log_info "ℹ Dashboard disabled (DASHBOARD_ENABLED=false); skipping deep API check"
+fi
+
+# Check 41: Btrfs metadata health (advanced repair)
+log_debug "[41/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
 root_fstype2=""
 if command -v findmnt >/dev/null 2>&1; then
     root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
@@ -8090,8 +8249,8 @@ else
     log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
 fi
 
-# Check 41: GPG keyring/signature handling (deep repair)
-log_debug "[41/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
+# Check 42: GPG keyring/signature handling (deep repair)
+log_debug "[42/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
 if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping deep GPG check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
