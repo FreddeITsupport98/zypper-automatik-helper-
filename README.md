@@ -1152,6 +1152,10 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - A **Snapper Manager** panel (root actions via localhost API) that exposes Snapper menu options **1–6**:
   - Status, list recent snapshots, create snapshot, full cleanup, AUTO enable timers, AUTO disable timers
   - Actions that change system state require an explicit confirmation phrase (e.g. CLEANUP / ENABLE / DISABLE)
+  - Note about systemd timer status: some commands show a `preset` value (vendor default), which is **not** the current state.
+    - Example: `snapper-boot.timer enabled=enabled active=active preset=disabled` means the timer **is enabled and running**, but the distro preset default is “disabled”. This is normal and safe.
+    - What matters for functionality is `enabled=` and `active=`.
+    - If you really want to override the vendor preset, you can add a local preset file under `/etc/systemd/system-preset/` (optional; not required for Snapper to work).
 - "Command Center" quick actions: big buttons that **copy** the correct helper command to your clipboard (verify/fix, install updates, health report, logs, reset downloads/config, refresh/open dashboard, diagnostics)
 - Service health indicators for the downloader/verify/notifier timers
 - Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
