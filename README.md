@@ -234,7 +234,7 @@ sudo zypper-auto-helper --self-update                  # Update using SELF_UPDAT
 sudo zypper-auto-helper --self-update stable           # Stable channel: latest GitHub Release
 sudo zypper-auto-helper --self-update rolling          # Rolling channel: latest commit on main
 sudo zypper-auto-helper --self-update stable --force   # Force reinstall even if refs match / force downgrade
-sudo zypper-auto-helper --self-update stable --dry-run  # SAFE test: download + verify only (does not replace installed helper)
+sudo zypper-auto-helper --self-update stable --dry-run  # SAFE test: opens WebUI dry-run simulation (default) or runs CLI dry-run when ZNH_SELF_UPDATE_NO_UI=1
 
 # Rollback Wizard (DANGEROUS)
 sudo zypper-auto-helper --rollback             # Interactive Snapper rollback wizard (reboots after rollback)
@@ -292,6 +292,8 @@ Dashboard WebUI self-update:
   - Click **Install**.
 - While installing, the overlay shows a scrollable live log view and a progress bar.
 - Safe testing: you can enable “Dry-run test” in the overlay to download + verify without replacing the installed helper.
+- CLI note: `--self-update ... --dry-run` opens the WebUI simulation by default. If you want a pure CLI dry-run instead, run it like:
+  - `sudo env ZNH_SELF_UPDATE_NO_UI=1 zypper-auto-helper --self-update stable --dry-run`
 - The Update button will be disabled when the latest stable release tag is older than your installed build (no downgrade by default).
 - After a successful update + reload, the dashboard auto-fetches and shows the full latest stable release notes.
 

@@ -4312,6 +4312,11 @@ generate_dashboard() {
               <span class="cmd-desc">Interactive diagnostics tools</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
+          <button class="cmd-btn" id="self-update-sim-run-btn" type="button" title="Open self-update overlay in SAFE dry-run simulation mode (no install)">
+              <span class="cmd-label">Simulate: Self-Update (Dry-run)</span>
+              <span class="cmd-desc">Blocking overlay + MIT license + live logs/progress (no install)</span>
+              <div class="cmd-copy-feedback">Opening…</div>
+          </button>
         </div>
       </details>
     </div>
@@ -4989,6 +4994,7 @@ generate_dashboard() {
         poll_timer: null,
         running: false,
         dry_run: false,
+        auto_dry_run: false,
         required_phrase: 'UPDATE'
     };
 
@@ -5030,6 +5036,7 @@ generate_dashboard() {
         _su.job_id = '';
         _su.running = false;
         _su.dry_run = false;
+        _su.auto_dry_run = false;
         _su.required_phrase = 'UPDATE';
         if (_su.poll_timer) {
             try { clearInterval(_su.poll_timer); } catch (e) {}
@@ -5241,6 +5248,12 @@ generate_dashboard() {
         var inp = document.getElementById('su-phrase');
         var dry = document.getElementById('su-dry-run');
 
+        // When opened in simulation mode, pre-select dry-run for safety.
+        if (dry && _su.auto_dry_run) {
+            try { dry.checked = true; } catch (e) {}
+            _su.dry_run = true;
+        }
+
         function updateInstallEnabled() {
             var ok = false;
             try {
@@ -5281,6 +5294,59 @@ generate_dashboard() {
             try { pre.scrollTop = pre.scrollHeight; } catch (ee) {}
         }
         highlightBlock('su-live-log');
+    }
+
+    function _suFetchStableReleaseNotesText() {
+        var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
+        return _githubApiJson(base + '/releases/latest').then(function(j) {
+            var out = [];
+            out.push('Stable channel (GitHub Releases)');
+            out.push('Tag: ' + String(j.tag_name || 'unknown'));
+            if (j.published_at) out.push('Published: ' + String(j.published_at));
+            out.push('');
+            out.push(String(j.body || '(no release notes)'));
+            return out.join('\n');
+        });
+    }
+
+    function _suRenderReleaseNotesOk(title, subtitle, logText, notesText) {
+        var e = _suEls();
+        if (!e.body) return;
+
+        var safe = function(s) {
+            return String(s || '').replace(/</g, '&lt;');
+        };
+
+        if (e.step) e.step.textContent = 'Complete';
+        if (e.mode) e.mode.textContent = 'Release notes';
+        if (e.title) e.title.textContent = String(title || 'Done');
+
+        e.body.innerHTML = [
+            '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
+            '<div class="overlay-scroll">',
+              '<div style="font-weight:950; margin-bottom: 8px;">Live log</div>',
+              '<pre class="overlay-pre" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
+              '<div style="font-weight:950; margin-top: 14px; margin-bottom: 8px;">Latest stable release notes</div>',
+              '<pre class="overlay-pre" style="max-height: 260px;">' + safe(notesText || '(no release notes)') + '</pre>',
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
+        ].join('\n');
+
+        // OK button
+        if (e.close) e.close.textContent = 'OK';
+        _suSetButtons({
+            show_cancel: false,
+            show_back: false,
+            show_next: false,
+            show_install: false,
+            show_close: true,
+            close_disabled: false,
+            footer_center: true
+        });
+
+        if (e.close) e.close.onclick = function() {
+            _suShow(false);
+        };
     }
 
     function _suPollJob(job_id, ch, dry_run) {
@@ -5342,14 +5408,14 @@ generate_dashboard() {
                                 try { window.location.reload(); } catch (e5) {}
                             }, 3500);
                         } else {
-                            _suSetButtons({
-                                show_cancel: false,
-                                show_back: false,
-                                show_next: false,
-                                show_install: false,
-                                show_close: true,
-                                close_disabled: false,
-                                footer_center: true
+                            // Dry-run finished: show release notes + OK button.
+                            var logText = '';
+                            try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e6) { logText = ''; }
+                            _suFetchStableReleaseNotesText().then(function(notes) {
+                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, notes);
+                            }).catch(function(err) {
+                                var msg = (err && err.message) ? err.message : 'failed to fetch release notes';
+                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, 'ERROR: ' + msg);
                             });
                         }
                     } else {
@@ -5396,49 +5462,58 @@ generate_dashboard() {
     }
 
     function selfUpdatePostSuccessInit() {
-        // If we just installed an update and reloaded, auto-show the latest release notes.
+        // If we just installed an update and reloaded, show the latest release notes
+        // with an OK button.
         var flag = '';
         try { flag = localStorage.getItem('znh_su_post_success') || ''; } catch (e) { flag = ''; }
         if (flag !== '1') return;
 
-        var ch = 'stable';
-        try { ch = localStorage.getItem('znh_su_channel') || 'stable'; } catch (e2) { ch = 'stable'; }
-
         try {
             localStorage.removeItem('znh_su_post_success');
             localStorage.removeItem('znh_su_channel');
-        } catch (e3) {}
+        } catch (e2) {}
 
-        // Requirement: after successful update, show the full release log from the latest tag.
-        // We always fetch stable release notes for this post-success message.
+        // Refresh status.
+        try { selfUpdateFetchStatus(false); } catch (e3) {}
+
+        // Update the main changelog area too.
         var old = (_settingsConfig && _settingsConfig.SELF_UPDATE_CHANNEL) ? String(_settingsConfig.SELF_UPDATE_CHANNEL) : 'stable';
         try { _settingsConfig.SELF_UPDATE_CHANNEL = 'stable'; } catch (e4) {}
         selfUpdateFetchChangelog(null).finally(function() {
             try { _settingsConfig.SELF_UPDATE_CHANNEL = old; } catch (e5) {}
-            toast('Self-update complete', 'Showing latest stable release notes', 'ok');
         });
 
-        // Also refresh status.
-        try { selfUpdateFetchStatus(false); } catch (e6) {}
-
-        // Add a small hint at the top of the changelog area.
-        try {
-            setTimeout(function() {
-                var pre = document.getElementById('self-update-changelog');
-                if (!pre) return;
-                var cur = String(pre.textContent || '');
-                var hdr = 'Update finished successfully. The helper is running normally.\n\n';
-                if (cur.indexOf(hdr) !== 0) {
-                    pre.textContent = hdr + cur;
-                }
-            }, 500);
-        } catch (e7) {}
+        // Open a blocking OK dialog that shows the full latest release notes.
+        _suReset();
+        _su.channel = 'stable';
+        _suShow(true);
+        _suUpdateProgress('Done', 100);
+        _suSetLog('');
+        _suFetchStableReleaseNotesText().then(function(notes) {
+            _suRenderReleaseNotesOk('Update installed successfully', 'The helper is running normally.', '', notes);
+        }).catch(function(err) {
+            var msg = (err && err.message) ? err.message : 'failed to fetch release notes';
+            _suRenderReleaseNotesOk('Update installed successfully', 'The helper is running normally.', '', 'ERROR: ' + msg);
+        });
     }
 
-    function selfUpdateOpenOverlay(btnEl) {
-        var ch = _selfUpdateGetChannel(_settingsConfig || {});
+    function selfUpdateOpenOverlay(arg) {
+        var opts = {};
+        try {
+            // If called from a click handler, arg may be a DOM element.
+            if (arg && typeof arg === 'object' && arg.nodeType) {
+                opts = {};
+            } else {
+                opts = arg || {};
+            }
+        } catch (e) { opts = {}; }
+
+        var ch = (opts && opts.channel) ? String(opts.channel) : _selfUpdateGetChannel(_settingsConfig || {});
+        if (ch !== 'stable' && ch !== 'rolling') ch = _selfUpdateGetChannel(_settingsConfig || {});
+
         _suReset();
         _su.channel = ch;
+        _su.auto_dry_run = !!(opts && opts.auto_dry_run);
 
         _suShow(true);
         _suRenderAgreement(null);
@@ -5519,6 +5594,26 @@ generate_dashboard() {
     function selfUpdateRun(btnEl) {
         // Update button now opens a blocking overlay workflow.
         return selfUpdateOpenOverlay(btnEl);
+    }
+
+    function selfUpdateAutoQueryInit() {
+        // URL query allows opening the overlay automatically (used by CLI dry-run -> WebUI simulation).
+        // Example: status.html?live=1&su=1&su_channel=stable&su_dry=1
+        var sp = null;
+        try { sp = new URLSearchParams(window.location.search || ''); } catch (e) { sp = null; }
+        if (!sp) return;
+
+        var su = String(sp.get('su') || sp.get('selfupdate') || sp.get('self-update') || '').toLowerCase();
+        if (su !== '1' && su !== 'true' && su !== 'yes') return;
+
+        var ch = String(sp.get('su_channel') || '').toLowerCase();
+        var dry = String(sp.get('su_dry') || sp.get('dry') || '').toLowerCase();
+        var autoDry = (dry === '1' || dry === 'true' || dry === 'yes');
+
+        // Give the page a moment to render.
+        setTimeout(function() {
+            try { selfUpdateOpenOverlay({ channel: ch, auto_dry_run: autoDry }); } catch (e2) {}
+        }, 400);
     }
 
     function selfUpdateFetchChangelog(btnEl) {
@@ -5620,8 +5715,9 @@ generate_dashboard() {
         var toggleBtn = document.getElementById('self-update-toggle-btn');
         var runBtn = document.getElementById('self-update-run-btn');
         var clBtn = document.getElementById('self-update-changelog-btn');
+        var simBtn = document.getElementById('self-update-sim-run-btn');
 
-        if (!chEl && !statusEl && !toggleBtn && !runBtn && !clBtn) return;
+        if (!chEl && !statusEl && !toggleBtn && !runBtn && !clBtn && !simBtn) return;
 
         if (toggleBtn) toggleBtn.addEventListener('click', function(ev) {
             try { addRipple(toggleBtn, ev.clientX, ev.clientY); } catch (e) {}
@@ -5638,6 +5734,12 @@ generate_dashboard() {
             selfUpdateFetchChangelog(clBtn).finally(function() {
                 try { selfUpdateFetchStatus(false); } catch (e2) {}
             });
+        });
+
+        // Debug action: open self-update overlay in SAFE dry-run simulation mode.
+        if (simBtn) simBtn.addEventListener('click', function(ev) {
+            try { addRipple(simBtn, ev.clientX, ev.clientY); } catch (e) {}
+            try { selfUpdateOpenOverlay({ auto_dry_run: true }); } catch (e2) {}
         });
 
         // Initial render + status probe (best-effort)
@@ -5868,6 +5970,7 @@ generate_dashboard() {
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
+            try { selfUpdateAutoQueryInit(); } catch (e) {}
 
             var inv = (c.invalid_keys || []);
             var warn = (c.warnings || []);
@@ -10570,17 +10673,27 @@ run_dash_stop_only() {
 run_dash_open_only() {
     log_info ">>> Opening dashboard (best-effort)"
 
-    local dash_browser
+    local dash_browser extra_qs
     dash_browser="${1:-${ZYPPER_AUTO_DASHBOARD_BROWSER:-${DASHBOARD_BROWSER:-}}}"
+    extra_qs="${2:-}"
 
     # Best-effort regenerate so the page is fresh.
     generate_dashboard || true
 
-    local dash_path dash_dir
-    dash_dir="${SUDO_USER_HOME:-}/.local/share/zypper-notify"
+    local dash_path dash_dir eff_home
+
+    eff_home="${SUDO_USER_HOME:-}"
+    if [ -z "${eff_home:-}" ] && [ -n "${SUDO_USER:-}" ]; then
+        eff_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
+    fi
+    if [ -z "${eff_home:-}" ]; then
+        eff_home="${HOME:-/root}"
+    fi
+
+    dash_dir="${eff_home}/.local/share/zypper-notify"
     dash_path="${dash_dir}/status.html"
 
-    if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${dash_path}" ]; then
+    if [ -f "${dash_path}" ]; then
         log_info "Dashboard path: ${dash_path}"
         if [ -n "${dash_browser:-}" ]; then
             log_info "Dashboard browser override: ${dash_browser}"
@@ -10622,6 +10735,16 @@ run_dash_open_only() {
         fi
 
         url="http://127.0.0.1:${port}/status.html?live=1"
+
+        # Optional extra query parameters (used by self-update simulation, etc.).
+        # Accept either "k=v&k2=v2" or "?k=v" or "&k=v".
+        if [ -n "${extra_qs:-}" ]; then
+            extra_qs="${extra_qs#\?}"
+            extra_qs="${extra_qs#&}"
+            if [ -n "${extra_qs:-}" ]; then
+                url="${url}&${extra_qs}"
+            fi
+        fi
 
         # Dashboard Settings API token: keep user token file in sync with the root API.
         local token_file old_token new_token api_ok
@@ -14803,6 +14926,18 @@ run_self_update_only() {
             channel="stable"
             ;;
     esac
+
+    # If user requested --dry-run, prefer the WebUI simulation flow.
+    # This shows the full disclosure + MIT license, then runs a dry-run job
+    # with live progress/logs in the blocking overlay.
+    # Set ZNH_SELF_UPDATE_NO_UI=1 to force pure CLI dry-run behavior.
+    if [ "${dry_run}" -eq 1 ] 2>/dev/null && [ "${ZNH_SELF_UPDATE_NO_UI:-0}" -ne 1 ] 2>/dev/null; then
+        log_info "[self-update] Dry-run requested: opening WebUI self-update simulation (no install will happen)"
+        # Ensure dashboard is served + API token is available, then open overlay.
+        run_dash_open_only "" "su=1&su_channel=${channel}&su_dry=1" || true
+        update_status "SUCCESS: Self-update dry-run simulation opened (no install)"
+        return 0
+    fi
 
     update_status "Self-updating (${channel})..."
 
@@ -22102,11 +22237,17 @@ def _write_managed_block(conf_path: str, values: dict) -> None:
     os.chmod(conf_path, 0o600)
 
 
-def _run_cmd(cmd: list[str], timeout_s: int, *, log=None) -> tuple[int, str]:
+def _run_cmd(cmd: list[str], timeout_s: int, *, log=None, extra_env: dict | None = None) -> tuple[int, str]:
     # Returns: (rc, combined_output)
     # Keep it simple and deterministic: merge stderr into stdout.
     env = os.environ.copy()
     env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    if extra_env and isinstance(extra_env, dict):
+        for k, v in extra_env.items():
+            try:
+                env[str(k)] = str(v)
+            except Exception:
+                pass
     try:
         if log:
             log("debug", f"exec: {' '.join(cmd)} timeout={timeout_s}s")
@@ -22653,6 +22794,9 @@ class Handler(BaseHTTPRequestHandler):
             def worker():
                 env = os.environ.copy()
                 env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                # Prevent recursion: the helper's --dry-run opens the WebUI by default.
+                # Jobs must run in pure CLI mode.
+                env["ZNH_SELF_UPDATE_NO_UI"] = "1"
 
                 cmd = [HELPER_BIN, "--self-update", ch]
                 if dry_run:
@@ -22763,7 +22907,7 @@ class Handler(BaseHTTPRequestHandler):
             cmd = [HELPER_BIN, "--self-update", ch]
             if dry_run:
                 cmd.append("--dry-run")
-            rc, out = _run_cmd(cmd, timeout_s=300, log=getattr(self.server, "_znh_log", None))
+            rc, out = _run_cmd(cmd, timeout_s=300, log=getattr(self.server, "_znh_log", None), extra_env={"ZNH_SELF_UPDATE_NO_UI": "1"})
 
             # Best-effort: regenerate dashboard after updating.
             dash_rc = -1
