@@ -6593,7 +6593,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=46
+    local TOTAL_CHECKS=50
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -8544,6 +8544,157 @@ else
     log_info "ℹ Systemd state is '${sys_state}'; skipping failed-unit health check"
 fi
 
+# Check 47: RPM database integrity (final sanity)
+# We already do structural checks + deep repairs earlier, but this late-stage
+# check catches "rpm hangs" edge cases before we print the summary.
+log_debug "[47/${TOTAL_CHECKS}] Verifying RPM database consistency (final sanity)..."
+rpmqa_ok=0
+if command -v rpm >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 10 rpm -qa --qf '' >/dev/null 2>&1; then
+            rpmqa_ok=1
+        fi
+    else
+        # Without timeout, avoid potentially hanging forever.
+        log_info "ℹ timeout not available; skipping rpm -qa hang-detection"
+        rpmqa_ok=1
+    fi
+
+    if [ "${rpmqa_ok}" -eq 1 ] 2>/dev/null; then
+        log_success "✓ RPM database is readable (rpm -qa)"
+    else
+        log_warn "⚠ RPM database appears unresponsive (rpm -qa timed out/failed)"
+
+        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+            log_warn "  ⚠ Skipping rpmdb rebuild because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            VERIFICATION_FAILED=1
+        else
+            log_info "  → Auto-repair: rebuilding RPM database (best-effort)..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+            # Derive db path (supports sqlite rpmdb too).
+            RPM_DB_PATH3=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
+            if [ -z "${RPM_DB_PATH3:-}" ]; then
+                RPM_DB_PATH3="/usr/lib/sysimage/rpm"
+            fi
+
+            # Best-effort: remove legacy lock/temp files (ignore if absent).
+            if [ -d "${RPM_DB_PATH3}" ]; then
+                execute_optional "Remove rpmdb lock file" rm -f "${RPM_DB_PATH3}/.rpm.lock" || true
+                execute_optional "Remove legacy rpmdb __db.* temp files" rm -f "${RPM_DB_PATH3}/__db."* || true
+            fi
+
+            if command -v timeout >/dev/null 2>&1; then
+                if execute_guarded "Rebuild RPM DB (rpm --rebuilddb)" timeout 180 rpm --rebuilddb; then
+                    log_success "  ✓ RPM database rebuilt successfully"
+                else
+                    log_error "  ✗ Failed to rebuild RPM database"
+                    VERIFICATION_FAILED=1
+                fi
+            else
+                if execute_guarded "Rebuild RPM DB (rpm --rebuilddb)" rpm --rebuilddb; then
+                    log_success "  ✓ RPM database rebuilt successfully"
+                else
+                    log_error "  ✗ Failed to rebuild RPM database"
+                    VERIFICATION_FAILED=1
+                fi
+            fi
+        fi
+    fi
+else
+    log_info "ℹ rpm not available; skipping rpmdb final sanity check"
+fi
+
+# Check 48: Snapper cleanup timers
+log_debug "[48/${TOTAL_CHECKS}] Verifying Snapper cleanup timers..."
+if __znh_unit_file_exists_system snapper-cleanup.timer; then
+    if systemctl is-active --quiet snapper-cleanup.timer 2>/dev/null; then
+        log_success "✓ Snapper cleanup timer is active"
+    else
+        log_warn "⚠ Snapper cleanup timer is INACTIVE (disk may fill over time)"
+        if attempt_repair "enable snapper cleanup timer" \
+            "systemctl enable --now snapper-cleanup.timer" \
+            "systemctl is-active snapper-cleanup.timer"; then
+            log_success "  ✓ Snapper cleanup timer enabled"
+        else
+            log_warn "  ⚠ Failed to enable snapper-cleanup.timer (non-fatal but risky)"
+        fi
+    fi
+else
+    log_info "ℹ snapper-cleanup.timer not installed; skipping"
+fi
+
+# Check 49: Repository metadata health (stale raw cache)
+log_debug "[49/${TOTAL_CHECKS}] Checking repository metadata health (raw cache age)..."
+if [ -d /var/cache/zypp/raw ]; then
+    cache_hit=$(find /var/cache/zypp/raw -maxdepth 1 -mindepth 1 -type d -mtime +14 -print -quit 2>/dev/null || true)
+
+    if [ -z "${cache_hit:-}" ] 2>/dev/null && [ "${REPO_REFRESH_FAILED:-0}" -ne 1 ] 2>/dev/null; then
+        log_success "✓ Repository metadata seems fresh"
+    else
+        log_warn "⚠ Repository metadata cache looks stale (or refresh failed earlier)"
+
+        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+            log_warn "  ⚠ Skipping metadata cleanup/refresh because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            VERIFICATION_FAILED=1
+        else
+            log_info "  → Auto-repair: forcing metadata cleanup and refresh..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+            # Prefer targeted cache cleanup (raw metadata + solv) without wiping downloaded RPMs.
+            execute_optional "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
+            execute_optional "Clear zypp solv cache" rm -rf /var/cache/zypp/solv/* >/dev/null 2>&1 || true
+
+            if command -v timeout >/dev/null 2>&1; then
+                if execute_guarded "Refresh repos (forced)" timeout 90 zypper --non-interactive refresh --force; then
+                    log_success "  ✓ Repositories refreshed successfully"
+                    REPO_REFRESH_FAILED=0
+                else
+                    log_error "  ✗ Failed to refresh repositories"
+                    VERIFICATION_FAILED=1
+                fi
+            else
+                if execute_guarded "Refresh repos (forced)" zypper --non-interactive refresh --force; then
+                    log_success "  ✓ Repositories refreshed successfully"
+                    REPO_REFRESH_FAILED=0
+                else
+                    log_error "  ✗ Failed to refresh repositories"
+                    VERIFICATION_FAILED=1
+                fi
+            fi
+        fi
+    fi
+else
+    log_info "ℹ /var/cache/zypp/raw not present; skipping metadata age check"
+fi
+
+# Check 50: Orphaned temporary files & cache garbage
+log_debug "[50/${TOTAL_CHECKS}] Checking for orphaned zypp cache garbage..."
+if [ -d /var/cache/zypp ]; then
+    garbage_count=$(find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) 2>/dev/null | wc -l | tr -d ' ')
+    if ! [[ "${garbage_count:-}" =~ ^[0-9]+$ ]]; then
+        garbage_count=0
+    fi
+
+    if [ "${garbage_count}" -lt 50 ] 2>/dev/null; then
+        log_success "✓ Cache hygiene is good (${garbage_count} stale file(s))"
+    else
+        log_warn "⚠ Found ${garbage_count} stale cache file(s); cleaning best-effort..."
+
+        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+            log_warn "  ⚠ Skipping cache garbage cleanup because zypper appears to be running"
+        else
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            execute_optional "Remove stale .solv/cookies" find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) -delete 2>/dev/null || true
+            # Keep this narrow: only repodata metadata, not downloaded packages.
+            execute_optional "Prune repodata temp files" find /var/cache/zypp/raw -type f -path '*/repodata/*' -delete 2>/dev/null || true
+            log_success "  ✓ Cache garbage cleanup completed"
+        fi
+    fi
+else
+    log_info "ℹ /var/cache/zypp not present; skipping cache garbage check"
+fi
+
 # Dashboard UX: surface reboot-required state as a top-level status so users
 # don't forget to reboot after kernel/core library updates.
 if check_reboot_required; then
@@ -8557,7 +8708,7 @@ fi
 
 # If we performed a critical repair (e.g. restarted the dashboard API), run a
 # one-off follow-up verification soon so we can confirm the fix held.
-if [ "${FOLLOWUP_SOON:-0}" -eq 1 ] 2>/dev/null || [ "${VERIFICATION_FAILED}" -gt 0 ] 2>/dev/null; then
+if [ "${FOLLOWUP_SOON:-0}" -eq 1 ] 2>/dev/null || [ "${VERIFICATION_FAILED}" -gt 0 ] 2>/dev/null || [ "${REPAIR_ATTEMPTS:-0}" -gt 0 ] 2>/dev/null; then
     if command -v systemd-run >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
         # Use a fixed unit name so repeated calls don't create a spam storm.
         log_info "Problems were found/fixed. Scheduling follow-up verification in 5 minutes..."
