@@ -5068,12 +5068,12 @@ generate_dashboard() {
         var common = [
             '<p><strong>What this does:</strong> this dashboard will download code from GitHub and then run the helper\'s self-updater as root. That can replace <code>/usr/local/bin/zypper-auto-helper</code>.</p>',
             '<p><strong>You are in control:</strong> nothing happens until you (1) accept the license/disclosure and (2) type the confirmation phrase and click Install.</p>',
-            '<p><strong>MIT License:</strong> this project is released under the MIT License (text below). It is provided “as is”, without warranty of any kind.</p>'
+            '<p><strong>MIT License:</strong> this project is released under the MIT License (text below). It is provided "as is", without warranty of any kind.</p>'
         ];
 
         var stable = [
             '<p><strong>Stable channel (recommended):</strong> installs the latest GitHub <em>Release</em> tag (example: <code>v65</code>).</p>',
-            '<p><strong>What “stable” means here:</strong> it is intended to be the safer choice for normal use. It should change less often than rolling and is meant to be tested before it is tagged as a Release. However, it is still a script that runs on a live system; bugs can still happen.</p>',
+            '<p><strong>What "stable" means here:</strong> it is intended to be the safer choice for normal use. It should change less often than rolling and is meant to be tested before it is tagged as a Release. However, it is still a script that runs on a live system; bugs can still happen.</p>',
             '<ul>' +
               '<li>Stable uses GitHub Releases (tags) as the source of truth.</li>' +
               '<li>It will refuse to downgrade to an older stable tag unless you force it.</li>' +
