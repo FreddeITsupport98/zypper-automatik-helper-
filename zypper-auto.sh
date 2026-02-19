@@ -104,6 +104,16 @@ __znh_pid_is_dashboard_http_server() {
     if command -v ps >/dev/null 2>&1; then
         local args
         args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
+
+        # New-style dashboard server (ThreadingHTTPServer) started via --dash-open.
+        # We mark the process name via: exec -a znh-dashboard-http ...
+        if printf '%s' "${args}" | grep -q "znh-dashboard-http"; then
+            printf '%s' "${args}" | grep -q "${dash_dir}" || return 1
+            printf '%s' "${args}" | grep -q " ${port}\b" || return 1
+            return 0
+        fi
+
+        # Legacy-style dashboard server.
         # Verify it's our http.server and pointing at the right directory/port.
         printf '%s' "${args}" | grep -q "python3 -m http.server" || return 1
         # Pattern begins with "--" so terminate grep options explicitly.
@@ -156,6 +166,14 @@ exec -a znh-dashboard-sync bash -lc '
   dash_dir="$1";
   src_root="/var/log/zypper-auto";
 
+  # Sync interval (seconds). Default lowered to improve WebUI responsiveness.
+  # You can override it via: ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS=10 zypper-auto-helper --dash-open
+  interval="${ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS:-2}";
+  case "$interval" in
+    ''|*[!0-9]*) interval=2 ;;
+  esac
+  if [ "$interval" -lt 1 ] 2>/dev/null; then interval=1; fi
+
   # Best-effort background priority: idle IO + nice(19).
   # Use -p $$ so we keep the custom argv0 (znh-dashboard-sync) intact.
   if command -v ionice >/dev/null 2>&1; then
@@ -177,7 +195,7 @@ exec -a znh-dashboard-sync bash -lc '
     cp -u "${src_root}/download-status.txt" "${dash_dir}/download-status.txt" 2>/dev/null || true
     # status.html is larger; only update if it changed.
     cp -u "${src_root}/status.html" "${dash_dir}/status.html" 2>/dev/null || true
-    sleep 10
+    sleep "$interval"
   done
 ' _ "${dash_dir}"
 SYNC
@@ -872,6 +890,18 @@ ZYPPER_TURBO_TUNER_ENABLED="false"
 # Verification hygiene: auto-vacuum the systemd journal when it grows too large.
 VERIFY_JOURNAL_AUTO_VACUUM_ENABLED="true"
 
+# AUTO_REPAIR_TRY_REMOUNT_RW
+# When true (DANGEROUS / advanced), verification and snapper helpers may attempt
+# to remount a read-only filesystem as read-write using:
+#   mount -o remount,rw <mountpoint>
+#
+# This can help recover from cases where / (and therefore /etc/snapper/configs)
+# is unexpectedly remounted read-only. It may also be expected to FAIL on
+# immutable/transactional systems.
+#
+# Default: false (safety)
+AUTO_REPAIR_TRY_REMOUNT_RW="false"
+
 HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
@@ -1507,6 +1537,7 @@ __znh_write_dashboard_schema_json() {
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
+    "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
     "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
     "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED": {"type": "bool", "default": "true"},
@@ -1605,6 +1636,20 @@ ENABLE_PIPX_UPDATES=true
 # - true : always run optional refresh steps after a successful zypper dup,
 #   even if there were no system updates.
 OPTIONAL_UPDATES_ALWAYS_REFRESH=false
+
+# ---------------------------------------------------------------------
+# Verification / auto-repair (advanced)
+# ---------------------------------------------------------------------
+
+# AUTO_REPAIR_TRY_REMOUNT_RW
+# DANGEROUS / advanced. When true, verification and Snapper helpers may attempt
+# to remount a read-only filesystem as read-write using:
+#   mount -o remount,rw <mountpoint>
+#
+# This is only useful when / (and therefore /etc) was unexpectedly remounted
+# read-only. It may fail on immutable/transactional systems.
+# Default: false (safety)
+AUTO_REPAIR_TRY_REMOUNT_RW=false
 
 # ---------------------------------------------------------------------
 # Remote monitoring (webhooks)
@@ -2330,6 +2375,7 @@ EOF
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
+    validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
     validate_bool_flag VERIFY_JOURNAL_AUTO_VACUUM_ENABLED true
 
@@ -2649,6 +2695,7 @@ EOF
     _mark_missing_key "SELF_UPDATE_CHANNEL"
     _mark_missing_key "ZYPPER_TURBO_TUNER_ENABLED"
     _mark_missing_key "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED"
+    _mark_missing_key "AUTO_REPAIR_TRY_REMOUNT_RW"
 
     # Snapper retention optimizer knobs
     _mark_missing_key "SNAP_RETENTION_OPTIMIZER_ENABLED"
@@ -3480,6 +3527,49 @@ generate_dashboard() {
         status_color="#3498db" # Blue
     fi
 
+    # Zypper lock badge (helps explain "stuck" installs / why Rocket wizard may wait).
+    local zypp_lock_state zypp_lock_pid zypp_lock_file
+    local zypp_lock_badge_text zypp_lock_badge_class zypp_lock_badge_title
+    zypp_lock_state="none"
+    zypp_lock_pid=""
+    zypp_lock_file=""
+    for zlock in /run/zypp.pid /var/run/zypp.pid; do
+        if [ -f "${zlock}" ]; then
+            zypp_lock_file="${zlock}"
+            zypp_lock_pid=$(cat "${zlock}" 2>/dev/null || echo "")
+            if [[ "${zypp_lock_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${zypp_lock_pid}" 2>/dev/null; then
+                zypp_lock_state="active"
+                break
+            fi
+            # If lock file exists but PID isn't alive, mark it stale.
+            zypp_lock_state="stale"
+        fi
+    done
+    # If the lock file is missing but zypper is running, still show "active".
+    if [ "${zypp_lock_state}" = "none" ] && pgrep -x zypper >/dev/null 2>&1; then
+        zypp_lock_state="active"
+        if [ -z "${zypp_lock_pid:-}" ]; then
+            zypp_lock_pid="unknown"
+        fi
+    fi
+
+    zypp_lock_badge_text=""
+    zypp_lock_badge_class="znh-hidden"
+    zypp_lock_badge_title=""
+
+    if [ "${zypp_lock_state}" = "active" ]; then
+        zypp_lock_badge_text="Zypper lock: ACTIVE${zypp_lock_pid:+ (PID ${zypp_lock_pid})}"
+        zypp_lock_badge_class="lock-active"
+        zypp_lock_badge_title="A zypper/YaST process is running; updates may be waiting on the lock."
+    elif [ "${zypp_lock_state}" = "stale" ]; then
+        zypp_lock_badge_text="Zypper lock: STALE${zypp_lock_pid:+ (PID ${zypp_lock_pid})}"
+        zypp_lock_badge_class="lock-stale"
+        zypp_lock_badge_title="Lock file exists but PID does not appear to be running (stale lock?)."
+    fi
+    if [ -n "${zypp_lock_file:-}" ]; then
+        zypp_lock_badge_title="${zypp_lock_badge_title} Lock file: ${zypp_lock_file}"
+    fi
+
     last_install_log=""
     last_install_log=$(find "${LOG_DIR}" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@\t%p\n' 2>/dev/null \
         | sort -nr | head -1 | cut -f2- || true)
@@ -3670,11 +3760,15 @@ generate_dashboard() {
     fi
 
     local last_status_esc last_tail_esc last_install_log_esc flight_report_esc flight_report_log_esc
+    local zypp_lock_badge_text_esc zypp_lock_badge_title_esc
     last_status_esc="$(_html_escape "$last_status")"
     last_tail_esc="$(_html_escape "$last_install_tail")"
     last_install_log_esc="$(_html_escape "$last_install_log")"
     flight_report_esc="$(_html_escape "$flight_report_raw")"
     flight_report_log_esc="$(_html_escape "$flight_report_log")"
+
+    zypp_lock_badge_text_esc="$(_html_escape "${zypp_lock_badge_text}")"
+    zypp_lock_badge_title_esc="$(_html_escape "${zypp_lock_badge_title}")"
 
     mkdir -p "$(dirname "${out_root}")" 2>/dev/null || true
 
@@ -4075,6 +4169,18 @@ generate_dashboard() {
         max-width: 100%;
         overflow-wrap: anywhere;
     }
+
+    .znh-hidden { display: none !important; }
+
+    /* Zypp/zypper lock badge (helps explain why updates are waiting) */
+    .lock-badge {
+        background:
+            linear-gradient(90deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05)),
+            var(--lock-color, rgba(245,158,11,0.90));
+    }
+    .lock-badge.lock-active { --lock-color: rgba(245,158,11,0.95); }
+    .lock-badge.lock-stale { --lock-color: rgba(168,85,247,0.85); }
+
     .timer-active { color: #2ecc71; font-weight: 800; }
     .timer-partial { color: #f59e0b; font-weight: 800; }
     .timer-inactive { color: #e74c3c; font-weight: 800; }
@@ -4254,7 +4360,10 @@ generate_dashboard() {
             <button class="rocket-btn" id="rocket-btn" type="button" title="Install system updates (wizard)">🚀</button>
             <span>Zypper Auto Command Center</span>
           </h1>
-          <span class="status-badge" id="status-badge">${last_status_esc}</span>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+            <span class="status-badge" id="status-badge">${last_status_esc}</span>
+            <span class="status-badge lock-badge ${zypp_lock_badge_class}" id="zypp-lock-badge" title="${zypp_lock_badge_title_esc}">${zypp_lock_badge_text_esc}</span>
+          </div>
       </div>
       <p style="color:var(--muted); margin-top:8px; margin-bottom:0; font-size:0.9rem;">
         Generated <span id="time-ago">just now</span> (<span style="font-family:monospace" id="generated-at">${now}</span>) • Pending Updates: <strong id="pending-count">${pending_count}</strong>
@@ -4394,6 +4503,11 @@ generate_dashboard() {
           <button class="cmd-btn" onclick="copyCmd('python3 -m http.server --directory ~/.local/share/zypper-notify 8765', this)">
               <span class="cmd-label">Serve Live Dashboard</span>
               <span class="cmd-desc">Start local server for realtime polling</span>
+              <div class="cmd-copy-feedback">Copied!</div>
+          </button>
+          <button class="cmd-btn" onclick="copyCmd('python3 -c "import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(SimpleHTTPRequestHandler, directory=d); httpd=ThreadingHTTPServer((\\"127.0.0.1\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()" ~/.local/share/zypper-notify 8765', this)">
+              <span class="cmd-label">Serve Live Dashboard (Threaded)</span>
+              <span class="cmd-desc">ThreadingHTTPServer: better parallel fetches</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
           <button class="cmd-btn" onclick="copyCmd('xdg-open http://127.0.0.1:8765/status.html?live=1', this)">
@@ -4766,6 +4880,7 @@ generate_dashboard() {
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
+        { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
         { key: 'ZYPPER_TURBO_TUNER_ENABLED', type: 'bool', label: 'Zypper Turbo tuner (optimize /etc/zypp/zypp.conf)' },
         { key: 'VERIFY_JOURNAL_AUTO_VACUUM_ENABLED', type: 'bool', label: 'Auto vacuum system journal when huge (verification)' },
@@ -4822,7 +4937,7 @@ generate_dashboard() {
         });
     }
 
-    function _api(path, opts) {
+    function _api(path, opts, _didRetryAuth) {
         opts = opts || {};
         return _fetchToken().then(function(tok) {
             var headers = opts.headers || {};
@@ -4833,11 +4948,28 @@ generate_dashboard() {
             opts.headers = headers;
             return fetch(SETTINGS_API_BASE + path, opts);
         }).then(function(r) {
-            return r.json().then(function(j) {
+            // Parse body defensively so we can still display errors even when the
+            // API returns non-JSON (or empty) output.
+            return r.text().then(function(txt) {
+                var j = null;
+                try {
+                    j = txt ? JSON.parse(txt) : {};
+                } catch (e) {
+                    j = { error: txt };
+                }
+
+                // Token caching race: if the API was restarted and a new token was
+                // generated, retry once by invalidating the cached token.
+                if ((r.status === 401 || r.status === 403) && !_didRetryAuth) {
+                    try { _settingsToken = null; } catch (e2) {}
+                    return _api(path, opts, true);
+                }
+
                 if (!r.ok) {
-                    var e = new Error((j && j.error) ? j.error : ('HTTP ' + r.status));
-                    e.payload = j;
-                    throw e;
+                    var e3 = new Error((j && j.error) ? j.error : ('HTTP ' + r.status));
+                    e3.payload = j;
+                    e3.http_status = r.status;
+                    throw e3;
                 }
                 return j;
             });
@@ -5433,7 +5565,7 @@ generate_dashboard() {
         var pre = document.getElementById('su-live-log');
         if (!pre) return;
         var atBottom = false;
-        try { atBottom = (pre.scrollTop + pre.clientHeight) >= (pre.scrollHeight - 40); } catch (e) { atBottom = true; }
+        try { atBottom = _nearBottom(pre, 60); } catch (e) { atBottom = true; }
         pre.textContent = String(text || '');
         if (atBottom) {
             try { pre.scrollTop = pre.scrollHeight; } catch (ee) {}
@@ -5511,10 +5643,34 @@ generate_dashboard() {
         var installBtn = _suEls().install;
         if (installBtn) installBtn.textContent = dry_run ? 'Testing…' : 'Installing…';
 
+        // Polling robustness:
+        // - don't stop on the first transient fetch error
+        // - only abort after N consecutive failures
+        // - guard against overlapping polls
+        var _pollFailures = 0;
+        var _pollMaxFailures = 9;
+        var _pollInFlight = false;
+        var _pollWarned = false;
+        var _lastPct = 0;
+
         function tick() {
+            if (_pollInFlight) return;
+            _pollInFlight = true;
+
             return _api('/api/self-update/job?job_id=' + encodeURIComponent(job_id), { method: 'GET' }).then(function(j) {
                 if (!j) return null;
-                _suUpdateProgress(j.stage || 'Running', parseInt(j.progress || 0, 10) || 0);
+
+                // Reset failure counter on any successful response.
+                if (_pollFailures > 0) {
+                    _pollFailures = 0;
+                    if (_pollWarned) {
+                        toast('Self-update reconnected', 'Polling resumed', 'ok');
+                        _pollWarned = false;
+                    }
+                }
+
+                _lastPct = parseInt(j.progress || 0, 10) || 0;
+                _suUpdateProgress(j.stage || 'Running', _lastPct);
                 if (j.output != null) {
                     _suSetLog(String(j.output));
                 }
@@ -5565,7 +5721,7 @@ generate_dashboard() {
                         }
                     } else {
                         toast('Self-update failed', 'rc=' + String(rc), 'err');
-                        _suUpdateProgress('Failed', parseInt(j.progress || 0, 10) || 0);
+                        _suUpdateProgress('Failed', _lastPct);
                         _suSetButtons({
                             show_cancel: false,
                             show_back: false,
@@ -5580,24 +5736,38 @@ generate_dashboard() {
 
                 return j;
             }).catch(function(e) {
+                _pollFailures++;
                 var msg = (e && e.message) ? e.message : 'job poll failed';
-                _suSetLog('ERROR polling job: ' + msg);
-                toast('Self-update polling failed', msg, 'err');
-                if (_su.poll_timer) {
-                    try { clearInterval(_su.poll_timer); } catch (ee) {}
-                    _su.poll_timer = null;
+
+                if (!_pollWarned) {
+                    _pollWarned = true;
+                    toast('Self-update polling error', msg, 'err');
                 }
-                _su.running = false;
-                _suSetButtons({
-                    show_cancel: false,
-                    show_back: false,
-                    show_next: false,
-                    show_install: false,
-                    show_close: true,
-                    close_disabled: false,
-                    footer_center: true
-                });
+
+                _suUpdateProgress('Reconnecting…', _lastPct);
+                _suSetLog('ERROR polling job (' + String(_pollFailures) + '/' + String(_pollMaxFailures) + '): ' + msg + '\nRetrying…');
+
+                // Only abort after too many consecutive failures.
+                if (_pollFailures >= _pollMaxFailures) {
+                    toast('Self-update polling failed', 'Too many errors. Please reload the page.', 'err');
+                    if (_su.poll_timer) {
+                        try { clearInterval(_su.poll_timer); } catch (ee) {}
+                        _su.poll_timer = null;
+                    }
+                    _su.running = false;
+                    _suSetButtons({
+                        show_cancel: false,
+                        show_back: false,
+                        show_next: false,
+                        show_install: false,
+                        show_close: true,
+                        close_disabled: false,
+                        footer_center: true
+                    });
+                }
                 return null;
+            }).finally(function() {
+                _pollInFlight = false;
             });
         }
 
@@ -6166,10 +6336,30 @@ generate_dashboard() {
         var installBtn = _suEls().install;
         if (installBtn) installBtn.textContent = _ru.simulate ? 'Testing…' : 'Installing…';
 
+        // Polling robustness (same idea as self-update): keep polling across transient errors.
+        var _pollFailures = 0;
+        var _pollMaxFailures = 10;
+        var _pollInFlight = false;
+        var _pollWarned = false;
+        var _lastPct = 0;
+
         function tick() {
+            if (_pollInFlight) return;
+            _pollInFlight = true;
+
             return _api('/api/system/dup/job?job_id=' + encodeURIComponent(job_id), { method: 'GET' }).then(function(j) {
                 if (!j) return null;
-                _suUpdateProgress(j.stage || 'Running', parseInt(j.progress || 0, 10) || 0);
+
+                if (_pollFailures > 0) {
+                    _pollFailures = 0;
+                    if (_pollWarned) {
+                        toast('Update reconnected', 'Polling resumed', 'ok');
+                        _pollWarned = false;
+                    }
+                }
+
+                _lastPct = parseInt(j.progress || 0, 10) || 0;
+                _suUpdateProgress(j.stage || 'Running', _lastPct);
                 if (j.output != null) _suSetLog(String(j.output));
 
                 if (j.done) {
@@ -6200,24 +6390,37 @@ generate_dashboard() {
 
                 return j;
             }).catch(function(e) {
+                _pollFailures++;
                 var msg = (e && e.message) ? e.message : 'job poll failed';
-                _suSetLog('ERROR polling job: ' + msg);
-                toast('Update polling failed', msg, 'err');
-                if (_ru.poll_timer) {
-                    try { clearInterval(_ru.poll_timer); } catch (ee) {}
-                    _ru.poll_timer = null;
+
+                if (!_pollWarned) {
+                    _pollWarned = true;
+                    toast('Update polling error', msg, 'err');
                 }
-                _ru.running = false;
-                _suSetButtons({
-                    show_cancel: false,
-                    show_back: false,
-                    show_next: false,
-                    show_install: false,
-                    show_close: true,
-                    close_disabled: false,
-                    footer_center: true
-                });
+
+                _suUpdateProgress('Reconnecting…', _lastPct);
+                _suSetLog('ERROR polling job (' + String(_pollFailures) + '/' + String(_pollMaxFailures) + '): ' + msg + '\nRetrying…');
+
+                if (_pollFailures >= _pollMaxFailures) {
+                    toast('Update polling failed', 'Too many errors. Please reload the page.', 'err');
+                    if (_ru.poll_timer) {
+                        try { clearInterval(_ru.poll_timer); } catch (ee) {}
+                        _ru.poll_timer = null;
+                    }
+                    _ru.running = false;
+                    _suSetButtons({
+                        show_cancel: false,
+                        show_back: false,
+                        show_next: false,
+                        show_install: false,
+                        show_close: true,
+                        close_disabled: false,
+                        footer_center: true
+                    });
+                }
                 return null;
+            }).finally(function() {
+                _pollInFlight = false;
             });
         }
 
@@ -6955,9 +7158,16 @@ generate_dashboard() {
     window.copyBlock = copyBlock;
 
     // Log UX: show a "Latest" button when the user scrolls away from bottom.
-    function _nearBottom(el) {
+    // NOTE: use Math.abs(delta) to be subpixel/zoom-safe (some browsers report
+    // fractional scrollTop/clientHeight and can produce tiny negative deltas).
+    function _nearBottom(el, px) {
         if (!el) return true;
-        return (el.scrollHeight - el.scrollTop - el.clientHeight) < 120;
+        var d = 0;
+        try { d = (el.scrollHeight - el.scrollTop - el.clientHeight); } catch (e) { d = 0; }
+        if (!isFinite(d)) return true;
+        var th = (px === undefined || px === null) ? 120 : parseFloat(px);
+        if (!isFinite(th)) th = 120;
+        return Math.abs(d) < th;
     }
 
     function updateJumpButton(preId, wrapId) {
@@ -7069,6 +7279,37 @@ generate_dashboard() {
         else el.classList.add('timer-inactive');
     }
 
+    function updateZyppLockBadge(d) {
+        var el = document.getElementById('zypp-lock-badge');
+        if (!el) return;
+
+        var st = '';
+        var pid = '';
+        var file = '';
+        try { st = String((d && d.zypp_lock_state) ? d.zypp_lock_state : ''); } catch (e) { st = ''; }
+        try { pid = String((d && d.zypp_lock_pid) ? d.zypp_lock_pid : ''); } catch (e2) { pid = ''; }
+        try { file = String((d && d.zypp_lock_file) ? d.zypp_lock_file : ''); } catch (e3) { file = ''; }
+
+        // Normalize
+        st = st.toLowerCase();
+
+        el.classList.remove('znh-hidden', 'lock-active', 'lock-stale');
+
+        if (!st || st === 'none') {
+            el.textContent = '';
+            el.classList.add('znh-hidden');
+            return;
+        }
+
+        var txt = 'Zypper lock: ' + st.toUpperCase();
+        if (pid) txt += ' (PID ' + pid + ')';
+        if (file) txt += ' • ' + file;
+        el.textContent = txt;
+
+        if (st === 'active') el.classList.add('lock-active');
+        else el.classList.add('lock-stale');
+    }
+
     function applyLiveData(d) {
         if (!d) return;
 
@@ -7081,6 +7322,7 @@ generate_dashboard() {
         }
 
         setText('status-badge', d.last_status);
+        try { updateZyppLockBadge(d); } catch (e0) {}
         setText('generated-at', d.generated_human);
         setText('pending-count', d.pending_count);
 
@@ -7133,7 +7375,7 @@ generate_dashboard() {
             var view = (typeof logView === 'undefined') ? 'install' : logView;
             if (view === 'install') {
                 // Same auto-scroll semantics as the live log poller.
-                var nearBottom2 = (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight) < 80;
+                var nearBottom2 = _nearBottom(logEl, 80);
                 logEl.textContent = d.last_install_tail || '';
                 highlightBlock('log-content');
                 if (nearBottom2 || _logAutoScrollOnce) {
@@ -7660,7 +7902,7 @@ generate_dashboard() {
                 if (!el) return;
 
                 // Keep scroll pinned to bottom if the user is already near bottom.
-                var nearBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80;
+                var nearBottom = _nearBottom(el, 80);
 
                 el.textContent = tailed;
                 highlightBlock('log-content');
@@ -7732,6 +7974,10 @@ EOF
 
   "last_status": "${json_last_status}",
   "status_color": "$(_json_escape "$status_color")",
+
+  "zypp_lock_state": "$(_json_escape "$zypp_lock_state")",
+  "zypp_lock_pid": "$(_json_escape "$zypp_lock_pid")",
+  "zypp_lock_file": "$(_json_escape "$zypp_lock_file")",
 
   "pending_count": ${pending_count},
 
@@ -8382,6 +8628,40 @@ run_verification_only() {
 
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
+
+    # Preflight: read-only root filesystem detection + optional remount.
+    # This is a best-effort repair and is OFF by default.
+    local root_ro
+    root_ro=0
+    if command -v findmnt >/dev/null 2>&1; then
+        if findmnt -n -o OPTIONS / 2>/dev/null | grep -qE '(^|,)ro(,|$)'; then
+            root_ro=1
+        fi
+    elif [ -r /proc/mounts ]; then
+        local root_opts
+        root_opts=$(grep -E '^[^ ]+ / ' /proc/mounts 2>/dev/null | head -n 1 | cut -d' ' -f4)
+        if printf ',%s,' "${root_opts:-}" | grep -q ',ro,'; then
+            root_ro=1
+        fi
+    fi
+
+    if [ "${root_ro}" -eq 1 ] 2>/dev/null; then
+        log_warn "⚠ Root filesystem appears to be mounted read-only (/)."
+        if [[ "${AUTO_REPAIR_TRY_REMOUNT_RW,,}" == "true" ]]; then
+            log_warn "  → AUTO_REPAIR_TRY_REMOUNT_RW=true: attempting to remount / as read-write (best-effort)..."
+            execute_optional "Remount / as read-write (requested)" mount -o remount,rw / || true
+            if command -v findmnt >/dev/null 2>&1; then
+                if ! findmnt -n -o OPTIONS / 2>/dev/null | grep -qE '(^|,)ro(,|$)'; then
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                    log_success "  ✓ Remount appears successful (/ is no longer ro)"
+                else
+                    log_warn "  ⚠ Remount attempt did not clear ro state (still read-only)"
+                fi
+            fi
+        else
+            log_info "  → You can enable AUTO_REPAIR_TRY_REMOUNT_RW=true in /etc/zypper-auto.conf (or WebUI Settings) to attempt a remount."
+        fi
+    fi
 
 # Helper function for advanced repair with retry logic
 attempt_repair() {
@@ -11455,7 +11735,7 @@ PY
                 # Use nohup so the server survives terminal close.
                 # Run at background priority (nice + idle IO) so it never contends with foreground apps.
                 sudo -u "${SUDO_USER}" \
-                    bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec python3 -m http.server --bind 127.0.0.1 --directory \"\$1\" \"\$2\"' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
+                    bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; py_srv=\"import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(SimpleHTTPRequestHandler, directory=d); httpd=ThreadingHTTPServer((\\\"127.0.0.1\\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()\"; if python3 -c \"from http.server import ThreadingHTTPServer\" >/dev/null 2>&1; then exec -a znh-dashboard-http python3 -c \"\\$py_srv\" \"\\$1\" \"\\$2\"; else exec python3 -m http.server --bind 127.0.0.1 --directory \"\\$1\" \"\\$2\"; fi' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
                 sleep 0.25
             fi
         fi
@@ -12228,6 +12508,24 @@ run_snapper_menu_only() {
             root_opts=$(grep -E '^[^ ]+ / ' /proc/mounts 2>/dev/null | head -n 1 | cut -d' ' -f4)
             if printf ',%s,' "${root_opts:-}" | grep -q ',ro,'; then
                 snapper_cfg_ro=1
+            fi
+        fi
+
+        if [ "${snapper_cfg_ro}" -eq 1 ] 2>/dev/null; then
+            # Optional auto-repair: try to remount the affected filesystem rw.
+            # This is OFF by default (safety) and only runs when explicitly enabled.
+            if [[ "${AUTO_REPAIR_TRY_REMOUNT_RW,,}" == "true" ]] && command -v findmnt >/dev/null 2>&1; then
+                echo "  [fix] AUTO_REPAIR_TRY_REMOUNT_RW=true: attempting remount read-write..."
+                local mnt_target
+                mnt_target=$(findmnt -n -o TARGET -T "${snapper_cfg_dir}" 2>/dev/null | head -n 1 || true)
+                if [ -n "${mnt_target:-}" ]; then
+                    execute_optional "Remount ${mnt_target} as read-write (requested)" mount -o remount,rw "${mnt_target}" || true
+                    # Re-check RO state
+                    if ! findmnt -n -o OPTIONS -T "${snapper_cfg_dir}" 2>/dev/null | grep -qE '(^|,)ro(,|$)'; then
+                        echo "  [ok] Remount appears successful; continuing Snapper config sync."
+                        snapper_cfg_ro=0
+                    fi
+                fi
             fi
         fi
 

@@ -1589,6 +1589,13 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Dashboard API systemd unit now includes `/run` and `/var/run` in `ReadWritePaths` (helps `systemd-run` reliability under hardening).
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
   - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
+  - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
+  - 🧰 **IMPROVED:** WebUI job polling (Rocket + self-update overlays) now retries across transient fetch/API errors instead of aborting on the first failure.
+  - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
+  - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
+  - 🧵 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).
+  - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
+  - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
