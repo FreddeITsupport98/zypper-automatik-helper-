@@ -1588,6 +1588,7 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Rocket preview now retries `systemd-run` without `--pipe` and captures output via a log file on transient-unit start failures (improves compatibility on some systems).
   - 🧰 **IMPROVED:** Dashboard API systemd unit now includes `/run` and `/var/run` in `ReadWritePaths` (helps `systemd-run` reliability under hardening).
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
+  - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.

@@ -12236,6 +12236,17 @@ run_snapper_menu_only() {
             echo "  [skip] ${snapper_cfg_dir} is read-only; cannot backup or tune Snapper configs."
             echo "  [hint] If this is unexpected, your root filesystem may be mounted read-only (or you are using an immutable/transactional setup)."
             echo "  [hint] Fix/remount as read-write, then re-run this Snapper enable action."
+            echo ""
+            echo "  Diagnostic (mount state):"
+            if command -v findmnt >/dev/null 2>&1; then
+                echo "  - findmnt -no TARGET,OPTIONS -T ${snapper_cfg_dir}" 
+                findmnt -n -o TARGET,OPTIONS -T "${snapper_cfg_dir}" 2>/dev/null | sed 's/^/    /' || true
+                echo "  - findmnt -no TARGET,OPTIONS /" 
+                findmnt -n -o TARGET,OPTIONS / 2>/dev/null | sed 's/^/    /' || true
+            else
+                echo "  - findmnt not available; inspect /proc/mounts"
+                grep -E '^[^ ]+ / ' /proc/mounts 2>/dev/null | sed 's/^/    /' || true
+            fi
             return 0
         fi
 
@@ -14082,6 +14093,20 @@ run_snapper_menu_only() {
 
             # SSD health (trim)
             __znh_hs_unit_active_check fstrim.timer 10 "SSD trim"
+
+            # If root is mounted read-only, many features (including Snapper config sync)
+            # cannot function correctly. Surface this as a high-severity health issue.
+            if command -v findmnt >/dev/null 2>&1; then
+                if findmnt -n -o OPTIONS / 2>/dev/null | grep -qE '(^|,)ro(,|$)'; then
+                    __znh_hs_add_issue 30 "Root filesystem is mounted read-only (/)"
+                fi
+            elif [ -r /proc/mounts ]; then
+                local root_opts
+                root_opts=$(grep -E '^[^ ]+ / ' /proc/mounts 2>/dev/null | head -n 1 | cut -d' ' -f4)
+                if printf ',%s,' "${root_opts:-}" | grep -q ',ro,'; then
+                    __znh_hs_add_issue 30 "Root filesystem is mounted read-only (/)"
+                fi
+            fi
 
             __znh_hs_snapper_config_check
 
