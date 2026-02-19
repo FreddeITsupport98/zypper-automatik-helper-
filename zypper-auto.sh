@@ -183,18 +183,37 @@ exec -a znh-dashboard-sync bash -lc '
     renice -n 19 -p $$ >/dev/null 2>&1 || true
   fi
 
+  sync_one() {
+    # Atomic "update if newer" copy: avoids partial reads by the browser.
+    local src="$1" dst="$2" tmp
+    [ -f "${src}" ] || return 0
+
+    if [ ! -f "${dst}" ] || [ "${src}" -nt "${dst}" ]; then
+      tmp="${dst}.tmp.$$"
+      if cp -f "${src}" "${tmp}" 2>/dev/null; then
+        if mv -f "${tmp}" "${dst}" 2>/dev/null; then
+          chmod 644 "${dst}" 2>/dev/null || true
+        else
+          rm -f "${tmp}" 2>/dev/null || true
+        fi
+      else
+        rm -f "${tmp}" 2>/dev/null || true
+      fi
+    fi
+    return 0
+  }
+
   while true; do
-    # Copy updated files if present (best-effort). cp -u is "update if newer".
-    cp -u "${src_root}/status-data.json" "${dash_dir}/status-data.json" 2>/dev/null || true
-    cp -u "${src_root}/dashboard-install-tail.log" "${dash_dir}/dashboard-install-tail.log" 2>/dev/null || true
-    cp -u "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log" 2>/dev/null || true
-    cp -u "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log" 2>/dev/null || true
-    cp -u "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log" 2>/dev/null || true
-    cp -u "${src_root}/dashboard-verify-tail.log" "${dash_dir}/dashboard-verify-tail.log" 2>/dev/null || true
+    sync_one "${src_root}/status-data.json" "${dash_dir}/status-data.json"
+    sync_one "${src_root}/dashboard-install-tail.log" "${dash_dir}/dashboard-install-tail.log"
+    sync_one "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log"
+    sync_one "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log"
+    sync_one "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log"
+    sync_one "${src_root}/dashboard-verify-tail.log" "${dash_dir}/dashboard-verify-tail.log"
     # Live mode polls download-status.txt; keep it synced too.
-    cp -u "${src_root}/download-status.txt" "${dash_dir}/download-status.txt" 2>/dev/null || true
+    sync_one "${src_root}/download-status.txt" "${dash_dir}/download-status.txt"
     # status.html is larger; only update if it changed.
-    cp -u "${src_root}/status.html" "${dash_dir}/status.html" 2>/dev/null || true
+    sync_one "${src_root}/status.html" "${dash_dir}/status.html"
     sleep "$interval"
   done
 ' _ "${dash_dir}"
@@ -1268,6 +1287,46 @@ write_atomic() {
         rm -f "$tmp" 2>/dev/null || true
         return 1
     fi
+}
+
+# Atomic copy helper to avoid partial writes when the WebUI reads files while
+# they are being refreshed (e.g., status-data.json).
+copy_atomic() {
+    local src="$1" dst="$2" tmp
+    if [ -z "${src:-}" ] || [ -z "${dst:-}" ]; then
+        return 2
+    fi
+    if [ ! -f "${src}" ]; then
+        return 3
+    fi
+
+    tmp="${dst}.tmp.$$"
+    if ! cp -f "${src}" "${tmp}" 2>/dev/null; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv -f "${tmp}" "${dst}" 2>/dev/null; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+# Copy src->dst only when src is newer than dst (or dst is missing), but do the
+# update atomically.
+copy_atomic_if_newer() {
+    local src="$1" dst="$2"
+    if [ -z "${src:-}" ] || [ -z "${dst:-}" ]; then
+        return 2
+    fi
+    if [ ! -f "${src}" ]; then
+        return 0
+    fi
+    if [ ! -f "${dst}" ] || [ "${src}" -nt "${dst}" ]; then
+        copy_atomic "${src}" "${dst}"
+        return $?
+    fi
+    return 0
 }
 
 # If the user passed --debug anywhere on the command line, enable shell
@@ -5677,7 +5736,7 @@ generate_dashboard() {
 
                 if (j.done) {
                     if (_su.poll_timer) {
-                        try { clearInterval(_su.poll_timer); } catch (e) {}
+                        try { clearTimeout(_su.poll_timer); } catch (e) {}
                         _su.poll_timer = null;
                     }
 
@@ -5751,7 +5810,7 @@ generate_dashboard() {
                 if (_pollFailures >= _pollMaxFailures) {
                     toast('Self-update polling failed', 'Too many errors. Please reload the page.', 'err');
                     if (_su.poll_timer) {
-                        try { clearInterval(_su.poll_timer); } catch (ee) {}
+                        try { clearTimeout(_su.poll_timer); } catch (ee) {}
                         _su.poll_timer = null;
                     }
                     _su.running = false;
@@ -5768,12 +5827,15 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 _pollInFlight = false;
+                if (_su.running) {
+                    // Recursive setTimeout avoids request pile-up on slow responses.
+                    _su.poll_timer = setTimeout(tick, 650);
+                }
             });
         }
 
-        // First tick immediately, then poll.
+        // First tick immediately; subsequent ticks are scheduled by tick() itself.
         tick();
-        _su.poll_timer = setInterval(tick, 650);
     }
 
     function selfUpdatePostSuccessInit() {
@@ -7402,6 +7464,13 @@ generate_dashboard() {
 
     var liveFailures = 0;
 
+    // Poller in-flight guards to prevent overlapping fetches (and browser request pile-ups)
+    // when responses are slow or the tab is backgrounded.
+    var _pollLiveInFlight = false;
+    var _pollDownloaderInFlight = false;
+    var _pollPerfInFlight = false;
+    var _pollLogInFlight = false;
+
     // Live mode toggle
     (function() {
         var t = document.getElementById('live-toggle');
@@ -7424,8 +7493,11 @@ generate_dashboard() {
     })();
 
     function pollLive() {
-        if (!liveEnabled) return;
-        fetch('status-data.json?ts=' + Date.now(), { cache: 'no-store' })
+        if (!liveEnabled) return Promise.resolve(null);
+        if (_pollLiveInFlight) return Promise.resolve(null);
+        _pollLiveInFlight = true;
+
+        return fetch('status-data.json?ts=' + Date.now(), { cache: 'no-store' })
             .then(function(r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 return r.json();
@@ -7433,6 +7505,7 @@ generate_dashboard() {
             .then(function(d) {
                 liveFailures = 0;
                 applyLiveData(d);
+                return d;
             })
             .catch(function() {
                 // When opened as file://, many browsers block fetch().
@@ -7441,6 +7514,10 @@ generate_dashboard() {
                     // Fallback: full reload every 15s (still useful if some other process regenerates the file)
                     setTimeout(function() { window.location.reload(); }, 15000);
                 }
+                return null;
+            })
+            .finally(function() {
+                _pollLiveInFlight = false;
             });
     }
 
@@ -7565,15 +7642,23 @@ generate_dashboard() {
     }
 
     function pollDownloaderStatus() {
-        if (!liveEnabled) return;
-        fetch('download-status.txt?ts=' + Date.now(), { cache: 'no-store' })
+        if (!liveEnabled) return Promise.resolve(null);
+        if (_pollDownloaderInFlight) return Promise.resolve(null);
+        _pollDownloaderInFlight = true;
+
+        return fetch('download-status.txt?ts=' + Date.now(), { cache: 'no-store' })
             .then(function(r) { return r.ok ? r.text() : ''; })
             .then(function(txt) {
                 var obj = parseDownloadStatus(txt);
                 updateDownloadUI(obj);
+                return obj;
             })
             .catch(function() {
                 // ignore
+                return null;
+            })
+            .finally(function() {
+                _pollDownloaderInFlight = false;
             });
     }
 
@@ -7761,8 +7846,11 @@ generate_dashboard() {
     }
 
     function pollPerf(force) {
-        if (!liveEnabled && !force) return;
-        fetch('perf-data.json?ts=' + Date.now(), { cache: 'no-store' })
+        if (!liveEnabled && !force) return Promise.resolve(null);
+        if (!force && _pollPerfInFlight) return Promise.resolve(null);
+        _pollPerfInFlight = true;
+
+        return fetch('perf-data.json?ts=' + Date.now(), { cache: 'no-store' })
             .then(function(r) {
                 if (r.status === 404 || r.status === 416) return null;
                 if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -7772,17 +7860,22 @@ generate_dashboard() {
                 if (!txt) {
                     var nowEl = document.getElementById('perf-now');
                     if (nowEl) nowEl.textContent = 'perf-data.json not available yet. Open via --dash-open to start the perf worker.';
-                    return;
+                    return null;
                 }
-                if (txt === _perfLastRaw) return;
+                if (txt === _perfLastRaw) return null;
                 _perfLastRaw = txt;
                 var perf = null;
                 try { perf = JSON.parse(txt); } catch (e) { perf = null; }
-                if (!perf) return;
+                if (!perf) return null;
                 _renderPerf(perf);
+                return perf;
             })
             .catch(function() {
                 // ignore
+                return null;
+            })
+            .finally(function() {
+                _pollPerfInFlight = false;
             });
     }
 
@@ -7863,7 +7956,9 @@ generate_dashboard() {
     })();
 
     function pollRecentActivityLog(force) {
-        if (!liveEnabled && !force) return;
+        if (!liveEnabled && !force) return Promise.resolve(null);
+        if (!force && _pollLogInFlight) return Promise.resolve(null);
+        _pollLogInFlight = true;
 
         // Log sources are pre-rendered by the helper into files located next to status.html
         // so the browser never executes commands.
@@ -7881,7 +7976,7 @@ generate_dashboard() {
             headers['Range'] = 'bytes=-' + String(rangeBytes);
         }
 
-        fetch(url, {
+        return fetch(url, {
             cache: 'no-store',
             headers: headers
         })
@@ -7918,6 +8013,10 @@ generate_dashboard() {
             })
             .catch(function() {
                 // If files aren't accessible (e.g. opened via file://), do nothing.
+                return null;
+            })
+            .finally(function() {
+                _pollLogInFlight = false;
             });
     }
 
@@ -7941,11 +8040,23 @@ generate_dashboard() {
         }
     })();
 
-    // Live poll intervals
-    setInterval(pollLive, 5000);
-    setInterval(pollDownloaderStatus, 2000);
-    setInterval(pollPerf, 2000);
-    setInterval(pollRecentActivityLog, 2000);
+    // Live poll loops (recursive setTimeout): avoids setInterval request pile-up
+    // when fetch responses are slow.
+    function _startPollLoop(fn, intervalMs) {
+        function step() {
+            Promise.resolve().then(fn).catch(function() { /* ignore */ }).finally(function() {
+                setTimeout(step, intervalMs);
+            });
+        }
+        setTimeout(step, 0);
+    }
+
+    _startPollLoop(pollLive, 5000);
+    _startPollLoop(pollDownloaderStatus, 2000);
+    _startPollLoop(pollPerf, 2000);
+    _startPollLoop(pollRecentActivityLog, 2000);
+
+    // Initial draws (some are useful even when live mode is off)
     pollLive();
     pollDownloaderStatus();
     pollPerf(true);
@@ -8076,17 +8187,17 @@ JSON_EOF
         out_user_json="${out_user_dir}/status-data.json"
 
         mkdir -p "${out_user_dir}" 2>/dev/null || true
-        cp -f "${out_root}" "${out_user}" 2>/dev/null || true
-        cp -f "${out_json_root}" "${out_user_json}" 2>/dev/null || true
-        cp -f "${out_install_tail_root}" "${out_user_dir}/dashboard-install-tail.log" 2>/dev/null || true
-        cp -f "${out_verify_tail_root}" "${out_user_dir}/dashboard-verify-tail.log" 2>/dev/null || true
-        cp -f "${out_diag_tail_root}" "${out_user_dir}/dashboard-diag-tail.log" 2>/dev/null || true
-        cp -f "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
-        cp -f "${out_api_tail_root}" "${out_user_dir}/dashboard-api.log" 2>/dev/null || true
+        copy_atomic "${out_root}" "${out_user}" 2>/dev/null || true
+        copy_atomic "${out_json_root}" "${out_user_json}" 2>/dev/null || true
+        copy_atomic "${out_install_tail_root}" "${out_user_dir}/dashboard-install-tail.log" 2>/dev/null || true
+        copy_atomic "${out_verify_tail_root}" "${out_user_dir}/dashboard-verify-tail.log" 2>/dev/null || true
+        copy_atomic "${out_diag_tail_root}" "${out_user_dir}/dashboard-diag-tail.log" 2>/dev/null || true
+        copy_atomic "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
+        copy_atomic "${out_api_tail_root}" "${out_user_dir}/dashboard-api.log" 2>/dev/null || true
 
         # Live mode polls download-status.txt; ensure it exists in the served user dir.
         if [ -f "${LOG_DIR}/download-status.txt" ]; then
-            cp -f "${LOG_DIR}/download-status.txt" "${out_user_dir}/download-status.txt" 2>/dev/null || true
+            copy_atomic "${LOG_DIR}/download-status.txt" "${out_user_dir}/download-status.txt" 2>/dev/null || true
         else
             printf '%s\n' "idle" >"${out_user_dir}/download-status.txt" 2>/dev/null || true
         fi
@@ -11734,8 +11845,8 @@ PY
                 # Run the web server as the desktop user so file permissions + paths match.
                 # Use nohup so the server survives terminal close.
                 # Run at background priority (nice + idle IO) so it never contends with foreground apps.
+                # shellcheck disable=SC2154
                 sudo -u "${SUDO_USER}" \
-                    # shellcheck disable=SC2154
                     bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; py_srv=\"import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(SimpleHTTPRequestHandler, directory=d); httpd=ThreadingHTTPServer((\\\"127.0.0.1\\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()\"; if python3 -c \"from http.server import ThreadingHTTPServer\" >/dev/null 2>&1; then exec -a znh-dashboard-http python3 -c \"\\$py_srv\" \"\\$1\" \"\\$2\"; else exec python3 -m http.server --bind 127.0.0.1 --directory \"\\$1\" \"\\$2\"; fi' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
                 sleep 0.25
             fi
