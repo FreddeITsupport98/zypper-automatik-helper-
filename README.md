@@ -1594,7 +1594,12 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
+  - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
   - ⚡ **IMPROVED:** dashboard Live mode polling now uses non-overlapping `setTimeout` loops with in-flight guards to avoid fetch request pile-up on slow responses.
+  - ⚡ **IMPROVED:** dashboard sync worker now prefers **inotify-driven** sync when available (instant updates on file changes; timeout fallback).
+  - 🐛 **FIXED:** Dashboard API confirm-token cache is now protected by a lock to prevent crashes under concurrent clicks / multiple tabs.
+  - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
+  - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).
   - 🧵 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).
   - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
   - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.

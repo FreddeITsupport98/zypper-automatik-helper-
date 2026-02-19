@@ -214,7 +214,14 @@ exec -a znh-dashboard-sync bash -lc '
     sync_one "${src_root}/download-status.txt" "${dash_dir}/download-status.txt"
     # status.html is larger; only update if it changed.
     sync_one "${src_root}/status.html" "${dash_dir}/status.html"
-    sleep "$interval"
+
+    # Prefer event-driven sync when available so Live mode feels instant.
+    # Wait for changes OR time out after ${interval}s.
+    if command -v inotifywait >/dev/null 2>&1; then
+      inotifywait -qq -t "${interval}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null || true
+    else
+      sleep "$interval"
+    fi
   done
 ' _ "${dash_dir}"
 SYNC
@@ -3243,7 +3250,11 @@ update_status() {
 
     # Status file is a single-line indicator consumed by the dashboard.
     # Keep it plain and stable so it can be parsed by humans and tools.
-    printf '[%s] %s\n' "${ts}" "${status}" >"${STATUS_FILE}" 2>/dev/null || true
+    # IMPORTANT: write atomically to avoid transient empty reads while the file
+    # is being truncated/written (can cause UI badge "flashing").
+    write_atomic "${STATUS_FILE}" <<EOF 2>/dev/null || true
+[${ts}] ${status}
+EOF
     chmod 644 "${STATUS_FILE}" 2>/dev/null || true
 
     # Also emit a structured line so the dashboard Recent Activity timeline
@@ -3831,7 +3842,7 @@ generate_dashboard() {
 
     mkdir -p "$(dirname "${out_root}")" 2>/dev/null || true
 
-    cat >"${out_root}" <<EOF
+    write_atomic "${out_root}" <<EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8077,7 +8088,7 @@ EOF
     json_flight_report_raw="$(_json_escape "$flight_report_raw")"
     json_flight_report_log="$(_json_escape "$flight_report_log")"
 
-    cat >"${out_json_root}" <<JSON_EOF
+    write_atomic "${out_json_root}" <<JSON_EOF
 {
   "generated_iso": "${now_iso}",
   "generated_human": "${now}",
@@ -8135,36 +8146,36 @@ JSON_EOF
     out_journal_tail_root="${LOG_DIR}/dashboard-journal-tail.log"
     out_api_tail_root="${LOG_DIR}/dashboard-api.log"
 
-    printf '%s\n' "${last_install_tail}" >"${out_install_tail_root}" 2>/dev/null || true
+    write_atomic "${out_install_tail_root}" <<<"${last_install_tail}" 2>/dev/null || true
     chmod 644 "${out_install_tail_root}" 2>/dev/null || true
 
     # Verify/repair log (tail) for the dashboard 'View: Verify/Repair' tab.
     local verify_root_log
     verify_root_log="${LOG_DIR}/service-logs/verify.log"
     if [ -f "${verify_root_log}" ]; then
-        tail -n 260 "${verify_root_log}" >"${out_verify_tail_root}" 2>/dev/null || true
+        tail -n 260 "${verify_root_log}" 2>/dev/null | write_atomic "${out_verify_tail_root}" 2>/dev/null || true
     else
-        printf '%s\n' "Verify log not found yet at ${verify_root_log}." >"${out_verify_tail_root}" 2>/dev/null || true
+        write_atomic "${out_verify_tail_root}" <<<"Verify log not found yet at ${verify_root_log}." 2>/dev/null || true
     fi
     chmod 644 "${out_verify_tail_root}" 2>/dev/null || true
 
     local diag_src
     diag_src="${LOG_DIR}/diagnostics/diag-$(date +%Y-%m-%d).log"
     if [ -f "${diag_src}" ]; then
-        tail -n 220 "${diag_src}" >"${out_diag_tail_root}" 2>/dev/null || true
+        tail -n 220 "${diag_src}" 2>/dev/null | write_atomic "${out_diag_tail_root}" 2>/dev/null || true
     else
-        printf '%s\n' "No diagnostics log found at ${diag_src}. Enable via: sudo zypper-auto-helper --diag-logs-on" >"${out_diag_tail_root}" 2>/dev/null || true
+        write_atomic "${out_diag_tail_root}" <<<"No diagnostics log found at ${diag_src}. Enable via: sudo zypper-auto-helper --diag-logs-on" 2>/dev/null || true
     fi
     chmod 644 "${out_diag_tail_root}" 2>/dev/null || true
 
     if command -v journalctl >/dev/null 2>&1; then
         if command -v timeout >/dev/null 2>&1; then
-            timeout 2 journalctl -t zypper-auto-helper -n 200 --no-pager >"${out_journal_tail_root}" 2>/dev/null || true
+            timeout 2 journalctl -t zypper-auto-helper -n 200 --no-pager 2>/dev/null | write_atomic "${out_journal_tail_root}" 2>/dev/null || true
         else
-            journalctl -t zypper-auto-helper -n 200 --no-pager >"${out_journal_tail_root}" 2>/dev/null || true
+            journalctl -t zypper-auto-helper -n 200 --no-pager 2>/dev/null | write_atomic "${out_journal_tail_root}" 2>/dev/null || true
         fi
     else
-        printf '%s\n' "journalctl not available on this system." >"${out_journal_tail_root}" 2>/dev/null || true
+        write_atomic "${out_journal_tail_root}" <<<"journalctl not available on this system." 2>/dev/null || true
     fi
     chmod 644 "${out_journal_tail_root}" 2>/dev/null || true
 
@@ -8173,9 +8184,9 @@ JSON_EOF
     local api_root_log
     api_root_log="${LOG_DIR}/service-logs/dashboard-api.log"
     if [ -f "${api_root_log}" ]; then
-        tail -n 260 "${api_root_log}" >"${out_api_tail_root}" 2>/dev/null || true
+        tail -n 260 "${api_root_log}" 2>/dev/null | write_atomic "${out_api_tail_root}" 2>/dev/null || true
     else
-        printf '%s\n' "Settings API log not found yet at ${api_root_log}." >"${out_api_tail_root}" 2>/dev/null || true
+        write_atomic "${out_api_tail_root}" <<<"Settings API log not found yet at ${api_root_log}." 2>/dev/null || true
     fi
     chmod 644 "${out_api_tail_root}" 2>/dev/null || true
 
@@ -8199,7 +8210,7 @@ JSON_EOF
         if [ -f "${LOG_DIR}/download-status.txt" ]; then
             copy_atomic "${LOG_DIR}/download-status.txt" "${out_user_dir}/download-status.txt" 2>/dev/null || true
         else
-            printf '%s\n' "idle" >"${out_user_dir}/download-status.txt" 2>/dev/null || true
+            write_atomic "${out_user_dir}/download-status.txt" <<<"idle" 2>/dev/null || true
         fi
 
         chown "${SUDO_USER}:${SUDO_USER}" \
@@ -9173,7 +9184,9 @@ if [ -s "${DL_STATUS_FILE}" ]; then
     else
         log_warn "⚠ Status file content looks invalid. Auto-repairing to 'idle'..."
         mkdir -p /var/log/zypper-auto
-        echo "idle" > "${DL_STATUS_FILE}"
+        write_atomic "${DL_STATUS_FILE}" <<'EOF' 2>/dev/null || true
+idle
+EOF
         chmod 644 "${DL_STATUS_FILE}" 2>/dev/null || true
         REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
         CURRENT_STATUS="idle"
@@ -9182,7 +9195,9 @@ if [ -s "${DL_STATUS_FILE}" ]; then
 elif [ -f "${DL_STATUS_FILE}" ]; then
     log_warn "⚠ Status file exists but is empty. Auto-repairing..."
     mkdir -p /var/log/zypper-auto
-    echo "idle" > "${DL_STATUS_FILE}"
+    write_atomic "${DL_STATUS_FILE}" <<'EOF' 2>/dev/null || true
+idle
+EOF
     chmod 644 "${DL_STATUS_FILE}" 2>/dev/null || true
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
     CURRENT_STATUS="idle"
@@ -9190,7 +9205,9 @@ elif [ -f "${DL_STATUS_FILE}" ]; then
 else
     log_warn "⚠ Status file is missing. Auto-repairing..."
     mkdir -p /var/log/zypper-auto
-    echo "idle" > "${DL_STATUS_FILE}"
+    write_atomic "${DL_STATUS_FILE}" <<'EOF' 2>/dev/null || true
+idle
+EOF
     chmod 644 "${DL_STATUS_FILE}" 2>/dev/null || true
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
     CURRENT_STATUS="idle"
@@ -9208,7 +9225,7 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
     if printf '%s\n' "$CURRENT_STATUS" | grep -qE '^(refreshing|downloading:)' && [ "$STATUS_AGE" -gt 3600 ]; then
         log_warn "⚠ Warning: Stale download status '$CURRENT_STATUS' detected (age ${STATUS_AGE}s)"
         log_info "  → Auto-fixer: resetting download status and timing files so background downloads can resume cleanly"
-        execute_guarded "Reset stale download-status.txt to idle" bash -lc "echo idle > /var/log/zypper-auto/download-status.txt" || true
+        execute_guarded "Reset stale download-status.txt to idle" bash -lc "tmp=/var/log/zypper-auto/download-status.txt.tmp.$$; printf '%s\n' idle >\"$tmp\" && mv -f \"$tmp\" /var/log/zypper-auto/download-status.txt" || true
         execute_guarded "Remove stale downloader timing files" rm -f \
               "/var/log/zypper-auto/download-last-check.txt" \
               "/var/log/zypper-auto/download-start-time.txt" || true
@@ -11847,7 +11864,7 @@ PY
                 # Run at background priority (nice + idle IO) so it never contends with foreground apps.
                 # shellcheck disable=SC2154
                 sudo -u "${SUDO_USER}" \
-                    bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; py_srv=\"import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(SimpleHTTPRequestHandler, directory=d); httpd=ThreadingHTTPServer((\\\"127.0.0.1\\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()\"; if python3 -c \"from http.server import ThreadingHTTPServer\" >/dev/null 2>&1; then exec -a znh-dashboard-http python3 -c \"\\$py_srv\" \"\\$1\" \"\\$2\"; else exec python3 -m http.server --bind 127.0.0.1 --directory \"\\$1\" \"\\$2\"; fi' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
+                    bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; py_srv=\"import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; NoCacheHandler=type(\\\"NoCacheHandler\\\", (SimpleHTTPRequestHandler,), {\\\"end_headers\\\": (lambda self: (self.send_header(\\\"Cache-Control\\\",\\\"no-cache, no-store, must-revalidate\\\"), self.send_header(\\\"Pragma\\\",\\\"no-cache\\\"), self.send_header(\\\"Expires\\\",\\\"0\\\"), SimpleHTTPRequestHandler.end_headers(self))) }); d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(NoCacheHandler, directory=d); httpd=ThreadingHTTPServer((\\\"127.0.0.1\\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()\"; if python3 -c \"from http.server import ThreadingHTTPServer\" >/dev/null 2>&1; then exec -a znh-dashboard-http python3 -c \"\\$py_srv\" \"\\$1\" \"\\$2\"; else exec python3 -m http.server --bind 127.0.0.1 --directory \"\\$1\" \"\\$2\"; fi' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
                 sleep 0.25
             fi
         fi
@@ -19390,7 +19407,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # zypper manually. We don't know the package count in advance here, so we
     # mark the total as 0 and treat that as "unknown" on the notifier side.
     sudo mkdir -p "$STATUS_DIR" >/dev/null 2>&1 || true
-    sudo bash -c "echo 'downloading:0:manual:0:0' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+    sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' 'downloading:0:manual:0:0' > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
 
     # Before running zypper, respect the global system management lock and
     # retry a few times with increasing delays so the user can see that we
@@ -19416,7 +19433,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
         echo ""
         # Clear the manual downloading state so the notifier does not show a
         # stuck progress bar when we never actually ran zypper.
-        sudo bash -c "echo 'idle' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+        sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' idle > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
         exit 1
     fi
 
@@ -19452,7 +19469,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
 
     # Clear the manual downloading state so the notifier stops showing
     # a progress bar once the interactive session has finished.
-    sudo bash -c "echo 'idle' > '$STATUS_FILE'" >/dev/null 2>&1 || true
+    sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' idle > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
 
     # Update helper status + remote monitoring (best-effort)
     ts=$(date '+%Y-%m-%d %H:%M:%S')
@@ -23523,8 +23540,14 @@ def _write_managed_block(conf_path: str, values: dict) -> None:
 def _run_cmd(cmd: list[str], timeout_s: int, *, log=None, extra_env: dict | None = None) -> tuple[int, str]:
     # Returns: (rc, combined_output)
     # Keep it simple and deterministic: merge stderr into stdout.
-    env = os.environ.copy()
-    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # IMPORTANT: do not inherit the full service environment (can leak vars when
+    # invoked via sudo -E). Start from a small allowlist.
+    env = {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "HOME": os.environ.get("HOME", "/root"),
+    }
     if extra_env and isinstance(extra_env, dict):
         for k, v in extra_env.items():
             try:
@@ -24144,6 +24167,13 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return _json_response(self, 401, {"error": "unauthorized"}, origin)
 
+        # Thread-safety: token cache is accessed concurrently.
+        tokens_lock = getattr(self.server, "tokens_lock", None)
+        if tokens_lock is None:
+            # Fallback for older/misconfigured servers.
+            self.server.tokens_lock = threading.Lock()
+            tokens_lock = self.server.tokens_lock
+
         # --- Dashboard maintenance (safe) ---
         if path == "/api/dashboard/refresh":
             # Regenerate the root dashboard artifacts. The user's dashboard copy
@@ -24155,13 +24185,16 @@ class Handler(BaseHTTPRequestHandler):
         # --- Confirmation token cache (shared) ---
         def _confirm_purge(now_ts: float):
             try:
-                items = getattr(self.server, "confirm_tokens", {})
-                dead = []
-                for k, v in items.items():
-                    if float(v.get("exp", 0)) < now_ts:
-                        dead.append(k)
-                for k in dead:
-                    items.pop(k, None)
+                with tokens_lock:
+                    items = getattr(self.server, "confirm_tokens", {})
+                    dead = []
+                    # Iterate over a snapshot to avoid "dict changed size" even if a
+                    # future refactor accidentally mutates during iteration.
+                    for k, v in list(items.items()):
+                        if float(v.get("exp", 0)) < now_ts:
+                            dead.append(k)
+                    for k in dead:
+                        items.pop(k, None)
             except Exception:
                 return
 
@@ -24178,13 +24211,14 @@ class Handler(BaseHTTPRequestHandler):
             token = secrets.token_urlsafe(24)
             exp = now_ts + 120.0
             try:
-                if not hasattr(self.server, "confirm_tokens"):
-                    self.server.confirm_tokens = {}
-                self.server.confirm_tokens[token] = {
-                    "action": "self-update",
-                    "channel": ch,
-                    "exp": exp,
-                }
+                with tokens_lock:
+                    if not hasattr(self.server, "confirm_tokens"):
+                        self.server.confirm_tokens = {}
+                    self.server.confirm_tokens[token] = {
+                        "action": "self-update",
+                        "channel": ch,
+                        "exp": exp,
+                    }
             except Exception:
                 return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
 
@@ -24207,24 +24241,25 @@ class Handler(BaseHTTPRequestHandler):
 
             now_ts = time.time()
             _confirm_purge(now_ts)
-            items = getattr(self.server, "confirm_tokens", {})
-            meta = items.get(confirm_token)
-            if not meta:
-                return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
-            if meta.get("action") != "self-update":
-                return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
-            if meta.get("channel") != ch:
-                return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
-            if float(meta.get("exp", 0)) < now_ts:
-                return _json_response(self, 400, {"error": "confirm token expired"}, origin)
-            if confirm_phrase != "UPDATE":
-                return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+            with tokens_lock:
+                items = getattr(self.server, "confirm_tokens", {})
+                meta = items.get(confirm_token)
+                if not meta:
+                    return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                if meta.get("action") != "self-update":
+                    return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+                if meta.get("channel") != ch:
+                    return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
+                if float(meta.get("exp", 0)) < now_ts:
+                    return _json_response(self, 400, {"error": "confirm token expired"}, origin)
+                if confirm_phrase != "UPDATE":
+                    return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
 
-            # One-time token.
-            try:
-                items.pop(confirm_token, None)
-            except Exception:
-                pass
+                # One-time token.
+                try:
+                    items.pop(confirm_token, None)
+                except Exception:
+                    pass
 
             job_id = secrets.token_urlsafe(18)
             job = {
@@ -24265,11 +24300,15 @@ class Handler(BaseHTTPRequestHandler):
                 jobs[job_id] = job
 
             def worker():
-                env = os.environ.copy()
-                env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                # Prevent recursion: the helper's --dry-run opens the WebUI by default.
-                # Jobs must run in pure CLI mode.
-                env["ZNH_SELF_UPDATE_NO_UI"] = "1"
+                env = {
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "HOME": os.environ.get("HOME", "/root"),
+                    # Prevent recursion: the helper's --dry-run opens the WebUI by default.
+                    # Jobs must run in pure CLI mode.
+                    "ZNH_SELF_UPDATE_NO_UI": "1",
+                }
 
                 cmd = [HELPER_BIN, "--self-update", ch]
                 if dry_run:
@@ -24358,24 +24397,25 @@ class Handler(BaseHTTPRequestHandler):
 
             now_ts = time.time()
             _confirm_purge(now_ts)
-            items = getattr(self.server, "confirm_tokens", {})
-            meta = items.get(confirm_token)
-            if not meta:
-                return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
-            if meta.get("action") != "self-update":
-                return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
-            if meta.get("channel") != ch:
-                return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
-            if float(meta.get("exp", 0)) < now_ts:
-                return _json_response(self, 400, {"error": "confirm token expired"}, origin)
-            if confirm_phrase != "UPDATE":
-                return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+            with tokens_lock:
+                items = getattr(self.server, "confirm_tokens", {})
+                meta = items.get(confirm_token)
+                if not meta:
+                    return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                if meta.get("action") != "self-update":
+                    return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+                if meta.get("channel") != ch:
+                    return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
+                if float(meta.get("exp", 0)) < now_ts:
+                    return _json_response(self, 400, {"error": "confirm token expired"}, origin)
+                if confirm_phrase != "UPDATE":
+                    return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
 
-            # One-time token.
-            try:
-                items.pop(confirm_token, None)
-            except Exception:
-                pass
+                # One-time token.
+                try:
+                    items.pop(confirm_token, None)
+                except Exception:
+                    pass
 
             cmd = [HELPER_BIN, "--self-update", ch]
             if dry_run:
@@ -24402,12 +24442,13 @@ class Handler(BaseHTTPRequestHandler):
             token = secrets.token_urlsafe(24)
             exp = now_ts + 120.0
             try:
-                if not hasattr(self.server, "confirm_tokens"):
-                    self.server.confirm_tokens = {}
-                self.server.confirm_tokens[token] = {
-                    "action": "system-dup",
-                    "exp": exp,
-                }
+                with tokens_lock:
+                    if not hasattr(self.server, "confirm_tokens"):
+                        self.server.confirm_tokens = {}
+                    self.server.confirm_tokens[token] = {
+                        "action": "system-dup",
+                        "exp": exp,
+                    }
             except Exception:
                 return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
 
@@ -24426,22 +24467,23 @@ class Handler(BaseHTTPRequestHandler):
 
             now_ts = time.time()
             _confirm_purge(now_ts)
-            items = getattr(self.server, "confirm_tokens", {})
-            meta = items.get(confirm_token)
-            if not meta:
-                return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
-            if meta.get("action") != "system-dup":
-                return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
-            if float(meta.get("exp", 0)) < now_ts:
-                return _json_response(self, 400, {"error": "confirm token expired"}, origin)
-            if confirm_phrase != "INSTALL":
-                return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+            with tokens_lock:
+                items = getattr(self.server, "confirm_tokens", {})
+                meta = items.get(confirm_token)
+                if not meta:
+                    return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                if meta.get("action") != "system-dup":
+                    return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+                if float(meta.get("exp", 0)) < now_ts:
+                    return _json_response(self, 400, {"error": "confirm token expired"}, origin)
+                if confirm_phrase != "INSTALL":
+                    return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
 
-            # One-time token.
-            try:
-                items.pop(confirm_token, None)
-            except Exception:
-                pass
+                # One-time token.
+                try:
+                    items.pop(confirm_token, None)
+                except Exception:
+                    pass
 
             # Compute dup flags from config at start time so the job is deterministic.
             eff, _warnings, _invalid = _read_conf(self.server.conf_path)
@@ -24666,9 +24708,13 @@ class Handler(BaseHTTPRequestHandler):
                             _job_output_append(j, f"[dashboard-api] Failed to write unit script: {e}\n")
                     raise
 
-                env = os.environ.copy()
-                env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                env["SIMULATE"] = "1" if simulate else "0"
+                env = {
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "HOME": os.environ.get("HOME", "/root"),
+                    "SIMULATE": "1" if simulate else "0",
+                }
 
                 # Start transient unit
                 sys_cmd = [
@@ -24856,13 +24902,14 @@ class Handler(BaseHTTPRequestHandler):
             token = secrets.token_urlsafe(24)
             exp = now_ts + 120.0
             try:
-                if not hasattr(self.server, "confirm_tokens"):
-                    self.server.confirm_tokens = {}
-                self.server.confirm_tokens[token] = {
-                    "action": action,
-                    "params": params,
-                    "exp": exp,
-                }
+                with tokens_lock:
+                    if not hasattr(self.server, "confirm_tokens"):
+                        self.server.confirm_tokens = {}
+                    self.server.confirm_tokens[token] = {
+                        "action": action,
+                        "params": params,
+                        "exp": exp,
+                    }
             except Exception:
                 return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
 
@@ -24901,28 +24948,29 @@ class Handler(BaseHTTPRequestHandler):
             if needs_confirm:
                 now_ts = time.time()
                 _confirm_purge(now_ts)
-                items = getattr(self.server, "confirm_tokens", {})
-                meta = items.get(confirm_token)
-                if not meta:
-                    return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
-                if meta.get("action") != action:
-                    return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+                with tokens_lock:
+                    items = getattr(self.server, "confirm_tokens", {})
+                    meta = items.get(confirm_token)
+                    if not meta:
+                        return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                    if meta.get("action") != action:
+                        return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
 
-                required_phrase = {
-                    "create": "SNAPSHOT",
-                    "cleanup": "CLEANUP",
-                    "auto-enable": "ENABLE",
-                    "auto-disable": "DISABLE",
-                }.get(action, "")
+                    required_phrase = {
+                        "create": "SNAPSHOT",
+                        "cleanup": "CLEANUP",
+                        "auto-enable": "ENABLE",
+                        "auto-disable": "DISABLE",
+                    }.get(action, "")
 
-                if required_phrase and confirm_phrase.upper() != required_phrase:
-                    return _json_response(self, 400, {"error": f"confirmation phrase mismatch (expected {required_phrase})"}, origin)
+                    if required_phrase and confirm_phrase.upper() != required_phrase:
+                        return _json_response(self, 400, {"error": f"confirmation phrase mismatch (expected {required_phrase})"}, origin)
 
-                # One-time token.
-                try:
-                    items.pop(confirm_token, None)
-                except Exception:
-                    pass
+                    # One-time token.
+                    try:
+                        items.pop(confirm_token, None)
+                    except Exception:
+                        pass
 
             # Map actions to helper subcommands.
             cmd = None
@@ -25117,7 +25165,10 @@ def main():
     httpd.token = token
     httpd.conf_path = args.config
     httpd._znh_log = log
+
+    # Confirmation token cache must be thread-safe (ThreadingHTTPServer).
     httpd.confirm_tokens = {}
+    httpd.tokens_lock = threading.Lock()
 
     try:
         httpd.serve_forever()
