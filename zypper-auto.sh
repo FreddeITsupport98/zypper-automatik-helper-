@@ -11735,6 +11735,7 @@ PY
                 # Use nohup so the server survives terminal close.
                 # Run at background priority (nice + idle IO) so it never contends with foreground apps.
                 sudo -u "${SUDO_USER}" \
+                    # shellcheck disable=SC2154
                     bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; py_srv=\"import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(SimpleHTTPRequestHandler, directory=d); httpd=ThreadingHTTPServer((\\\"127.0.0.1\\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()\"; if python3 -c \"from http.server import ThreadingHTTPServer\" >/dev/null 2>&1; then exec -a znh-dashboard-http python3 -c \"\\$py_srv\" \"\\$1\" \"\\$2\"; else exec python3 -m http.server --bind 127.0.0.1 --directory \"\\$1\" \"\\$2\"; fi' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
                 sleep 0.25
             fi
