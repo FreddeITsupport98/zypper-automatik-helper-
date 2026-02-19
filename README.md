@@ -1584,6 +1584,7 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - 🐛 **FIXED:** Rocket Update Wizard now writes the transient-unit script to disk before calling `systemd-run` (avoids potential argv/D-Bus size issues that can cause errors like "Failed to start transient service unit: Connection reset by peer" on some systems).
+  - 🐛 **FIXED:** Rocket Update Wizard now **streams zypper output live** into the WebUI log (instead of buffering until the command finishes), so it no longer looks “stuck” at 0% during long runs.
   - 🧰 **IMPROVED:** Rocket preview now retries `systemd-run` without `--pipe` and captures output via a log file on transient-unit start failures (improves compatibility on some systems).
   - 🧰 **IMPROVED:** Dashboard API systemd unit now includes `/run` and `/var/run` in `ReadWritePaths` (helps `systemd-run` reliability under hardening).
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).

@@ -24098,13 +24098,13 @@ class Handler(BaseHTTPRequestHandler):
                     f'echo "CMD: {zcmd}" >>"$LOG"',
                     'echo "" >>"$LOG"',
 
-                    # Run zypper and append output (rc is always captured).
+                    # Run zypper and stream output live into $LOG.
+                    # We also keep a temporary copy so we can detect "Nothing to do." reliably.
                     'TMP_OUT="$(mktemp /tmp/znh-webui-dup.XXXXXX 2>/dev/null || echo /tmp/znh-webui-dup.$$)"',
                     'set +e',
-                    f'( {zcmd} ) >"$TMP_OUT" 2>&1',
+                    f'( {zcmd} ) 2>&1 | tee -a "$LOG" >"$TMP_OUT"',
                     'rc=$?',
                     'set -e',
-                    'cat "$TMP_OUT" >>"$LOG" 2>/dev/null || true',
                     'did_updates=1',
                     'if grep -q "Nothing to do\\." "$TMP_OUT" 2>/dev/null; then did_updates=0; fi',
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
@@ -24325,6 +24325,16 @@ class Handler(BaseHTTPRequestHandler):
                             props[k.strip()] = v.strip()
                     active = props.get("ActiveState", "")
                     sub = props.get("SubState", "")
+
+                    # If the unit is running, reflect that in the UI even if there is a
+                    # short delay before new log lines arrive.
+                    if active == "active":
+                        with lock:
+                            j = jobs.get(job_id)
+                            if j and j.get("stage") in ("Starting", "starting"):
+                                j["stage"] = "Running" if not simulate else "Dry-run running"
+                                if int(j.get("progress") or 0) < 1:
+                                    j["progress"] = 1
 
                     if active == "inactive" and sub in ("dead", "failed", "exited"):
                         try:
