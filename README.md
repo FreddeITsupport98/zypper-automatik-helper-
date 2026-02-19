@@ -1345,6 +1345,8 @@ Safeguards (applies to `--dash-open`):
 - The Settings API CORS allowlist supports that same port range (`8765-8790`) so Settings won’t break when the dashboard uses a fallback port.
 - Startup errors for the local web server (if any) are written to: `~/.local/share/zypper-notify/dashboard-http.err`
 - The web server and browser launch are started detached (best-effort `nohup` / `setsid`) so closing the terminal won’t kill the dashboard.
+- The local web server is multi-threaded (Python `ThreadingHTTPServer`) so parallel polling requests don’t block each other.
+- **Security:** the local web server blocks access to sensitive local-only files (tokens, pid/port/err files, dotfiles).
 - Requires `python3` (`sudo zypper install python3`).
 
 It also starts a root-only **Dashboard API** on `127.0.0.1:8766` so the dashboard can:
@@ -1360,7 +1362,8 @@ Predefined allowed values (enums/intervals/min-max ranges) are served from a roo
 - `/var/lib/zypper-auto/dashboard-schema.json`
 
 Authentication is done via a random token written to:
-- `~/.local/share/zypper-notify/dashboard-token.txt` (served locally to the browser)
+- `~/.local/share/zypper-notify/dashboard-token.txt` (legacy: older builds fetched this over HTTP)
+- **Security note (newer builds):** when opened via `--dash-open`, the token is passed via the URL fragment (not sent to the web server), stored in `localStorage`, and the local HTTP server **blocks** direct access to `dashboard-token.txt`.
 
 ##### Settings change logging (audit trail)
 Settings loads/saves (including auto-save) are logged with the same structured levels as the rest of the project.
@@ -1409,6 +1412,7 @@ sudo zypper-auto-helper --dashboard
 The dashboard also writes small sidecar files alongside the HTML:
 - `/var/log/zypper-auto/status-data.json`
 - `~/.local/share/zypper-notify/dashboard-live.log` (realtime log stream for Live mode)
+  - **Safety/UX:** the sync worker keeps this bounded by copying only the most recent ~2500 lines into the user dashboard directory, so long-lived tabs don’t end up pulling a multi-megabyte log forever.
 - `~/.local/share/zypper-notify/dashboard-verify-tail.log` (tail of auto-repair/verification service log for the Recent Activity view)
 - `~/.local/share/zypper-notify/dashboard-api.log` (Settings API log mirror for the UI)
 - `/var/log/zypper-auto/last-verify-summary.txt` (key=value summary so the dashboard can show the last verify/auto-repair counts)
@@ -1606,7 +1610,10 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** Dashboard API confirm-token cache is now protected by a lock to prevent crashes under concurrent clicks / multiple tabs.
   - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
   - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).
-  - 🧵 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).
+  - 🧰 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).
+  - 🔒 **FIXED:** local dashboard HTTP server no longer exposes `dashboard-token.txt` (token is now passed via URL fragment and stored in localStorage; server blocks token/pid/err/port files).
+  - 🧯 **FIXED:** user-visible `dashboard-live.log` is now capped to the most recent ~2500 lines by the sync worker to prevent browser/resource blow-ups.
+  - 🖱️ **IMPROVED:** Recent Activity log polling no longer fights the user’s scroll position (updates are staged while scrolled up).
   - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
   - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.
 

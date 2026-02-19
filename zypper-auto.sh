@@ -109,7 +109,8 @@ __znh_pid_is_dashboard_http_server() {
         # We mark the process name via: exec -a znh-dashboard-http ...
         if printf '%s' "${args}" | grep -q "znh-dashboard-http"; then
             printf '%s' "${args}" | grep -q "${dash_dir}" || return 1
-            printf '%s' "${args}" | grep -q " ${port}\b" || return 1
+            # Match the port as a full argument (avoid substring matches like 876 -> 8765)
+            printf '%s' "${args}" | grep -qE "(^|[[:space:]])${port}([[:space:]]|$)" || return 1
             return 0
         fi
 
@@ -118,7 +119,8 @@ __znh_pid_is_dashboard_http_server() {
         printf '%s' "${args}" | grep -q "python3 -m http.server" || return 1
         # Pattern begins with "--" so terminate grep options explicitly.
         printf '%s' "${args}" | grep -qF -- "--directory ${dash_dir}" || return 1
-        printf '%s' "${args}" | grep -q " ${port}\b" || return 1
+        # Match the port as a full argument (avoid substring matches like 876 -> 8765)
+        printf '%s' "${args}" | grep -qE "(^|[[:space:]])${port}([[:space:]]|$)" || return 1
         return 0
     fi
 
@@ -140,6 +142,135 @@ __znh_pid_is_dashboard_sync_worker() {
         return 0
     fi
     return 1
+}
+
+__znh_dashboard_http_server_py() {
+    # Secure + threaded localhost dashboard server.
+    # Security goals:
+    # - Block access to sensitive local files (tokens/pids/error logs) even though
+    #   the server runs as the desktop user and can read them.
+    # - Avoid directory listing.
+    # - Keep no-cache headers so browsers always refresh.
+    cat <<'PY'
+import functools
+import os
+import sys
+from urllib.parse import unquote, urlparse
+from http.server import SimpleHTTPRequestHandler
+
+# ThreadingHTTPServer exists on modern Python; fall back to a ThreadingMixIn-based server.
+try:
+    from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
+    ThreadingHTTPServer = _ThreadingHTTPServer
+except Exception:
+    import socketserver
+    from http.server import HTTPServer
+
+    class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+
+# Block direct access to local-only secrets/state files.
+DENY_NAMES = {
+    "dashboard-token.txt",
+    "dashboard-http.pid",
+    "dashboard-http.port",
+    "dashboard-http.err",
+    "dashboard-sync.pid",
+    "dashboard-perf.pid",
+}
+DENY_SUFFIXES = (".pid", ".err", ".port", ".token", ".env")
+
+
+class SecureHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        return super().end_headers()
+
+    def list_directory(self, path):
+        self.send_error(403, "Forbidden")
+        return None
+
+    def send_head(self):
+        try:
+            req_path = unquote(urlparse(self.path).path or "")
+            base = os.path.basename(req_path)
+            if base.startswith("."):
+                self.send_error(403, "Forbidden")
+                return None
+            if base in DENY_NAMES or base.endswith(DENY_SUFFIXES):
+                self.send_error(403, "Forbidden")
+                return None
+        except Exception:
+            # Fail open on parsing issues (handler has its own traversal safeguards).
+            pass
+
+        return super().send_head()
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        return 2
+    d = sys.argv[1]
+    p = int(sys.argv[2])
+
+    # Bind the directory to the handler (python 3.7+).
+    Handler = functools.partial(SecureHandler, directory=d)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", p), Handler)
+    try:
+        httpd.daemon_threads = True
+    except Exception:
+        pass
+
+    httpd.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+}
+
+__znh_start_dashboard_http_server() {
+    # Starts the local dashboard HTTP server (ThreadingHTTPServer, secure handler).
+    # Args:
+    #  1 dash_dir
+    #  2 port
+    #  3 pid_file
+    #  4 port_file
+    #  5 err_file
+    #  6 run_as_user (optional)
+    local dash_dir="$1" port="$2" pid_file="$3" port_file="$4" err_file="$5" run_as_user="${6:-}"
+
+    [ -n "${dash_dir:-}" ] || return 1
+    [[ "${port:-}" =~ ^[0-9]+$ ]] || return 1
+
+    local py_srv
+    py_srv="$(__znh_dashboard_http_server_py)"
+
+    # Start under the target desktop user if provided (root-only, so we never prompt).
+    if [ -n "${run_as_user:-}" ] && [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null && command -v sudo >/dev/null 2>&1; then
+        sudo -u "${run_as_user}" bash -c '
+            err="$1"; pidf="$2"; portf="$3"; d="$4"; p="$5"; py="$6";
+            rm -f "$err" 2>/dev/null || true
+            nohup bash -c "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-http python3 -c \"\$1\" \"\$2\" \"\$3\"" _ "$py" "$d" "$p" >>"$err" 2>&1 &
+            echo $! >"$pidf" 2>/dev/null || true
+            echo "$p" >"$portf" 2>/dev/null || true
+            chmod 600 "$pidf" "$portf" 2>/dev/null || true
+        ' _ "${err_file}" "${pid_file}" "${port_file}" "${dash_dir}" "${port}" "${py_srv}" || true
+    else
+        rm -f "${err_file}" 2>/dev/null || true
+        nohup bash -c "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-http python3 -c \"\$1\" \"\$2\" \"\$3\"" _ "${py_srv}" "${dash_dir}" "${port}" >>"${err_file}" 2>&1 &
+        echo $! >"${pid_file}" 2>/dev/null || true
+        echo "${port}" >"${port_file}" 2>/dev/null || true
+        chmod 600 "${pid_file}" "${port_file}" 2>/dev/null || true
+    fi
+
+    return 0
 }
 
 __znh_start_dashboard_sync_worker() {
@@ -220,8 +351,22 @@ exec -a znh-dashboard-sync bash -lc '
     sync_one "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log"
     sync_one "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log"
     sync_one "${src_root}/dashboard-verify-tail.log" "${dash_dir}/dashboard-verify-tail.log"
+
     # Live mode polls download-status.txt; keep it synced too.
     sync_one "${src_root}/download-status.txt" "${dash_dir}/download-status.txt"
+
+    # Live log: cap size so long-lived tabs can't blow up the browser (or disk).
+    # We only need recent context.
+    if [ -f "${src_root}/dashboard-live.log" ]; then
+      tmp="${dash_dir}/dashboard-live.log.tmp.$$"
+      tail -n 2500 "${src_root}/dashboard-live.log" >"${tmp}" 2>/dev/null || true
+      if mv -f "${tmp}" "${dash_dir}/dashboard-live.log" 2>/dev/null; then
+        chmod 644 "${dash_dir}/dashboard-live.log" 2>/dev/null || true
+      else
+        rm -f "${tmp}" 2>/dev/null || true
+      fi
+    fi
+
     # status.html is larger; only update if it changed.
     sync_one "${src_root}/status.html" "${dash_dir}/status.html"
 
@@ -813,6 +958,20 @@ PY
             fi
         fi
 
+        # SECURITY: do not serve the token over HTTP. Pass it via URL fragment (not sent to server)
+        # and let the browser store it in localStorage.
+        token_for_url=""
+        if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
+            token_for_url="${new_token}"
+        elif [ -n "${old_token}" ]; then
+            token_for_url="${old_token}"
+        fi
+
+        url_open="${url}"
+        if [ -n "${token_for_url}" ]; then
+            url_open="${url}#znh_token=${token_for_url}"
+        fi
+
         server_running=0
         if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
             old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
@@ -828,8 +987,7 @@ PY
                 rm -f "${err_file}" 2>/dev/null || true
                 # Bind explicitly to localhost (privacy/safety) and detach so the server survives terminal close.
                 # Run the server at background priority (nice + idle IO) so it never contends with foreground apps.
-                # shellcheck disable=SC2016  # $$ is expanded by the nested bash -lc, not by this outer script
-                ( nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec python3 -m http.server --bind 127.0.0.1 --directory "$1" "$2"' _ "${dash_dir}" "${port}" >>"${err_file}" 2>&1 & echo $! >"${pid_file}"; echo "${port}" >"${port_file}" ) || true
+                __znh_start_dashboard_http_server "${dash_dir}" "${port}" "${pid_file}" "${port_file}" "${err_file}" || true
                 sleep 0.25
             else
                 echo "python3 not found; cannot start live dashboard server." >&2
@@ -873,7 +1031,7 @@ PY
         # Best-effort open.
         # Prefer explicit browser when requested; fall back to xdg-open.
         # Detach so closing the terminal does not kill the browser/tab.
-        __znh_detach_open_url "${url}" "${dash_browser:-}" || true
+        __znh_detach_open_url "${url_open:-${url}}" "${dash_browser:-}" || true
 
         echo ""
         echo "To refresh/regenerate first (requires sudo):"
@@ -5049,16 +5207,58 @@ generate_dashboard() {
 
     function _fetchToken() {
         if (_settingsToken) return Promise.resolve(_settingsToken);
-        // Token is served from the dashboard directory itself:
-        //   ~/.local/share/zypper-notify/dashboard-token.txt
-        return fetch('dashboard-token.txt', { cache: 'no-store' }).then(function(r) {
-            if (!r.ok) throw new Error('token file not found');
-            return r.text();
-        }).then(function(t) {
-            _settingsToken = (t || '').trim();
-            return _settingsToken;
-        });
+
+        // SECURITY: if the dashboard was opened with a token fragment, store it and
+        // immediately remove it from the URL so it doesn't linger in history.
+        try {
+            var h = String(window.location.hash || '');
+            if (h && h.charAt(0) === '#') h = h.slice(1);
+            if (h) {
+                var sp = new URLSearchParams(h);
+                var t1 = (sp.get('znh_token') || sp.get('token') || '').trim();
+                if (t1) {
+                    _settingsToken = t1;
+                    try { localStorage.setItem('znh_settings_token', _settingsToken); } catch (e1) {}
+                    try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e2) {}
+                    return Promise.resolve(_settingsToken);
+                }
+                // If the hash had something else, still strip it to avoid leaking garbage into bookmarks.
+                try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e3) {}
+            }
+        } catch (e4) {}
+
+        // Prefer token from localStorage (set via URL fragment when opened by --dash-open).
+        try {
+            var t0 = localStorage.getItem('znh_settings_token') || '';
+            if (t0 && String(t0).trim()) {
+                _settingsToken = String(t0).trim();
+                return Promise.resolve(_settingsToken);
+            }
+        } catch (e5) {}
+
+        // Legacy fallback: only attempt token file fetch when opened via file://.
+        // When served over http://, the local server intentionally blocks this file.
+        if (window.location && window.location.protocol === 'file:') {
+            return fetch('dashboard-token.txt', { cache: 'no-store' }).then(function(r) {
+                if (!r.ok) throw new Error('token file not found');
+                return r.text();
+            }).then(function(t) {
+                _settingsToken = (t || '').trim();
+                return _settingsToken;
+            });
+        }
+
+        return Promise.reject(new Error('dashboard token missing (re-open via --dash-open)'));
     }
+
+    // Best-effort: capture the token from the URL fragment as soon as possible so
+    // it doesn't linger in the address bar longer than necessary.
+    try {
+        var _h0 = String(window.location.hash || '');
+        if (_h0.indexOf('znh_token=') !== -1 || _h0.indexOf('token=') !== -1) {
+            _fetchToken().catch(function() {});
+        }
+    } catch (e_h0) {}
 
     function _api(path, opts, _didRetryAuth) {
         opts = opts || {};
@@ -7333,6 +7533,19 @@ generate_dashboard() {
 
         pre.addEventListener('scroll', function() {
             updateJumpButton(preId, wrapId);
+
+            // If user returned to bottom, apply any staged update.
+            try {
+                if (_pendingLogText && _pendingLogView === logView && _nearBottom(pre, 80)) {
+                    pre.textContent = _pendingLogText;
+                    if (logView !== 'live') {
+                        try { highlightBlock(preId); } catch (e0) {}
+                    }
+                    pre.scrollTop = pre.scrollHeight;
+                    _pendingLogText = '';
+                    _pendingLogView = '';
+                }
+            } catch (e1) {}
         }, { passive: true });
 
         // Initial state
@@ -7957,6 +8170,11 @@ generate_dashboard() {
 
     // Realtime Recent Activity Log (multi-source)
     var _lastLiveLog = '';
+    // When the user scrolls up, we pause log replacement to avoid fighting their
+    // scroll position. New content is staged here and applied when they return
+    // to the bottom (or click Latest).
+    var _pendingLogText = '';
+    var _pendingLogView = '';
     // When true, the next successful log render will scroll to the bottom so the
     // user sees the latest events immediately. After that, we only keep the
     // view pinned to bottom when the user is already near the bottom.
@@ -8076,6 +8294,19 @@ generate_dashboard() {
 
                 // Keep scroll pinned to bottom if the user is already near bottom.
                 var nearBottom = _nearBottom(el, 80);
+
+                // UX: if the user is reading older lines (scrolled up), do not
+                // replace the log content (it can shift due to tail truncation).
+                // Stage the update and apply it when they return to bottom.
+                if (!nearBottom && !_logAutoScrollOnce) {
+                    _pendingLogText = tailed;
+                    _pendingLogView = logView;
+                    updateJumpButton('log-content', 'recent-log-wrap');
+                    return;
+                }
+
+                _pendingLogText = '';
+                _pendingLogView = '';
 
                 // Performance: for the high-frequency Live log view, avoid replacing the
                 // entire DOM block on every poll when the new content is just an append.
@@ -11926,6 +12157,21 @@ PY
             fi
         fi
 
+        # SECURITY: do not serve the token over HTTP. Pass it via URL fragment (not sent to server)
+        # and let the browser store it in localStorage.
+        local token_for_url url_open
+        token_for_url=""
+        if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
+            token_for_url="${new_token}"
+        elif [ -n "${old_token}" ]; then
+            token_for_url="${old_token}"
+        fi
+
+        url_open="${url}"
+        if [ -n "${token_for_url}" ]; then
+            url_open="${url}#znh_token=${token_for_url}"
+        fi
+
         local server_running
         server_running=0
         if [ -f "${pid_file}" ] && [ -f "${port_file}" ]; then
@@ -11944,8 +12190,7 @@ PY
                 # Use nohup so the server survives terminal close.
                 # Run at background priority (nice + idle IO) so it never contends with foreground apps.
                 # shellcheck disable=SC2154
-                sudo -u "${SUDO_USER}" \
-                    bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; py_srv=\"import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; NoCacheHandler=type(\\\"NoCacheHandler\\\", (SimpleHTTPRequestHandler,), {\\\"end_headers\\\": (lambda self: (self.send_header(\\\"Cache-Control\\\",\\\"no-cache, no-store, must-revalidate\\\"), self.send_header(\\\"Pragma\\\",\\\"no-cache\\\"), self.send_header(\\\"Expires\\\",\\\"0\\\"), SimpleHTTPRequestHandler.end_headers(self))) }); d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(NoCacheHandler, directory=d); httpd=ThreadingHTTPServer((\\\"127.0.0.1\\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()\"; if python3 -c \"from http.server import ThreadingHTTPServer\" >/dev/null 2>&1; then exec -a znh-dashboard-http python3 -c \"\\$py_srv\" \"\\$1\" \"\\$2\"; else exec python3 -m http.server --bind 127.0.0.1 --directory \"\\$1\" \"\\$2\"; fi' _ \"${dash_dir}\" \"${port}\" >>\"${err_file}\" 2>&1 & echo \$! >\"${pid_file}\"; echo \"${port}\" >\"${port_file}\"" || true
+                __znh_start_dashboard_http_server "${dash_dir}" "${port}" "${pid_file}" "${port_file}" "${err_file}" "${SUDO_USER}" || true
                 sleep 0.25
             fi
         fi
@@ -11993,18 +12238,18 @@ PY
             extra_args="$(__znh_browser_extra_args "${dash_browser}" 2>/dev/null | tr '\n' ' ' || true)"
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
-                    bash -lc "nohup \"${dash_browser}\" ${extra_args} \"${url}\" >/dev/null 2>&1 &" || true
+                    bash -lc "nohup \"${dash_browser}\" ${extra_args} \"${url_open}\" >/dev/null 2>&1 &" || true
             else
                 # shellcheck disable=SC2207
                 local extra=( $(__znh_browser_extra_args "${dash_browser}" 2>/dev/null || true) )
-                __znh_detach_cmd "${dash_browser}" "${extra[@]}" "${url}" || true
+                __znh_detach_cmd "${dash_browser}" "${extra[@]}" "${url_open}" || true
             fi
         elif command -v xdg-open >/dev/null 2>&1; then
             if [ -n "${SUDO_USER:-}" ] && [ -n "${user_bus:-}" ]; then
                 sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${user_bus}" XDG_RUNTIME_DIR="${user_runtime}" \
-                    bash -lc "nohup xdg-open \"${url}\" >/dev/null 2>&1 &" || true
+                    bash -lc "nohup xdg-open \"${url_open}\" >/dev/null 2>&1 &" || true
             else
-                __znh_detach_cmd xdg-open "${url}" || true
+                __znh_detach_cmd xdg-open "${url_open}" || true
             fi
         fi
 
