@@ -1597,6 +1597,12 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
   - ⚡ **IMPROVED:** dashboard Live mode polling now uses non-overlapping `setTimeout` loops with in-flight guards to avoid fetch request pile-up on slow responses.
   - ⚡ **IMPROVED:** dashboard sync worker now prefers **inotify-driven** sync when available (instant updates on file changes; timeout fallback).
+  - 🐛 **FIXED:** dashboard sync worker now includes an **inotify debounce** (prevents CPU spikes during rapid log writes).
+  - 🐛 **FIXED:** stopping dashboard workers now also kills child watcher processes (prevents orphaned/zombie inotify processes).
+  - 🐛 **FIXED:** Rocket Update Wizard job polling now uses recursive `setTimeout` scheduling (avoids interval-style lag/stuck behaviour under load).
+  - 🐛 **FIXED:** Dashboard API now self-cleans transient Rocket Update unit scripts (`/var/lib/zypper-auto/webui-dup-*.sh`) to prevent disk clutter over time.
+  - ⚡ **IMPROVED:** Live log view now prefers **append rendering** when possible (reduces DOM churn / scroll jank).
+  - 🐛 **FIXED:** dashboard now applies stored theme in the `<head>` (prevents “flash of wrong theme” on load).
   - 🐛 **FIXED:** Dashboard API confirm-token cache is now protected by a lock to prevent crashes under concurrent clicks / multiple tabs.
   - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
   - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).

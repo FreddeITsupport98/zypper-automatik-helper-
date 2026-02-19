@@ -166,6 +166,16 @@ exec -a znh-dashboard-sync bash -lc '
   dash_dir="$1";
   src_root="/var/log/zypper-auto";
 
+  # Ensure child processes die when this worker is stopped.
+  cleanup_children() {
+    trap - EXIT INT TERM
+    if command -v pkill >/dev/null 2>&1; then
+      pkill -TERM -P $$ >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup_children EXIT
+  trap "cleanup_children; exit 0" INT TERM
+
   # Sync interval (seconds). Default lowered to improve WebUI responsiveness.
   # You can override it via: ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS=10 zypper-auto-helper --dash-open
   interval="${ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS:-2}";
@@ -218,7 +228,13 @@ exec -a znh-dashboard-sync bash -lc '
     # Prefer event-driven sync when available so Live mode feels instant.
     # Wait for changes OR time out after ${interval}s.
     if command -v inotifywait >/dev/null 2>&1; then
-      inotifywait -qq -t "${interval}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null || true
+      # Debounce: if logs are being written rapidly, inotify can fire extremely
+      # often. Sleep briefly after an event so we group bursts into one sync.
+      inotifywait -qq -t "${interval}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null
+      rc=$?
+      if [ "${rc}" -eq 0 ] 2>/dev/null; then
+        sleep 0.5
+      fi
     else
       sleep "$interval"
     fi
@@ -251,9 +267,22 @@ __znh_stop_dashboard_sync_worker() {
     local pid
     pid=$(cat "${pid_file}" 2>/dev/null || echo "")
     if __znh_pid_is_dashboard_sync_worker "${pid}" "${dash_dir}"; then
+        # Best-effort: stop child watchers (inotifywait) so we don't leave orphans.
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -TERM -P "${pid}" 2>/dev/null || true
+        fi
+
         kill "${pid}" 2>/dev/null || true
-        sleep 0.1
+        sleep 0.15
+
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -TERM -P "${pid}" 2>/dev/null || true
+        fi
+
         kill -9 "${pid}" 2>/dev/null || true
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -KILL -P "${pid}" 2>/dev/null || true
+        fi
     fi
     rm -f "${pid_file}" 2>/dev/null || true
 }
@@ -3849,6 +3878,18 @@ generate_dashboard() {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Zypper Auto Command Center</title>
+  <script>
+    // Apply stored theme ASAP to avoid "flash of wrong theme" (FOUC) when the
+    // user has forced Light/Dark while the system prefers the opposite.
+    (function() {
+      try {
+        var mode = localStorage.getItem('znh_theme') || 'auto';
+        if (mode === 'dark' || mode === 'light') {
+          document.documentElement.setAttribute('data-theme', mode);
+        }
+      } catch (e) {}
+    })();
+  </script>
   <style>
     html { color-scheme: light dark; }
     /* Ensure native form controls (especially <select>/<option>) follow our theme */
@@ -4293,6 +4334,18 @@ generate_dashboard() {
     }
     .copy-btn:focus,
     .jump-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
+
+    /* Copy feedback (log copy buttons) */
+    .copy-btn.copied-ok {
+        border-color: rgba(34,197,94,0.55) !important;
+        background: rgba(34,197,94,0.08) !important;
+        color: var(--text) !important;
+    }
+    .copy-btn.copied-err {
+        border-color: rgba(239,68,68,0.55) !important;
+        background: rgba(239,68,68,0.08) !important;
+        color: var(--text) !important;
+    }
 
     pre {
         background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.00)), var(--code-bg);
@@ -5077,7 +5130,8 @@ generate_dashboard() {
 
             if (fb) fb.textContent = (r && r.rc === 0) ? 'OK ✓' : 'Done';
 
-            // The dashboard sync worker copies /var/log/zypper-auto/status.html -> ~/.local/share/zypper-notify/status.html every 10s.
+            // The dashboard sync worker keeps /var/log/zypper-auto/status.html -> ~/.local/share/zypper-notify/status.html in sync.
+            // It prefers inotify (instant) with a short interval fallback (default ~2s).
             // Reload after a short delay so most users see the refreshed HTML.
             setTimeout(function() {
                 try { window.location.reload(); } catch (e) {}
@@ -6182,7 +6236,7 @@ generate_dashboard() {
         _ru.auto_simulate = false;
         _ru.last_preview = null;
         if (_ru.poll_timer) {
-            try { clearInterval(_ru.poll_timer); } catch (e) {}
+            try { clearTimeout(_ru.poll_timer); } catch (e) {}
             _ru.poll_timer = null;
         }
     }
@@ -6437,7 +6491,7 @@ generate_dashboard() {
 
                 if (j.done) {
                     if (_ru.poll_timer) {
-                        try { clearInterval(_ru.poll_timer); } catch (e) {}
+                        try { clearTimeout(_ru.poll_timer); } catch (e) {}
                         _ru.poll_timer = null;
                     }
                     _ru.running = false;
@@ -6477,7 +6531,7 @@ generate_dashboard() {
                 if (_pollFailures >= _pollMaxFailures) {
                     toast('Update polling failed', 'Too many errors. Please reload the page.', 'err');
                     if (_ru.poll_timer) {
-                        try { clearInterval(_ru.poll_timer); } catch (ee) {}
+                        try { clearTimeout(_ru.poll_timer); } catch (ee) {}
                         _ru.poll_timer = null;
                     }
                     _ru.running = false;
@@ -6494,11 +6548,15 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 _pollInFlight = false;
+                if (_ru.running) {
+                    // Recursive setTimeout avoids request pile-up on slow responses.
+                    _ru.poll_timer = setTimeout(tick, 850);
+                }
             });
         }
 
+        // First tick immediately; subsequent ticks are scheduled by tick().
         tick();
-        _ru.poll_timer = setInterval(tick, 800);
     }
 
     function rocketUpdateWizardOpen(arg) {
@@ -7191,8 +7249,15 @@ generate_dashboard() {
             if (!btn) return;
             var old = btn.textContent;
             btn.textContent = ok ? 'Copied!' : 'Copy failed';
+            try {
+                btn.classList.remove('copied-ok', 'copied-err');
+                btn.classList.add(ok ? 'copied-ok' : 'copied-err');
+            } catch (e0) {}
             btn.classList.add('pulse');
-            setTimeout(function() { btn.textContent = old; btn.classList.remove('pulse'); }, 2000);
+            setTimeout(function() {
+                btn.textContent = old;
+                try { btn.classList.remove('pulse', 'copied-ok', 'copied-err'); } catch (e1) {}
+            }, 2000);
             if (ok) toast('Copied text', id, 'ok');
             else toast('Copy failed', 'Clipboard access blocked.', 'err');
         }
@@ -8002,6 +8067,8 @@ generate_dashboard() {
             .then(function(txt) {
                 var tailed = tailLines(txt, 220);
                 if (tailed === _lastLiveLog) return;
+
+                var prev = _lastLiveLog;
                 _lastLiveLog = tailed;
 
                 var el = document.getElementById('log-content');
@@ -8010,8 +8077,22 @@ generate_dashboard() {
                 // Keep scroll pinned to bottom if the user is already near bottom.
                 var nearBottom = _nearBottom(el, 80);
 
-                el.textContent = tailed;
-                highlightBlock('log-content');
+                // Performance: for the high-frequency Live log view, avoid replacing the
+                // entire DOM block on every poll when the new content is just an append.
+                // For other views we keep full replace + keyword highlighting.
+                var doHighlight = (logView !== 'live');
+                if (!doHighlight && prev && tailed.indexOf(prev) === 0) {
+                    var diff = tailed.slice(prev.length);
+                    if (diff) {
+                        try { el.appendChild(document.createTextNode(diff)); } catch (e0) { el.textContent = tailed; }
+                    }
+                } else {
+                    el.textContent = tailed;
+                }
+
+                if (doHighlight) {
+                    highlightBlock('log-content');
+                }
 
                 // Default behaviour: always show latest entries the first time
                 // (or after view switches). After that, only auto-scroll when
@@ -24689,6 +24770,9 @@ class Handler(BaseHTTPRequestHandler):
                     '  echo "=== ZYPPER PS -s (restart check) ===" >>"$LOG"',
                     f'  {ZYPPER_BIN} ps -s >>"$LOG" 2>&1 || true',
                     'fi',
+                    '',
+                    '# Self-cleanup: remove this temporary script file so /var/lib/zypper-auto does not fill up over time.',
+                    'rm -f "$0" >/dev/null 2>&1 || true',
                     'exit ${rc}',
                 ])
 
@@ -24705,8 +24789,18 @@ class Handler(BaseHTTPRequestHandler):
                     with lock:
                         j = jobs.get(job_id)
                         if j:
+                            j["rc"] = 1
+                            j["running"] = False
+                            j["done"] = True
+                            j["finished_at"] = time.time()
+                            j["stage"] = "Failed"
                             _job_output_append(j, f"[dashboard-api] Failed to write unit script: {e}\n")
-                    raise
+                    try:
+                        if script_file and os.path.exists(script_file):
+                            os.remove(script_file)
+                    except Exception:
+                        pass
+                    return
 
                 env = {
                     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -24749,6 +24843,7 @@ class Handler(BaseHTTPRequestHandler):
                         encoding="utf-8",
                         errors="replace",
                         env=env,
+                        timeout=15,
                     )
                     if p.returncode != 0:
                         with lock:
@@ -24769,6 +24864,11 @@ class Handler(BaseHTTPRequestHandler):
                             j["finished_at"] = time.time()
                             j["stage"] = "Failed"
                             _job_output_append(j, f"\n[dashboard-api] Failed to start update: {e}\n")
+                    try:
+                        if script_file and os.path.exists(script_file):
+                            os.remove(script_file)
+                    except Exception:
+                        pass
                     return
 
                 # Stream the log file + poll unit state.
@@ -24876,6 +24976,15 @@ class Handler(BaseHTTPRequestHandler):
                             j["stage"] = "Done" if not simulate else "Dry-run done"
                         else:
                             j["stage"] = "Failed"
+
+
+                # CLEANUP (best-effort): if the unit script still exists, remove it.
+                # In normal operation the script self-deletes (rm -f "$0").
+                try:
+                    if script_file and os.path.exists(script_file):
+                        os.remove(script_file)
+                except Exception:
+                    pass
 
             threading.Thread(target=worker, daemon=True).start()
             return _json_response(self, 200, {"job_id": job_id}, origin)
@@ -25043,7 +25152,7 @@ class Handler(BaseHTTPRequestHandler):
             # Non-interactive reset via helper so it stays consistent with installer template.
             cmd = ["/usr/local/bin/zypper-auto-helper", "--reset-config", "--yes"]
             try:
-                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
             except Exception:
                 pass
             eff, warnings, invalid = _read_conf(self.server.conf_path)
