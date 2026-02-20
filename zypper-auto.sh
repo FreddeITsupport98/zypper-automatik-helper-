@@ -4484,6 +4484,11 @@ generate_dashboard() {
         overflow-wrap: anywhere;
     }
 
+    /* JS health badge (used to quickly tell if the page JS is alive) */
+    .js-health-badge { --status-color: rgba(100,116,139,0.92); }
+    .js-health-badge.js-ok { --status-color: rgba(34,197,94,0.92); }
+    .js-health-badge.js-err { --status-color: rgba(239,68,68,0.92); }
+
     .znh-hidden { display: none !important; }
 
     /* Zypp/zypper lock badge (helps explain why updates are waiting) */
@@ -4688,6 +4693,7 @@ generate_dashboard() {
           </h1>
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
             <span class="status-badge" id="status-badge">${last_status_esc}</span>
+            <span class="status-badge js-health-badge" id="js-health-badge" title="JavaScript status (if this shows FAIL, open DevTools → Console)">JS: loading…</span>
             <span class="status-badge lock-badge ${zypp_lock_badge_class}" id="zypp-lock-badge" title="${zypp_lock_badge_title_esc}">${zypp_lock_badge_text_esc}</span>
           </div>
       </div>
@@ -5054,6 +5060,15 @@ generate_dashboard() {
       <h2>Recent Activity Log</h2>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: <span id="last-install-log">${last_install_log_esc}</span></div>
 
+      <details id="js-health-details" style="margin: 10px 0 12px 0; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">
+        <summary style="cursor:pointer; font-weight: 950; color: var(--text);">🧪 JS health (debug)</summary>
+        <div style="margin-top:8px; color: var(--muted); font-size:0.86rem; font-weight: 800;">
+          Shows dashboard JS errors/debug breadcrumbs.
+          If Live mode or the log tabs stop working, the first error here is usually the root cause.
+        </div>
+        <pre id="js-health-log" style="max-height: 180px; margin-top: 10px;">(booting…)</pre>
+      </details>
+
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 10px 0;">
         <button class="pill log-tab" type="button" data-view="live">View: Live</button>
         <button class="pill log-tab" type="button" data-view="install">View: Logs (tail)</button>
@@ -5132,9 +5147,135 @@ generate_dashboard() {
     </div>
   </div>
 
+  <!-- JS health indicator bootstrap: runs even if the main dashboard script has a syntax error -->
+  <script>
+    (function() {
+        try { window.__znh_js_ok = false; } catch (e0) {}
+        try { window.__znh_js_health_log = []; } catch (e0b) {}
+
+        function _now() {
+            try {
+                var s = new Date().toISOString();
+                return s.slice(11, 19);
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function _healthOpenOnError() {
+            try {
+                var d = document.getElementById('js-health-details');
+                if (d) d.open = true;
+            } catch (e) {}
+        }
+
+        function _healthRender() {
+            try {
+                var el = document.getElementById('js-health-log');
+                if (!el) return;
+                var arr = window.__znh_js_health_log || [];
+                el.textContent = arr.length ? arr.join('\n') : '(empty)';
+            } catch (e) {}
+        }
+
+        function _healthAppend(level, msg) {
+            var line = '[' + _now() + '] ' + String(level || 'info').toUpperCase() + ': ' + String(msg || '');
+            try {
+                if (!window.__znh_js_health_log) window.__znh_js_health_log = [];
+                window.__znh_js_health_log.push(line);
+                if (window.__znh_js_health_log.length > 120) {
+                    window.__znh_js_health_log = window.__znh_js_health_log.slice(window.__znh_js_health_log.length - 120);
+                }
+            } catch (e0c) {}
+            _healthRender();
+        }
+
+        function _setJsBadge(state, msg, title) {
+            var b = null;
+            try { b = document.getElementById('js-health-badge'); } catch (e1) { b = null; }
+            if (!b) return;
+
+            try { b.classList.remove('js-ok'); } catch (e2) {}
+            try { b.classList.remove('js-err'); } catch (e3) {}
+
+            if (state === 'ok') {
+                try { b.classList.add('js-ok'); } catch (e4) {}
+            } else if (state === 'err') {
+                try { b.classList.add('js-err'); } catch (e5) {}
+            }
+
+            try { b.textContent = msg || 'JS: …'; } catch (e6) {}
+            try { if (title) b.title = title; } catch (e7) {}
+        }
+
+        function _fail(msg) {
+            _setJsBadge('err', 'JS: FAIL', 'Dashboard JavaScript failed. Open "🧪 JS health (debug)" (Recent Activity) or DevTools → Console.');
+            _healthAppend('error', msg || 'JS failed');
+            _healthOpenOnError();
+        }
+
+        // Expose a debug helper so the main script can add breadcrumbs.
+        try {
+            window.znhJsHealthLog = function(level, msg) {
+                _healthAppend(level || 'debug', msg || '');
+            };
+        } catch (e8) {}
+
+        // Expose a global so the main script can mark the page as OK.
+        try {
+            window.znhJsHealthOk = function() {
+                try { window.__znh_js_ok = true; } catch (e9) {}
+                _setJsBadge('ok', 'JS: OK', 'Dashboard JavaScript is running');
+                _healthAppend('info', 'Dashboard JS OK');
+            };
+        } catch (e10) {}
+
+        _setJsBadge('info', 'JS: loading…', 'JavaScript bootstrapping…');
+        _healthAppend('debug', 'bootstrap loaded');
+
+        // Watchdog: if main JS never marks OK (e.g. syntax error), show FAIL.
+        setTimeout(function() {
+            var ok = false;
+            try { ok = !!window.__znh_js_ok; } catch (e11) { ok = false; }
+            if (!ok) {
+                _fail('Main dashboard script did not start (possible syntax error).');
+            }
+        }, 1500);
+
+        // Capture runtime errors (best-effort).
+        try {
+            window.addEventListener('error', function(ev) {
+                try {
+                    // Ignore resource loading errors (no message).
+                    if (!ev || !ev.message) return;
+
+                    var where = '';
+                    try {
+                        if (ev.filename) where += ' ' + String(ev.filename).split('/').slice(-1)[0];
+                        if (ev.lineno) where += ':' + String(ev.lineno);
+                        if (ev.colno) where += ':' + String(ev.colno);
+                    } catch (eW) {}
+
+                    _fail('JS error:' + where + ' ' + String(ev.message));
+                } catch (e12) {}
+            });
+        } catch (e13) {}
+
+        try {
+            window.addEventListener('unhandledrejection', function(ev) {
+                try {
+                    var msg2 = (ev && ev.reason) ? String(ev.reason) : 'promise rejection';
+                    _fail('Unhandled rejection: ' + msg2);
+                } catch (e14) {}
+            });
+        } catch (e15) {}
+    })();
+  </script>
+
   <script>
     // Enable JS-only styling hooks
     try { document.documentElement.classList.add('js'); } catch (e) {}
+    try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'main dashboard script start'); } catch (e0) {}
 
     // Global UI state (used by live polling)
     var genTime = new Date("${now_iso}");
@@ -7121,6 +7262,8 @@ generate_dashboard() {
                         // but setting this to 0 avoids confusing "stuck" pending count.
                         if (!_ru.simulate) {
                             try { setText('pending-count', 0); } catch (e_pc) {}
+                        }
+                        try { znhTaskDone('system-update', true); } catch (e_task_ru3) {}
                     } else {
                         toast('Update failed', 'rc=' + String(rc), 'err');
                         try { znhTaskDone('system-update', false); } catch (e_task_ru4) {}
@@ -8194,6 +8337,7 @@ generate_dashboard() {
             }
         });
     })();
+    try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'wired live toggle'); } catch (e) {}
 
     function pollLive() {
         if (!liveEnabled) return Promise.resolve(null);
@@ -8662,6 +8806,7 @@ generate_dashboard() {
         }
         _updateLogTabsUI();
     })();
+    try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'wired log tabs'); } catch (e) {}
 
     function pollRecentActivityLog(force) {
         if (!liveEnabled && !force) return Promise.resolve(null);
@@ -8798,6 +8943,9 @@ generate_dashboard() {
     pollDownloaderStatus();
     pollPerf(true);
     pollRecentActivityLog();
+
+    // Mark dashboard JS as booted (updates the header badge).
+    try { if (typeof window.znhJsHealthOk === 'function') window.znhJsHealthOk(); } catch (e) {}
   </script>
 </body>
 </html>
