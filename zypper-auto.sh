@@ -3756,6 +3756,24 @@ generate_dashboard() {
     now_iso="$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
     last_status=$(cat "${STATUS_FILE}" 2>/dev/null || echo "Unknown")
 
+    # Helper VERSION header embedded into the dashboard so the WebUI can detect
+    # when it is outdated compared to the installed helper binary.
+    local helper_version_at_gen helper_version_line
+    helper_version_at_gen="0"
+    helper_version_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "$0" 2>/dev/null || true)
+    helper_version_at_gen=$(printf '%s' "${helper_version_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "0")
+    if ! [[ "${helper_version_at_gen:-}" =~ ^[0-9]+$ ]]; then helper_version_at_gen="0"; fi
+
+    # Dashboard generation ID: used by an already-open tab to detect that a NEW
+    # dashboard file was generated (even if the helper version didn't change).
+    local dash_gen_id
+    dash_gen_id=""
+    if date +%s%N >/dev/null 2>&1; then
+        dash_gen_id="g$(date +%s%N)"
+    else
+        dash_gen_id="g$(date +%s)"
+    fi
+
     # Pending updates count (from cached dry-run output)
     local pending_count dry_file
     pending_count="0"
@@ -4730,6 +4748,21 @@ generate_dashboard() {
         </div>
       </div>
 
+      <!-- Dashboard update banner (shown when a newer helper/dashboard build is available) -->
+      <div id="znh-dashboard-update-banner" style="display:none; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); color: var(--text);">
+        <div style="display:flex; gap:12px; justify-content: space-between; flex-wrap: wrap; align-items: center;">
+          <div>
+            <div style="font-weight: 950;">✨ Dashboard update available</div>
+            <div id="znh-dashboard-update-text" style="margin-top:4px; font-size:0.9rem; color: var(--muted); font-weight: 800;">(checking…)</div>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
+            <button class="pill" type="button" id="znh-dashboard-update-refresh-btn" title="Regenerate dashboard via localhost API (same as Quick Actions → Run: Refresh Dashboard)">Run: Refresh Dashboard</button>
+            <button class="pill" type="button" id="znh-dashboard-update-reload-btn" style="border-color: rgba(255,255,255,0.14);">Reload tab</button>
+            <button class="pill" type="button" id="znh-dashboard-update-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
+          </div>
+        </div>
+      </div>
+
       <div class="grid" style="margin-top: 18px;">
         <div class="stat-box">
             <span class="stat-label">Kernel</span>
@@ -5320,6 +5353,8 @@ generate_dashboard() {
 
     // Global UI state (used by live polling)
     var genTime = new Date("${now_iso}");
+    var ZNH_HELPER_VERSION_AT_GEN = ${helper_version_at_gen};
+    var ZNH_DASHBOARD_GEN_ID = "${dash_gen_id}";
 
     // --- Debugging helpers ---
     // Enable with: ?debug=1 (or ?znh_debug=1)
@@ -5540,6 +5575,144 @@ generate_dashboard() {
             // ignore
         }
     }
+
+    // --- Dashboard update notifications ("new features available" / reload guidance) ---
+    var _znh_dash_update_key = '';
+    var _znh_dash_update_state = {
+        helper_mismatch: false,
+        helper_inst: 0,
+        helper_gen: 0,
+
+        meta_mismatch: false,
+        meta_gen_id: '',
+        meta_generated_iso: '',
+        meta_generated_human: ''
+    };
+
+    function _znhDashUpdateSetVisible(v) {
+        var b = document.getElementById('znh-dashboard-update-banner');
+        if (!b) return;
+        b.style.display = v ? 'block' : 'none';
+    }
+
+    function _znhDashUpdateSetText(msg) {
+        var t = document.getElementById('znh-dashboard-update-text');
+        if (!t) return;
+        t.textContent = String(msg || '');
+    }
+
+    function _znhDashUpdateDismissedKey() {
+        try { return String(localStorage.getItem('znh_dash_update_dismiss_key') || ''); } catch (e) { return ''; }
+    }
+
+    function _znhDashUpdateSetDismissedKey(k) {
+        try { localStorage.setItem('znh_dash_update_dismiss_key', String(k || '')); } catch (e) {}
+    }
+
+    function znhDashboardUpdateBannerShow(key, msg) {
+        key = String(key || '');
+        if (!key) return;
+        var dismissed = _znhDashUpdateDismissedKey();
+        if (dismissed && dismissed === key) {
+            _znhDashUpdateSetVisible(false);
+            return;
+        }
+
+        _znh_dash_update_key = key;
+        _znhDashUpdateSetText(msg);
+        _znhDashUpdateSetVisible(true);
+    }
+
+    function znhDashboardUpdateBannerHide() {
+        _znhDashUpdateSetVisible(false);
+    }
+
+    function _znhDashUpdateRender() {
+        var parts = [];
+        var keyParts = [];
+
+        if (_znh_dash_update_state.helper_mismatch) {
+            parts.push('Installed helper is v' + String(_znh_dash_update_state.helper_inst || '?') + ', but this dashboard was generated by v' + String(_znh_dash_update_state.helper_gen || '?') + '.');
+            keyParts.push('helper:' + String(_znh_dash_update_state.helper_inst) + ':' + String(_znh_dash_update_state.helper_gen));
+        }
+
+        if (_znh_dash_update_state.meta_mismatch) {
+            var when = _znh_dash_update_state.meta_generated_human || _znh_dash_update_state.meta_generated_iso || '';
+            parts.push('A newer dashboard file was generated' + (when ? (' at ' + when) : '') + '.');
+            keyParts.push('meta:' + String(_znh_dash_update_state.meta_gen_id || '')); 
+        }
+
+        if (!parts.length) {
+            znhDashboardUpdateBannerHide();
+            return false;
+        }
+
+        var key = keyParts.join('|');
+        var msg = parts.join(' ') + ' Reload this tab to load new UI/features.' +
+            ' If needed: click “Run: Refresh Dashboard” (or run sudo zypper-auto-helper --dashboard).';
+
+        znhDashboardUpdateBannerShow(key, msg);
+        return true;
+    }
+
+    function znhDashboardUpdateInit() {
+        var b = document.getElementById('znh-dashboard-update-banner');
+        if (!b) return;
+
+        var btnReload = document.getElementById('znh-dashboard-update-reload-btn');
+        var btnRefresh = document.getElementById('znh-dashboard-update-refresh-btn');
+        var btnDismiss = document.getElementById('znh-dashboard-update-dismiss-btn');
+
+        if (btnReload) btnReload.addEventListener('click', function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            try { window.location.reload(); } catch (e1) {}
+        });
+
+        if (btnRefresh) btnRefresh.addEventListener('click', function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e2) {}
+            try { dashboardRefreshRun(null); } catch (e3) {
+                toast('Refresh failed', (e3 && e3.message) ? e3.message : 'failed', 'err');
+            }
+        });
+
+        if (btnDismiss) btnDismiss.addEventListener('click', function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e4) {}
+            if (_znh_dash_update_key) {
+                _znhDashUpdateSetDismissedKey(_znh_dash_update_key);
+            }
+            znhDashboardUpdateBannerHide();
+        });
+    }
+
+    function znhDashboardUpdateMaybeNotifyFromInstalledVersion(installedVer) {
+        var inst = 0;
+        var gen = 0;
+        try { inst = parseInt(installedVer || 0, 10) || 0; } catch (e0) { inst = 0; }
+        try { gen = parseInt(ZNH_HELPER_VERSION_AT_GEN || 0, 10) || 0; } catch (e1) { gen = 0; }
+
+        _znh_dash_update_state.helper_inst = inst;
+        _znh_dash_update_state.helper_gen = gen;
+        _znh_dash_update_state.helper_mismatch = (inst > 0 && gen > 0 && inst > gen);
+
+        return _znhDashUpdateRender();
+    }
+
+    function znhDashboardUpdateMaybeNotifyFromMeta(meta) {
+        meta = meta || {};
+        var remoteId = '';
+        try { remoteId = String(meta.gen_id || ''); } catch (e0) { remoteId = ''; }
+
+        _znh_dash_update_state.meta_gen_id = remoteId;
+        try { _znh_dash_update_state.meta_generated_iso = String(meta.generated_iso || ''); } catch (e1) { _znh_dash_update_state.meta_generated_iso = ''; }
+        try { _znh_dash_update_state.meta_generated_human = String(meta.generated_human || ''); } catch (e2) { _znh_dash_update_state.meta_generated_human = ''; }
+
+        _znh_dash_update_state.meta_mismatch = (!!remoteId && remoteId !== String(ZNH_DASHBOARD_GEN_ID || ''));
+
+        return _znhDashUpdateRender();
+    }
+
+    // Wire update banner early.
+    try { znhDashboardUpdateInit(); } catch (eU0) {}
 
     // --- Background job bubble (resume running self-update / system-update jobs) ---
     var ZNH_TASK_KEY = 'znh_active_task_v1';
@@ -6270,12 +6443,16 @@ generate_dashboard() {
         _selfUpdateSetRunBtn(false, 'Checking…');
 
         return _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).then(function(r) {
-            // r: { channel, installed_ref, remote_ref, up_to_date, update_available, remote_is_older, known_installed, error }
+            // r: { channel, installed_ref, remote_ref, up_to_date, update_available, remote_is_older, known_installed, error, installed_version_header }
             if (!r) {
                 _selfUpdateSetStatus('Unknown');
                 _selfUpdateSetRunBtn(true, 'Install latest');
                 return null;
             }
+
+            // Dashboard update notification: if the installed helper is newer than the version that
+            // generated this HTML, prompt the user to refresh/reload to pick up new features.
+            try { znhDashboardUpdateMaybeNotifyFromInstalledVersion(r.installed_version_header); } catch (eU) {}
 
             if (r.error) {
                 _selfUpdateSetStatus('Error');
@@ -8610,6 +8787,7 @@ generate_dashboard() {
     var _pollDownloaderInFlight = false;
     var _pollPerfInFlight = false;
     var _pollLogInFlight = false;
+    var _pollDashMetaInFlight = false;
 
     // Live mode toggle
     (function() {
@@ -8667,6 +8845,53 @@ generate_dashboard() {
             })
             .finally(function() {
                 _pollLiveInFlight = false;
+            });
+    }
+
+    function pollDashboardMeta() {
+        // Poll a small sidecar file that is updated whenever the helper regenerates
+        // status.html. This lets a long-lived tab detect that a NEW dashboard
+        // is available (new features / updated layout) and prompt the user to reload.
+
+        // When opened as file://, many browsers block fetch(); skip quietly.
+        try {
+            if (!window.location || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) {
+                return Promise.resolve(null);
+            }
+        } catch (e0) {
+            return Promise.resolve(null);
+        }
+
+        if (_pollDashMetaInFlight) return Promise.resolve(null);
+        _pollDashMetaInFlight = true;
+
+        return znhFetch('status-meta.json?ts=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) {
+                if (r.status === 404 || r.status === 416) return '';
+                if (!r.ok && r.status !== 206) {
+                    var e = new Error('HTTP ' + r.status);
+                    try { e.http_status = r.status; } catch (e2) {}
+                    throw e;
+                }
+                return r.text();
+            })
+            .then(function(txt) {
+                if (!txt) return null;
+                var meta = null;
+                try { meta = JSON.parse(txt); } catch (e) { meta = null; }
+                if (!meta) return null;
+                try { znhDashboardUpdateMaybeNotifyFromMeta(meta); } catch (e3) {}
+                return meta;
+            })
+            .catch(function(err) {
+                if (ZNH_DEBUG) {
+                    var msg = (err && err.message) ? err.message : 'dashboard meta poll failed';
+                    try { znhDebugWarn('pollDashboardMeta failed:', msg); } catch (e1) {}
+                }
+                return null;
+            })
+            .finally(function() {
+                _pollDashMetaInFlight = false;
             });
     }
 
@@ -9265,12 +9490,14 @@ generate_dashboard() {
     _startPollLoop(pollDownloaderStatus, 2000);
     _startPollLoop(pollPerf, 2000);
     _startPollLoop(pollRecentActivityLog, 2000);
+    _startPollLoop(pollDashboardMeta, 15000);
 
     // Initial draws (some are useful even when live mode is off)
     pollLive();
     pollDownloaderStatus();
     pollPerf(true);
     pollRecentActivityLog();
+    pollDashboardMeta();
 
     // Mark dashboard JS as booted (updates the header badge).
     try { if (typeof window.znhJsHealthOk === 'function') window.znhJsHealthOk(); } catch (e) {}
@@ -9278,6 +9505,20 @@ generate_dashboard() {
 </body>
 </html>
 EOF
+
+    # Sidecar metadata for long-lived tabs: allows detecting that a NEW dashboard
+    # was generated and prompting the user to reload.
+    local out_meta_root
+    out_meta_root="${LOG_DIR}/status-meta.json"
+    write_atomic "${out_meta_root}" <<JSON_EOF
+{
+  "gen_id": "$(_json_escape "${dash_gen_id}")",
+  "generated_iso": "$(_json_escape "${now_iso}")",
+  "generated_human": "$(_json_escape "${now}")",
+  "helper_version_at_gen": ${helper_version_at_gen}
+}
+JSON_EOF
+    chmod 644 "${out_meta_root}" 2>/dev/null || true
 
     # Also generate a machine-readable data file for live polling.
     local out_json_root
@@ -9395,12 +9636,14 @@ JSON_EOF
     chmod 644 "${out_root}" 2>/dev/null || true
 
     if [ -n "${out_user}" ]; then
-        local out_user_dir out_user_json
+        local out_user_dir out_user_json out_user_meta
         out_user_dir="$(dirname "${out_user}")"
         out_user_json="${out_user_dir}/status-data.json"
+        out_user_meta="${out_user_dir}/status-meta.json"
 
         mkdir -p "${out_user_dir}" 2>/dev/null || true
         copy_atomic "${out_root}" "${out_user}" 2>/dev/null || true
+        copy_atomic "${out_meta_root}" "${out_user_meta}" 2>/dev/null || true
         copy_atomic "${out_json_root}" "${out_user_json}" 2>/dev/null || true
         copy_atomic "${out_install_tail_root}" "${out_user_dir}/dashboard-install-tail.log" 2>/dev/null || true
         copy_atomic "${out_verify_tail_root}" "${out_user_dir}/dashboard-verify-tail.log" 2>/dev/null || true
@@ -9416,7 +9659,7 @@ JSON_EOF
         fi
 
         chown "${SUDO_USER}:${SUDO_USER}" \
-            "${out_user}" "${out_user_json}" \
+            "${out_user}" "${out_user_json}" "${out_user_meta}" \
             "${out_user_dir}/dashboard-install-tail.log" \
             "${out_user_dir}/dashboard-verify-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
@@ -9424,7 +9667,7 @@ JSON_EOF
             "${out_user_dir}/dashboard-api.log" \
             "${out_user_dir}/download-status.txt" \
             2>/dev/null || true
-        chmod 644 "${out_user}" "${out_user_json}" \
+        chmod 644 "${out_user}" "${out_user_json}" "${out_user_meta}" \
             "${out_user_dir}/dashboard-install-tail.log" \
             "${out_user_dir}/dashboard-verify-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
@@ -17867,6 +18110,9 @@ run_self_update_only() {
     echo ""
     echo "Self-update complete. To apply all updated units/scripts, run:"
     echo "  sudo ${installed_path} install"
+    echo ""
+    echo "Dashboard note: if you have the dashboard open in a browser, reload the tab to load new UI features." 
+    echo "If you do not see new features: click Quick Actions → 'Run: Refresh Dashboard' or run: sudo zypper-auto-helper --dashboard"
 
     return 0
 }
@@ -26974,6 +27220,7 @@ echo "  - Install logs: ${LOG_DIR}/install-*.log" | tee -a "${LOG_FILE}"
 echo "  - Service logs: ${LOG_DIR}/service-logs/" | tee -a "${LOG_FILE}"
 echo "  - User logs: ${USER_LOG_DIR}/" | tee -a "${LOG_FILE}"
 echo "  - Status file: ${STATUS_FILE}" | tee -a "${LOG_FILE}"
+echo "  - Dashboard note: if the dashboard is already open in your browser, reload the tab to load new UI features." | tee -a "${LOG_FILE}"
 echo "" | tee -a "${LOG_FILE}"
 echo "Quick Commands:" | tee -a "${LOG_FILE}"
 echo "  sudo zypper-auto-helper --verify        # Check system health" | tee -a "${LOG_FILE}"

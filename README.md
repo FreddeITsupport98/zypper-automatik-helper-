@@ -1358,6 +1358,8 @@ It also starts a root-only **Dashboard API** on `127.0.0.1:8766` so the dashboar
 Important: **Browser refresh vs WebUI refresh**
 - Your browser’s reload button (or `Ctrl+R`) only reloads the *already-generated* `status.html`.
 - The dashboard button **Quick Actions → “Run: Refresh Dashboard”** triggers the helper to **regenerate** the dashboard (equivalent to running `sudo zypper-auto-helper --dashboard`), then reloads the page so you see the new content.
+- After helper updates (Self-Update or reinstall), the dashboard may gain new UI features. If your open tab is outdated, the WebUI shows a banner: **“✨ Dashboard update available”** with buttons to refresh/regenerate and reload.
+  - It also detects when a *new* dashboard file was regenerated in the background (via a small `status-meta.json` sidecar), even if the helper version did not change.
 
 Troubleshooting: **JS health indicator (Live mode / tabs not working)**
 - The dashboard header shows a small badge: `JS: loading…` → `JS: OK`.
