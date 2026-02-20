@@ -1435,6 +1435,7 @@ Note (important for Settings/Snapper Manager):
 - Newer builds intentionally **block** `dashboard-token.txt` from being served over HTTP.
 - Use `zypper-auto-helper --dash-open` (recommended) so the token is injected securely via URL fragment and stored in the browser.
 - The token is also stored in a cookie (best-effort) so it survives port changes (8765 → 8766, etc.) when the helper picks a fallback port.
+- If you open the dashboard via a manual URL/bookmark and the token is missing, the WebUI will show a **Token Repair** banner with a copy button for the fix command.
 
 #### Console output (interactive)
 

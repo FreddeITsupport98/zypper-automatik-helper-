@@ -4702,6 +4702,20 @@ generate_dashboard() {
         <span style="font-size:0.85rem; color: var(--muted);">Live polls <code>status-data.json</code>, <code>download-status.txt</code>, and <code>perf-data.json</code> (best via <code>http://</code>).</span>
       </div>
 
+      <!-- Token repair banner (shown when Settings/Snapper token is missing) -->
+      <div id="znh-token-repair-banner" style="display:none; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(250,204,21,0.45); background: rgba(250,204,21,0.12); color: var(--text);">
+        <div style="display:flex; gap:12px; justify-content: space-between; flex-wrap: wrap; align-items: center;">
+          <div>
+            <div style="font-weight: 950;">⚠ Settings/Snapper token missing</div>
+            <div style="margin-top:4px; font-size:0.9rem; color: var(--muted); font-weight: 800;">Fix: re-open dashboard using <code>zypper-auto-helper --dash-open</code></div>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
+            <button class="pill" type="button" id="znh-token-copy-btn">Copy fix command</button>
+            <button class="pill" type="button" id="znh-token-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
+          </div>
+        </div>
+      </div>
+
       <div class="grid" style="margin-top: 18px;">
         <div class="stat-box">
             <span class="stat-label">Kernel</span>
@@ -5398,6 +5412,64 @@ generate_dashboard() {
     var _tokKey = 'znh_settings_token';
     var _tokCookie = 'znh_settings_token';
     var _tokMissingToastShown = false;
+    var _tokRepairBannerShown = false;
+
+    function _znhShowTokenRepairBanner() {
+        if (_tokRepairBannerShown) return;
+        _tokRepairBannerShown = true;
+
+        var banner = document.getElementById('znh-token-repair-banner');
+        var copyBtn = document.getElementById('znh-token-copy-btn');
+        var disBtn = document.getElementById('znh-token-dismiss-btn');
+        if (!banner) return;
+
+        banner.style.display = 'block';
+
+        var cmd = 'zypper-auto-helper --dash-open';
+
+        function copyNow() {
+            // Prefer the global helper if it's already defined.
+            try {
+                if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(cmd, copyBtn);
+                    return;
+                }
+            } catch (e0) {}
+
+            // Minimal fallback clipboard helper.
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(cmd).then(function() {
+                        toast('Copied command', cmd, 'ok');
+                    }, function() {
+                        toast('Copy failed', 'Clipboard permission denied', 'err');
+                    });
+                    return;
+                }
+            } catch (e1) {}
+
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = cmd;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                toast('Copied command', cmd, 'ok');
+            } catch (e2) {
+                toast('Copy failed', cmd, 'err');
+            }
+        }
+
+        if (copyBtn && !copyBtn._znh_bound) {
+            copyBtn._znh_bound = true;
+            copyBtn.addEventListener('click', function() { copyNow(); });
+        }
+        if (disBtn && !disBtn._znh_bound) {
+            disBtn._znh_bound = true;
+            disBtn.addEventListener('click', function() { try { banner.style.display = 'none'; } catch (e) {} });
+        }
+    }
 
     function _cookieGet(name) {
         try {
@@ -5498,6 +5570,9 @@ generate_dashboard() {
                 return _settingsToken;
             });
         }
+
+        // Also show a persistent banner so the user can copy the fix command.
+        try { _znhShowTokenRepairBanner(); } catch (eB) {}
 
         if (!_tokMissingToastShown) {
             _tokMissingToastShown = true;
