@@ -4351,6 +4351,17 @@ generate_dashboard() {
         border-radius: 10px;
     }
 
+    /* Debug: visual DOM update flashing (opt-in)
+       Enable via URL: ?domflash=1 (or ?znh_domflash=1)
+       This is intentionally loud so you can spot accidental full re-renders. */
+    @keyframes znhDebugFlash {
+        0% { background-color: rgba(250, 204, 21, 0.75); }
+        100% { background-color: transparent; }
+    }
+    .debug-updated {
+        animation: znhDebugFlash 800ms ease-out;
+    }
+
     @keyframes pulseGlow {
         0%   { transform: translateY(0); filter: saturate(1); }
         50%  { transform: translateY(-1px); filter: saturate(1.2); }
@@ -5510,6 +5521,56 @@ generate_dashboard() {
     var ZNH_URL = { params: null };
     try { ZNH_URL.params = new URLSearchParams(window.location.search || ''); } catch (eU0) { ZNH_URL.params = null; }
 
+    // Throttling (network latency simulation)
+    // Usage: ?throttle=1500 (milliseconds)
+    var ZNH_THROTTLE_DELAY_MS = 0;
+    try {
+        if (ZNH_URL.params) {
+            var tv = parseInt(String(ZNH_URL.params.get('throttle') || ZNH_URL.params.get('znh_throttle') || '0'), 10);
+            if (isFinite(tv) && tv > 0) {
+                // Safety cap: keep it reasonable so users don't lock their UI by accident.
+                if (tv > 30000) tv = 30000;
+                ZNH_THROTTLE_DELAY_MS = tv;
+            }
+        }
+    } catch (eT0) { ZNH_THROTTLE_DELAY_MS = 0; }
+
+    function _znhSleep(ms) {
+        return new Promise(function(resolve) {
+            setTimeout(resolve, Math.max(0, parseInt(ms || 0, 10) || 0));
+        });
+    }
+
+    // Visual DOM update flashing (opt-in)
+    var ZNH_DOM_FLASH = false;
+    try {
+        if (ZNH_URL.params) {
+            var fv = String(ZNH_URL.params.get('domflash') || ZNH_URL.params.get('znh_domflash') || '').toLowerCase();
+            if (fv === '1' || fv === 'true' || fv === 'yes') ZNH_DOM_FLASH = true;
+        }
+    } catch (eF0) { ZNH_DOM_FLASH = false; }
+
+    function _znhMarkUpdated(el) {
+        if (!ZNH_DOM_FLASH || !el) return;
+        try {
+            el.classList.remove('debug-updated');
+            void el.offsetWidth;
+            el.classList.add('debug-updated');
+        } catch (e) {}
+    }
+
+    // Pub/Sub (event-driven) helpers
+    function znhDispatch(name, detail) {
+        try {
+            if (!name) return false;
+            if (!document || !document.dispatchEvent) return false;
+            document.dispatchEvent(new CustomEvent(String(name), { detail: detail }));
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     // Mock mode (safe: disabled unless explicitly requested)
     var ZNH_MOCK = {
         enabled: false,
@@ -5818,6 +5879,63 @@ generate_dashboard() {
             helper_version_at_gen: ZNH_HELPER_VERSION_AT_GEN,
             dashboard_gen_id: ZNH_DASHBOARD_GEN_ID
         };
+
+        // State tracking + time-travel history
+        api.state = {
+            lastData: null,
+            lastError: null,
+            lastEvent: ''
+        };
+        api.stateHistory = [];
+        api.stateHistoryMax = 20;
+
+        function _cloneForHistory(obj) {
+            // Deep clone, but keep memory bounded by truncating very large strings.
+            // Note: this is best-effort and intentionally conservative.
+            var j = null;
+            try { j = JSON.parse(JSON.stringify(obj || {})); } catch (e0) { j = null; }
+            if (!j) return obj;
+
+            function trunc(s, max) {
+                try {
+                    s = String(s || '');
+                    if (s.length > max) return s.slice(0, max) + '…';
+                    return s;
+                } catch (e) {
+                    return s;
+                }
+            }
+
+            // Known large fields
+            try {
+                if (j.last_install_tail) j.last_install_tail = trunc(j.last_install_tail, 2400);
+                if (j.flight_report_raw) j.flight_report_raw = trunc(j.flight_report_raw, 2400);
+            } catch (e1) {}
+
+            return j;
+        }
+
+        api.recordState = function(tag, data) {
+            try {
+                var entry = {
+                    time: (function() { try { return new Date().toISOString(); } catch (e) { return ''; } })(),
+                    tag: String(tag || 'state'),
+                    data: _cloneForHistory(data)
+                };
+
+                api.state.lastEvent = entry.tag;
+                api.state.lastData = entry.data;
+
+                api.stateHistory.push(entry);
+                if (api.stateHistory.length > api.stateHistoryMax) {
+                    api.stateHistory = api.stateHistory.slice(api.stateHistory.length - api.stateHistoryMax);
+                }
+
+                return entry;
+            } catch (e2) {
+                return null;
+            }
+        };
         api.flags = {
             get debug() { try { return !!ZNH_DEBUG; } catch (e) { return false; } },
             get mock() { return znhMockEnabled(); }
@@ -5947,14 +6065,35 @@ generate_dashboard() {
         var start = 0;
         try { start = Date.now(); } catch (e0) { start = 0; }
 
+        function _maybeThrottle(tag, durMs) {
+            var thr = 0;
+            try { thr = parseInt(ZNH_THROTTLE_DELAY_MS || 0, 10) || 0; } catch (eT) { thr = 0; }
+            if (thr <= 0) return Promise.resolve(null);
+
+            // Log throttling in a visible way.
+            try {
+                if (console && console.warn) console.warn('[ZNH-DEBUG] Throttling ' + String(tag || 'fetch') + ' by ' + String(thr) + 'ms');
+            } catch (eW) {}
+            try { if (typeof window.znhHudLog === 'function') window.znhHudLog('warn', 'throttle ' + String(tag || 'fetch') + ' +' + String(thr) + 'ms', { dur_ms: durMs || 0 }); } catch (eH) {}
+
+            return _znhSleep(thr);
+        }
+
         // Mock mode: allow simulating dashboard-local resources when developing/debugging UI.
         try {
             var mockR = znhMockFetchMaybe(url, opts || {});
             if (mockR) {
+                var dur0 = 0;
+                try { dur0 = start ? (Date.now() - start) : 0; } catch (e0d) { dur0 = 0; }
+
                 if (ZNH_DEBUG) {
-                    try { znhDebugLog('mock fetch', url); } catch (e0m) {}
+                    try { znhDebugLog('mock fetch', url, '(' + String(dur0) + 'ms)'); } catch (e0m) {}
                 }
-                return Promise.resolve(mockR);
+
+                // Optional throttle for mock responses too (helps reproduce UI timing bugs).
+                return _maybeThrottle('mock', dur0).then(function() {
+                    return mockR;
+                });
             }
         } catch (eM) {}
 
@@ -5964,12 +6103,18 @@ generate_dashboard() {
             if (ZNH_DEBUG) {
                 try { znhDebugLog('fetch', (opts && opts.method) ? opts.method : 'GET', url, '->', 'HTTP', r.status, '(' + String(dur) + 'ms)'); } catch (e2) {}
             }
-            return r;
+            return _maybeThrottle('fetch', dur).then(function() { return r; });
         }).catch(function(e) {
             var msg = (e && e.message) ? e.message : String(e || 'fetch failed');
             if (ZNH_DEBUG) {
                 try { znhDebugWarn('fetch failed', url, msg); } catch (e3) {}
             }
+
+            // Broadcast network errors so UI can react without being coupled to fetch logic.
+            try {
+                znhDispatch('znh-network-error', { url: String(url || ''), error: msg });
+            } catch (eD) {}
+
             throw e;
         });
     }
@@ -9191,6 +9336,9 @@ generate_dashboard() {
             // Reflow so animation restarts
             void el.offsetWidth;
             el.classList.add('flash');
+
+            // Loud flashing (opt-in) for performance debugging
+            try { _znhMarkUpdated(el); } catch (e) {}
         }
     }
 
@@ -9206,7 +9354,10 @@ generate_dashboard() {
         var el = document.getElementById(id);
         if (!el) return;
         var s = (state === undefined || state === null) ? '' : String(state);
-        if (el.textContent !== s) el.textContent = s;
+        if (el.textContent !== s) {
+            el.textContent = s;
+            try { _znhMarkUpdated(el); } catch (e) {}
+        }
         el.classList.remove('timer-active');
         el.classList.remove('timer-partial');
         el.classList.remove('timer-inactive');
@@ -9248,6 +9399,18 @@ generate_dashboard() {
 
     function applyLiveData(d) {
         if (!d) return;
+
+        // Time-travel history (for debugging sequences leading up to a failure)
+        try {
+            if (window.ZNH && typeof window.ZNH.recordState === 'function') {
+                window.ZNH.recordState('status-data', d);
+            }
+        } catch (e0) {}
+
+        // Note: do NOT dispatch 'znh-data-updated' from here, because pollLive()
+        // already dispatches it and the default handler calls applyLiveData().
+        // Re-dispatching would recurse.
+        try { znhDispatch('znh-ui-applied', { ok: true, at: Date.now() }); } catch (e1) {}
 
         if (d.generated_iso) {
             genTime = new Date(d.generated_iso);
@@ -9384,7 +9547,15 @@ generate_dashboard() {
             })
             .then(function(d) {
                 liveFailures = 0;
-                applyLiveData(d);
+
+                // Event-driven architecture: broadcast update and let listeners apply UI.
+                // If dispatch fails, fall back to direct apply so the dashboard still works.
+                var dispatched = false;
+                try { dispatched = znhDispatch('znh-data-updated', d); } catch (eD0) { dispatched = false; }
+                if (!dispatched) {
+                    applyLiveData(d);
+                }
+
                 return d;
             })
             .catch(function(err) {
@@ -9394,6 +9565,26 @@ generate_dashboard() {
                 if (ZNH_DEBUG || liveFailures === 1 || liveFailures === 3) {
                     try { znhDebugError('pollLive failed:', msg); } catch (e0) {}
                 }
+
+                // Broadcast errors so UI can react independently.
+                try {
+                    znhDispatch('znh-network-error', {
+                        source: 'pollLive',
+                        error: msg,
+                        failures: liveFailures
+                    });
+                } catch (e1) {}
+
+                // Track in time-travel history as well.
+                try {
+                    if (window.ZNH && window.ZNH.state) {
+                        window.ZNH.state.lastError = { time: new Date().toISOString(), source: 'pollLive', error: msg, failures: liveFailures };
+                    }
+                    if (window.ZNH && typeof window.ZNH.recordState === 'function') {
+                        window.ZNH.recordState('network-error', { source: 'pollLive', error: msg, failures: liveFailures });
+                    }
+                } catch (e2) {}
+
                 if (liveFailures >= 3) {
                     // Fallback: full reload every 15s (still useful if some other process regenerates the file)
                     setTimeout(function() { window.location.reload(); }, 15000);
@@ -9404,6 +9595,45 @@ generate_dashboard() {
                 _pollLiveInFlight = false;
             });
     }
+
+    // Default pub/sub handlers (additive):
+    // - You can manually inject state into the UI from DevTools with:
+    //     document.dispatchEvent(new CustomEvent('znh-data-updated', { detail: { ... } }))
+    (function() {
+        // Avoid double-binding if the script is somehow injected twice.
+        try {
+            if (window.__znh_pubsub_bound) return;
+            window.__znh_pubsub_bound = true;
+        } catch (e0) {}
+
+        document.addEventListener('znh-data-updated', function(ev) {
+            try {
+                var d = ev ? ev.detail : null;
+                if (!d) return;
+                applyLiveData(d);
+            } catch (e2) {
+                try { znhDebugError('znh-data-updated handler failed', (e2 && e2.message) ? e2.message : String(e2 || 'error')); } catch (e3) {}
+            }
+        });
+
+        document.addEventListener('znh-network-error', function(ev) {
+            try {
+                var info = ev ? ev.detail : null;
+                // Best-effort UI signal. We don't override JS health OK/FAIL state,
+                // but we do emit a breadcrumb.
+                try {
+                    if (typeof window.znhJsHealthLog === 'function') {
+                        window.znhJsHealthLog('warn', 'Network error: ' + JSON.stringify(info || {}));
+                    }
+                } catch (e4) {}
+                try {
+                    if (typeof window.znhHudLog === 'function') {
+                        window.znhHudLog('warn', 'network error', info || {});
+                    }
+                } catch (e5) {}
+            } catch (e6) {}
+        });
+    })();
 
     function pollDashboardMeta() {
         // Poll a small sidecar file that is updated whenever the helper regenerates
