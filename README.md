@@ -1353,6 +1353,7 @@ It also starts a root-only **Dashboard API** on `127.0.0.1:8766` so the dashboar
 - read/write `/etc/zypper-auto.conf` safely (Settings drawer)
 - run Snapper Manager actions (options 1–6) via a strict allowlist + confirmation phrases
 - **Refresh the dashboard from the WebUI** (Quick Actions → “Run: Refresh Dashboard”), which regenerates the root dashboard and then your open tab reloads (the sync worker copies it into your user dashboard directory)
+- **Resume running jobs:** when the WebUI starts a long-running job (Self-update or System Update wizard), the page shows a bottom-right “background job bubble” (spinning indicator) so if you minimize/close the overlay or reload the page, you can click the bubble to reopen the job view and continue watching progress.
 
 Important: **Browser refresh vs WebUI refresh**
 - Your browser’s reload button (or `Ctrl+R`) only reloads the *already-generated* `status.html`.
@@ -1428,6 +1429,12 @@ Quickstart (serve + open live):
 python3 -m http.server --directory ~/.local/share/zypper-notify 8765
 xdg-open http://127.0.0.1:8765/status.html?live=1
 ```
+
+Note (important for Settings/Snapper Manager):
+- The dashboard Settings API requires a token.
+- Newer builds intentionally **block** `dashboard-token.txt` from being served over HTTP.
+- Use `zypper-auto-helper --dash-open` (recommended) so the token is injected securely via URL fragment and stored in the browser.
+- The token is also stored in a cookie (best-effort) so it survives port changes (8765 → 8766, etc.) when the helper picks a fallback port.
 
 #### Console output (interactive)
 
@@ -1614,6 +1621,8 @@ systemctl status zypper-autodownload.service
   - 🔒 **FIXED:** local dashboard HTTP server no longer exposes `dashboard-token.txt` (token is now passed via URL fragment and stored in localStorage; server blocks token/pid/err/port files).
   - 🧯 **FIXED:** user-visible `dashboard-live.log` is now capped to the most recent ~2500 lines by the sync worker to prevent browser/resource blow-ups.
   - 🖱️ **IMPROVED:** Recent Activity log polling no longer fights the user’s scroll position (updates are staged while scrolled up).
+  - 🧿 **NEW:** when a Self-update or System Update job is running, the dashboard shows a bottom-right “background job bubble” (spinner + name like “Update system”) so accidental overlay closes don’t lose the running job view.
+  - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
   - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
   - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.
 

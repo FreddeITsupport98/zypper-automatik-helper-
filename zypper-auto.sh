@@ -923,47 +923,53 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         #
         # Token safety: only update dashboard-token.txt after the root API has
         # successfully restarted with that token (prevents token desync).
+        #
+        # IMPORTANT: do NOT rotate the token on every --dash-open. Keep it stable
+        # when possible so already-open dashboard tabs don't lose access.
         token_file="${dash_dir}/dashboard-token.txt"
         old_token=""
         if [ -f "${token_file}" ]; then
             old_token=$(cat "${token_file}" 2>/dev/null || echo "")
+            old_token="$(printf '%s' "${old_token}" | tr -d '\r\n')"
         fi
 
-        new_token=""
-        if command -v python3 >/dev/null 2>&1; then
-            new_token=$(python3 - <<'PY'
+        desired_token="${old_token}"  # reuse when possible
+        if [ -z "${desired_token//[[:space:]]/}" ]; then
+            if command -v python3 >/dev/null 2>&1; then
+                desired_token=$(python3 - <<'PY'
 import secrets
 print(secrets.token_urlsafe(24))
 PY
 )
-        else
-            new_token="$(date +%s%N)"
+            else
+                desired_token="$(date +%s%N)"
+            fi
         fi
 
         api_ok=0
-        if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
-            if sudo /usr/local/bin/zypper-auto-helper --dash-api-on "${new_token}" >/dev/null 2>&1; then
+        if [ -n "${desired_token//[[:space:]]/}" ] && command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
+            if sudo /usr/local/bin/zypper-auto-helper --dash-api-on "${desired_token}" >/dev/null 2>&1; then
                 api_ok=1
             fi
         fi
 
         if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
-            printf '%s' "${new_token}" >"${token_file}" 2>/dev/null || true
+            printf '%s' "${desired_token}" >"${token_file}" 2>/dev/null || true
             chmod 600 "${token_file}" 2>/dev/null || true
         else
             # Keep the existing token file untouched on failure.
             # (If there wasn't one, Settings will remain unavailable until API starts.)
-            if [ -n "${old_token}" ]; then
+            if [ -n "${old_token//[[:space:]]/}" ]; then
                 chmod 600 "${token_file}" 2>/dev/null || true
             fi
         fi
 
         # SECURITY: do not serve the token over HTTP. Pass it via URL fragment (not sent to server)
-        # and let the browser store it in localStorage.
+        # and let the browser store it in localStorage/cookie.
         token_for_url=""
         if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
-            token_for_url="${new_token}"
-        elif [ -n "${old_token}" ]; then
+            token_for_url="${desired_token}"
+        elif [ -n "${old_token//[[:space:]]/}" ]; then
             token_for_url="${old_token}"
         fi
 
@@ -4353,6 +4359,45 @@ generate_dashboard() {
         z-index: 9999;
         max-width: min(420px, calc(100vw - 36px));
     }
+
+    /* Background task bubble (self-update / system update wizard)
+       Shows when an update job is running so users can reopen it if they
+       accidentally close/minimize the overlay or reload the page. */
+    body.task-active #toast-wrap { bottom: 86px; }
+    .znh-task-bubble {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 15000; /* above toasts, below overlay */
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.88);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.12);
+        box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        cursor: pointer;
+        user-select: none;
+        max-width: min(520px, calc(100vw - 36px));
+    }
+    .znh-task-bubble.hidden { display: none; }
+    .znh-task-spinner {
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        border: 3px solid rgba(255,255,255,0.25);
+        border-top-color: rgba(34,197,94,0.95);
+        animation: znhSpin 900ms linear infinite;
+        flex: 0 0 auto;
+    }
+    @keyframes znhSpin { to { transform: rotate(360deg); } }
+    .znh-task-text { display: grid; gap: 2px; min-width: 0; }
+    .znh-task-title { font-weight: 950; font-size: 0.92rem; line-height: 1.1; }
+    .znh-task-sub { font-weight: 800; font-size: 0.78rem; opacity: 0.85; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .toast {
         background: rgba(17, 24, 39, 0.82);
         color: #fff;
@@ -5041,9 +5086,12 @@ generate_dashboard() {
           <div class="overlay-title" id="su-title">Self-update</div>
           <div class="overlay-step" id="su-step">Step 1/2</div>
         </div>
-        <div class="feat-badge" title="This is a blocking overlay; use Cancel/Close to exit.">
-          <span class="feat-dot" style="color: var(--warning);">●</span>
-          <strong id="su-mode">Agreement</strong>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+          <button class="pill" type="button" id="su-min-btn" style="display:none;">Minimize</button>
+          <div class="feat-badge" title="This is a blocking overlay; use Cancel/Close to exit.">
+            <span class="feat-dot" style="color: var(--warning);">●</span>
+            <strong id="su-mode">Agreement</strong>
+          </div>
         </div>
       </div>
       <div class="overlay-body" id="su-body">
@@ -5058,6 +5106,15 @@ generate_dashboard() {
           <button class="pill" type="button" id="su-close-btn" style="display:none;">Close</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Background task bubble (shows running jobs if overlay is minimized/closed) -->
+  <div id="znh-task-bubble" class="znh-task-bubble hidden" role="button" tabindex="0" aria-label="Open running update job">
+    <div class="znh-task-spinner" aria-hidden="true"></div>
+    <div class="znh-task-text">
+      <div class="znh-task-title" id="znh-task-title">Update</div>
+      <div class="znh-task-sub" id="znh-task-sub">Running…</div>
     </div>
   </div>
 
@@ -5099,6 +5156,138 @@ generate_dashboard() {
             // ignore
         }
     }
+
+    // --- Background job bubble (resume running self-update / system-update jobs) ---
+    var ZNH_TASK_KEY = 'znh_active_task_v1';
+
+    function _znhTaskLoad() {
+        try {
+            var raw = localStorage.getItem(ZNH_TASK_KEY) || '';
+            if (!raw) return null;
+            var j = JSON.parse(raw);
+            if (!j || !j.type || !j.job_id) return null;
+            return j;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function _znhTaskSave(obj) {
+        try {
+            if (!obj) return;
+            localStorage.setItem(ZNH_TASK_KEY, JSON.stringify(obj));
+        } catch (e) {}
+    }
+
+    function _znhTaskClear() {
+        try { localStorage.removeItem(ZNH_TASK_KEY); } catch (e) {}
+    }
+
+    function _znhTaskBubbleSetVisible(v) {
+        var b = document.getElementById('znh-task-bubble');
+        if (!b) return;
+        if (v) {
+            b.classList.remove('hidden');
+            try { document.body.classList.add('task-active'); } catch (e) {}
+        } else {
+            b.classList.add('hidden');
+            try { document.body.classList.remove('task-active'); } catch (e) {}
+        }
+    }
+
+    function _znhTaskBubbleSetText(title, sub) {
+        var t = document.getElementById('znh-task-title');
+        var s = document.getElementById('znh-task-sub');
+        if (t) t.textContent = String(title || 'Update');
+        if (s) s.textContent = String(sub || 'Running…');
+    }
+
+    function znhTaskSet(taskObj) {
+        // taskObj: {type:'self-update'|'system-update', job_id, channel?, dry_run?, simulate?, started_iso?}
+        if (!taskObj || !taskObj.type || !taskObj.job_id) return;
+        if (!taskObj.started_iso) {
+            try { taskObj.started_iso = new Date().toISOString(); } catch (e) {}
+        }
+        _znhTaskSave(taskObj);
+
+        var title = (taskObj.type === 'self-update') ? 'Update manager' : 'Update system';
+        _znhTaskBubbleSetText(title, 'Running…');
+        _znhTaskBubbleSetVisible(true);
+    }
+
+    function znhTaskUpdateFromJob(taskType, job) {
+        if (!job) return;
+        var title = (taskType === 'self-update') ? 'Update manager' : 'Update system';
+
+        var st = '';
+        try { st = String(job.stage || job.state || 'Running'); } catch (e) { st = 'Running'; }
+        var pct = 0;
+        try { pct = parseInt(job.progress || 0, 10) || 0; } catch (e2) { pct = 0; }
+
+        var sub = st;
+        if (pct > 0 && pct < 100) sub = st + ' • ' + String(pct) + '%';
+
+        // Keep bubble visible while running.
+        _znhTaskBubbleSetText(title, sub);
+        _znhTaskBubbleSetVisible(true);
+    }
+
+    function znhTaskDone(taskType, ok) {
+        // Clear persistent task state. Bubble hides shortly after.
+        _znhTaskClear();
+        var title = (taskType === 'self-update') ? 'Update manager' : 'Update system';
+        _znhTaskBubbleSetText(title, ok ? 'Done' : 'Failed');
+        _znhTaskBubbleSetVisible(true);
+        setTimeout(function() { _znhTaskBubbleSetVisible(false); }, 8000);
+    }
+
+    function znhTaskOpenOverlayFromBubble() {
+        var t = _znhTaskLoad();
+        if (!t) return;
+        try { _suShow(true); } catch (e) {}
+    }
+
+    function znhTaskResumeInit() {
+        // If the user reloaded the page while an update job is running, resume polling.
+        var t = _znhTaskLoad();
+        if (!t) return;
+
+        // Show bubble immediately.
+        znhTaskSet(t);
+
+        // Resume hidden polling (so bubble stays accurate) without forcing the overlay open.
+        try { _suReset(); } catch (e0) {}
+        try { _ruReset(); } catch (e1) {}
+
+        if (t.type === 'self-update') {
+            try { _su.channel = String(t.channel || 'stable'); } catch (e2) {}
+            try { _suShow(false); } catch (e3) {}
+            try { _suRenderRunning(t); } catch (e4) {}
+            try { _suPollJob(String(t.job_id), String(_su.channel || 'stable'), !!t.dry_run); } catch (e5) {}
+        } else if (t.type === 'system-update') {
+            try { _ru.simulate = !!t.simulate; } catch (e6) {}
+            try { _ru.auto_simulate = !!t.simulate; } catch (e7) {}
+            try { _suShow(false); } catch (e8) {}
+            try { _ruRenderRunning(t); } catch (e9) {}
+            try { _ruPollJob(String(t.job_id)); } catch (e10) {}
+        }
+    }
+
+    // Wire bubble click
+    (function() {
+        var b = document.getElementById('znh-task-bubble');
+        if (!b) return;
+        b.addEventListener('click', function() {
+            znhTaskOpenOverlayFromBubble();
+        });
+        b.addEventListener('keydown', function(ev) {
+            if (!ev) return;
+            if (ev.key === 'Enter' || ev.key === ' ') {
+                try { ev.preventDefault(); } catch (e) {}
+                znhTaskOpenOverlayFromBubble();
+            }
+        });
+    })();
 
     // --- Settings drawer (localhost API) ---
     var SETTINGS_API_BASE = 'http://127.0.0.1:8766';
@@ -5205,6 +5394,54 @@ generate_dashboard() {
         b.textContent = msg;
     }
 
+    // Token cache key (localStorage is per-origin/port; cookie is cross-port on 127.0.0.1)
+    var _tokKey = 'znh_settings_token';
+    var _tokCookie = 'znh_settings_token';
+    var _tokMissingToastShown = false;
+
+    function _cookieGet(name) {
+        try {
+            if (!name) return '';
+            // Cookies are only meaningful on http(s).
+            if (!window.location || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) return '';
+            var parts = String(document.cookie || '').split(';');
+            for (var i = 0; i < parts.length; i++) {
+                var p = parts[i].trim();
+                if (!p) continue;
+                if (p.indexOf(name + '=') === 0) {
+                    return decodeURIComponent(p.slice((name + '=').length) || '').trim();
+                }
+            }
+        } catch (e) {}
+        return '';
+    }
+
+    function _cookieSet(name, value, maxAgeSec) {
+        try {
+            if (!name) return;
+            if (!window.location || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) return;
+            var s = name + '=' + encodeURIComponent(String(value || ''));
+            s += '; Path=/';
+            if (maxAgeSec && maxAgeSec > 0) s += '; Max-Age=' + String(maxAgeSec);
+            s += '; SameSite=Strict';
+            document.cookie = s;
+        } catch (e) {}
+    }
+
+    function _cookieDel(name) {
+        try {
+            if (!name) return;
+            if (!window.location || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) return;
+            document.cookie = name + '=; Path=/; Max-Age=0; SameSite=Strict';
+        } catch (e) {}
+    }
+
+    function _clearTokenCaches() {
+        try { _settingsToken = null; } catch (e1) {}
+        try { localStorage.removeItem(_tokKey); } catch (e2) {}
+        try { _cookieDel(_tokCookie); } catch (e3) {}
+    }
+
     function _fetchToken() {
         if (_settingsToken) return Promise.resolve(_settingsToken);
 
@@ -5218,7 +5455,9 @@ generate_dashboard() {
                 var t1 = (sp.get('znh_token') || sp.get('token') || '').trim();
                 if (t1) {
                     _settingsToken = t1;
-                    try { localStorage.setItem('znh_settings_token', _settingsToken); } catch (e1) {}
+                    try { localStorage.setItem(_tokKey, _settingsToken); } catch (e1) {}
+                    // Cookie is cross-port on 127.0.0.1, so it survives port fallback (8765->8766 etc)
+                    try { _cookieSet(_tokCookie, _settingsToken, 365 * 24 * 3600); } catch (e1b) {}
                     try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e2) {}
                     return Promise.resolve(_settingsToken);
                 }
@@ -5227,11 +5466,23 @@ generate_dashboard() {
             }
         } catch (e4) {}
 
-        // Prefer token from localStorage (set via URL fragment when opened by --dash-open).
+        // Prefer token from cookie first (cookie is NOT port-scoped).
         try {
-            var t0 = localStorage.getItem('znh_settings_token') || '';
+            var tc = _cookieGet(_tokCookie) || '';
+            if (tc && String(tc).trim()) {
+                _settingsToken = String(tc).trim();
+                try { localStorage.setItem(_tokKey, _settingsToken); } catch (eC) {}
+                return Promise.resolve(_settingsToken);
+            }
+        } catch (e4b) {}
+
+        // Fall back to localStorage (port-scoped)
+        try {
+            var t0 = localStorage.getItem(_tokKey) || '';
             if (t0 && String(t0).trim()) {
                 _settingsToken = String(t0).trim();
+                // Best-effort: also refresh cookie so future port changes keep working.
+                try { _cookieSet(_tokCookie, _settingsToken, 365 * 24 * 3600); } catch (e0b) {}
                 return Promise.resolve(_settingsToken);
             }
         } catch (e5) {}
@@ -5246,6 +5497,11 @@ generate_dashboard() {
                 _settingsToken = (t || '').trim();
                 return _settingsToken;
             });
+        }
+
+        if (!_tokMissingToastShown) {
+            _tokMissingToastShown = true;
+            toast('Token missing', 'Dashboard token missing. Fix: re-open using zypper-auto-helper --dash-open', 'err');
         }
 
         return Promise.reject(new Error('dashboard token missing (re-open via --dash-open)'));
@@ -5284,7 +5540,7 @@ generate_dashboard() {
                 // Token caching race: if the API was restarted and a new token was
                 // generated, retry once by invalidating the cached token.
                 if ((r.status === 401 || r.status === 403) && !_didRetryAuth) {
-                    try { _settingsToken = null; } catch (e2) {}
+                    try { _clearTokenCaches(); } catch (e2) {}
                     return _api(path, opts, true);
                 }
 
@@ -5630,6 +5886,65 @@ generate_dashboard() {
         }
     }
 
+    function _suSetMinBtnVisible(v) {
+        var b = document.getElementById('su-min-btn');
+        if (!b) return;
+        b.style.display = v ? '' : 'none';
+    }
+
+    // Minimize: hide overlay but keep the update job running + visible in bubble.
+    (function() {
+        var b = document.getElementById('su-min-btn');
+        if (!b) return;
+        b.addEventListener('click', function(ev) {
+            try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+            _suShow(false);
+        });
+    })();
+
+    function _suRenderRunning(taskInfo) {
+        // Minimal "running" view for resumed jobs.
+        var e = _suEls();
+        if (!e.body) return;
+        var isDry = false;
+        try { isDry = !!(taskInfo && taskInfo.dry_run); } catch (ee) { isDry = false; }
+        _suSetMinBtnVisible(true);
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Update job running</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This job is still running in the background. You can minimize this window and reopen it from the bottom-right bubble.</div>',
+            '</div>',
+            '<div class="overlay-progress">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Running</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="su-live-log" style="max-height: 320px;">(resuming logs…)</pre>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Mode: ' + (isDry ? 'dry-run / test' : 'install') + '</div>'
+        ].join('\n');
+        _ruSetHeader('Running', 'In progress', isDry ? 'Update manager (dry-run)' : 'Update manager');
+    }
+
+    function _ruRenderRunning(taskInfo) {
+        var e = _suEls();
+        if (!e.body) return;
+        var isSim = false;
+        try { isSim = !!(taskInfo && taskInfo.simulate); } catch (ee) { isSim = false; }
+        _suSetMinBtnVisible(true);
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">System update running</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This job is still running in the background. You can minimize this window and reopen it from the bottom-right bubble.</div>',
+            '</div>',
+            '<div class="overlay-progress">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Running</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="su-live-log" style="max-height: 320px;">(resuming logs…)</pre>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Mode: ' + (isSim ? 'simulation (dry-run)' : 'install') + '</div>'
+        ].join('\n');
+        _ruSetHeader('Running', 'In progress', isSim ? 'Update system (dry-run)' : 'Update system');
+    }
+
     function _suReset() {
         _su.step = 1;
         _su.accepted = false;
@@ -5639,6 +5954,7 @@ generate_dashboard() {
         _su.dry_run = false;
         _su.auto_dry_run = false;
         _su.required_phrase = 'UPDATE';
+        _suSetMinBtnVisible(false);
         if (_su.poll_timer) {
             try { clearInterval(_su.poll_timer); } catch (e) {}
             _su.poll_timer = null;
@@ -5953,6 +6269,15 @@ generate_dashboard() {
     function _suPollJob(job_id, ch, dry_run) {
         _su.job_id = job_id;
         _su.running = true;
+        _suSetMinBtnVisible(true);
+        try {
+            znhTaskSet({
+                type: 'self-update',
+                job_id: String(job_id),
+                channel: String(ch || 'stable'),
+                dry_run: !!dry_run
+            });
+        } catch (e_task) {}
 
         _suSetButtons({
             show_cancel: false,
@@ -5998,6 +6323,7 @@ generate_dashboard() {
                 if (j.output != null) {
                     _suSetLog(String(j.output));
                 }
+                try { znhTaskUpdateFromJob('self-update', j); } catch (e_task2) {}
 
                 if (j.done) {
                     if (_su.poll_timer) {
@@ -6011,6 +6337,7 @@ generate_dashboard() {
                     if (rc === 0) {
                         toast('Self-update finished', dry_run ? 'Dry-run OK (no install)' : 'Installed OK', 'ok');
                         _suUpdateProgress(dry_run ? 'Dry-run done' : 'Done', 100);
+                        try { znhTaskDone('self-update', true); } catch (e_task3) {}
 
                         // Post-success actions:
                         // - refresh status
@@ -6046,6 +6373,7 @@ generate_dashboard() {
                     } else {
                         toast('Self-update failed', 'rc=' + String(rc), 'err');
                         _suUpdateProgress('Failed', _lastPct);
+                        try { znhTaskDone('self-update', false); } catch (e_task4) {}
                         _suSetButtons({
                             show_cancel: false,
                             show_back: false,
@@ -6649,6 +6977,14 @@ generate_dashboard() {
     function _ruPollJob(job_id) {
         _ru.job_id = job_id;
         _ru.running = true;
+        _suSetMinBtnVisible(true);
+        try {
+            znhTaskSet({
+                type: 'system-update',
+                job_id: String(job_id),
+                simulate: !!_ru.simulate
+            });
+        } catch (e_task_ru) {}
 
         _suSetButtons({
             show_cancel: false,
@@ -6688,6 +7024,7 @@ generate_dashboard() {
                 _lastPct = parseInt(j.progress || 0, 10) || 0;
                 _suUpdateProgress(j.stage || 'Running', _lastPct);
                 if (j.output != null) _suSetLog(String(j.output));
+                try { znhTaskUpdateFromJob('system-update', j); } catch (e_task_ru2) {}
 
                 if (j.done) {
                     if (_ru.poll_timer) {
@@ -6703,14 +7040,15 @@ generate_dashboard() {
                     if (rc === 0) {
                         toast('Update finished', _ru.simulate ? 'Dry-run OK (no install)' : 'Installed OK', 'ok');
                         _suUpdateProgress(_ru.simulate ? 'Dry-run done' : 'Done', 100);
-                        _ruRenderDone(
-                            _ru.simulate ? 'Simulation complete' : 'System updates installed',
-                            _ru.simulate ? 'No changes were made (dry-run).' : 'Install completed. Review restart check below.',
-                            logText,
-                            j.restart_check_output || ''
-                        );
+
+                        // UX: immediately reflect that updates were installed.
+                        // The authoritative source is the next dashboard regeneration,
+                        // but setting this to 0 avoids confusing "stuck" pending count.
+                        if (!_ru.simulate) {
+                            try { setText('pending-count', 0); } catch (e_pc) {}
                     } else {
                         toast('Update failed', 'rc=' + String(rc), 'err');
+                        try { znhTaskDone('system-update', false); } catch (e_task_ru4) {}
                         _ruRenderDone('Update failed', 'zypper dup returned a non-zero exit code (see log).', logText, j.restart_check_output || '');
                     }
                 }
@@ -7089,6 +7427,7 @@ generate_dashboard() {
             try { selfUpdatePostSuccessInit(); } catch (e) {}
             try { selfUpdateAutoQueryInit(); } catch (e) {}
             try { rocketUpdateAutoQueryInit(); } catch (e) {}
+            try { znhTaskResumeInit(); } catch (e) {}
 
             var inv = (c.invalid_keys || []);
             var warn = (c.warnings || []);
@@ -9429,6 +9768,34 @@ else
     log_info "Dashboard API unit not installed (skipping)"
 fi
 
+# Check 10b: Verification service sandbox should be able to write the user dashboard dir
+# so auto-repair can keep dashboard-token.txt in sync (and refresh user dashboard artifacts when desired).
+log_debug "[10b/${TOTAL_CHECKS}] Checking verification unit sandbox paths (user dashboard dir)..."
+local VERIFY_UNIT_FILE user_dash_rw verify_changed
+VERIFY_UNIT_FILE="/etc/systemd/system/zypper-auto-verify.service"
+user_dash_rw="${SUDO_USER_HOME}/.local/share/zypper-notify"
+verify_changed=0
+if [ -f "${VERIFY_UNIT_FILE}" ] && [ -n "${user_dash_rw:-}" ]; then
+    if grep -q '^ReadWritePaths=' "${VERIFY_UNIT_FILE}" 2>/dev/null; then
+        if ! grep -qF "${user_dash_rw}" "${VERIFY_UNIT_FILE}" 2>/dev/null; then
+            execute_guarded "Patch verify unit (allow write to user dashboard dir)" \
+                sed -i "s|^ReadWritePaths=\(.*\)$|ReadWritePaths=\1 ${user_dash_rw}|" "${VERIFY_UNIT_FILE}" || true
+            verify_changed=1
+        fi
+    else
+        printf '%s\n' "ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp ${user_dash_rw}" >>"${VERIFY_UNIT_FILE}" 2>/dev/null || true
+        verify_changed=1
+    fi
+
+    if [ "${verify_changed}" -eq 1 ] 2>/dev/null; then
+        execute_guarded "systemd daemon-reload (verify unit auto-fix)" systemctl daemon-reload || true
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        log_success "  ✓ Auto-fixed verification unit sandbox (user dashboard dir writable)"
+    else
+        log_success "✓ Verification unit sandbox paths look OK"
+    fi
+fi
+
 # Check 11: Dashboard artifacts freshness (apply new changes automatically)
 # If the installed helper is newer than the generated dashboard, regenerate it.
 log_debug "[11/${TOTAL_CHECKS}] Checking dashboard artifacts freshness..."
@@ -10691,6 +11058,33 @@ PY
                 FOLLOWUP_SOON=1
                 log_success "  ✓ Token regenerated and API restarted"
             fi
+
+            # Keep the user dashboard token file in sync with the root token.
+            # This helps when the dashboard is opened via file:// (legacy fallback) and
+            # prevents confusing "token missing" flows after repairs.
+            local user_dash_dir user_token_file root_tok user_tok
+            user_dash_dir="${SUDO_USER_HOME}/.local/share/zypper-notify"
+            user_token_file="${user_dash_dir}/dashboard-token.txt"
+            root_tok=$(tr -d '\r\n' <"${token_path}" 2>/dev/null || true)
+            user_tok=""
+            if [ -n "${root_tok//[[:space:]]/}" ]; then
+                mkdir -p "${user_dash_dir}" 2>/dev/null || true
+                if [ -f "${user_token_file}" ]; then
+                    user_tok=$(tr -d '\r\n' <"${user_token_file}" 2>/dev/null || true)
+                fi
+                if [ ! -s "${user_token_file}" ] || [ "${user_tok}" != "${root_tok}" ]; then
+                    if printf '%s' "${root_tok}" >"${user_token_file}" 2>/dev/null; then
+                        chmod 600 "${user_token_file}" 2>/dev/null || true
+                        if [ -n "${SUDO_USER:-}" ]; then
+                            chown "${SUDO_USER}:${SUDO_USER}" "${user_token_file}" 2>/dev/null || true
+                        fi
+                        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                        log_success "  ✓ Synced dashboard token into user dashboard dir"
+                    else
+                        log_warn "  ⚠ Could not sync user dashboard token (systemd sandbox?)"
+                    fi
+                fi
+            fi
         else
             log_warn "⚠ Dashboard API token file is missing"
             log_info "  → Auto-repair: creating token and restarting API..."
@@ -10710,6 +11104,25 @@ PY
             execute_guarded "Restart dashboard settings API (token created)" systemctl restart "${dash_api_unit}" || true
             FOLLOWUP_SOON=1
             log_success "  ✓ Token created and API restarted"
+
+            # Also sync the user dashboard token copy (best-effort).
+            local user_dash_dir user_token_file root_tok
+            user_dash_dir="${SUDO_USER_HOME}/.local/share/zypper-notify"
+            user_token_file="${user_dash_dir}/dashboard-token.txt"
+            root_tok=$(tr -d '\r\n' <"${token_path}" 2>/dev/null || true)
+            if [ -n "${root_tok//[[:space:]]/}" ]; then
+                mkdir -p "${user_dash_dir}" 2>/dev/null || true
+                if printf '%s' "${root_tok}" >"${user_token_file}" 2>/dev/null; then
+                    chmod 600 "${user_token_file}" 2>/dev/null || true
+                    if [ -n "${SUDO_USER:-}" ]; then
+                        chown "${SUDO_USER}:${SUDO_USER}" "${user_token_file}" 2>/dev/null || true
+                    fi
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                    log_success "  ✓ Synced dashboard token into user dashboard dir"
+                else
+                    log_warn "  ⚠ Could not sync user dashboard token (systemd sandbox?)"
+                fi
+            fi
         fi
     else
         log_info "ℹ Dashboard Settings API unit not installed; skipping deep API check"
@@ -12122,48 +12535,60 @@ run_dash_open_only() {
         fi
 
         # Dashboard Settings API token: keep user token file in sync with the root API.
-        local token_file old_token new_token api_ok
+        # IMPORTANT: keep the token stable when possible so existing tabs don't lose access.
+        local token_file old_token desired_token api_ok
         token_file="${dash_dir}/dashboard-token.txt"
         old_token=""
         if [ -f "${token_file}" ]; then
             old_token=$(cat "${token_file}" 2>/dev/null || echo "")
+            old_token="$(printf '%s' "${old_token}" | tr -d '\r\n')"
         fi
-        new_token=""
-        if command -v python3 >/dev/null 2>&1; then
-            new_token=$(python3 - <<'PY'
+
+        # If the user token is missing but the root token exists, reuse it.
+        desired_token="${old_token}"
+        if [ -z "${desired_token//[[:space:]]/}" ] && [ -f "/var/lib/zypper-auto/dashboard-api.token" ]; then
+            desired_token=$(cat "/var/lib/zypper-auto/dashboard-api.token" 2>/dev/null || echo "")
+            desired_token="$(printf '%s' "${desired_token}" | tr -d '\r\n')"
+        fi
+
+        # Otherwise generate a new token.
+        if [ -z "${desired_token//[[:space:]]/}" ]; then
+            if command -v python3 >/dev/null 2>&1; then
+                desired_token=$(python3 - <<'PY'
 import secrets
 print(secrets.token_urlsafe(24))
 PY
 )
-        else
-            new_token="$(date +%s%N)"
+            else
+                desired_token="$(date +%s%N)"
+            fi
         fi
 
         api_ok=0
-        if run_dash_api_on_only "${new_token}" >/dev/null 2>&1; then
+        if [ -n "${desired_token//[[:space:]]/}" ] && run_dash_api_on_only "${desired_token}" >/dev/null 2>&1; then
             api_ok=1
         fi
 
         if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
-            printf '%s' "${new_token}" >"${token_file}" 2>/dev/null || true
+            printf '%s' "${desired_token}" >"${token_file}" 2>/dev/null || true
             chmod 600 "${token_file}" 2>/dev/null || true
             if [ -n "${SUDO_USER:-}" ]; then
                 chown "${SUDO_USER}:${SUDO_USER}" "${token_file}" 2>/dev/null || true
             fi
         else
             # Keep existing token file untouched if API restart failed.
-            if [ -n "${old_token}" ]; then
+            if [ -n "${old_token//[[:space:]]/}" ]; then
                 chmod 600 "${token_file}" 2>/dev/null || true
             fi
         fi
 
         # SECURITY: do not serve the token over HTTP. Pass it via URL fragment (not sent to server)
-        # and let the browser store it in localStorage.
+        # and let the browser store it in localStorage/cookie.
         local token_for_url url_open
         token_for_url=""
         if [ "${api_ok}" -eq 1 ] 2>/dev/null; then
-            token_for_url="${new_token}"
-        elif [ -n "${old_token}" ]; then
+            token_for_url="${desired_token}"
+        elif [ -n "${old_token//[[:space:]]/}" ]; then
             token_for_url="${old_token}"
         fi
 
@@ -19179,7 +19604,7 @@ ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
-ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp
+ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp ${SUDO_USER_HOME}/.local/share/zypper-notify
 EOF
 log_success "Verification service file created"
 chmod 644 "${VERIFY_SERVICE_FILE}" 2>/dev/null || true
