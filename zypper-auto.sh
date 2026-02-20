@@ -5396,9 +5396,27 @@ generate_dashboard() {
         setTimeout(function() { _znhTaskBubbleSetVisible(false); }, 8000);
     }
 
+    // Short guard window to prevent accidental overlay re-open when a click/key event
+    // happens right after closing the overlay.
+    var _znh_overlay_guard_until = 0;
+    function _znhOverlayGuard(ms) {
+        try {
+            _znh_overlay_guard_until = Date.now() + (parseInt(ms || 0, 10) || 0);
+        } catch (e) {
+            _znh_overlay_guard_until = 0;
+        }
+    }
+    function _znhOverlayGuardActive() {
+        try { return Date.now() < (_znh_overlay_guard_until || 0); } catch (e) { return false; }
+    }
+
     function znhTaskOpenOverlayFromBubble() {
         var t = _znhTaskLoad();
         if (!t) return;
+        if (_znhOverlayGuardActive()) {
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'overlay reopen blocked (guard active)'); } catch (e1) {}
+            return;
+        }
         try { _suShow(true); } catch (e) {}
     }
 
@@ -6090,12 +6108,18 @@ generate_dashboard() {
     function _suShow(v) {
         var e = _suEls();
         if (!e.overlay) return;
+
         _su.open = !!v;
         if (_su.open) {
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'overlay show'); } catch (e0) {}
             e.overlay.classList.remove('hidden');
             e.overlay.setAttribute('aria-hidden', 'false');
             try { document.body.classList.add('overlay-open'); } catch (ee) {}
         } else {
+            // Add a small guard window to avoid accidental immediate reopen (bubble click
+            // or key events landing right after close).
+            try { _znhOverlayGuard(700); } catch (eG) {}
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'overlay hide (guard=700ms)'); } catch (e1) {}
             e.overlay.classList.add('hidden');
             e.overlay.setAttribute('aria-hidden', 'true');
             try { document.body.classList.remove('overlay-open'); } catch (ee) {}
@@ -6114,6 +6138,7 @@ generate_dashboard() {
         if (!b) return;
         b.addEventListener('click', function(ev) {
             try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'overlay minimize clicked'); } catch (e2) {}
             _suShow(false);
         });
     })();
@@ -6477,7 +6502,9 @@ generate_dashboard() {
             footer_center: true
         });
 
-        if (e.close) e.close.onclick = function() {
+        if (e.close) e.close.onclick = function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'overlay OK clicked'); } catch (e1) {}
             _suShow(false);
         };
     }
@@ -6712,11 +6739,15 @@ generate_dashboard() {
         var e = _suEls();
         if (!e.overlay) return;
 
-        if (e.cancel) e.cancel.onclick = function() {
+        if (e.cancel) e.cancel.onclick = function(ev) {
             if (_su.running) return;
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'self-update overlay cancel clicked'); } catch (e1) {}
             _suShow(false);
         };
-        if (e.close) e.close.onclick = function() {
+        if (e.close) e.close.onclick = function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'self-update overlay close clicked'); } catch (e1) {}
             _suShow(false);
         };
         if (e.back) e.back.onclick = function() {
@@ -6796,8 +6827,16 @@ generate_dashboard() {
         var dry = String(sp.get('su_dry') || sp.get('dry') || '').toLowerCase();
         var autoDry = (dry === '1' || dry === 'true' || dry === 'yes');
 
+        // Only run once per page load (settingsLoad() can be triggered multiple times).
+        if (window.__znh_su_auto_open_done) return;
+        window.__znh_su_auto_open_done = true;
+
         // Give the page a moment to render.
         setTimeout(function() {
+            if (_znhOverlayGuardActive()) {
+                try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'self-update auto-open blocked (guard active)'); } catch (e1) {}
+                return;
+            }
             try { selfUpdateOpenOverlay({ channel: ch, auto_dry_run: autoDry }); } catch (e2) {}
         }, 400);
     }
@@ -6819,7 +6858,15 @@ generate_dashboard() {
         var dry = String(sp.get('ru_dry') || sp.get('ru_sim') || sp.get('simulate') || '').toLowerCase();
         var autoSim = (dry === '1' || dry === 'true' || dry === 'yes');
 
+        // Only run once per page load (settingsLoad() can be triggered multiple times).
+        if (window.__znh_ru_auto_open_done) return;
+        window.__znh_ru_auto_open_done = true;
+
         setTimeout(function() {
+            if (_znhOverlayGuardActive()) {
+                try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'rocket auto-open blocked (guard active)'); } catch (e1) {}
+                return;
+            }
             try { rocketUpdateWizardOpen({ auto_simulate: autoSim }); } catch (e2) {}
         }, 450);
     }
@@ -7370,8 +7417,10 @@ generate_dashboard() {
         });
 
         // Wire overlay buttons for this flow.
-        if (e.cancel) e.cancel.onclick = function() {
+        if (e.cancel) e.cancel.onclick = function(ev) {
             if (_ru.running) return;
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'rocket overlay cancel clicked'); } catch (e1) {}
             _suShow(false);
         };
         if (e.back) e.back.onclick = function() {
