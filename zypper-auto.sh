@@ -4445,6 +4445,58 @@ generate_dashboard() {
     @keyframes toastIn { to { transform: translateY(0); opacity: 1; } }
     @keyframes toastOut { to { transform: translateY(6px); opacity: 0; } }
 
+    /* Debug HUD (advanced JS debugging toolkit)
+       Toggle via keyboard (Ctrl+Alt+H or Ctrl+Backquote), or append ?hud=1 to the URL. */
+    .znh-hud {
+        position: fixed;
+        left: 18px;
+        bottom: 18px;
+        z-index: 16000; /* above normal content, below blocking overlay */
+        width: min(780px, calc(100vw - 36px));
+        max-height: min(520px, calc(100vh - 36px));
+        display: flex;
+        flex-direction: column;
+        background: rgba(17, 24, 39, 0.90);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 16px;
+        box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        overflow: hidden;
+    }
+    .znh-hud.hidden { display: none; }
+    .znh-hud-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.10);
+        background: rgba(255,255,255,0.04);
+    }
+    .znh-hud-title {
+        font-weight: 950;
+        font-size: 0.92rem;
+        letter-spacing: 0.2px;
+    }
+    .znh-hud-sub {
+        font-size: 0.78rem;
+        font-weight: 800;
+        opacity: 0.85;
+        margin-left: 10px;
+    }
+    .znh-hud-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .znh-hud pre {
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+        max-height: none;
+        flex: 1;
+        background: rgba(0,0,0,0.15);
+        color: #e5e7eb;
+    }
+
     /* Feature toggles */
     .feat-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .feat-badge { font-size: 0.8rem; padding: 6px 10px; border-radius: 10px; background: var(--subtle); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 8px; }
@@ -5196,11 +5248,76 @@ generate_dashboard() {
     </div>
   </div>
 
+  <!-- Debug HUD (advanced JS debugging toolkit) -->
+  <div id="znh-hud" class="znh-hud hidden" aria-hidden="true">
+    <div class="znh-hud-head">
+      <div style="display:flex; align-items:baseline; flex-wrap: wrap;">
+        <div class="znh-hud-title">Debug HUD</div>
+        <div class="znh-hud-sub" id="znh-hud-sub">(Ctrl+Alt+H)</div>
+      </div>
+      <div class="znh-hud-actions">
+        <button class="pill" type="button" id="znh-hud-copy-btn" title="Copy HUD log to clipboard">Copy</button>
+        <button class="pill" type="button" id="znh-hud-clear-btn" title="Clear HUD log">Clear</button>
+        <button class="pill" type="button" id="znh-hud-close-btn" style="border-color: rgba(255,255,255,0.14);" title="Close HUD">Close</button>
+      </div>
+    </div>
+    <pre id="znh-hud-log" style="max-height: none;">(HUD hidden — press Ctrl+Alt+H)</pre>
+  </div>
+
   <!-- JS health indicator bootstrap: runs even if the main dashboard script has a syntax error -->
   <script>
     (function() {
         try { window.__znh_js_ok = false; } catch (e0) {}
         try { window.__znh_js_health_log = []; } catch (e0b) {}
+
+        // Persistent crash log (localStorage): survives page reloads so you can inspect
+        // crash history even if the dashboard JS fails early.
+        var _CRASH_KEY = 'znh_js_crash_log_v1';
+        function _crashLoad() {
+            try {
+                var raw = '';
+                try { raw = localStorage.getItem(_CRASH_KEY) || ''; } catch (e0) { raw = ''; }
+                if (!raw) return [];
+                var j = JSON.parse(raw);
+                if (!Array.isArray(j)) return [];
+                return j;
+            } catch (e) {
+                return [];
+            }
+        }
+        function _crashSave(arr) {
+            try {
+                if (!arr) return;
+                localStorage.setItem(_CRASH_KEY, JSON.stringify(arr));
+            } catch (e) {}
+        }
+        function _crashAppend(kind, msg, meta) {
+            try {
+                var ts = '';
+                try { ts = new Date().toISOString(); } catch (e0) { ts = ''; }
+                var entry = {
+                    ts: ts,
+                    kind: String(kind || 'error'),
+                    msg: String(msg || ''),
+                    meta: meta || {}
+                };
+
+                // Keep entries bounded.
+                try {
+                    if (entry.msg && entry.msg.length > 1400) entry.msg = entry.msg.slice(0, 1400) + '…';
+                } catch (e1) {}
+
+                var arr = _crashLoad();
+                arr.push(entry);
+                if (arr.length > 30) arr = arr.slice(arr.length - 30);
+                _crashSave(arr);
+            } catch (e) {}
+        }
+
+        // Expose a small API for the main script (best-effort; safe if localStorage is blocked).
+        try { window.__znhCrashAppend = _crashAppend; } catch (e1) {}
+        try { window.__znhCrashRead = _crashLoad; } catch (e2) {}
+        try { window.__znhCrashClear = function() { try { localStorage.removeItem(_CRASH_KEY); } catch (e) {} }; } catch (e3) {}
 
         function _now() {
             try {
@@ -5260,6 +5377,7 @@ generate_dashboard() {
         function _fail(msg) {
             _setJsBadge('err', 'JS: FAIL', 'Dashboard JavaScript failed. Open "🧪 JS health (debug)" (Recent Activity) or DevTools → Console.');
             _healthAppend('error', msg || 'JS failed');
+            try { _crashAppend('error', String(msg || 'JS failed'), { source: 'js-health-bootstrap' }); } catch (e0) {}
             _healthOpenOnError();
         }
 
@@ -5287,6 +5405,7 @@ generate_dashboard() {
             var ok = false;
             try { ok = !!window.__znh_js_ok; } catch (e11) { ok = false; }
             if (!ok) {
+                try { _crashAppend('fatal', 'Main dashboard script did not start (possible syntax error).', { source: 'watchdog' }); } catch (e0) {}
                 _fail('Main dashboard script did not start (possible syntax error).');
             }
         }, 1500);
@@ -5305,6 +5424,15 @@ generate_dashboard() {
                         if (ev.colno) where += ':' + String(ev.colno);
                     } catch (eW) {}
 
+                    try {
+                        _crashAppend('error', String(ev.message || 'error'), {
+                            source: 'window.error',
+                            filename: ev.filename || '',
+                            lineno: ev.lineno || 0,
+                            colno: ev.colno || 0
+                        });
+                    } catch (eC) {}
+
                     _fail('JS error:' + where + ' ' + String(ev.message));
                 } catch (e12) {}
             });
@@ -5315,6 +5443,16 @@ generate_dashboard() {
             var _prevOnError = window.onerror;
             window.onerror = function(msg, url, lineNo, columnNo, error) {
                 try {
+                    try {
+                        _crashAppend('error', String(msg || 'error'), {
+                            source: 'window.onerror',
+                            url: url || '',
+                            lineno: lineNo || 0,
+                            colno: columnNo || 0,
+                            stack: (error && error.stack) ? String(error.stack) : ''
+                        });
+                    } catch (eC) {}
+
                     var where2 = '';
                     try {
                         if (url) where2 += ' ' + String(url).split('/').slice(-1)[0];
@@ -5339,6 +5477,11 @@ generate_dashboard() {
             window.addEventListener('unhandledrejection', function(ev) {
                 try {
                     var msg2 = (ev && ev.reason) ? String(ev.reason) : 'promise rejection';
+                    try {
+                        _crashAppend('rejection', msg2, {
+                            source: 'unhandledrejection'
+                        });
+                    } catch (eC) {}
                     _fail('Unhandled rejection: ' + msg2);
                 } catch (e14) {}
             });
@@ -5355,6 +5498,369 @@ generate_dashboard() {
     var genTime = new Date("${now_iso}");
     var ZNH_HELPER_VERSION_AT_GEN = ${helper_version_at_gen};
     var ZNH_DASHBOARD_GEN_ID = "${dash_gen_id}";
+
+    // --- Advanced JS debug toolkit (additive) ---
+    // Features:
+    //  - window.ZNH (inspect internal state + helpers)
+    //  - Persistent crash logs (localStorage; survives reload)
+    //  - URL-based mock mode (simulate file/API states)
+    //  - Debug HUD overlay (toggle with Ctrl+Alt+H / Ctrl+Backquote)
+
+    // URL flags
+    var ZNH_URL = { params: null };
+    try { ZNH_URL.params = new URLSearchParams(window.location.search || ''); } catch (eU0) { ZNH_URL.params = null; }
+
+    // Mock mode (safe: disabled unless explicitly requested)
+    var ZNH_MOCK = {
+        enabled: false,
+        params: {}
+    };
+    try {
+        if (ZNH_URL.params) {
+            var mv = String(ZNH_URL.params.get('znh_mock') || ZNH_URL.params.get('mock') || '').toLowerCase();
+            if (mv === '1' || mv === 'true' || mv === 'yes') ZNH_MOCK.enabled = true;
+
+            // Common mock params (all optional)
+            // - znh_mock_download_status_raw=...
+            // - znh_mock_download_state=idle|refreshing|downloading|complete|error
+            // - znh_mock_self_update_status=up_to_date|update_available|remote_older|error
+            // - znh_mock_token_missing=1
+            ZNH_MOCK.params.download_status_raw = String(ZNH_URL.params.get('znh_mock_download_status_raw') || '');
+            ZNH_MOCK.params.download_state = String(ZNH_URL.params.get('znh_mock_download_state') || '');
+            ZNH_MOCK.params.self_update_status = String(ZNH_URL.params.get('znh_mock_self_update_status') || '');
+            ZNH_MOCK.params.token_missing = String(ZNH_URL.params.get('znh_mock_token_missing') || '') === '1';
+
+            // Full JSON override for status-data.json (advanced)
+            ZNH_MOCK.params.status_data_json = String(ZNH_URL.params.get('znh_mock_status_data_json') || '');
+        }
+    } catch (eM0) {}
+
+    function znhMockEnabled() {
+        try { return !!(ZNH_MOCK && ZNH_MOCK.enabled); } catch (e) { return false; }
+    }
+
+    function _znhMakeTextResponse(body, statusCode, contentType) {
+        try {
+            if (typeof Response === 'function') {
+                return new Response(String(body || ''), {
+                    status: statusCode || 200,
+                    headers: { 'Content-Type': contentType || 'text/plain; charset=utf-8' }
+                });
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function _znhMakeJsonResponse(obj, statusCode) {
+        try {
+            var s = '';
+            try { s = JSON.stringify(obj || {}); } catch (e0) { s = '{}'; }
+            return _znhMakeTextResponse(s, statusCode || 200, 'application/json; charset=utf-8');
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function znhMockFetchMaybe(url, opts) {
+        if (!znhMockEnabled()) return null;
+        var u = '';
+        try { u = String(url || ''); } catch (e) { u = ''; }
+
+        // Only mock dashboard-local resources (no external URLs) unless explicitly extended.
+        // This is for UI development/testing only.
+        try {
+            // status-data.json
+            if (u.indexOf('status-data.json') === 0) {
+                if (ZNH_MOCK.params.status_data_json) {
+                    try { return _znhMakeTextResponse(ZNH_MOCK.params.status_data_json, 200, 'application/json; charset=utf-8'); } catch (e1) {}
+                }
+                // Small deterministic default payload
+                return _znhMakeJsonResponse({
+                    generated_iso: new Date().toISOString(),
+                    generated_human: '(mock)',
+                    run_id: 'MOCK',
+                    last_status: 'MOCK: status-data.json',
+                    status_color: 'rgba(124,58,237,0.92)',
+                    zypp_lock_state: 'none',
+                    zypp_lock_pid: '',
+                    zypp_lock_file: '',
+                    pending_count: 7,
+                    feat_flatpak: true,
+                    feat_snap: false,
+                    feat_soar: true,
+                    feat_brew: false,
+                    feat_pipx: true,
+                    dl_timer: 'enabled=enabled active=active',
+                    verify_timer: 'enabled=enabled active=active',
+                    nt_timer: 'enabled=enabled active=active',
+                    verify_last_fixed: 0,
+                    verify_last_detected: 0,
+                    verify_last_remaining: 0,
+                    verify_last_ts: '(mock)',
+                    snapper_timeline_timer: 'enabled=enabled active=active preset=disabled',
+                    snapper_cleanup_timer: 'enabled=enabled active=active preset=disabled',
+                    snapper_boot_timer: 'enabled=enabled active=active preset=disabled',
+                    kernel_ver: '(mock)',
+                    uptime_info: '(mock)',
+                    mem_usage: '(mock)',
+                    disk_usage_display: '(mock)',
+                    disk_percent: 41,
+                    last_install_log: '(mock)',
+                    last_install_tail: '(mock) hello from mock status-data.json',
+                    flight_report_log: '(mock)',
+                    flight_report_raw: '(mock)'
+                }, 200);
+            }
+
+            // download-status.txt
+            if (u.indexOf('download-status.txt') === 0) {
+                if (ZNH_MOCK.params.download_status_raw) {
+                    return _znhMakeTextResponse(ZNH_MOCK.params.download_status_raw, 200, 'text/plain; charset=utf-8');
+                }
+                var st = String(ZNH_MOCK.params.download_state || '').toLowerCase();
+                if (st === 'downloading') return _znhMakeTextResponse('downloading:20:1.1GB:3:15', 200);
+                if (st === 'refreshing') return _znhMakeTextResponse('refreshing', 200);
+                if (st === 'complete') return _znhMakeTextResponse('complete:92:18', 200);
+                if (st === 'error') return _znhMakeTextResponse('error:network', 200);
+                return _znhMakeTextResponse('idle', 200);
+            }
+
+            // perf-data.json (minimal)
+            if (u.indexOf('perf-data.json') === 0) {
+                return _znhMakeJsonResponse({ generated_iso: new Date().toISOString(), interval_sec: 2, units: {} }, 200);
+            }
+
+            // dashboard meta (force banner testing)
+            if (u.indexOf('status-meta.json') === 0) {
+                return _znhMakeJsonResponse({ gen_id: 'MOCK-GEN-ID', generated_iso: new Date().toISOString(), generated_human: '(mock)', helper_version_at_gen: ZNH_HELPER_VERSION_AT_GEN }, 200);
+            }
+        } catch (e2) {
+            return null;
+        }
+
+        return null;
+    }
+
+    // HUD (on-screen debug overlay)
+    var _znhHudLines = [];
+    var _znhHudMax = 220;
+
+    function _znhHudEl() { return document.getElementById('znh-hud'); }
+    function _znhHudLogEl() { return document.getElementById('znh-hud-log'); }
+
+    function znhHudSetVisible(v) {
+        var h = _znhHudEl();
+        if (!h) return;
+        if (v) {
+            h.classList.remove('hidden');
+            h.setAttribute('aria-hidden', 'false');
+            try { localStorage.setItem('znh_hud', '1'); } catch (e) {}
+        } else {
+            h.classList.add('hidden');
+            h.setAttribute('aria-hidden', 'true');
+            try { localStorage.setItem('znh_hud', '0'); } catch (e2) {}
+        }
+    }
+
+    function znhHudIsVisible() {
+        var h = _znhHudEl();
+        if (!h) return false;
+        return !h.classList.contains('hidden');
+    }
+
+    function znhHudRender() {
+        var pre = _znhHudLogEl();
+        if (!pre) return;
+        pre.textContent = _znhHudLines.length ? _znhHudLines.join('\n') : '(empty)';
+        try { pre.scrollTop = pre.scrollHeight; } catch (e) {}
+    }
+
+    function znhHudLog(level, msg, ctx) {
+        // Level: debug|info|warn|error
+        try {
+            var ts = '';
+            try { ts = new Date().toISOString().slice(11, 19); } catch (e0) { ts = ''; }
+            var line = '[' + ts + '] ' + String(level || 'info').toUpperCase() + ': ' + String(msg || '');
+            if (ctx && typeof ctx === 'object') {
+                try {
+                    var j = JSON.stringify(ctx);
+                    if (j && j !== '{}' && j.length < 420) line += ' ' + j;
+                } catch (e1) {}
+            }
+            _znhHudLines.push(line);
+            if (_znhHudLines.length > _znhHudMax) _znhHudLines = _znhHudLines.slice(_znhHudLines.length - _znhHudMax);
+            if (znhHudIsVisible()) znhHudRender();
+        } catch (e) {}
+    }
+
+    // Expose HUD logger globally so other helpers can use it.
+    try { window.znhHudLog = znhHudLog; } catch (eH0) {}
+
+    function znhHudClear() {
+        _znhHudLines = [];
+        znhHudRender();
+    }
+
+    function znhHudToggle() {
+        znhHudSetVisible(!znhHudIsVisible());
+        if (znhHudIsVisible()) {
+            znhHudRender();
+            // When opening, show recent persistent crash log entries if any.
+            try {
+                if (typeof window.__znhCrashRead === 'function') {
+                    var arr = window.__znhCrashRead() || [];
+                    if (arr && arr.length) {
+                        znhHudLog('info', 'Persistent crash log entries (localStorage): ' + String(arr.length));
+                        var tail = arr.slice(Math.max(0, arr.length - 6));
+                        for (var i = 0; i < tail.length; i++) {
+                            var it = tail[i] || {};
+                            znhHudLog(it.kind || 'error', (it.ts ? (it.ts + ' ') : '') + String(it.msg || ''), it.meta || null);
+                        }
+                    }
+                }
+            } catch (eC) {}
+        }
+    }
+
+    // Wire HUD UI buttons + keyboard shortcuts.
+    (function() {
+        var closeBtn = document.getElementById('znh-hud-close-btn');
+        var clearBtn = document.getElementById('znh-hud-clear-btn');
+        var copyBtn = document.getElementById('znh-hud-copy-btn');
+
+        if (closeBtn) closeBtn.addEventListener('click', function() { znhHudSetVisible(false); });
+        if (clearBtn) clearBtn.addEventListener('click', function() { znhHudClear(); toast('HUD cleared', '', 'ok'); });
+
+        if (copyBtn) copyBtn.addEventListener('click', function() {
+            var txt = '';
+            try { txt = (_znhHudLines || []).join('\n'); } catch (e0) { txt = ''; }
+            if (!txt) { toast('HUD empty', 'Nothing to copy', 'err'); return; }
+
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(txt).then(function() {
+                        toast('HUD copied', 'Copied to clipboard', 'ok');
+                    }, function() {
+                        toast('HUD copy failed', 'Clipboard permission denied', 'err');
+                    });
+                    return;
+                }
+            } catch (e1) {}
+
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = txt;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                toast('HUD copied', 'Copied to clipboard', 'ok');
+            } catch (e2) {
+                toast('HUD copy failed', 'Could not copy', 'err');
+            }
+        });
+
+        document.addEventListener('keydown', function(ev) {
+            if (!ev) return;
+
+            // Toggle keys:
+            // - Ctrl+Alt+H
+            // - Ctrl+Backquote
+            var k = '';
+            try { k = String(ev.key || ''); } catch (e) { k = ''; }
+            var kLower = k.toLowerCase();
+
+            var toggle = false;
+            if (ev.ctrlKey && ev.altKey && kLower === 'h') toggle = true;
+            try {
+                var code = String(ev.code || '');
+                if (ev.ctrlKey && code === 'Backquote') toggle = true;
+            } catch (eC) {}
+            // Fallback for browsers that don't support KeyboardEvent.code.
+            try {
+                if (ev.ctrlKey && !toggle && k && k.charCodeAt && k.charCodeAt(0) === 96) toggle = true;
+            } catch (eC2) {}
+
+            if (toggle) {
+                try { ev.preventDefault(); } catch (e2) {}
+                znhHudToggle();
+            }
+        });
+
+        // Initial open (optional)
+        try {
+            var want = false;
+            if (ZNH_URL.params) {
+                var hv = String(ZNH_URL.params.get('hud') || ZNH_URL.params.get('znh_hud') || '').toLowerCase();
+                if (hv === '1' || hv === 'true' || hv === 'yes') want = true;
+            }
+            if (!want) {
+                try { want = (localStorage.getItem('znh_hud') || '') === '1'; } catch (e3) { want = false; }
+            }
+            if (want) {
+                znhHudSetVisible(true);
+                znhHudLog('info', 'HUD auto-open enabled');
+                znhHudRender();
+            }
+        } catch (e4) {}
+    })();
+
+    // window.ZNH: global debug context
+    (function() {
+        try {
+            if (window.ZNH && window.ZNH.__znh_ready) return;
+        } catch (e0) {}
+
+        var api = {};
+        api.__znh_ready = true;
+        api.meta = {
+            generated_iso: (function() { try { return genTime.toISOString(); } catch (e) { return ''; } })(),
+            helper_version_at_gen: ZNH_HELPER_VERSION_AT_GEN,
+            dashboard_gen_id: ZNH_DASHBOARD_GEN_ID
+        };
+        api.flags = {
+            get debug() { try { return !!ZNH_DEBUG; } catch (e) { return false; } },
+            get mock() { return znhMockEnabled(); }
+        };
+        api.hud = {
+            show: function() { znhHudSetVisible(true); znhHudRender(); },
+            hide: function() { znhHudSetVisible(false); },
+            toggle: function() { znhHudToggle(); },
+            clear: function() { znhHudClear(); },
+            log: function(level, msg, ctx) { znhHudLog(level, msg, ctx); }
+        };
+        api.crash = {
+            list: function() {
+                try { return (typeof window.__znhCrashRead === 'function') ? (window.__znhCrashRead() || []) : []; } catch (e) { return []; }
+            },
+            clear: function() {
+                try { if (typeof window.__znhCrashClear === 'function') window.__znhCrashClear(); } catch (e) {}
+            },
+            append: function(kind, msg, meta) {
+                try { if (typeof window.__znhCrashAppend === 'function') window.__znhCrashAppend(kind, msg, meta || {}); } catch (e) {}
+            }
+        };
+        api.mock = ZNH_MOCK;
+        api.getState = function() {
+            // Snapshot only (avoid returning large DOM objects).
+            return {
+                debug: api.flags.debug,
+                hud: znhHudIsVisible(),
+                mock: znhMockEnabled(),
+                liveEnabled: (typeof liveEnabled !== 'undefined') ? !!liveEnabled : false,
+                logView: (typeof logView !== 'undefined') ? String(logView || '') : '',
+                helper_version_at_gen: ZNH_HELPER_VERSION_AT_GEN,
+                dashboard_gen_id: ZNH_DASHBOARD_GEN_ID
+            };
+        };
+        api.dumpState = function() {
+            var s = api.getState();
+            try { console.log('[ZNH] state', s); } catch (e) {}
+            return s;
+        };
+
+        try { window.ZNH = api; } catch (e1) {}
+    })();
 
     // --- Debugging helpers ---
     // Enable with: ?debug=1 (or ?znh_debug=1)
@@ -5403,6 +5909,7 @@ generate_dashboard() {
             if (console && console.log) console.log.apply(console, ['[ZNH-DEBUG]'].concat(args));
         } catch (e_dbg2) {}
         try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbg3) {}
+        try { if (typeof window.znhHudLog === 'function') window.znhHudLog('debug', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbgH) {}
     }
 
     function znhDebugWarn() {
@@ -5412,6 +5919,7 @@ generate_dashboard() {
             if (console && console.warn) console.warn.apply(console, ['[ZNH-DEBUG]'].concat(args));
         } catch (e_dbg4) {}
         try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('warn', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbg5) {}
+        try { if (typeof window.znhHudLog === 'function') window.znhHudLog('warn', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbgH2) {}
     }
 
     function znhDebugError() {
@@ -5422,6 +5930,12 @@ generate_dashboard() {
             if (console && console.error) console.error.apply(console, ['[ZNH]'].concat(args));
         } catch (e_dbg6) {}
         try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('error', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbg7) {}
+        try { if (typeof window.znhHudLog === 'function') window.znhHudLog('error', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbgH3) {}
+        try {
+            if (typeof window.__znhCrashAppend === 'function') {
+                window.__znhCrashAppend('error', Array.prototype.slice.call(arguments).join(' '), { source: 'znhDebugError' });
+            }
+        } catch (e_dbgP) {}
     }
 
     if (ZNH_DEBUG) {
@@ -5432,6 +5946,18 @@ generate_dashboard() {
     function znhFetch(url, opts) {
         var start = 0;
         try { start = Date.now(); } catch (e0) { start = 0; }
+
+        // Mock mode: allow simulating dashboard-local resources when developing/debugging UI.
+        try {
+            var mockR = znhMockFetchMaybe(url, opts || {});
+            if (mockR) {
+                if (ZNH_DEBUG) {
+                    try { znhDebugLog('mock fetch', url); } catch (e0m) {}
+                }
+                return Promise.resolve(mockR);
+            }
+        } catch (eM) {}
+
         return fetch(url, opts).then(function(r) {
             var dur = 0;
             try { dur = start ? (Date.now() - start) : 0; } catch (e1) { dur = 0; }
@@ -6079,6 +6605,15 @@ generate_dashboard() {
     function _fetchToken() {
         if (_settingsToken) return Promise.resolve(_settingsToken);
 
+        // Mock mode: force missing-token behaviour to test the repair banner.
+        try {
+            if (znhMockEnabled() && ZNH_MOCK && ZNH_MOCK.params && ZNH_MOCK.params.token_missing) {
+                try { _clearTokenCaches(); } catch (e0) {}
+                try { _znhShowTokenRepairBanner(); } catch (e1) {}
+                return Promise.reject(new Error('mock: token missing'));
+            }
+        } catch (eM0) {}
+
         // SECURITY: if the dashboard was opened with a token fragment, store it and
         // immediately remove it from the URL so it doesn't linger in history.
         try {
@@ -6158,6 +6693,28 @@ generate_dashboard() {
         if (ZNH_DEBUG) {
             try { znhDebugLog('api request', (opts && opts.method) ? opts.method : 'GET', path); } catch (e0) {}
         }
+
+        // Mock mode: simulate common API results so UI states can be tested without the API.
+        try {
+            if (znhMockEnabled() && ZNH_MOCK && ZNH_MOCK.params && ZNH_MOCK.params.self_update_status) {
+                var key = String(ZNH_MOCK.params.self_update_status || '').toLowerCase();
+                if (path.indexOf('/api/self-update/status') === 0) {
+                    if (key === 'error') {
+                        return Promise.resolve({ error: 'mocked self-update status error', installed_version_header: ZNH_HELPER_VERSION_AT_GEN });
+                    }
+                    if (key === 'remote_older') {
+                        return Promise.resolve({ remote_is_older: true, up_to_date: false, update_available: false, installed_version_header: ZNH_HELPER_VERSION_AT_GEN, remote_ref: 'v1', installed_ref: 'v' + String(ZNH_HELPER_VERSION_AT_GEN || 0) });
+                    }
+                    if (key === 'update_available') {
+                        return Promise.resolve({ update_available: true, up_to_date: false, remote_is_older: false, installed_version_header: ZNH_HELPER_VERSION_AT_GEN, remote_ref: 'v999', installed_ref: 'v' + String(ZNH_HELPER_VERSION_AT_GEN || 0) });
+                    }
+                    if (key === 'up_to_date') {
+                        return Promise.resolve({ up_to_date: true, update_available: false, remote_is_older: false, installed_version_header: ZNH_HELPER_VERSION_AT_GEN, remote_ref: 'v' + String(ZNH_HELPER_VERSION_AT_GEN || 0), installed_ref: 'v' + String(ZNH_HELPER_VERSION_AT_GEN || 0) });
+                    }
+                }
+            }
+        } catch (eM1) {}
+
         return _fetchToken().then(function(tok) {
             var headers = opts.headers || {};
             headers['X-ZNH-Token'] = tok;
