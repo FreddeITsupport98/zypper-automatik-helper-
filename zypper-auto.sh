@@ -1795,6 +1795,7 @@ __znh_write_dashboard_schema_json() {
     "OPTIONAL_UPDATES_ALWAYS_REFRESH": {"type": "bool", "default": "false"},
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
+    "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
@@ -1957,6 +1958,13 @@ DASHBOARD_ENABLED=true
 # Leave empty to use the system default (xdg-open).
 # Examples: "firefox", "google-chrome", "chromium"
 DASHBOARD_BROWSER=""
+
+# DASHBOARD_JS_VERBOSE_DEBUG
+# When true, the dashboard Web UI prints extra debug diagnostics (fetch/API details)
+# into DevTools → Console and mirrors key lines into the "🧪 JS health (debug)" panel.
+# This helps troubleshoot Live mode, tab switching, and overlay workflows.
+# Default: false
+DASHBOARD_JS_VERBOSE_DEBUG=false
 
 # SELF_UPDATE_CHANNEL
 # Controls which update channel is used by default when you run:
@@ -5065,6 +5073,10 @@ generate_dashboard() {
         <div style="margin-top:8px; color: var(--muted); font-size:0.86rem; font-weight: 800;">
           Shows dashboard JS errors/debug breadcrumbs.
           If Live mode or the log tabs stop working, the first error here is usually the root cause.
+          <div style="margin-top:8px;">
+            Debug mode: add <code>?debug=1</code> to the dashboard URL for verbose fetch/API logs (also mirrored here).
+            Option-based: enable <code>DASHBOARD_JS_VERBOSE_DEBUG</code> in Settings to keep verbose debug on without changing the URL.
+          </div>
         </div>
         <pre id="js-health-log" style="max-height: 180px; margin-top: 10px;">(booting…)</pre>
       </details>
@@ -5261,6 +5273,31 @@ generate_dashboard() {
             });
         } catch (e13) {}
 
+        // Also hook window.onerror (covers some cases where event listeners don't fire).
+        try {
+            var _prevOnError = window.onerror;
+            window.onerror = function(msg, url, lineNo, columnNo, error) {
+                try {
+                    var where2 = '';
+                    try {
+                        if (url) where2 += ' ' + String(url).split('/').slice(-1)[0];
+                        if (lineNo) where2 += ':' + String(lineNo);
+                        if (columnNo) where2 += ':' + String(columnNo);
+                    } catch (eW2) {}
+                    _fail('JS error:' + where2 + ' ' + String(msg || 'error'));
+                } catch (e16) {}
+
+                // Preserve any pre-existing onerror handler.
+                try {
+                    if (typeof _prevOnError === 'function') {
+                        return _prevOnError(msg, url, lineNo, columnNo, error);
+                    }
+                } catch (e17) {}
+
+                return false;
+            };
+        } catch (e18) {}
+
         try {
             window.addEventListener('unhandledrejection', function(ev) {
                 try {
@@ -5279,6 +5316,98 @@ generate_dashboard() {
 
     // Global UI state (used by live polling)
     var genTime = new Date("${now_iso}");
+
+    // --- Debugging helpers ---
+    // Enable with: ?debug=1 (or ?znh_debug=1)
+    // Optional persistent flag: localStorage.setItem('znh_debug','1')
+    var ZNH_DEBUG = false;
+    var ZNH_DEBUG_FORCED = false;
+    try {
+        var _znhP = new URLSearchParams(window.location.search || '');
+        var _znhDv = String(_znhP.get('debug') || _znhP.get('znh_debug') || '').toLowerCase();
+        if (_znhDv === '1' || _znhDv === 'true' || _znhDv === 'yes') {
+            ZNH_DEBUG = true;
+            ZNH_DEBUG_FORCED = true;
+        }
+    } catch (e_dbg0) {}
+    try {
+        if (!ZNH_DEBUG && (localStorage.getItem('znh_debug') || '') === '1') ZNH_DEBUG = true;
+    } catch (e_dbg1) {}
+
+    function znhDebugApplyFromConfig(cfg) {
+        // Prefer the Settings/API config ("options") over browser-local flags.
+        // Still allow URL debug=1 to force-enable even if config says false.
+        var want = false;
+        try {
+            var v = (cfg && cfg.DASHBOARD_JS_VERBOSE_DEBUG != null) ? cfg.DASHBOARD_JS_VERBOSE_DEBUG : null;
+            want = String(v || '').toLowerCase() === 'true';
+        } catch (e_dbgC) { want = false; }
+
+        if (want && !ZNH_DEBUG) {
+            ZNH_DEBUG = true;
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('info', 'Verbose JS debug enabled (config: DASHBOARD_JS_VERBOSE_DEBUG=true)'); } catch (e0) {}
+        }
+
+        if (!want && ZNH_DEBUG && !ZNH_DEBUG_FORCED) {
+            // If debug was enabled only by browser-local state, allow config to disable it.
+            ZNH_DEBUG = false;
+            try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('info', 'Verbose JS debug disabled (config: DASHBOARD_JS_VERBOSE_DEBUG=false)'); } catch (e1) {}
+        }
+
+        return want;
+    }
+
+    function znhDebugLog() {
+        if (!ZNH_DEBUG) return;
+        try {
+            var args = Array.prototype.slice.call(arguments);
+            if (console && console.log) console.log.apply(console, ['[ZNH-DEBUG]'].concat(args));
+        } catch (e_dbg2) {}
+        try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbg3) {}
+    }
+
+    function znhDebugWarn() {
+        if (!ZNH_DEBUG) return;
+        try {
+            var args = Array.prototype.slice.call(arguments);
+            if (console && console.warn) console.warn.apply(console, ['[ZNH-DEBUG]'].concat(args));
+        } catch (e_dbg4) {}
+        try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('warn', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbg5) {}
+    }
+
+    function znhDebugError() {
+        // Always emit to JS health log (even when debug mode is off) so failures
+        // surface in the UI without DevTools.
+        try {
+            var args = Array.prototype.slice.call(arguments);
+            if (console && console.error) console.error.apply(console, ['[ZNH]'].concat(args));
+        } catch (e_dbg6) {}
+        try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('error', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbg7) {}
+    }
+
+    if (ZNH_DEBUG) {
+        try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('info', 'Debug mode enabled (?debug=1)'); } catch (e_dbg8) {}
+    }
+
+    // Fetch wrapper that adds basic diagnostics (HTTP status, duration).
+    function znhFetch(url, opts) {
+        var start = 0;
+        try { start = Date.now(); } catch (e0) { start = 0; }
+        return fetch(url, opts).then(function(r) {
+            var dur = 0;
+            try { dur = start ? (Date.now() - start) : 0; } catch (e1) { dur = 0; }
+            if (ZNH_DEBUG) {
+                try { znhDebugLog('fetch', (opts && opts.method) ? opts.method : 'GET', url, '->', 'HTTP', r.status, '(' + String(dur) + 'ms)'); } catch (e2) {}
+            }
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : String(e || 'fetch failed');
+            if (ZNH_DEBUG) {
+                try { znhDebugWarn('fetch failed', url, msg); } catch (e3) {}
+            }
+            throw e;
+        });
+    }
 
     // Toast notifications (non-intrusive)
     function ensureToastWrap() {
@@ -5522,6 +5651,7 @@ generate_dashboard() {
         { key: 'OPTIONAL_UPDATES_ALWAYS_REFRESH', type: 'bool', label: 'Always refresh optional app updates (Flatpak/Snap/Soar/Brew/pipx) even when no system updates' },
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
+        { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
@@ -5752,6 +5882,9 @@ generate_dashboard() {
 
     function _api(path, opts, _didRetryAuth) {
         opts = opts || {};
+        if (ZNH_DEBUG) {
+            try { znhDebugLog('api request', (opts && opts.method) ? opts.method : 'GET', path); } catch (e0) {}
+        }
         return _fetchToken().then(function(tok) {
             var headers = opts.headers || {};
             headers['X-ZNH-Token'] = tok;
@@ -5759,7 +5892,7 @@ generate_dashboard() {
                 headers['Content-Type'] = 'application/json';
             }
             opts.headers = headers;
-            return fetch(SETTINGS_API_BASE + path, opts);
+            return znhFetch(SETTINGS_API_BASE + path, opts);
         }).then(function(r) {
             // Parse body defensively so we can still display errors even when the
             // API returns non-JSON (or empty) output.
@@ -5998,14 +6131,23 @@ generate_dashboard() {
     }
 
     function _githubApiJson(url) {
-        return fetch(url, { cache: 'no-store' }).then(function(r) {
+        return znhFetch(url, { cache: 'no-store' }).then(function(r) {
             return r.json().then(function(j) {
                 if (!r.ok) {
                     var msg = (j && (j.message || j.error)) ? (j.message || j.error) : ('HTTP ' + r.status);
-                    throw new Error(msg);
+                    var e = new Error(msg);
+                    try { e.http_status = r.status; } catch (e2) {}
+                    throw e;
                 }
                 return j;
             });
+        }).catch(function(e) {
+            // Improve the error that ends up in the toast + JS health log.
+            var msg2 = (e && e.message) ? e.message : 'GitHub fetch failed';
+            if (ZNH_DEBUG) {
+                try { znhDebugWarn('github api failed', url, msg2); } catch (e3) {}
+            }
+            throw e;
         });
     }
 
@@ -7689,6 +7831,7 @@ generate_dashboard() {
             return _api('/api/config', { method: 'GET' });
         }).then(function(c) {
             _settingsConfig = c.config
+            try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
@@ -8393,9 +8536,13 @@ generate_dashboard() {
         if (_pollLiveInFlight) return Promise.resolve(null);
         _pollLiveInFlight = true;
 
-        return fetch('status-data.json?ts=' + Date.now(), { cache: 'no-store' })
+        return znhFetch('status-data.json?ts=' + Date.now(), { cache: 'no-store' })
             .then(function(r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
+                if (!r.ok) {
+                    var e = new Error('HTTP ' + r.status);
+                    try { e.http_status = r.status; } catch (e2) {}
+                    throw e;
+                }
                 return r.json();
             })
             .then(function(d) {
@@ -8403,9 +8550,13 @@ generate_dashboard() {
                 applyLiveData(d);
                 return d;
             })
-            .catch(function() {
+            .catch(function(err) {
                 // When opened as file://, many browsers block fetch().
                 liveFailures++;
+                var msg = (err && err.message) ? err.message : 'pollLive failed';
+                if (ZNH_DEBUG || liveFailures === 1 || liveFailures === 3) {
+                    try { znhDebugError('pollLive failed:', msg); } catch (e0) {}
+                }
                 if (liveFailures >= 3) {
                     // Fallback: full reload every 15s (still useful if some other process regenerates the file)
                     setTimeout(function() { window.location.reload(); }, 15000);
@@ -8542,15 +8693,26 @@ generate_dashboard() {
         if (_pollDownloaderInFlight) return Promise.resolve(null);
         _pollDownloaderInFlight = true;
 
-        return fetch('download-status.txt?ts=' + Date.now(), { cache: 'no-store' })
-            .then(function(r) { return r.ok ? r.text() : ''; })
+        return znhFetch('download-status.txt?ts=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) {
+                    if (ZNH_DEBUG) {
+                        try { znhDebugWarn('download-status fetch HTTP', r.status); } catch (e0) {}
+                    }
+                    return '';
+                }
+                return r.text();
+            })
             .then(function(txt) {
                 var obj = parseDownloadStatus(txt);
                 updateDownloadUI(obj);
                 return obj;
             })
-            .catch(function() {
-                // ignore
+            .catch(function(err) {
+                if (ZNH_DEBUG) {
+                    var msg = (err && err.message) ? err.message : 'download status fetch failed';
+                    try { znhDebugWarn('pollDownloaderStatus failed:', msg); } catch (e1) {}
+                }
                 return null;
             })
             .finally(function() {
@@ -8746,10 +8908,14 @@ generate_dashboard() {
         if (!force && _pollPerfInFlight) return Promise.resolve(null);
         _pollPerfInFlight = true;
 
-        return fetch('perf-data.json?ts=' + Date.now(), { cache: 'no-store' })
+        return znhFetch('perf-data.json?ts=' + Date.now(), { cache: 'no-store' })
             .then(function(r) {
                 if (r.status === 404 || r.status === 416) return null;
-                if (!r.ok) throw new Error('HTTP ' + r.status);
+                if (!r.ok) {
+                    var e = new Error('HTTP ' + r.status);
+                    try { e.http_status = r.status; } catch (e2) {}
+                    throw e;
+                }
                 return r.text();
             })
             .then(function(txt) {
@@ -8766,8 +8932,11 @@ generate_dashboard() {
                 _renderPerf(perf);
                 return perf;
             })
-            .catch(function() {
-                // ignore
+            .catch(function(err) {
+                if (ZNH_DEBUG) {
+                    var msg = (err && err.message) ? err.message : 'perf poll failed';
+                    try { znhDebugWarn('pollPerf failed:', msg); } catch (e0) {}
+                }
                 return null;
             })
             .finally(function() {
@@ -8878,7 +9047,7 @@ generate_dashboard() {
             headers['Range'] = 'bytes=-' + String(rangeBytes);
         }
 
-        return fetch(url, {
+        return znhFetch(url, {
             cache: 'no-store',
             headers: headers
         })
@@ -8887,7 +9056,11 @@ generate_dashboard() {
                 // some servers reply 416; treat that as empty content.
                 // If the file is missing (404), also treat as empty so the UI doesn't freeze.
                 if (r.status === 416 || r.status === 404) return '';
-                if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
+                if (!r.ok && r.status !== 206) {
+                    var e = new Error('HTTP ' + r.status);
+                    try { e.http_status = r.status; } catch (e2) {}
+                    throw e;
+                }
                 return r.text();
             })
             .then(function(txt) {
@@ -8942,7 +9115,11 @@ generate_dashboard() {
                 }
                 updateJumpButton('log-content', 'recent-log-wrap');
             })
-            .catch(function() {
+            .catch(function(err) {
+                if (ZNH_DEBUG) {
+                    var msg = (err && err.message) ? err.message : 'log poll failed';
+                    try { znhDebugWarn('pollRecentActivityLog failed:', msg); } catch (e0) {}
+                }
                 // If files aren't accessible (e.g. opened via file://), do nothing.
                 return null;
             })
