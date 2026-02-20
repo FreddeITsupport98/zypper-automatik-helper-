@@ -5077,6 +5077,10 @@ generate_dashboard() {
             Debug mode: add <code>?debug=1</code> to the dashboard URL for verbose fetch/API logs (also mirrored here).
             Option-based: enable <code>DASHBOARD_JS_VERBOSE_DEBUG</code> in Settings to keep verbose debug on without changing the URL.
           </div>
+          <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button class="pill" type="button" id="znh-debug-toggle-btn" title="Toggle verbose JS debug via Settings API">Verbose debug: (loading…)</button>
+            <span style="font-size:0.82rem; color: var(--muted);">Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed).</span>
+          </div>
         </div>
         <pre id="js-health-log" style="max-height: 180px; margin-top: 10px;">(booting…)</pre>
       </details>
@@ -5408,6 +5412,102 @@ generate_dashboard() {
             throw e;
         });
     }
+
+    function znhVerboseDebugOptionEnabled() {
+        try {
+            var v = (_settingsConfig && _settingsConfig.DASHBOARD_JS_VERBOSE_DEBUG != null) ? _settingsConfig.DASHBOARD_JS_VERBOSE_DEBUG : null;
+            return String(v || '').toLowerCase() === 'true';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function znhDebugUpdateToggleUi() {
+        var btn = document.getElementById('znh-debug-toggle-btn');
+        if (!btn) return;
+
+        if (!_settingsConfig) {
+            btn.textContent = 'Verbose debug: (Settings not loaded)';
+            btn.disabled = true;
+            try { btn.style.borderColor = 'rgba(255,255,255,0.14)'; } catch (e0) {}
+            return;
+        }
+
+        var optOn = znhVerboseDebugOptionEnabled();
+        var forced = !!ZNH_DEBUG_FORCED;
+
+        var label = optOn ? 'Verbose debug: ON' : 'Verbose debug: OFF';
+        if (forced && !optOn) label += ' (URL forced)';
+
+        btn.textContent = label;
+        btn.disabled = false;
+
+        try {
+            btn.style.borderColor = optOn ? 'rgba(34,197,94,0.45)' : 'rgba(255,255,255,0.14)';
+        } catch (e1) {}
+    }
+
+    function znhSetVerboseDebugOption(enable) {
+        var btn = document.getElementById('znh-debug-toggle-btn');
+        var want = enable ? 'true' : 'false';
+
+        if (btn) btn.disabled = true;
+
+        return _api('/api/config', {
+            method: 'POST',
+            body: JSON.stringify({ patch: { DASHBOARD_JS_VERBOSE_DEBUG: want } })
+        }).then(function(r) {
+            // Keep local config in sync.
+            _settingsConfig = (r && r.config) ? r.config : _settingsConfig;
+
+            try { znhDebugApplyFromConfig(_settingsConfig); } catch (e0) {}
+
+            // Keep the Settings drawer checkbox in sync (best-effort).
+            try {
+                var form = document.getElementById('settings-form');
+                var cb = form ? form.querySelector('input[type="checkbox"][data-key="DASHBOARD_JS_VERBOSE_DEBUG"]') : null;
+                if (cb) {
+                    cb.checked = (want === 'true');
+                    // Mirror ON/OFF label inside the pill.
+                    if (cb.parentNode && cb.parentNode.lastChild) {
+                        cb.parentNode.lastChild.nodeValue = cb.checked ? 'ON' : 'OFF';
+                    }
+                }
+            } catch (e1) {}
+
+            znhDebugUpdateToggleUi();
+            toast('Verbose debug updated', 'DASHBOARD_JS_VERBOSE_DEBUG=' + want, 'ok');
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'failed';
+            toast('Verbose debug toggle failed', msg, 'err');
+            znhDebugUpdateToggleUi();
+            return null;
+        }).finally(function() {
+            if (btn) btn.disabled = false;
+        });
+    }
+
+    // Wire JS health debug toggle button.
+    (function() {
+        var btn = document.getElementById('znh-debug-toggle-btn');
+        if (!btn) return;
+
+        btn.addEventListener('click', function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+
+            if (!_settingsConfig) {
+                toast('Settings not loaded', 'Open Settings or reload dashboard', 'err');
+                return;
+            }
+
+            var cur = znhVerboseDebugOptionEnabled();
+            znhSetVerboseDebugOption(!cur);
+        });
+
+        // Initial state (until Settings loads).
+        try { znhDebugUpdateToggleUi(); } catch (e1) {}
+    })();
 
     // Toast notifications (non-intrusive)
     function ensureToastWrap() {
@@ -7832,6 +7932,7 @@ generate_dashboard() {
         }).then(function(c) {
             _settingsConfig = c.config
             try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
+            try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
@@ -7860,6 +7961,7 @@ generate_dashboard() {
                 toast('Settings load failed', (e && e.message) ? e.message : 'API not reachable', 'err');
             }
             try { console && console.warn && console.warn('settingsLoad failed', e); } catch (ee) {}
+            try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             // Can't log via API if the API is unreachable.
             return null;
         });
