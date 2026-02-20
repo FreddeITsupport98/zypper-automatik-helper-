@@ -4773,7 +4773,7 @@ generate_dashboard() {
   </style>
 </head>
 <body>
-  <div class="container">
+  <div class="container" id="main-content">
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
           <h1>
@@ -5025,6 +5025,11 @@ generate_dashboard() {
               <span class="cmd-desc">Rocket Wizard preview + live logs/progress (no install)</span>
               <div class="cmd-copy-feedback">Opening…</div>
           </button>
+          <button class="cmd-btn" type="button" onclick="try { if (window.ZNH && typeof window.ZNH.exportDiagnostics === 'function') { window.ZNH.exportDiagnostics(); } else { __znhExportDiagnosticsBootstrap(); } } catch (e) { try { __znhExportDiagnosticsBootstrap(); } catch (e2) {} }" title="Download a JSON diagnostic report (black box flight recorder)">
+              <span class="cmd-label">Download UI Diagnostics</span>
+              <span class="cmd-desc">Exports state history + crash logs + network errors into a JSON file</span>
+              <div class="cmd-copy-feedback">Downloading…</div>
+          </button>
         </div>
       </details>
     </div>
@@ -5175,6 +5180,7 @@ generate_dashboard() {
           </div>
           <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <button class="pill" type="button" id="znh-debug-toggle-btn" title="Toggle verbose JS debug via Settings API">Verbose debug: (loading…)</button>
+            <button class="pill" type="button" id="znh-js-health-copy-btn" onclick="__znhCopyBlockBootstrap('js-health-log', this)" title="Copy JS health log (debug breadcrumbs/errors)">Copy JS debug log</button>
             <span style="font-size:0.82rem; color: var(--muted);">Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed).</span>
           </div>
         </div>
@@ -5329,6 +5335,126 @@ generate_dashboard() {
         try { window.__znhCrashAppend = _crashAppend; } catch (e1) {}
         try { window.__znhCrashRead = _crashLoad; } catch (e2) {}
         try { window.__znhCrashClear = function() { try { localStorage.removeItem(_CRASH_KEY); } catch (e) {} }; } catch (e3) {}
+
+        // Bootstrap clipboard helper: allows copying JS health logs even if the
+        // main dashboard script fails to load.
+        try {
+            window.__znhCopyBlockBootstrap = function(preId, btn) {
+                var el = null;
+                try { el = document.getElementById(preId); } catch (e0) { el = null; }
+                if (!el) return;
+                var text = '';
+                try { text = el.innerText || el.textContent || ''; } catch (e1) { text = ''; }
+
+                function done(ok) {
+                    try {
+                        if (btn) {
+                            var old = btn.textContent;
+                            btn.textContent = ok ? 'Copied!' : 'Copy failed';
+                            setTimeout(function() { try { btn.textContent = old; } catch (e) {} }, 1800);
+                        }
+                    } catch (e2) {}
+                    try { _healthAppend(ok ? 'info' : 'warn', ok ? 'Copied JS debug log' : 'Copy JS debug log failed'); } catch (e3) {}
+                }
+
+                if (!text) {
+                    done(false);
+                    return;
+                }
+
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(text).then(function() {
+                            done(true);
+                        }, function() {
+                            throw new Error('clipboard blocked');
+                        });
+                        return;
+                    }
+                } catch (e4) {}
+
+                try {
+                    var ta = document.createElement('textarea');
+                    ta.value = text;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    done(true);
+                } catch (e5) {
+                    done(false);
+                }
+            };
+        } catch (eB0) {}
+
+        // Bootstrap diagnostics exporter: works even when the main script fails.
+        // If window.ZNH.exportDiagnostics exists, this will prefer that.
+        try {
+            window.__znhExportDiagnosticsBootstrap = function() {
+                var report = {};
+                try {
+                    report.generatedAt = new Date().toISOString();
+                } catch (e0) {
+                    report.generatedAt = '';
+                }
+
+                report.mode = 'bootstrap-only';
+                report.environment = {};
+                try { report.environment.userAgent = String(navigator.userAgent || ''); } catch (e1) { report.environment.userAgent = ''; }
+                try { report.environment.url = String(window.location && window.location.href ? window.location.href : ''); } catch (e2) { report.environment.url = ''; }
+
+                report.telemetry = {};
+                try { report.telemetry.crashLogs = _crashLoad(); } catch (e3) { report.telemetry.crashLogs = []; }
+                try { report.telemetry.jsHealthLog = (window.__znh_js_health_log || []).slice(0); } catch (e4) { report.telemetry.jsHealthLog = []; }
+
+                var dataStr = '';
+                try { dataStr = JSON.stringify(report, null, 2); } catch (e5) { dataStr = '{"error":"json stringify failed"}'; }
+
+                try {
+                    var blob = new Blob([dataStr], { type: 'application/json' });
+                    var url = URL.createObjectURL(blob);
+                    var a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'zypper-dashboard-diag-' + String(Date.now()) + '.json';
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(function() {
+                        try { document.body.removeChild(a); } catch (e6) {}
+                        try { URL.revokeObjectURL(url); } catch (e7) {}
+                    }, 0);
+                    try { _healthAppend('info', 'Exported diagnostics (bootstrap-only)'); } catch (e8) {}
+                } catch (e9) {
+                    try { _healthAppend('warn', 'Export diagnostics failed (bootstrap): ' + String(e9 && e9.message ? e9.message : e9)); } catch (e10) {}
+                }
+            };
+        } catch (eB1) {}
+
+        // Ctrl+Shift+D: export diagnostics (prefers full exporter when available).
+        try {
+            if (!window.__znh_diag_key_bound) {
+                window.__znh_diag_key_bound = true;
+                document.addEventListener('keydown', function(ev) {
+                    try {
+                        if (!ev) return;
+                        var k = '';
+                        try { k = String(ev.key || ''); } catch (e) { k = ''; }
+                        if (ev.ctrlKey && ev.shiftKey && (k === 'D' || k === 'd')) {
+                            try { ev.preventDefault(); } catch (e2) {}
+                            try { _healthAppend('info', 'Hotkey: exporting diagnostics (Ctrl+Shift+D)'); } catch (e3) {}
+                            try {
+                                if (window.ZNH && typeof window.ZNH.exportDiagnostics === 'function') {
+                                    window.ZNH.exportDiagnostics();
+                                } else if (typeof window.__znhExportDiagnosticsBootstrap === 'function') {
+                                    window.__znhExportDiagnosticsBootstrap();
+                                }
+                            } catch (e4) {
+                                try { if (typeof window.__znhExportDiagnosticsBootstrap === 'function') window.__znhExportDiagnosticsBootstrap(); } catch (e5) {}
+                            }
+                        }
+                    } catch (e6) {}
+                });
+            }
+        } catch (eB2) {}
 
         function _now() {
             try {
@@ -5889,6 +6015,40 @@ generate_dashboard() {
         api.stateHistory = [];
         api.stateHistoryMax = 20;
 
+        // Network error history (bounded)
+        api.netErrors = [];
+        api.netErrorsMax = 30;
+        api.recordNetError = function(info) {
+            try {
+                var entry = {
+                    time: (function() { try { return new Date().toISOString(); } catch (e) { return ''; } })(),
+                    info: info || {}
+                };
+
+                // Keep individual fields bounded.
+                try {
+                    if (entry.info && entry.info.error != null) {
+                        var em = String(entry.info.error || '');
+                        if (em.length > 1400) entry.info.error = em.slice(0, 1400) + '…';
+                    }
+                } catch (e1) {}
+                try {
+                    if (entry.info && entry.info.url != null) {
+                        var uu = String(entry.info.url || '');
+                        if (uu.length > 600) entry.info.url = uu.slice(0, 600) + '…';
+                    }
+                } catch (e2) {}
+
+                api.netErrors.push(entry);
+                if (api.netErrors.length > api.netErrorsMax) {
+                    api.netErrors = api.netErrors.slice(api.netErrors.length - api.netErrorsMax);
+                }
+                return entry;
+            } catch (e0) {
+                return null;
+            }
+        };
+
         function _cloneForHistory(obj) {
             // Deep clone, but keep memory bounded by truncating very large strings.
             // Note: this is best-effort and intentionally conservative.
@@ -5975,6 +6135,129 @@ generate_dashboard() {
             var s = api.getState();
             try { console.log('[ZNH] state', s); } catch (e) {}
             return s;
+        };
+
+        // Black Box Flight Recorder (UI diagnostics exporter)
+        // - Downloads a single JSON bundle containing:
+        //   stateHistory + last state, persistent crash logs, network errors, HUD/js-health logs, and a bounded DOM snapshot.
+        api.exportDiagnostics = function(opts) {
+            opts = opts || {};
+
+            function truncStr(s, max) {
+                try {
+                    s = String(s == null ? '' : s);
+                    if (max > 0 && s.length > max) return { value: s.slice(0, max) + '…', truncated: true, length: s.length };
+                    return { value: s, truncated: false, length: s.length };
+                } catch (e0) {
+                    return { value: '', truncated: false, length: 0 };
+                }
+            }
+
+            function safeCopyArray(arr, max) {
+                try {
+                    var a = arr || [];
+                    if (!Array.isArray(a)) return [];
+                    if (max && a.length > max) return a.slice(a.length - max);
+                    return a.slice(0);
+                } catch (e1) {
+                    return [];
+                }
+            }
+
+            var report = {};
+            try { report.generatedAt = new Date().toISOString(); } catch (e2) { report.generatedAt = ''; }
+            report.mode = 'full';
+
+            report.environment = {};
+            try { report.environment.userAgent = String(navigator.userAgent || ''); } catch (e3) { report.environment.userAgent = ''; }
+            try { report.environment.url = String(window.location && window.location.href ? window.location.href : ''); } catch (e4) { report.environment.url = ''; }
+            try {
+                if (window.location && window.location.protocol) report.environment.protocol = String(window.location.protocol);
+            } catch (e5) {}
+            try {
+                if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+                    var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                    if (tz) report.environment.timeZone = String(tz);
+                }
+            } catch (e6) {}
+
+            report.meta = {};
+            try { report.meta = JSON.parse(JSON.stringify(api.meta || {})); } catch (e7) { report.meta = api.meta || {}; }
+
+            report.flags = {};
+            try { report.flags.debug = api.flags.debug; } catch (e8) { report.flags.debug = false; }
+            try { report.flags.mock = znhMockEnabled(); } catch (e9) { report.flags.mock = false; }
+            try { report.flags.throttle_ms = parseInt(ZNH_THROTTLE_DELAY_MS || 0, 10) || 0; } catch (e10) { report.flags.throttle_ms = 0; }
+            try {
+                if (typeof ZNH_DOM_FLASH !== 'undefined') report.flags.domflash = !!ZNH_DOM_FLASH;
+                else if (typeof ZNH_DOMFLASH_ENABLED !== 'undefined') report.flags.domflash = !!ZNH_DOMFLASH_ENABLED;
+                else report.flags.domflash = false;
+            } catch (e11) { report.flags.domflash = false; }
+            try { report.flags.liveEnabled = (typeof liveEnabled !== 'undefined') ? !!liveEnabled : false; } catch (e12) { report.flags.liveEnabled = false; }
+
+            report.state = {};
+            try { report.state = JSON.parse(JSON.stringify(api.state || {})); } catch (e13) { report.state = api.state || {}; }
+            report.stateHistory = safeCopyArray(api.stateHistory, 400);
+
+            report.telemetry = {};
+            try { report.telemetry.crashLogs = api.crash.list(); } catch (e14) { report.telemetry.crashLogs = []; }
+            try { report.telemetry.networkErrors = safeCopyArray(api.netErrors, 200); } catch (e15) { report.telemetry.networkErrors = []; }
+            try { report.telemetry.jsHealthLog = safeCopyArray(window.__znh_js_health_log, 200); } catch (e16) { report.telemetry.jsHealthLog = []; }
+            try { report.telemetry.hudLog = safeCopyArray(_znhHudLines, 260); } catch (e17) { report.telemetry.hudLog = []; }
+
+            report.domSnapshot = {};
+            try {
+                var includeDom = (opts.includeDom === undefined) ? true : !!opts.includeDom;
+                var maxChars = 0;
+                try { maxChars = parseInt(opts.domMaxChars || 240000, 10) || 240000; } catch (e18) { maxChars = 240000; }
+                if (maxChars < 20000) maxChars = 20000;
+                if (maxChars > 900000) maxChars = 900000;
+
+                if (includeDom) {
+                    var root = document.getElementById('main-content');
+                    var html = '';
+                    try { html = root ? (root.innerHTML || '') : ''; } catch (e19) { html = ''; }
+                    var t = truncStr(html, maxChars);
+                    report.domSnapshot.selector = '#main-content';
+                    report.domSnapshot.html = t.value;
+                    report.domSnapshot.html_length = t.length;
+                    report.domSnapshot.truncated = !!t.truncated;
+                } else {
+                    report.domSnapshot.skipped = true;
+                }
+            } catch (e20) {
+                report.domSnapshot = { error: String((e20 && e20.message) ? e20.message : e20) };
+            }
+
+            // Serialize + download
+            var dataStr = '';
+            try { dataStr = JSON.stringify(report, null, 2); } catch (e21) { dataStr = '{"error":"json stringify failed"}'; }
+
+            try {
+                var blob = new Blob([dataStr], { type: 'application/json' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = 'zypper-dashboard-flight-recorder-' + String(Date.now()) + '.json';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(function() {
+                    try { document.body.removeChild(a); } catch (e22) {}
+                    try { URL.revokeObjectURL(url); } catch (e23) {}
+                }, 0);
+
+                try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('info', 'Exported UI diagnostics (full)'); } catch (e24) {}
+                try { if (typeof window.znhHudLog === 'function') window.znhHudLog('info', 'exported diagnostics', { bytes: dataStr.length }); } catch (e25) {}
+                try { if (typeof toast === 'function') toast('Diagnostics exported', 'Saved JSON report', 'ok'); } catch (e26) {}
+            } catch (e27) {
+                var em = (e27 && e27.message) ? e27.message : String(e27 || 'export failed');
+                try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('warn', 'Export diagnostics failed: ' + em); } catch (e28) {}
+                try { if (typeof window.znhHudLog === 'function') window.znhHudLog('error', 'export diagnostics failed', { error: em }); } catch (e29) {}
+                try { if (typeof window.__znhCrashAppend === 'function') window.__znhCrashAppend('error', 'Export diagnostics failed: ' + em, { source: 'exportDiagnostics' }); } catch (e30) {}
+                try { if (typeof toast === 'function') toast('Export failed', em, 'err'); } catch (e31) {}
+            }
+
+            return report;
         };
 
         try { window.ZNH = api; } catch (e1) {}
@@ -6109,6 +6392,13 @@ generate_dashboard() {
             if (ZNH_DEBUG) {
                 try { znhDebugWarn('fetch failed', url, msg); } catch (e3) {}
             }
+
+            // Store network error in the "black box" recorder.
+            try {
+                if (window.ZNH && typeof window.ZNH.recordNetError === 'function') {
+                    window.ZNH.recordNetError({ source: 'znhFetch', url: String(url || ''), error: msg });
+                }
+            } catch (eN) {}
 
             // Broadcast network errors so UI can react without being coupled to fetch logic.
             try {
@@ -9619,6 +9909,14 @@ generate_dashboard() {
         document.addEventListener('znh-network-error', function(ev) {
             try {
                 var info = ev ? ev.detail : null;
+
+                // Keep a bounded history for diagnostics export.
+                try {
+                    if (window.ZNH && typeof window.ZNH.recordNetError === 'function') {
+                        window.ZNH.recordNetError(info || {});
+                    }
+                } catch (e3) {}
+
                 // Best-effort UI signal. We don't override JS health OK/FAIL state,
                 // but we do emit a breadcrumb.
                 try {
