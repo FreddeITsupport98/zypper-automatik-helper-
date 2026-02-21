@@ -1707,6 +1707,9 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Self-Update state now tracks installed helper SHA256 so the WebUI can warn on **(local edits)** before overwriting manual changes.
   - 🧰 **IMPROVED:** Self-Update panel now shows a short detail line (server-side reason text) under the buttons for clearer UX.
   - 🧰 **IMPROVED:** Rolling channel now has a checksum fallback for raw script installs: when no git SHA is known, the API hashes the installed helper and the remote `main` script and compares them to decide up-to-date vs update available (eliminates “unknown install” false positives).
+  - 🧰 **IMPROVED:** Self-update CLI now blocks overwriting **local manual edits** unless you pass `--force` (hash mismatch trap).
+  - 🧰 **IMPROVED:** Self-update CLI now refuses to overwrite system-managed paths like `/usr/bin` and `/bin` (use your package manager or reinstall into `/usr/local/bin`).
+  - 🧰 **IMPROVED:** Rolling self-update CLI now supports a raw-script hash-match fallback: if local content matches remote rolling exactly, it seeds the rolling SHA into state (prevents “unknown SHA → update available” loops).
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA="unknown"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**

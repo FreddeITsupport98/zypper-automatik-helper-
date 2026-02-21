@@ -18935,6 +18935,15 @@ run_self_update_only() {
         log_warn "Installed helper not found at ${installed_path}; attempting to update the current script path instead: ${dest}"
     fi
 
+    # Package manager safety: never overwrite binaries in system-managed paths.
+    # Local manual installs should live in /usr/local/bin.
+    if [[ "${dest}" == "/usr/bin/"* ]] || [[ "${dest}" == "/bin/"* ]] || [[ "${dest}" == "/usr/sbin/"* ]] || [[ "${dest}" == "/sbin/"* ]]; then
+        log_warn "Detected system-managed path: ${dest}"
+        log_error "Self-update is disabled for scripts installed in system-managed paths (/usr/bin, /bin, /usr/sbin, /sbin)."
+        log_info "Please update this tool using your system package manager (or reinstall into /usr/local/bin)."
+        return 1
+    fi
+
     # Git worktree safety: never overwrite a git working tree file (developer checkout).
     local git_top
     git_top=""
@@ -18964,6 +18973,31 @@ run_self_update_only() {
         embedded_sha="$(__znh_embedded_sha_from_file "${dest}")"
         if [ -n "${embedded_sha:-}" ]; then
             installed_rolling_sha="${embedded_sha}"
+        fi
+    fi
+
+    # Dirty edit trap: if the helper file hash differs from what we last recorded,
+    # block self-update unless --force is provided.
+    local expected_hash current_hash
+    expected_hash="$(__znh_self_update_state_get installed_file_sha256)"
+    expected_hash="${expected_hash,,}"
+    if [ -n "${expected_hash:-}" ] && [ -f "${dest}" ]; then
+        current_hash=""
+        if command -v sha256sum >/dev/null 2>&1; then
+            current_hash=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
+        elif command -v openssl >/dev/null 2>&1; then
+            current_hash=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
+        fi
+
+        if [ -n "${current_hash:-}" ] && [ "${current_hash}" != "${expected_hash}" ]; then
+            if [ "${force}" -ne 1 ] 2>/dev/null; then
+                log_warn "⚠ LOCAL EDITS DETECTED: The script at ${dest} was manually modified!"
+                log_error "Self-update would overwrite your custom changes."
+                log_info "Run again with --force to overwrite your changes."
+                return 1
+            else
+                log_info "[self-update] Local edits detected, but --force provided. Overwriting..."
+            fi
         fi
     fi
 
@@ -19071,6 +19105,36 @@ run_self_update_only() {
             log_error "[self-update] Could not determine latest rolling commit SHA from GitHub. Use --force to install anyway."
             return 1
         fi
+    fi
+
+    # Rolling raw-script fallback:
+    # If we don't know our local rolling SHA (no state file / no .git), but the remote script
+    # content perfectly matches our local script content, then we are up-to-date.
+    # Seed state so future checks are fast and deterministic.
+    if [ "${channel}" = "rolling" ] && [ -z "${installed_ref:-}" ] && [ -n "${remote_ref:-}" ]; then
+        local temp_remote local_hash remote_hash
+        temp_remote="$(mktemp)"
+        local_hash=""
+        remote_hash=""
+
+        if curl -sL --fail --connect-timeout 5 --max-time 30 "${raw_url}" -o "${temp_remote}" 2>/dev/null; then
+            if command -v sha256sum >/dev/null 2>&1; then
+                local_hash=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
+                remote_hash=$(sha256sum "${temp_remote}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
+            elif command -v openssl >/dev/null 2>&1; then
+                local_hash=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
+                remote_hash=$(openssl dgst -sha256 "${temp_remote}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
+            fi
+
+            if [ -n "${local_hash:-}" ] && [ "${local_hash}" = "${remote_hash}" ]; then
+                log_info "[self-update] Local file perfectly matches remote rolling. Seeding state."
+                installed_ref="${remote_ref}"
+                installed_rolling_sha="${remote_ref}"
+                __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "local-install" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        rm -f "${temp_remote}" 2>/dev/null || true
     fi
 
     # 1b) Skip download when already up-to-date (based on stable tag or rolling SHA)
