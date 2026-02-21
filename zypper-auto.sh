@@ -10,6 +10,13 @@
 #
 # MUST be run with sudo or as root.
 
+# --- Build identity (optional; CI can stamp this) ---
+# If you publish the script via GitHub Actions (release assets or raw downloads), you can
+# replace the "unknown" placeholder with the commit SHA that produced the artifact.
+# This allows rolling installs done via curl/wget (no .git folder) to still know their
+# exact build SHA.
+__ZNH_EMBEDDED_SHA="unknown"
+
 # --- 1. Strict Mode & Config ---
 set -euo pipefail
 # Default to a restrictive umask so newly created logs and helper files
@@ -72,6 +79,31 @@ fi
 # Optional browser override (best-effort):
 #   zypper-auto-helper --dash-open firefox
 #   ZYPPER_AUTO_DASHBOARD_BROWSER=firefox zypper-auto-helper --dash-open
+
+__znh_embedded_sha_from_file() {
+    # Best-effort parse of __ZNH_EMBEDDED_SHA from a script file.
+    # Returns empty string if missing/unknown/invalid.
+    local f="$1"
+    [ -f "${f}" ] || { printf '%s' ""; return 0; }
+
+    local line sha
+    line=$(grep -m1 '^__ZNH_EMBEDDED_SHA=' "${f}" 2>/dev/null || true)
+    sha=$(printf '%s' "${line}" | sed -E 's/^__ZNH_EMBEDDED_SHA="?([^" ]*)"?.*$/\1/' 2>/dev/null || true)
+
+    sha="${sha,,}"
+    if [ -z "${sha:-}" ] || [ "${sha}" = "unknown" ]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    if [[ "${sha}" =~ ^[0-9a-f]{7,40}$ ]]; then
+        printf '%s' "${sha}"
+        return 0
+    fi
+
+    printf '%s' ""
+    return 0
+}
 
 __znh_port_listen_in_use() {
     # best-effort: return 0 if TCP port appears to have a LISTEN socket
@@ -18926,6 +18958,15 @@ run_self_update_only() {
     installed_stable_tag="$(__znh_self_update_state_get stable_tag)"
     installed_rolling_sha="$(__znh_self_update_state_get rolling_sha)"
 
+    # If the state file is missing (or rolling_sha is unknown) and the installed script
+    # is CI-stamped with an embedded SHA, use it as a best-effort installed rolling SHA.
+    if [ -z "${installed_rolling_sha:-}" ] && [ -f "${dest}" ]; then
+        embedded_sha="$(__znh_embedded_sha_from_file "${dest}")"
+        if [ -n "${embedded_sha:-}" ]; then
+            installed_rolling_sha="${embedded_sha}"
+        fi
+    fi
+
     # 1) Determine remote ref and URL(s) (rolling vs stable)
     local repo api_url tag remote_sha raw_url_asset raw_url_tag raw_url
     local remote_ref installed_ref
@@ -26197,6 +26238,18 @@ if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PA
             fi
         fi
 
+        # CI-stamped fallback (optional): if the installed script contains an embedded SHA,
+        # use it when git metadata is not available.
+        if [ -z "${rolling_sha:-}" ]; then
+            embedded_sha="$(__znh_embedded_sha_from_file "${COMMAND_PATH}")"
+            if [ -n "${embedded_sha:-}" ]; then
+                rolling_sha="${embedded_sha}"
+                if [ "${install_source}" = "local-install" ]; then
+                    install_source="local-stamped"
+                fi
+            fi
+        fi
+
         last_ref=""
         if [ "${last_ch}" = "stable" ]; then
             last_ref="${stable_tag}"
@@ -26558,6 +26611,22 @@ def _read_installed_version_header(path: str) -> int:
     return 0
 
 
+def _read_embedded_sha(path: str) -> str:
+    # Parse: __ZNH_EMBEDDED_SHA="<sha>" (optional CI stamp)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 250:
+                    break
+                m = re.match(r'^__ZNH_EMBEDDED_SHA\s*=\s*"([0-9a-fA-F]{7,40})"\s*$', line.strip())
+                if m:
+                    v = (m.group(1) or "").strip().lower()
+                    return v
+    except Exception:
+        return ""
+    return ""
+
+
 def _read_self_update_state() -> dict:
     try:
         with open(SELF_UPDATE_STATE_FILE, "r", encoding="utf-8") as f:
@@ -26780,6 +26849,15 @@ class Handler(BaseHTTPRequestHandler):
             known_installed = bool(installed_ref)
             guessed = False
 
+            # Rolling installs done via raw script copy may not have a state file or git metadata.
+            # If the helper was CI-stamped with __ZNH_EMBEDDED_SHA, use that as the installed ref.
+            if ch == "rolling" and not installed_ref:
+                emb = _read_embedded_sha(HELPER_BIN)
+                if emb:
+                    installed_ref = emb
+                    known_installed = True
+                    guessed = True
+
             installed_ver = _read_installed_version_header(HELPER_BIN)
             if ch == "stable" and not installed_ref and installed_ver > 0:
                 installed_ref = f"v{installed_ver}"
@@ -26799,6 +26877,24 @@ class Handler(BaseHTTPRequestHandler):
                 err = str(e)
             except Exception as e:
                 err = str(e)
+
+            # Rolling checksum fallback:
+            # If a user installed from a raw script copy (no .git folder), we may not know the
+            # rolling SHA. In that case, compare file contents by hashing the remote script at
+            # the latest remote SHA and the local helper file.
+            remote_script_sha256 = ""
+            rolling_checksum_used = False
+            try:
+                if ch == "rolling" and remote_ref and not installed_ref and installed_sha_current:
+                    import hashlib
+
+                    raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/zypper-auto.sh"
+                    req = urllib.request.Request(raw_url, headers={"User-Agent": "znh-dashboard-api"})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        data = r.read()
+                    remote_script_sha256 = hashlib.sha256(data).hexdigest().strip().lower()
+            except Exception:
+                remote_script_sha256 = ""
 
             up_to_date = False
             update_available = False
@@ -26828,7 +26924,23 @@ class Handler(BaseHTTPRequestHandler):
                     known_installed = bool(installed_ref)
 
             else:
-                if installed_ref and remote_ref:
+                if ch == "rolling" and remote_ref and not installed_ref:
+                    # Checksum fallback (raw script installs without git SHA).
+                    if installed_sha_current and remote_script_sha256:
+                        rolling_checksum_used = True
+                        known_installed = True
+                        guessed = True
+                        if installed_sha_current == remote_script_sha256:
+                            up_to_date = True
+                            installed_ref = remote_ref
+                        else:
+                            update_available = True
+                            installed_ref = f"sha256:{installed_sha_current[:12]}"
+                    elif remote_ref:
+                        # No checksum available; still treat as install.
+                        install_available = True
+
+                elif installed_ref and remote_ref:
                     if installed_ref == remote_ref:
                         up_to_date = True
                     elif ch == "stable":
@@ -26837,6 +26949,7 @@ class Handler(BaseHTTPRequestHandler):
                             update_available = True
                     else:
                         update_available = True
+
                 elif remote_ref:
                     # Remote exists but installed ref is unknown. This is an INSTALL,
                     # not an UPDATE. The UI will label it correctly.
@@ -26859,12 +26972,16 @@ class Handler(BaseHTTPRequestHandler):
             elif update_available:
                 action_type = "update"
                 msg = "Update available"
+                if rolling_checksum_used and ch == "rolling":
+                    msg = "Update available (rolling checksum mismatch)"
             elif install_available:
                 action_type = "install"
                 msg = "Install available"
             elif up_to_date:
                 action_type = "none"
                 msg = "Up to date"
+                if rolling_checksum_used and ch == "rolling":
+                    msg = "Up to date (rolling checksum match)"
 
             payload = {
                 # Legacy fields (keep UI backward compatible)
@@ -26902,11 +27019,14 @@ class Handler(BaseHTTPRequestHandler):
                     "source": install_source,
                     "is_dirty": is_dirty,
                     "is_externally_managed": is_externally_managed,
+                    "script_sha256": installed_sha_current,
+                    "rolling_checksum_used": bool(rolling_checksum_used),
                 },
                 "remote": {
                     "ref": remote_ref,
                     "stable_tag": remote_ref if ch == "stable" else "",
                     "rolling_sha": remote_ref if ch == "rolling" else "",
+                    "script_sha256": remote_script_sha256,
                 },
                 "configured_target_channel": ch,
                 "evaluation": {

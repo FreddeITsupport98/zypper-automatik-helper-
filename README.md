@@ -1702,6 +1702,12 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
   - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
   - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.
+  - 🧰 **IMPROVED:** Self-Update status API now returns a consolidated `evaluation.action_type` + message so the WebUI doesn’t need to guess (update vs install vs switch).
+  - 🧰 **IMPROVED:** Self-Update now detects "managed by system" installs (outside `/usr/local/bin/`) and disables self-update to avoid overwriting OS/RPM-managed files (enforced in both WebUI and localhost API endpoints).
+  - 🧰 **IMPROVED:** Self-Update state now tracks installed helper SHA256 so the WebUI can warn on **(local edits)** before overwriting manual changes.
+  - 🧰 **IMPROVED:** Self-Update panel now shows a short detail line (server-side reason text) under the buttons for clearer UX.
+  - 🧰 **IMPROVED:** Rolling channel now has a checksum fallback for raw script installs: when no git SHA is known, the API hashes the installed helper and the remote `main` script and compares them to decide up-to-date vs update available (eliminates “unknown install” false positives).
+  - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA="unknown"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
