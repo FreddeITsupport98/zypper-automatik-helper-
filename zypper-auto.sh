@@ -4869,6 +4869,7 @@ generate_dashboard() {
           <button class="pill" type="button" id="self-update-run-btn" title="Install the latest build from this channel (requires confirmation phrase)" disabled>Update</button>
           <button class="pill" type="button" id="self-update-changelog-btn" title="Fetch latest changelog from GitHub">Fetch changelog</button>
         </div>
+        <div id="self-update-detail" style="margin-top:6px; font-size:0.86rem; color: var(--muted); font-weight: 800;"></div>
         <div style="margin-top:10px;">
           <pre id="self-update-changelog" style="max-height: 280px;">(tip: click “Fetch changelog”, then “Update” if a newer build is available)</pre>
         </div>
@@ -7422,6 +7423,14 @@ generate_dashboard() {
         el.textContent = String(text || '');
     }
 
+    function _selfUpdateSetDetail(text) {
+        var el = document.getElementById('self-update-detail');
+        if (!el) return;
+        var t = String(text || '').trim();
+        el.textContent = t;
+        try { el.style.display = t ? '' : 'none'; } catch (e) {}
+    }
+
     function _selfUpdateSetRunBtn(enabled, label) {
         var btn = document.getElementById('self-update-run-btn');
         if (!btn) return;
@@ -7432,6 +7441,7 @@ generate_dashboard() {
     function selfUpdateFetchStatus(showToast) {
         var ch = _selfUpdateGetChannel(_settingsConfig || {});
         _selfUpdateSetStatus('Checking…');
+        _selfUpdateSetDetail('');
         _selfUpdateSetRunBtn(false, 'Checking…');
 
         return _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).then(function(r) {
@@ -7448,9 +7458,18 @@ generate_dashboard() {
 
             if (r.error) {
                 _selfUpdateSetStatus('Error');
+                _selfUpdateSetDetail(String(r.error || ''));
                 _selfUpdateSetRunBtn(true, 'Install latest');
                 if (showToast) toast('Self-update check failed', String(r.error), 'err');
                 return r;
+            }
+
+            // Show server-side reason text (single source of truth)
+            try {
+                var msg = (r.evaluation && r.evaluation.message) ? String(r.evaluation.message) : '';
+                _selfUpdateSetDetail(msg);
+            } catch (eMsg) {
+                _selfUpdateSetDetail('');
             }
 
             var suffix = (r.is_dirty ? ' (local edits)' : '');
@@ -7542,6 +7561,7 @@ generate_dashboard() {
         }).catch(function(e) {
             var msg = (e && e.message) ? e.message : 'API not reachable';
             _selfUpdateSetStatus('API not reachable');
+            _selfUpdateSetDetail(msg);
             _selfUpdateSetRunBtn(false, 'API down');
             if (showToast) toast('Self-update check failed', msg, 'err');
             return null;
@@ -7827,6 +7847,11 @@ generate_dashboard() {
 
         var d = _suLongDisclosureHtml(ch);
 
+        var dirtyExtra = '';
+        if (st && st.is_dirty) {
+            dirtyExtra = '<label class="pill" style="gap:10px; justify-content:flex-start; margin-top:8px;"><input type="checkbox" id="su-accept-dirty" /> I understand local edits will be overwritten by self-update.</label>';
+        }
+
         e.body.innerHTML = [
             info.join(''),
             warn,
@@ -7837,6 +7862,7 @@ generate_dashboard() {
               '<pre class="overlay-pre" style="max-height: 260px;">' + d.mit_text.replace(/</g, '&lt;') + '</pre>',
             '</div>',
             '<label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="su-accept" /> I have read the disclosure and accept the MIT license.</label>',
+            dirtyExtra,
             '<div style="color: var(--muted); font-size:0.88rem;">Tip: you can scroll inside the box above to read everything. The background page is locked until you Cancel or finish.</div>'
         ].join('\n');
 
@@ -7844,6 +7870,26 @@ generate_dashboard() {
             if (e.step) e.step.textContent = 'Step 1/2';
             if (e.mode) e.mode.textContent = 'Agreement';
         } catch (ee) {}
+
+        // Managed installs: show OK-only and do not allow proceeding.
+        if (st && st.is_externally_managed) {
+            try {
+                if (e.step) e.step.textContent = 'Notice';
+                if (e.mode) e.mode.textContent = 'Managed';
+                if (e.close) e.close.textContent = 'OK';
+            } catch (ee2) {}
+
+            _suSetButtons({
+                show_cancel: false,
+                show_back: false,
+                show_next: false,
+                show_install: false,
+                show_close: true,
+                close_disabled: false,
+                footer_center: true
+            });
+            return;
+        }
 
         _suSetButtons({
             show_cancel: true,
@@ -7856,20 +7902,29 @@ generate_dashboard() {
         });
 
         var acc = document.getElementById('su-accept');
-        if (acc) {
-            acc.addEventListener('change', function() {
-                _su.accepted = !!acc.checked;
-                _suSetButtons({
-                    show_cancel: true,
-                    show_back: false,
-                    show_next: true,
-                    show_install: false,
-                    show_close: false,
-                    next_disabled: !_su.accepted,
-                    footer_center: false
-                });
+        var dirtyAcc = document.getElementById('su-accept-dirty');
+
+        function _suAgreementUpdateNextEnabled() {
+            var ok = false;
+            try { ok = !!(acc && acc.checked); } catch (e0) { ok = false; }
+            if (dirtyAcc) {
+                try { ok = ok && !!dirtyAcc.checked; } catch (e1) { ok = false; }
+            }
+            _su.accepted = ok;
+            _suSetButtons({
+                show_cancel: true,
+                show_back: false,
+                show_next: true,
+                show_install: false,
+                show_close: false,
+                next_disabled: !ok,
+                footer_center: false
             });
         }
+
+        if (acc) acc.addEventListener('change', _suAgreementUpdateNextEnabled);
+        if (dirtyAcc) dirtyAcc.addEventListener('change', _suAgreementUpdateNextEnabled);
+        _suAgreementUpdateNextEnabled();
     }
 
     function _suRenderInstall(confirmInfo) {
