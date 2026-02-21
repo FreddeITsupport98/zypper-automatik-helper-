@@ -19515,7 +19515,7 @@ run_self_update_only() {
                 cut_n=$((total-keep_n))
                 for ((i=0; i<cut_n; i++)); do
                     old="${_baks[$i]}"
-                    ts_old="${old#${base}.bak.}"
+                    ts_old="${old#"${base}".bak.}"
                     rm -f "${backup_dir}/${old}" 2>/dev/null || true
                     rm -f "${backup_dir}/zypper-auto.conf.bak.${ts_old}" 2>/dev/null || true
                 done
