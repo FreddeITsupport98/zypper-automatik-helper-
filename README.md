@@ -1718,6 +1718,8 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Self-update now prunes old backup archives (keeps the most recent backups) to prevent disk bloat over time.
   - 🧰 **IMPROVED:** Self-update download logic now retries on transient network failures to reduce flaky-connection failures.
   - 🧰 **NEW:** `--self-update-rollback` restores the most recent self-update backup (script + config snapshot).
+  - 🧰 **FIXED:** Rocket Update Wizard (system updates) can now resume job polling after a dashboard API restart, avoiding "job not found" reconnect loops.
+  - 🧰 **FIXED:** WebUI Self-Update now runs in a dedicated transient systemd unit and can resume polling after a dashboard API restart (no more "job not found" during GitHub downloads).
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**

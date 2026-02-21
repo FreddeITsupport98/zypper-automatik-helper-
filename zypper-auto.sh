@@ -26905,6 +26905,280 @@ JOB_MAX_OUTPUT_CHARS = 200_000
 JOB_OUTPUT_TAIL_CHARS = 40_000
 JOB_TTL_SECONDS = 30 * 60
 
+# Rocket Update Wizard (system dup) needs to survive dashboard API restarts.
+# The systemd-run unit keeps running even if this API service restarts, so the
+# in-memory job map can be lost. We therefore support stateless resume by using
+# deterministic log/status paths derived from job_id.
+DUP_LOG_DIR = "/var/log/zypper-auto/service-logs"
+DUP_STATUS_DIR = "/var/lib/zypper-auto"
+
+
+def _dup_paths(job_id: str) -> tuple[str, str, str]:
+    jid = (job_id or "").strip()
+    unit = f"znh-webui-dup-{jid[:8]}"
+    log_path = f"{DUP_LOG_DIR}/webui-dup-{jid[:10]}.log"
+    status_path = f"{DUP_STATUS_DIR}/webui-dup-{jid[:10]}.status"
+    return unit, log_path, status_path
+
+
+def _tail_file(path: str, max_chars: int) -> tuple[str, bool]:
+    """Return (tail_text, truncated)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - int(max_chars))
+            f.seek(start)
+            data = f.read()
+        txt = data.decode("utf-8", errors="replace")
+        return txt, bool(start > 0)
+    except Exception:
+        return "", False
+
+
+def _read_kv_status(path: str) -> dict:
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return out
+
+
+def _recover_system_dup_job(job_id: str) -> dict | None:
+    # token_urlsafe() uses [A-Za-z0-9_-]. Reject anything else.
+    jid = (job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", jid or ""):
+        return None
+
+    unit, log_path, status_path = _dup_paths(jid)
+
+    have_any = os.path.exists(log_path) or os.path.exists(status_path)
+
+    props = {}
+    rc_show, out_show = _run_cmd(
+        ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus"],
+        timeout_s=3,
+        log=None,
+    )
+    if rc_show == 0:
+        for line in (out_show or "").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k.strip()] = v.strip()
+        if props.get("ActiveState"):
+            have_any = True
+
+    if not have_any:
+        return None
+
+    active = props.get("ActiveState", "")
+    sub = props.get("SubState", "")
+
+    status = _read_kv_status(status_path) if os.path.exists(status_path) else {}
+
+    done = False
+    rc = None
+
+    try:
+        done = str(status.get("done", "")).strip() in ("1", "true", "yes")
+    except Exception:
+        done = False
+
+    if done:
+        try:
+            rc = int(str(status.get("rc", "1") or "1"))
+        except Exception:
+            rc = 1
+
+    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
+        done = True
+        try:
+            rc = int(props.get("ExecMainStatus", "1") or "1")
+        except Exception:
+            rc = 1
+
+    running = not done
+
+    tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
+
+    # Best-effort progress from log tail
+    jtmp = {
+        "stage": status.get("stage") or ("Running" if active == "active" else "Starting"),
+        "progress": 0,
+    }
+    try:
+        for ln in (tail or "").splitlines(True):
+            _job_update_progress_dup(jtmp, ln)
+    except Exception:
+        pass
+
+    stage = str(jtmp.get("stage") or "Starting")
+    progress = int(jtmp.get("progress") or 0)
+
+    if done and progress < 100:
+        if rc == 0:
+            progress = 100
+            stage = "Done"
+        else:
+            stage = "Failed"
+
+    # Restart check section (best-effort from tail)
+    restart_out = ""
+    try:
+        marker = "=== ZYPPER PS -s (restart check) ==="
+        if marker in (tail or ""):
+            restart_out = (tail.split(marker, 1)[1] or "").strip()
+            if len(restart_out) > 60_000:
+                restart_out = restart_out[-60_000:]
+    except Exception:
+        restart_out = ""
+
+    return {
+        "job_id": jid,
+        "type": "system-dup",
+        "simulate": bool(str(status.get("simulate", "0")).strip() in ("1", "true", "yes")),
+        "running": bool(running),
+        "done": bool(done),
+        "rc": rc,
+        "stage": stage,
+        "progress": int(progress),
+        "output": tail,
+        "output_truncated": bool(truncated),
+        "restart_check_output": restart_out,
+        "resumed": True,
+        "unit": unit,
+        "log_path": log_path,
+        "status_path": status_path,
+    }
+
+
+# --- Self-update resume helpers (WebUI) ---
+SU_LOG_DIR = "/var/log/zypper-auto/service-logs"
+SU_STATUS_DIR = "/var/lib/zypper-auto"
+
+
+def _su_paths(job_id: str) -> tuple[str, str, str, str]:
+    jid = (job_id or "").strip()
+    unit = f"znh-webui-self-update-{jid[:8]}"
+    log_path = f"{SU_LOG_DIR}/webui-self-update-{jid[:10]}.log"
+    status_path = f"{SU_STATUS_DIR}/webui-self-update-{jid[:10]}.status"
+    script_path = f"{SU_STATUS_DIR}/webui-self-update-{jid[:10]}.sh"
+    return unit, log_path, status_path, script_path
+
+
+def _recover_self_update_job(job_id: str) -> dict | None:
+    # token_urlsafe() uses [A-Za-z0-9_-]. Reject anything else.
+    jid = (job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", jid or ""):
+        return None
+
+    unit, log_path, status_path, _script_path = _su_paths(jid)
+
+    have_any = os.path.exists(log_path) or os.path.exists(status_path)
+
+    props = {}
+    rc_show, out_show = _run_cmd(
+        ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus"],
+        timeout_s=3,
+        log=None,
+    )
+    if rc_show == 0:
+        for line in (out_show or "").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k.strip()] = v.strip()
+        if props.get("ActiveState"):
+            have_any = True
+
+    if not have_any:
+        return None
+
+    active = props.get("ActiveState", "")
+    sub = props.get("SubState", "")
+
+    status = _read_kv_status(status_path) if os.path.exists(status_path) else {}
+
+    ch = str(status.get("channel", "") or "").strip().lower()
+    if ch not in ("stable", "rolling"):
+        ch = ""
+
+    dry_run = str(status.get("dry_run", "") or "").strip() in ("1", "true", "yes")
+
+    done = False
+    rc = None
+
+    try:
+        done = str(status.get("done", "")).strip() in ("1", "true", "yes")
+    except Exception:
+        done = False
+
+    if done:
+        try:
+            rc = int(str(status.get("rc", "1") or "1"))
+        except Exception:
+            rc = 1
+
+    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
+        done = True
+        try:
+            rc = int(props.get("ExecMainStatus", "1") or "1")
+        except Exception:
+            rc = 1
+
+    running = not done
+
+    tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
+
+    # Best-effort progress from log tail
+    jtmp = {
+        "stage": status.get("stage") or ("Running" if active == "active" else "Starting"),
+        "progress": 0,
+    }
+    try:
+        for ln in (tail or "").splitlines(True):
+            _job_update_progress(jtmp, ln)
+    except Exception:
+        pass
+
+    stage = str(jtmp.get("stage") or "Starting")
+    progress = int(jtmp.get("progress") or 0)
+
+    if done and progress < 100:
+        if rc == 0:
+            progress = 100
+            stage = "Dry-run done" if dry_run else "Done"
+        else:
+            stage = "Failed"
+
+    return {
+        "job_id": jid,
+        "type": "self-update",
+        "channel": ch,
+        "dry_run": bool(dry_run),
+        "simulate": False,
+        "running": bool(running),
+        "done": bool(done),
+        "rc": rc,
+        "stage": stage,
+        "progress": int(progress),
+        "output": tail,
+        "output_truncated": bool(truncated),
+        "restart_check_output": "",
+        "resumed": True,
+        "unit": unit,
+        "log_path": log_path,
+        "status_path": status_path,
+    }
+
 
 def _job_output_append(job: dict, s: str) -> None:
     if not s:
@@ -27331,6 +27605,9 @@ class Handler(BaseHTTPRequestHandler):
 
                         job = jobs.get(job_id)
                         if not job:
+                            recovered = _recover_self_update_job(job_id)
+                            if recovered:
+                                return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
                         out = str(job.get("output", ""))
                         tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
@@ -27352,6 +27629,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     job = jobs.get(job_id)
                     if not job:
+                        recovered = _recover_self_update_job(job_id)
+                        if recovered:
+                            return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
                     out = str(job.get("output", ""))
                     tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
@@ -27467,6 +27747,9 @@ class Handler(BaseHTTPRequestHandler):
 
                         job = jobs.get(job_id)
                         if not job:
+                            recovered = _recover_system_dup_job(job_id)
+                            if recovered:
+                                return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
                         out = str(job.get("output", ""))
                         tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
@@ -27486,6 +27769,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     job = jobs.get(job_id)
                     if not job:
+                        recovered = _recover_system_dup_job(job_id)
+                        if recovered:
+                            return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
                     out = str(job.get("output", ""))
                     tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
@@ -27661,127 +27947,125 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            # Run self-update via systemd-run so it is not confined by this API service's sandbox
+            # and so the job survives dashboard API restarts.
             job_id = secrets.token_urlsafe(18)
-            job = {
-                "job_id": job_id,
-                "channel": ch,
-                "dry_run": dry_run,
-                "running": True,
-                "done": False,
-                "rc": None,
-                "stage": "Starting",
-                "progress": 0,
-                "output": "",
-                "output_truncated": False,
-                "started_at": now_ts,
-                "finished_at": 0,
-            }
+            unit, log_path, status_path, script_file = _su_paths(job_id)
 
-            lock = getattr(self.server, "jobs_lock", None)
-            jobs = getattr(self.server, "jobs", None)
-            if jobs is None:
-                self.server.jobs = {}
-                jobs = self.server.jobs
-            if lock is None:
-                self.server.jobs_lock = threading.Lock()
-                lock = self.server.jobs_lock
-
-            with lock:
-                # purge old jobs
-                dead = []
-                for k, j in jobs.items():
-                    if not isinstance(j, dict):
-                        dead.append(k)
-                        continue
-                    if j.get("done") and (now_ts - float(j.get("finished_at", 0))) > JOB_TTL_SECONDS:
-                        dead.append(k)
-                for k in dead:
-                    jobs.pop(k, None)
-                jobs[job_id] = job
-
-            def worker():
-                env = {
-                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                    "LANG": "C.UTF-8",
-                    "LC_ALL": "C.UTF-8",
-                    "HOME": os.environ.get("HOME", "/root"),
-                    # Prevent recursion: the helper's --dry-run opens the WebUI by default.
-                    # Jobs must run in pure CLI mode.
-                    "ZNH_SELF_UPDATE_NO_UI": "1",
-                }
-
-                cmd = [HELPER_BIN, "--self-update", ch]
-                if dry_run:
-                    cmd.append("--dry-run")
-
-                try:
-                    getattr(self.server, "_znh_log", lambda *_: None)("info", f"self-update job start: {job_id} ch={ch} dry_run={dry_run}")
-                except Exception:
+            # Precreate log + status so the first poll can't race before the unit writes anything.
+            try:
+                os.makedirs("/var/log/zypper-auto/service-logs", exist_ok=True)
+                os.makedirs("/var/lib/zypper-auto", exist_ok=True)
+                with open(log_path, "a", encoding="utf-8"):
                     pass
+                with open(status_path, "w", encoding="utf-8") as f:
+                    f.write(f"done=0\n")
+                    f.write(f"rc=0\n")
+                    f.write(f"stage=starting\n")
+                    f.write(f"channel={ch}\n")
+                    f.write(f"dry_run={1 if dry_run else 0}\n")
+            except Exception:
+                pass
 
-                try:
-                    p = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        bufsize=1,
-                        env=env,
-                    )
+            su_cmd = f"{HELPER_BIN} --self-update {ch}".strip()
+            if dry_run:
+                su_cmd = (su_cmd + " --dry-run").strip()
 
-                    while True:
-                        line = p.stdout.readline() if p.stdout else ""
-                        if not line:
-                            if p.poll() is not None:
-                                break
-                            time.sleep(0.05)
-                            continue
+            script_text = "\n".join([
+                'set -euo pipefail',
+                f'LOG={shlex.quote(log_path)}',
+                f'STATUS={shlex.quote(status_path)}',
+                f'CHANNEL={shlex.quote(ch)}',
+                f'DRY_RUN={"1" if dry_run else "0"}',
+                'mkdir -p /var/log/zypper-auto/service-logs || true',
+                'mkdir -p /var/lib/zypper-auto || true',
+                'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                'write_status() {',
+                '  local done="$1"; local rc="$2"; local stage="$3"',
+                '  local tmp="${STATUS}.tmp.$$"',
+                '  {',
+                '    echo "done=${done}"',
+                '    echo "rc=${rc}"',
+                '    echo "stage=${stage}"',
+                '    echo "channel=${CHANNEL:-}"',
+                '    echo "dry_run=${DRY_RUN:-0}"',
+                '    echo "started_at_utc=${STARTED_AT}"',
+                '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                '  } >"${tmp}" 2>/dev/null || true',
+                '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
+                '}',
+                'write_status 0 0 starting',
+                'echo "==========================================" >>"$LOG" || true',
+                'echo " WebUI self-update job " >>"$LOG" || true',
+                'echo "==========================================" >>"$LOG" || true',
+                'date >>"$LOG" 2>/dev/null || true',
+                'echo "" >>"$LOG" || true',
+                f'echo "CMD: {su_cmd}" >>"$LOG" || true',
+                'echo "" >>"$LOG" || true',
+                'export ZNH_SELF_UPDATE_NO_UI=1',
+                'write_status 0 0 running',
+                'set +e',
+                f'( {su_cmd} ) 2>&1 | tee -a "$LOG"',
+                'rc=${PIPESTATUS[0]}',
+                'set -e',
+                'echo "" >>"$LOG" || true',
+                'echo "[webui] self-update rc=$rc" >>"$LOG" || true',
+                'if [ ${rc} -eq 0 ] && [ "${DRY_RUN:-0}" != "1" ]; then',
+                '  write_status 0 ${rc} refreshing-dashboard',
+                f'  ( {HELPER_BIN} --dashboard ) >>"$LOG" 2>&1 || echo "[WARN] dashboard refresh failed (continuing)" >>"$LOG" || true',
+                'fi',
+                'if [ ${rc} -eq 0 ]; then',
+                '  if [ "${DRY_RUN:-0}" = "1" ]; then write_status 1 ${rc} dry-run-done; else write_status 1 ${rc} done; fi',
+                'else',
+                '  write_status 1 ${rc} failed',
+                'fi',
+                'rm -f "$0" >/dev/null 2>&1 || true',
+                'exit ${rc}',
+            ])
 
-                        with lock:
-                            j = jobs.get(job_id)
-                            if not j:
-                                continue
-                            _job_output_append(j, line)
-                            _job_update_progress(j, line)
+            # Write unit script to disk (inside the API service sandbox).
+            try:
+                os.makedirs("/var/lib/zypper-auto", exist_ok=True)
+                with open(script_file, "w", encoding="utf-8") as f:
+                    f.write("#!/usr/bin/env bash\n")
+                    f.write(script_text)
+                    f.write("\n")
+                os.chmod(script_file, 0o700)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"failed to write self-update unit script: {e}"}, origin)
 
-                    rc = int(p.wait(timeout=1) if p else 1)
+            sys_cmd = [
+                "systemd-run",
+                "--quiet",
+                "--collect",
+                "--unit",
+                unit,
+                "--property",
+                "After=network-online.target",
+                "--property",
+                "Wants=network-online.target",
+                "--",
+                "/usr/bin/bash",
+                script_file,
+            ]
 
-                except Exception as e:
-                    rc = 1
-                    with lock:
-                        j = jobs.get(job_id)
-                        if j:
-                            _job_output_append(j, f"\n[dashboard-api] Exception while running self-update: {e}\n")
+            try:
+                p = subprocess.run(
+                    sys_cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                if p.returncode != 0:
+                    out = (p.stdout or "").strip()
+                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
 
-                dash_rc = -1
-                if rc == 0 and not dry_run:
-                    dash_rc, dash_out = _run_cmd([HELPER_BIN, "--dashboard"], timeout_s=120, log=getattr(self.server, "_znh_log", None))
-                    with lock:
-                        j = jobs.get(job_id)
-                        if j:
-                            _job_output_append(j, f"\n[dashboard-api] Dashboard refresh rc={dash_rc}\n")
-                            if dash_out:
-                                _job_output_append(j, dash_out + "\n")
-
-                with lock:
-                    j = jobs.get(job_id)
-                    if j:
-                        j["rc"] = rc
-                        j["running"] = False
-                        j["done"] = True
-                        j["finished_at"] = time.time()
-                        if rc == 0:
-                            j["progress"] = 100
-                            if dry_run:
-                                j["stage"] = "Dry-run done"
-                            else:
-                                j["stage"] = "Done"
-                        else:
-                            j["stage"] = "Failed"
-
-            threading.Thread(target=worker, daemon=True).start()
             return _json_response(self, 200, {"job_id": job_id}, origin)
 
         # Backward-compatible synchronous endpoint (no live progress; returns full output).
@@ -27904,6 +28188,7 @@ class Handler(BaseHTTPRequestHandler):
             job_id = secrets.token_urlsafe(18)
             unit = f"znh-webui-dup-{job_id[:8]}"
             log_path = f"/var/log/zypper-auto/service-logs/webui-dup-{job_id[:10]}.log"
+            status_path = f"/var/lib/zypper-auto/webui-dup-{job_id[:10]}.status"
 
             job = {
                 "job_id": job_id,
@@ -27920,6 +28205,7 @@ class Handler(BaseHTTPRequestHandler):
                 "finished_at": 0,
                 "unit": unit,
                 "log_path": log_path,
+                "status_path": status_path,
                 "restart_check_output": "",
             }
 
@@ -27951,8 +28237,25 @@ class Handler(BaseHTTPRequestHandler):
                 script_text = "\n".join([
                     'set -euo pipefail',
                     f'LOG={shlex.quote(log_path)}',
+                    f'STATUS={shlex.quote(status_path)}',
                     'mkdir -p /var/log/zypper-auto/service-logs || true',
+                    'mkdir -p /var/lib/zypper-auto || true',
                     f'SIMULATE={"1" if simulate else "0"}',
+                    'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                    'write_status() {',
+                    '  local done="$1"; local rc="$2"; local stage="$3"',
+                    '  local tmp="${STATUS}.tmp.$$"',
+                    '  {',
+                    '    echo "done=${done}"',
+                    '    echo "rc=${rc}"',
+                    '    echo "stage=${stage}"',
+                    '    echo "simulate=${SIMULATE:-0}"',
+                    '    echo "started_at_utc=${STARTED_AT}"',
+                    '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                    '  } >"${tmp}" 2>/dev/null || true',
+                    '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
+                    '}',
+                    'write_status 0 0 starting',
 
                     # Load config toggles for optional post-update refresh.
                     'CONFIG=/etc/zypper-auto.conf',
@@ -27999,6 +28302,7 @@ class Handler(BaseHTTPRequestHandler):
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
                     'echo "" >>"$LOG"',
                     'echo "[webui] zypper dup rc=$rc" >>"$LOG"',
+                    'if [ ${rc} -eq 0 ]; then write_status 0 ${rc} running; else write_status 0 ${rc} failed; fi',
                     'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional updates." >>"$LOG"; fi',
                     'if [ ${rc} -ne 0 ]; then echo "[webui] zypper dup failed; skipping optional updates." >>"$LOG"; fi',
 
@@ -28103,6 +28407,7 @@ class Handler(BaseHTTPRequestHandler):
                     'fi',
                     '',
                     '# Self-cleanup: remove this temporary script file so /var/lib/zypper-auto does not fill up over time.',
+                    'if [ ${rc} -eq 0 ]; then write_status 1 ${rc} done; else write_status 1 ${rc} failed; fi',
                     'rm -f "$0" >/dev/null 2>&1 || true',
                     'exit ${rc}',
                 ])
@@ -28221,6 +28526,20 @@ class Handler(BaseHTTPRequestHandler):
                                     if j:
                                         _job_output_append(j, ln)
                                         _job_update_progress_dup(j, ln)
+                    except Exception:
+                        pass
+
+                    # If the unit disappears (collected) or the API restarts, the unit script
+                    # still writes a status file. Use it as an authoritative done/rc signal.
+                    try:
+                        if os.path.exists(status_path):
+                            st = _read_kv_status(status_path)
+                            if str(st.get("done", "")).strip() in ("1", "true", "yes"):
+                                try:
+                                    finished_rc = int(str(st.get("rc", "1") or "1"))
+                                except Exception:
+                                    finished_rc = 1
+                                break
                     except Exception:
                         pass
 
