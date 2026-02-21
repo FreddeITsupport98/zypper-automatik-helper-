@@ -8647,6 +8647,23 @@ generate_dashboard() {
         var rc = (p.rc != null) ? parseInt(p.rc, 10) : -1;
         var cmd = (p.cmd != null) ? String(p.cmd) : '';
 
+        // If there are no system updates, exit early (no need for confirmation step).
+        var noUpdates = false;
+        try {
+            var low = out.toLowerCase();
+            if (rc === 0 && (low.indexOf('nothing to do.') !== -1 || low.indexOf('\nnothing to do.') !== -1 || low.indexOf('nothing to do') !== -1)) {
+                noUpdates = true;
+            }
+        } catch (e_noup) { noUpdates = false; }
+
+        if (noUpdates) {
+            toast('Up to date', 'No system updates available (Nothing to do).', 'ok');
+            _ru.running = false;
+            try { znhTaskDone('system-update', true); } catch (e_task_ru_done0) {}
+            _ruRenderDone('Up to date', 'No system updates available (Nothing to do).', out, '');
+            return;
+        }
+
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
             '  <div style="font-weight:950;">Preview first (safe)</div>',
@@ -8899,7 +8916,16 @@ generate_dashboard() {
                     try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e2) { logText = ''; }
 
                     if (rc === 0) {
-                        toast('Update finished', _ru.simulate ? 'Dry-run OK (no install)' : 'Installed OK', 'ok');
+                        // Detect "no updates" case from output so we can exit cleanly.
+                        var noUpdates2 = false;
+                        try {
+                            var lt = String(logText || '').toLowerCase();
+                            if (lt.indexOf('nothing to do.') !== -1 || lt.indexOf('[webui] no system updates were applied') !== -1) {
+                                noUpdates2 = true;
+                            }
+                        } catch (e_noup2) { noUpdates2 = false; }
+
+                        toast('Update finished', noUpdates2 ? 'Nothing to do (already up to date)' : (_ru.simulate ? 'Dry-run OK (no install)' : 'Installed OK'), 'ok');
                         _suUpdateProgress(_ru.simulate ? 'Dry-run done' : 'Done', 100);
 
                         // UX: immediately reflect that updates were installed.
@@ -8909,6 +8935,15 @@ generate_dashboard() {
                             try { setText('pending-count', 0); } catch (e_pc) {}
                         }
                         try { znhTaskDone('system-update', true); } catch (e_task_ru3) {}
+
+                        if (noUpdates2) {
+                            _ruRenderDone('Up to date', 'No system updates were available (Nothing to do).', logText, '');
+                        } else if (_ru.simulate) {
+                            _ruRenderDone('Dry-run complete', 'Dry-run finished successfully (no install).', logText, j.restart_check_output || '');
+                        } else {
+                            _ruRenderDone('Update complete', 'System updates installed successfully.', logText, j.restart_check_output || '');
+                        }
+
                     } else {
                         toast('Update failed', 'rc=' + String(rc), 'err');
                         try { znhTaskDone('system-update', false); } catch (e_task_ru4) {}
