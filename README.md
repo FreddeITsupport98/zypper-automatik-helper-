@@ -289,6 +289,7 @@ sudo zypper-auto-helper --self-update stable           # Stable channel: latest 
 sudo zypper-auto-helper --self-update rolling          # Rolling channel: latest commit on main
 sudo zypper-auto-helper --self-update stable --force   # Force reinstall even if refs match / force downgrade
 sudo zypper-auto-helper --self-update stable --dry-run  # SAFE test: opens WebUI dry-run simulation (default) or runs CLI dry-run when ZNH_SELF_UPDATE_NO_UI=1
+sudo zypper-auto-helper --self-update-rollback          # Restore the most recent self-update backup (script + config snapshot)
 
 # Rollback Wizard (DANGEROUS)
 sudo zypper-auto-helper --rollback             # Interactive Snapper rollback wizard (reboots after rollback)
@@ -331,6 +332,8 @@ Self-update notes:
   - `rolling` compares the installed **commit SHA on `main`** with the latest commit SHA.
 - The installed ref is stored in a root-owned state file: `/var/lib/zypper-auto/self-update-state.json`.
 - It creates a timestamped backup before overwriting the destination script, and also keeps an archive copy under `/var/backups/zypper-auto/self-update/`.
+  - It also snapshots `/etc/zypper-auto.conf` alongside script backups to make rollback safer.
+  - Rollback shortcut: `sudo zypper-auto-helper --self-update-rollback` restores the most recent script+config snapshot.
 - It downloads into a temp file and then swaps it in with an atomic `mv` rename (so updating the currently-running script won’t corrupt execution).
 - It refuses to install empty downloads or HTML error pages (GitHub 404/403), and runs `bash -n` syntax checks before installing.
 - Stable channel safety: it refuses to **downgrade** to an older stable tag unless you pass `--force`.
@@ -1713,6 +1716,8 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Self-update now has a concurrency guard (`flock`) so double-clicks / multiple terminals can’t run two updates at once.
   - 🧰 **IMPROVED:** Self-update backups now also snapshot `/etc/zypper-auto.conf` alongside the script backup for safer rollback.
   - 🧰 **IMPROVED:** Self-update now prunes old backup archives (keeps the most recent backups) to prevent disk bloat over time.
+  - 🧰 **IMPROVED:** Self-update download logic now retries on transient network failures to reduce flaky-connection failures.
+  - 🧰 **NEW:** `--self-update-rollback` restores the most recent self-update backup (script + config snapshot).
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**

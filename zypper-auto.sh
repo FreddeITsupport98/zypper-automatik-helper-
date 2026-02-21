@@ -49,7 +49,7 @@ esac
 # '-reset'.
 if [[ $# -gt 0 ]]; then
     case "${1:-}" in
-        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--rollback|\
+        install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
@@ -19129,19 +19129,29 @@ run_self_update_only() {
         remote_hash=""
 
         if curl -sL --fail --connect-timeout 5 --max-time 30 "${raw_url}" -o "${temp_remote}" 2>/dev/null; then
-            if command -v sha256sum >/dev/null 2>&1; then
-                local_hash=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
-                remote_hash=$(sha256sum "${temp_remote}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
-            elif command -v openssl >/dev/null 2>&1; then
-                local_hash=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
-                remote_hash=$(openssl dgst -sha256 "${temp_remote}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
-            fi
+            # Preflight: captive portals / proxies can return HTML with HTTP 200.
+            # Verify it at least looks like a bash script before hashing.
+            if head -n 1 "${temp_remote}" 2>/dev/null | grep -qE '^#!/bin/bash|^#!/usr/bin/env bash' \
+                && grep -qE '^#\s*VERSION\s+[0-9]+' "${temp_remote}" 2>/dev/null \
+                && grep -q "zypper-auto-helper" "${temp_remote}" 2>/dev/null \
+                && bash -n "${temp_remote}" >/dev/null 2>&1; then
 
-            if [ -n "${local_hash:-}" ] && [ "${local_hash}" = "${remote_hash}" ]; then
-                log_info "[self-update] Local file perfectly matches remote rolling. Seeding state."
-                installed_ref="${remote_ref}"
-                installed_rolling_sha="${remote_ref}"
-                __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "local-install" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+                if command -v sha256sum >/dev/null 2>&1; then
+                    local_hash=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
+                    remote_hash=$(sha256sum "${temp_remote}" 2>/dev/null | cut -d ' ' -f1 | tr 'A-F' 'a-f' || true)
+                elif command -v openssl >/dev/null 2>&1; then
+                    local_hash=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
+                    remote_hash=$(openssl dgst -sha256 "${temp_remote}" 2>/dev/null | sed -E 's/^.*= //' | tr 'A-F' 'a-f' || true)
+                fi
+
+                if [ -n "${local_hash:-}" ] && [ "${local_hash}" = "${remote_hash}" ]; then
+                    log_info "[self-update] Local file perfectly matches remote rolling. Seeding state."
+                    installed_ref="${remote_ref}"
+                    installed_rolling_sha="${remote_ref}"
+                    __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "local-install" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+                fi
+            else
+                log_warn "[self-update] Rolling raw-script check: remote download did not look like a valid bash script; skipping state seed (possible portal/proxy)"
             fi
         fi
 
@@ -19195,24 +19205,69 @@ run_self_update_only() {
     # Ensure the trap does not leak outside this function (it clears itself after running once).
     trap 'rm -f "${tmp}" 2>/dev/null || true; trap - RETURN' RETURN
 
+    local max_retries attempt download_ok
+
     if [ "${channel}" = "stable" ]; then
         log_info "[self-update] Downloading update from GitHub release (asset preferred)…"
 
         # Try asset URL first (if it exists), then fall back to raw tag URL.
-        if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url_asset}" -o "${tmp}"; then
-            raw_url="${raw_url_asset}"
-        else
-            log_warn "[self-update] Release asset download failed; falling back to raw tag URL"
-            raw_url="${raw_url_tag}"
-            if ! curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
-                log_error "Failed to download update from ${raw_url}"
-                return 1
+        raw_url="${raw_url_asset}"
+
+        max_retries=3
+        attempt=1
+        download_ok=0
+        while [ "${attempt}" -le "${max_retries}" ]; do
+            rm -f "${tmp}" 2>/dev/null || true
+            if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+                download_ok=1
+                break
             fi
+            log_warn "[self-update] Download failed (attempt ${attempt}/${max_retries}). Retrying in 5s..."
+            sleep 5
+            attempt=$((attempt + 1))
+        done
+
+        if [ "${download_ok}" -ne 1 ] 2>/dev/null; then
+            log_warn "[self-update] Release asset download failed after retries; falling back to raw tag URL"
+            raw_url="${raw_url_tag}"
+
+            attempt=1
+            download_ok=0
+            while [ "${attempt}" -le "${max_retries}" ]; do
+                rm -f "${tmp}" 2>/dev/null || true
+                if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+                    download_ok=1
+                    break
+                fi
+                log_warn "[self-update] Download failed (attempt ${attempt}/${max_retries}). Retrying in 5s..."
+                sleep 5
+                attempt=$((attempt + 1))
+            done
+        fi
+
+        if [ "${download_ok}" -ne 1 ] 2>/dev/null; then
+            log_error "[self-update] Failed to fetch update from GitHub after ${max_retries} attempts: ${raw_url}"
+            return 1
         fi
     else
         log_info "[self-update] Downloading update from: ${raw_url}"
-        if ! curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
-            log_error "Failed to download update from ${raw_url}"
+
+        max_retries=3
+        attempt=1
+        download_ok=0
+        while [ "${attempt}" -le "${max_retries}" ]; do
+            rm -f "${tmp}" 2>/dev/null || true
+            if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+                download_ok=1
+                break
+            fi
+            log_warn "[self-update] Download failed (attempt ${attempt}/${max_retries}). Retrying in 5s..."
+            sleep 5
+            attempt=$((attempt + 1))
+        done
+
+        if [ "${download_ok}" -ne 1 ] 2>/dev/null; then
+            log_error "[self-update] Failed to fetch update from GitHub after ${max_retries} attempts: ${raw_url}"
             return 1
         fi
     fi
@@ -19523,6 +19578,105 @@ run_self_update_only() {
         fi
     ) || true
 
+    return 0
+}
+
+# --- Helper: Self-update rollback (CLI) ---
+run_self_update_rollback_only() {
+    log_info ">>> Self-update rollback mode requested"
+
+    if [ "${EUID:-1}" -ne 0 ] 2>/dev/null; then
+        log_error "--self-update-rollback must be run as root (use sudo)"
+        return 1
+    fi
+
+    if ! command -v flock >/dev/null 2>&1; then
+        log_error "flock is required for safe rollback locking (install util-linux)"
+        return 1
+    fi
+
+    # Use the same lock as self-update so a rollback can't race an update.
+    exec 9>"/run/zypper-auto-self-update.lock" 2>/dev/null || exec 9>"/var/run/zypper-auto-self-update.lock"
+    if ! flock -n 9; then
+        log_error "Another self-update process is currently running. Please wait."
+        return 1
+    fi
+
+    local backup_dir dest base latest_file ts_old backup_path config_backup
+    backup_dir="/var/backups/zypper-auto/self-update"
+    dest="/usr/local/bin/zypper-auto-helper"
+    base="$(basename "${dest}")"
+
+    if [ ! -d "${backup_dir}" ]; then
+        log_error "No self-update backup directory found: ${backup_dir}"
+        return 1
+    fi
+
+    latest_file=$(find "${backup_dir}" -maxdepth 1 -type f -name "${base}.bak.*" -printf '%f\n' 2>/dev/null | sort | tail -n 1 || true)
+    if [ -z "${latest_file:-}" ] || [ ! -f "${backup_dir}/${latest_file}" ]; then
+        log_error "No self-update backups found in ${backup_dir}"
+        return 1
+    fi
+
+    ts_old="${latest_file#"${base}".bak.}"
+    backup_path="${backup_dir}/${latest_file}"
+    config_backup="${backup_dir}/zypper-auto.conf.bak.${ts_old}"
+
+    log_warn "Rolling back helper to backup timestamp: ${ts_old}"
+    log_info "Restore script: ${backup_path} -> ${dest}"
+
+    if ! cp -a "${backup_path}" "${dest}" 2>/dev/null; then
+        log_error "Failed to restore script from ${backup_path}"
+        return 1
+    fi
+    chmod 755 "${dest}" 2>/dev/null || true
+    chown root:root "${dest}" 2>/dev/null || true
+
+    if ! bash -n "${dest}" >/dev/null 2>&1; then
+        log_error "Restored script failed bash -n. Manual recovery may be required."
+        return 1
+    fi
+
+    if [ -f "${config_backup}" ]; then
+        log_info "Restore config: ${config_backup} -> /etc/zypper-auto.conf"
+        cp -a "${config_backup}" "/etc/zypper-auto.conf" 2>/dev/null || true
+        chmod 600 "/etc/zypper-auto.conf" 2>/dev/null || true
+        chown root:root "/etc/zypper-auto.conf" 2>/dev/null || true
+    else
+        log_warn "No matching config snapshot found for ${ts_old} (continuing)"
+    fi
+
+    # Best-effort: update self-update state file to reflect the restored script.
+    (
+        set +e
+        ver_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${dest}" 2>/dev/null || true)
+        ver_n=$(printf '%s' "${ver_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "")
+        stable_tag=""
+        if [[ "${ver_n:-}" =~ ^[0-9]+$ ]] && [ "${ver_n}" -gt 0 ] 2>/dev/null; then
+            stable_tag="v${ver_n}"
+        fi
+
+        rolling_sha="$(__znh_embedded_sha_from_file "${dest}")"
+        last_ch="stable"
+        last_ref="${stable_tag}"
+        if [ -n "${rolling_sha:-}" ]; then
+            last_ch="rolling"
+            last_ref="${rolling_sha}"
+        fi
+
+        dest_sha=""
+        if command -v sha256sum >/dev/null 2>&1; then
+            dest_sha=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 || true)
+        elif command -v openssl >/dev/null 2>&1; then
+            dest_sha=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' || true)
+        fi
+
+        __znh_self_update_state_write "${stable_tag}" "${rolling_sha}" "${last_ch}" "${last_ref}" "rollback" "${dest_sha}" "${dest}" >/dev/null 2>&1 || true
+    ) || true
+
+    update_status "SUCCESS: Self-update rollback completed"
+    log_success "✓ Rollback complete"
+    log_info "Tip: regenerate dashboard artifacts with: sudo ${dest} --dashboard"
     return 0
 }
 
@@ -20525,6 +20679,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
     echo "  --self-update            Self-update the installed helper script from GitHub (rolling/stable channel)"
     echo "                         Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force]"
+    echo "  --self-update-rollback   Roll back to the most recent self-update backup (script + config snapshot)"
     echo "  --rollback               Open Snapper rollback wizard (DANGEROUS: reverts system snapshot and reboots)"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
@@ -20593,6 +20748,10 @@ elif [[ "${1:-}" == "--self-update" ]]; then
     log_info "Self-update mode requested"
     shift || true
     run_self_update_only "$@"
+    exit $?
+elif [[ "${1:-}" == "--self-update-rollback" ]]; then
+    log_info "Self-update rollback mode requested"
+    run_self_update_rollback_only
     exit $?
 elif [[ "${1:-}" == "--rollback" ]]; then
     log_info "Rollback wizard mode requested"
@@ -22955,7 +23114,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --self-update --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
+ZNH_CLI_WORDS="install debug snapper --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -23035,7 +23194,7 @@ EOF
 local -a _znh_cmds
 _znh_cmds=(
   install debug snapper
-  --verify --repair --diagnose --check --self-check --self-update --rollback
+  --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback
   --soar --brew --pip-package --pipx --setup-SF
   --reset-config --reset-downloads --reset-state --rm-conflict
   --logs --log --live-logs --analyze --health
@@ -23099,7 +23258,7 @@ EOF
 complete -c zypper-auto-helper -f -a "install debug snapper"
 
 # common option-like commands
-complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --rollback --debug"
+complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --debug"
 complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
 complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
 complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
