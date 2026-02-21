@@ -18872,6 +18872,17 @@ run_self_update_only() {
         return 1
     fi
 
+    # Concurrency guard: prevent simultaneous self-update runs (double-click / multiple terminals).
+    if ! command -v flock >/dev/null 2>&1; then
+        log_error "flock is required for safe self-update concurrency locking (install util-linux)"
+        return 1
+    fi
+    exec 9>"/run/zypper-auto-self-update.lock" 2>/dev/null || exec 9>"/var/run/zypper-auto-self-update.lock"
+    if ! flock -n 9; then
+        log_error "Another self-update process is currently running. Please wait."
+        return 1
+    fi
+
     # Args: [rolling|stable] [--force] [--dry-run]
     local requested_channel channel force dry_run
     requested_channel=""
@@ -19343,13 +19354,14 @@ run_self_update_only() {
     fi
 
     # 6) Safety backups + atomic swap
-    local ts backup_samefs backup_dir backup_archive
+    local ts backup_samefs backup_dir backup_archive config_backup
     ts="$(date +%Y%m%d-%H%M%S)"
     backup_samefs="${dest}.bak.${ts}"
 
     backup_dir="/var/backups/zypper-auto/self-update"
     mkdir -p "${backup_dir}" 2>/dev/null || true
     backup_archive="${backup_dir}/$(basename "${dest}").bak.${ts}"
+    config_backup="${backup_dir}/zypper-auto.conf.bak.${ts}"
 
     if [ -f "${dest}" ]; then
         # Backup on same filesystem so rollback can be atomic.
@@ -19362,6 +19374,13 @@ run_self_update_only() {
             cp -a "${backup_samefs}" "${backup_archive}" 2>/dev/null || true
             chmod 600 "${backup_archive}" 2>/dev/null || true
             chown root:root "${backup_archive}" 2>/dev/null || true
+
+            # Also snapshot the config file alongside the script backup.
+            if [ -f "/etc/zypper-auto.conf" ]; then
+                cp -a "/etc/zypper-auto.conf" "${config_backup}" 2>/dev/null || true
+                chmod 600 "${config_backup}" 2>/dev/null || true
+                chown root:root "${config_backup}" 2>/dev/null || true
+            fi
         else
             log_warn "[self-update] Could not create backup; proceeding (rollback may be impossible)"
         fi
@@ -19481,6 +19500,28 @@ run_self_update_only() {
     echo ""
     echo "Dashboard note: if you have the dashboard open in a browser, reload the tab to load new UI features." 
     echo "If you do not see new features: click Quick Actions → 'Run: Refresh Dashboard' or run: sudo zypper-auto-helper --dashboard"
+
+    # 10) Prune old backups (keep newest N script backups, plus their matching config snapshots)
+    log_debug "[self-update] Cleaning up old backups..."
+    (
+        set +e
+        keep_n=10
+        base="$(basename "${dest}")"
+        if [ -d "${backup_dir}" ]; then
+            # Find script backups by name (timestamp order is lexicographically sortable).
+            mapfile -t _baks < <(find "${backup_dir}" -maxdepth 1 -type f -name "${base}.bak.*" -printf '%f\n' 2>/dev/null | sort)
+            total=${#_baks[@]}
+            if [ "${total}" -gt "${keep_n}" ] 2>/dev/null; then
+                cut_n=$((total-keep_n))
+                for ((i=0; i<cut_n; i++)); do
+                    old="${_baks[$i]}"
+                    ts_old="${old#${base}.bak.}"
+                    rm -f "${backup_dir}/${old}" 2>/dev/null || true
+                    rm -f "${backup_dir}/zypper-auto.conf.bak.${ts_old}" 2>/dev/null || true
+                done
+            fi
+        fi
+    ) || true
 
     return 0
 }

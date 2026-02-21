@@ -1710,7 +1710,10 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Self-update CLI now blocks overwriting **local manual edits** unless you pass `--force` (hash mismatch trap).
   - 🧰 **IMPROVED:** Self-update CLI now refuses to overwrite system-managed paths like `/usr/bin` and `/bin` (use your package manager or reinstall into `/usr/local/bin`).
   - 🧰 **IMPROVED:** Rolling self-update CLI now supports a raw-script hash-match fallback: if local content matches remote rolling exactly, it seeds the rolling SHA into state (prevents “unknown SHA → update available” loops).
-  - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA="unknown"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
+  - 🧰 **IMPROVED:** Self-update now has a concurrency guard (`flock`) so double-clicks / multiple terminals can’t run two updates at once.
+  - 🧰 **IMPROVED:** Self-update backups now also snapshot `/etc/zypper-auto.conf` alongside the script backup for safer rollback.
+  - 🧰 **IMPROVED:** Self-update now prunes old backup archives (keeps the most recent backups) to prevent disk bloat over time.
+  - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
