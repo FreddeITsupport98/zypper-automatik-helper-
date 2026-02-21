@@ -4941,6 +4941,7 @@ generate_dashboard() {
         <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
           <div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Channel: <strong id="self-update-channel">(loading)</strong></div>
           <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Update: <strong id="self-update-status">(checking…)</strong></div>
+          <div class="feat-badge znh-hidden" id="self-update-lock-badge" role="button" tabindex="0" title="Self-update safety lock is active (click to view running job)"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> <strong id="self-update-lock-text">LOCKED</strong></div>
           <button class="pill" type="button" id="self-update-toggle-btn" title="Toggle update channel (rolling/stable)">Toggle channel</button>
           <button class="pill" type="button" id="self-update-run-btn" title="Install the latest build from this channel (requires confirmation phrase)" disabled>Update</button>
           <button class="pill" type="button" id="self-update-changelog-btn" title="Fetch latest changelog from GitHub">Fetch changelog</button>
@@ -7455,6 +7456,81 @@ generate_dashboard() {
     var GITHUB_OWNER = 'FreddeITsupport98';
     var GITHUB_REPO = 'zypper-automatik-helper-';
 
+    // Self-update UI safety locks:
+    // - Prevent switching channel while a status check is running
+    // - Prevent switching channel while a self-update job is running (even if overlay is minimized)
+    // - Ignore stale status responses (req-id guarding)
+    var _self_update_ui = {
+        status_req_id: 0,
+        checking: false,
+        toggling: false,
+        job_running: false,
+        last_status: null
+    };
+
+    function _selfUpdateUiLocked() {
+        try {
+            return !!(
+                _self_update_ui.checking
+                || _self_update_ui.toggling
+                || _self_update_ui.job_running
+                || (_su && _su.running)
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _selfUpdateUiApplyLocks() {
+        // This only enforces extra safety locks. It does NOT decide whether
+        // the Update button should be enabled; selfUpdateFetchStatus() does that.
+        var locked = _selfUpdateUiLocked();
+
+        var toggleBtn = document.getElementById('self-update-toggle-btn');
+        var runBtn = document.getElementById('self-update-run-btn');
+        var clBtn = document.getElementById('self-update-changelog-btn');
+        var simBtn = document.getElementById('self-update-sim-run-btn');
+        var lockBadge = document.getElementById('self-update-lock-badge');
+        var lockText = document.getElementById('self-update-lock-text');
+
+        if (toggleBtn) toggleBtn.disabled = !!locked;
+        if (clBtn) clBtn.disabled = !!locked;
+        if (simBtn) simBtn.disabled = !!locked;
+
+        // Force-disable run button while locked to avoid mid-flight channel races.
+        // When unlocking, status refresh will re-enable it if applicable.
+        if (runBtn && locked) runBtn.disabled = true;
+
+        // Visible badge near channel label to make lock state obvious.
+        // IMPORTANT: this badge is clickable and should only be shown when an update job
+        // is actually running (so users don't think they can click it during "checking").
+        try {
+            var showBadge = !!(locked && (_self_update_ui.job_running || (_su && _su.running)));
+            if (lockBadge) {
+                if (showBadge) lockBadge.classList.remove('znh-hidden');
+                else lockBadge.classList.add('znh-hidden');
+            }
+            if (lockText) {
+                var txt = 'LOCKED';
+                if (showBadge) txt = 'LOCKED (click to view log)';
+                lockText.textContent = txt;
+            }
+        } catch (eB) {}
+
+        // Improve the UX: show why the controls are locked.
+        try {
+            if (locked) {
+                if (_self_update_ui.job_running || (_su && _su.running)) {
+                    _selfUpdateSetDetail('Self-update is running. Channel switching is locked until it finishes.');
+                } else if (_self_update_ui.checking) {
+                    _selfUpdateSetDetail('Checking for updates… (controls temporarily locked)');
+                } else if (_self_update_ui.toggling) {
+                    _selfUpdateSetDetail('Switching channel… (controls temporarily locked)');
+                }
+            }
+        } catch (e) {}
+    }
+
     function _selfUpdateGetChannel(cfg) {
         var ch = 'stable';
         try {
@@ -7523,17 +7599,43 @@ generate_dashboard() {
 
     function selfUpdateFetchStatus(showToast) {
         var ch = _selfUpdateGetChannel(_settingsConfig || {});
+
+        // Request-id guarding: if the user clicks fast (or toggles channel), ignore stale responses.
+        var reqId = 0;
+        try {
+            _self_update_ui.status_req_id = (_self_update_ui.status_req_id || 0) + 1;
+            reqId = _self_update_ui.status_req_id;
+        } catch (e0) {
+            reqId = 0;
+        }
+
+        try { _self_update_ui.checking = true; } catch (e1) {}
         _selfUpdateSetStatus('Checking…');
         _selfUpdateSetDetail('');
         _selfUpdateSetRunBtn(false, 'Checking…');
+        try { _selfUpdateUiApplyLocks(); } catch (e2) {}
 
         return _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).then(function(r) {
+            try {
+                if (reqId && reqId !== _self_update_ui.status_req_id) {
+                    // stale response: ignore
+                    return null;
+                }
+            } catch (eStale) {}
             // r: legacy + extended flags (externally-managed, dirty detection, evaluation)
             if (!r) {
                 _selfUpdateSetStatus('Unknown');
                 _selfUpdateSetRunBtn(true, 'Install latest');
                 return null;
             }
+
+            // Server-side running guard (single source of truth)
+            try {
+                _self_update_ui.job_running = !!(r && r.job_running);
+            } catch (eRun0) {
+                try { _self_update_ui.job_running = false; } catch (eRun1) {}
+            }
+            try { _self_update_ui.last_status = r; } catch (eRun2) {}
 
             // Dashboard update notification: if the installed helper is newer than the version that
             // generated this HTML, prompt the user to refresh/reload to pick up new features.
@@ -7642,12 +7744,29 @@ generate_dashboard() {
             _selfUpdateSetRunBtn(true, 'Install latest');
             return r;
         }).catch(function(e) {
+            // If this request is stale, ignore the error instead of clobbering the UI.
+            try {
+                if (reqId && reqId !== _self_update_ui.status_req_id) {
+                    return null;
+                }
+            } catch (eStale2) {}
+
             var msg = (e && e.message) ? e.message : 'API not reachable';
             _selfUpdateSetStatus('API not reachable');
             _selfUpdateSetDetail(msg);
             _selfUpdateSetRunBtn(false, 'API down');
             if (showToast) toast('Self-update check failed', msg, 'err');
             return null;
+        }).finally(function() {
+            // Only clear the checking flag for the latest request.
+            try {
+                if (!reqId || reqId === _self_update_ui.status_req_id) {
+                    _self_update_ui.checking = false;
+                }
+            } catch (eF) {
+                try { _self_update_ui.checking = false; } catch (eF2) {}
+            }
+            try { _selfUpdateUiApplyLocks(); } catch (eF3) {}
         });
     }
 
@@ -8086,9 +8205,31 @@ generate_dashboard() {
         var st = document.getElementById('su-stage');
         var pc = document.getElementById('su-percent');
         var bar = document.getElementById('su-progress-bar');
-        if (st) st.textContent = String(stage || '');
-        if (pc) pc.textContent = String(percent || 0) + '%';
-        if (bar) bar.style.width = String(percent || 0) + '%';
+        var stTxt = String(stage || '');
+        var pct = parseInt(percent || 0, 10) || 0;
+
+        if (st) st.textContent = stTxt;
+        if (pc) pc.textContent = String(pct) + '%';
+        if (bar) {
+            bar.style.width = String(pct) + '%';
+            // Visual polish: apply a "waiting" animation class for stages that are
+            // not making linear progress (locks, reconnects, early starting).
+            try {
+                var low = stTxt.toLowerCase();
+                var isWaiting = (
+                    low.indexOf('waiting') !== -1
+                    || low.indexOf('starting') !== -1
+                    || low.indexOf('reconnecting') !== -1
+                    || low.indexOf('connecting') !== -1
+                    || low.indexOf('comput') !== -1
+                );
+                if (isWaiting && pct < 100) {
+                    bar.classList.add('waiting');
+                } else {
+                    bar.classList.remove('waiting');
+                }
+            } catch (e) {}
+        }
     }
 
     function _suSetLog(text) {
@@ -8162,6 +8303,11 @@ generate_dashboard() {
         _su.job_id = job_id;
         _su.running = true;
         _suSetMinBtnVisible(true);
+
+        // Lock self-update UI controls while the job is running (even if overlay is minimized).
+        try { _self_update_ui.job_running = true; } catch (e0) {}
+        try { _selfUpdateUiApplyLocks(); } catch (e1) {}
+
         try {
             znhTaskSet({
                 type: 'self-update',
@@ -8231,6 +8377,10 @@ generate_dashboard() {
                         _suUpdateProgress(dry_run ? 'Dry-run done' : 'Done', 100);
                         try { znhTaskDone('self-update', true); } catch (e_task3) {}
 
+                        // Unlock UI controls now that the job is done.
+                        try { _self_update_ui.job_running = false; } catch (eU0) {}
+                        try { _selfUpdateUiApplyLocks(); } catch (eU1) {}
+
                         // Post-success actions:
                         // - refresh status
                         // - optionally refresh dashboard + reload
@@ -8266,6 +8416,10 @@ generate_dashboard() {
                         toast('Self-update failed', 'rc=' + String(rc), 'err');
                         _suUpdateProgress('Failed', _lastPct);
                         try { znhTaskDone('self-update', false); } catch (e_task4) {}
+
+                        // Unlock UI controls now that the job is done.
+                        try { _self_update_ui.job_running = false; } catch (eU0) {}
+                        try { _selfUpdateUiApplyLocks(); } catch (eU1) {}
                         _suSetButtons({
                             show_cancel: false,
                             show_back: false,
@@ -8459,6 +8613,11 @@ generate_dashboard() {
 
     function selfUpdateRun(btnEl) {
         // Update button now opens a blocking overlay workflow.
+        // Safety: if a status check/channel toggle/job is in-flight, do not allow starting.
+        if (_selfUpdateUiLocked()) {
+            toast('Locked', 'Self-update is busy/running. Please wait.', 'err');
+            return Promise.resolve(null);
+        }
         return selfUpdateOpenOverlay(btnEl);
     }
 
@@ -8578,10 +8737,19 @@ generate_dashboard() {
 
     function selfUpdateToggleChannel(btnEl) {
         var btn = btnEl || document.getElementById('self-update-toggle-btn');
+
+        // Hard lock: do not allow channel switching while status check or job is running.
+        if (_selfUpdateUiLocked()) {
+            toast('Locked', 'Cannot switch channel while self-update is busy/running.', 'err');
+            return Promise.resolve(null);
+        }
+
         var cur = _selfUpdateGetChannel(_settingsConfig || {});
         var next = (cur === 'rolling') ? 'stable' : 'rolling';
 
         if (btn) btn.disabled = true;
+        try { _self_update_ui.toggling = true; } catch (e0) {}
+        try { _selfUpdateUiApplyLocks(); } catch (e1) {}
         toast('Switching channel…', 'Setting SELF_UPDATE_CHANNEL=' + next, 'ok');
 
         return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: { SELF_UPDATE_CHANNEL: next } }) }).then(function(r) {
@@ -8609,6 +8777,8 @@ generate_dashboard() {
             _settingsClientLog('warn', 'self-update channel toggle failed', { error: msg });
             return null;
         }).finally(function() {
+            try { _self_update_ui.toggling = false; } catch (e0) {}
+            try { _selfUpdateUiApplyLocks(); } catch (e1) {}
             if (btn) btn.disabled = false;
         });
     }
@@ -8620,6 +8790,7 @@ generate_dashboard() {
         var runBtn = document.getElementById('self-update-run-btn');
         var clBtn = document.getElementById('self-update-changelog-btn');
         var simBtn = document.getElementById('self-update-sim-run-btn');
+        var lockBadge = document.getElementById('self-update-lock-badge');
 
         if (!chEl && !statusEl && !toggleBtn && !runBtn && !clBtn && !simBtn) return;
 
@@ -8627,6 +8798,41 @@ generate_dashboard() {
             try { addRipple(toggleBtn, ev.clientX, ev.clientY); } catch (e) {}
             selfUpdateToggleChannel(toggleBtn);
         });
+
+        // Clicking the LOCKED badge should open the overlay so the user can see live logs
+        // (especially useful when the overlay was minimized).
+        function _openSelfUpdateOverlayFromBadge(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+
+            // If a self-update task is running, open the existing overlay view.
+            // This uses the same resume logic as the bottom-right bubble.
+            try {
+                if (_self_update_ui.job_running || (_su && _su.running)) {
+                    znhTaskOpenOverlayFromBubble();
+                    return;
+                }
+            } catch (e1) {}
+
+            // If we are locked for another reason (checking/toggling), just inform the user.
+            if (_selfUpdateUiLocked()) {
+                toast('Locked', 'Self-update is busy. Please wait a moment…', 'err');
+                return;
+            }
+
+            // Otherwise open the normal self-update flow.
+            try { selfUpdateOpenOverlay({}); } catch (e2) {}
+        }
+
+        if (lockBadge) {
+            try { lockBadge.style.cursor = 'pointer'; } catch (e0s) {}
+            lockBadge.addEventListener('click', _openSelfUpdateOverlayFromBadge);
+            lockBadge.addEventListener('keydown', function(ev) {
+                if (!ev) return;
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                    _openSelfUpdateOverlayFromBadge(ev);
+                }
+            });
+        }
 
         if (runBtn) runBtn.addEventListener('click', function(ev) {
             try { addRipple(runBtn, ev.clientX, ev.clientY); } catch (e) {}
@@ -27025,11 +27231,13 @@ update_status "Installing dashboard settings API..."
 if write_atomic "${DASH_API_BIN}" <<'PYEOF'
 #!/usr/bin/env python3
 import argparse
+import glob
 import json
 import os
 import re
 import secrets
 import shlex
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -27038,7 +27246,6 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
-
 def _load_schema(schema_file: str) -> dict:
     with open(schema_file, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -27660,6 +27867,104 @@ SU_LOG_DIR = "/var/log/zypper-auto/service-logs"
 SU_STATUS_DIR = "/var/lib/zypper-auto"
 
 
+def _self_update_any_running() -> dict:
+    """Best-effort: detect if any WebUI self-update unit is currently running.
+
+    This is used as a safety guard so users cannot switch channels or start a second update
+    while one is already in progress.
+    """
+    out = {
+        "running": False,
+        "channel": "",
+        "unit": "",
+        "status_path": "",
+        "checked": 0,
+    }
+
+    try:
+        paths = glob.glob(os.path.join(SU_STATUS_DIR, "webui-self-update-*.status"))
+    except Exception:
+        paths = []
+
+    # Prefer newest status files.
+    try:
+        paths = sorted(paths, key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+
+    now = time.time()
+    for p in (paths or [])[:30]:
+        out["checked"] = out.get("checked", 0) + 1
+        st = {}
+        try:
+            st = _read_kv_status(p)
+        except Exception:
+            st = {}
+
+        done = False
+        try:
+            done = str(st.get("done", "")).strip() in ("1", "true", "yes")
+        except Exception:
+            done = False
+        if done:
+            continue
+
+        # Ignore very old leftovers.
+        age = 0.0
+        try:
+            age = float(now - os.path.getmtime(p))
+        except Exception:
+            age = 0.0
+        if age > 12 * 3600:
+            continue
+
+        ch = str(st.get("channel", "") or "").strip().lower()
+        if ch not in ("stable", "rolling"):
+            ch = ""
+
+        # Derive unit name from status file prefix.
+        base = os.path.basename(p)
+        prefix = ""
+        try:
+            prefix = base.replace("webui-self-update-", "", 1).replace(".status", "", 1)
+        except Exception:
+            prefix = ""
+        unit = f"znh-webui-self-update-{prefix[:8]}" if prefix else ""
+
+        active = ""
+        sub = ""
+        if unit:
+            try:
+                rc_show, out_show = _run_cmd(
+                    ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState"],
+                    timeout_s=2,
+                    log=None,
+                )
+                if rc_show == 0:
+                    for line in (out_show or "").splitlines():
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            if k.strip() == "ActiveState":
+                                active = v.strip()
+                            if k.strip() == "SubState":
+                                sub = v.strip()
+            except Exception:
+                pass
+
+        # If systemd says it's active, it's definitely running.
+        # If systemd isn't available but the status is fresh + not done, still treat as running.
+        is_running = (active == "active") or (age < 30 * 60)
+
+        if is_running:
+            out["running"] = True
+            out["channel"] = ch
+            out["unit"] = unit
+            out["status_path"] = p
+            return out
+
+    return out
+
+
 def _su_paths(job_id: str) -> tuple[str, str, str, str]:
     jid = (job_id or "").strip()
     unit = f"znh-webui-self-update-{jid[:8]}"
@@ -28136,6 +28441,8 @@ class Handler(BaseHTTPRequestHandler):
                 if rolling_checksum_used and ch == "rolling":
                     msg = "Up to date (rolling checksum match)"
 
+            running_info = _self_update_any_running()
+
             payload = {
                 # Legacy fields (keep UI backward compatible)
                 "channel": ch,
@@ -28187,6 +28494,12 @@ class Handler(BaseHTTPRequestHandler):
                     "can_safely_execute": can_safely_execute,
                     "message": msg,
                 },
+
+                # Safety: if any self-update job is running, lock channel switching in the UI.
+                "job_running": bool(running_info.get("running")),
+                "job_running_channel": str(running_info.get("channel", "") or ""),
+                "job_running_unit": str(running_info.get("unit", "") or ""),
+                "job_running_status_path": str(running_info.get("status_path", "") or ""),
             }
 
             return _json_response(self, 200, payload, origin)
@@ -28526,6 +28839,14 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- Self-update control (dashboard) ---
         if path == "/api/self-update/confirm":
+            # Safety: do not allow a second confirm flow while an update is already running.
+            try:
+                ri = _self_update_any_running()
+                if ri.get("running"):
+                    return _json_response(self, 409, {"error": "self-update already running", "job_running": True, "unit": ri.get("unit"), "status_path": ri.get("status_path")}, origin)
+            except Exception:
+                pass
+
             # Guard: do not allow self-update if the helper looks OS-managed.
             try:
                 helper_real = os.path.realpath(HELPER_BIN)
@@ -28568,6 +28889,14 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         if path == "/api/self-update/start":
+            # Safety: prevent concurrent self-update jobs.
+            try:
+                ri = _self_update_any_running()
+                if ri.get("running"):
+                    return _json_response(self, 409, {"error": "self-update already running", "job_running": True, "unit": ri.get("unit"), "status_path": ri.get("status_path")}, origin)
+            except Exception:
+                pass
+
             # Guard: do not allow self-update if the helper looks OS-managed.
             try:
                 helper_real = os.path.realpath(HELPER_BIN)
@@ -29572,6 +29901,21 @@ class Handler(BaseHTTPRequestHandler):
             patch = body.get("patch", body)
             if not isinstance(patch, dict):
                 patch = {}
+
+            # Safety: prevent switching self-update channel while a self-update job is running.
+            try:
+                if "SELF_UPDATE_CHANNEL" in patch:
+                    ri = _self_update_any_running()
+                    if ri.get("running"):
+                        return _json_response(self, 409, {
+                            "error": "SELF_UPDATE_CHANNEL is locked while self-update is running",
+                            "job_running": True,
+                            "unit": ri.get("unit"),
+                            "status_path": ri.get("status_path"),
+                        }, origin)
+            except Exception:
+                pass
+
             eff, warnings, invalid = _read_conf(self.server.conf_path)
 
             # Apply patch to effective config (only known keys)
