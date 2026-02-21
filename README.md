@@ -1721,6 +1721,16 @@ systemctl status zypper-autodownload.service
   - 🧰 **FIXED:** Rocket Update Wizard (system updates) can now resume job polling after a dashboard API restart, avoiding "job not found" reconnect loops.
   - 🧰 **FIXED:** WebUI Self-Update now runs in a dedicated transient systemd unit and can resume polling after a dashboard API restart (no more "job not found" during GitHub downloads).
   - 🧰 **IMPROVED:** Rocket Update Wizard now exits early when there are no updates ("Nothing to do"), instead of asking for confirmation.
+  - 🧰 **IMPROVED:** Rocket Update Wizard now waits for the zypp/zypper lock (e.g. YaST, packagekit, background refresh) instead of failing instantly.
+  - 🧰 **IMPROVED:** Rocket preview now detects common solver-conflict patterns and shows a dedicated "Conflict detected" warning in the WebUI.
+  - 🧰 **IMPROVED:** Rocket Update Wizard now supports real progress percentages via zypper `--xmlout` (WebUI still shows readable logs via best-effort XML text extraction).
+  - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:
+    - `ROCKET_WIZARD_DEFAULT_SIMULATE` (opens with Simulation mode pre-selected by default)
+    - `ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS` + `ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS` (lock wait timeouts)
+    - `ROCKET_WIZARD_USE_XMLOUT` (toggle xmlout progress mode)
+    - `ROCKET_WIZARD_FORCE_RESOLUTION` (dangerous: adds `--force-resolution`)
+  - 🧾 **IMPROVED:** Rocket job log tail shown in the WebUI is now XML-prettified (more readable when `--xmlout` is enabled).
+  - 🛡️ **IMPROVED:** WebUI Settings drawer now hides **Advanced** settings by default, requires typing a confirmation phrase (`ADVANCED`) to reveal them (per page load), requires an explicit temporary **Unlock danger zone** toggle, and (hard mode) each dangerous setting change requires typing its own confirmation phrase (example: `REMOUNT`, `FORCE`).
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**

@@ -1831,6 +1831,13 @@ __znh_write_dashboard_schema_json() {
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
+
+    "ROCKET_WIZARD_DEFAULT_SIMULATE": {"type": "bool", "default": "true"},
+    "ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 600, "step": 30, "default": "180"},
+    "ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 7200, "step": 60, "default": "1800"},
+    "ROCKET_WIZARD_USE_XMLOUT": {"type": "bool", "default": "true"},
+    "ROCKET_WIZARD_FORCE_RESOLUTION": {"type": "bool", "default": "false"},
+
     "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
     "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED": {"type": "bool", "default": "true"},
 
@@ -2006,6 +2013,43 @@ DASHBOARD_JS_VERBOSE_DEBUG=false
 #   - stable  : updates to the latest GitHub Release
 # Default: stable
 SELF_UPDATE_CHANNEL="stable"
+
+# ---------------------------------------------------------------------
+# Rocket Update Wizard (WebUI) defaults
+# ---------------------------------------------------------------------
+
+# ROCKET_WIZARD_DEFAULT_SIMULATE
+# Controls whether the Rocket Update Wizard opens with "Simulation mode" pre-selected.
+#
+# - true  : safer default (dry-run only; no packages installed unless you uncheck it)
+# - false : opens in normal install mode by default
+#
+# Default: true
+ROCKET_WIZARD_DEFAULT_SIMULATE=true
+
+# ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS
+# How long the Rocket preview step should wait for a zypper/YaST lock before it gives up.
+# Range: 0..600 seconds (0 disables waiting)
+# Default: 180
+ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS=180
+
+# ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS
+# How long the Rocket install step should wait for a zypper/YaST lock before it gives up.
+# Range: 0..7200 seconds (0 disables waiting)
+# Default: 1800
+ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS=1800
+
+# ROCKET_WIZARD_USE_XMLOUT
+# When true, Rocket install runs zypper with --xmlout and the dashboard uses it to show
+# real progress percentages.
+# Default: true
+ROCKET_WIZARD_USE_XMLOUT=true
+
+# ROCKET_WIZARD_FORCE_RESOLUTION
+# DANGEROUS / advanced. When true, Rocket install adds "--force-resolution" to zypper dup.
+# This may cause zypper to make decisions you would normally want to review manually.
+# Default: false
+ROCKET_WIZARD_FORCE_RESOLUTION=false
 
 # ZYPPER_TURBO_TUNER_ENABLED
 # When true, verification (and the periodic verify timer) may tune /etc/zypp/zypp.conf
@@ -6918,11 +6962,18 @@ generate_dashboard() {
         { key: 'OPTIONAL_UPDATES_ALWAYS_REFRESH', type: 'bool', label: 'Always refresh optional app updates (Flatpak/Snap/Soar/Brew/pipx) even when no system updates' },
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
-        { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)' },
+        { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
-        { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)' },
+        { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
-        { key: 'ZYPPER_TURBO_TUNER_ENABLED', type: 'bool', label: 'Zypper Turbo tuner (optimize /etc/zypp/zypp.conf)' },
+
+        { key: 'ROCKET_WIZARD_DEFAULT_SIMULATE', type: 'bool', label: 'Rocket Wizard: default to Simulation mode (dry-run) in WebUI', help: 'Safer default: opens wizard in dry-run mode unless you uncheck it.' },
+        { key: 'ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS', type: 'int', label: 'Rocket Wizard: preview lock-wait timeout (seconds)', help: 'How long preview waits if YaST/zypper lock is active.' },
+        { key: 'ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS', type: 'int', label: 'Rocket Wizard: install lock-wait timeout (seconds)', help: 'How long install waits if YaST/zypper lock is active.' },
+        { key: 'ROCKET_WIZARD_USE_XMLOUT', type: 'bool', label: 'Rocket Wizard: use zypper --xmlout for real progress %', advanced: true, help: 'Recommended ON. Turning off may reduce progress accuracy.' },
+        { key: 'ROCKET_WIZARD_FORCE_RESOLUTION', type: 'bool', label: 'DANGEROUS: Rocket Wizard add --force-resolution to zypper dup', danger: true, danger_phrase: 'FORCE', advanced: true, help: 'Not recommended. Requires unlocking danger zone + typing FORCE on change.' },
+
+        { key: 'ZYPPER_TURBO_TUNER_ENABLED', type: 'bool', label: 'Zypper Turbo tuner (optimize /etc/zypp/zypp.conf)', advanced: true, help: 'Tweaks /etc/zypp/zypp.conf for performance.' },
         { key: 'VERIFY_JOURNAL_AUTO_VACUUM_ENABLED', type: 'bool', label: 'Auto vacuum system journal when huge (verification)' },
 
         // Snapper safety (affects /etc/snapper/configs/* only when you run snapper tools)
@@ -8611,7 +8662,8 @@ generate_dashboard() {
         running: false,
         simulate: false,
         auto_simulate: false,
-        last_preview: null
+        last_preview: null,
+        conflict_override: false
     };
 
     function _ruReset() {
@@ -8624,6 +8676,7 @@ generate_dashboard() {
         _ru.simulate = false;
         _ru.auto_simulate = false;
         _ru.last_preview = null;
+        _ru.conflict_override = false;
         if (_ru.poll_timer) {
             try { clearTimeout(_ru.poll_timer); } catch (e) {}
             _ru.poll_timer = null;
@@ -8647,6 +8700,17 @@ generate_dashboard() {
         var rc = (p.rc != null) ? parseInt(p.rc, 10) : -1;
         var cmd = (p.cmd != null) ? String(p.cmd) : '';
 
+        var conflictDetected = false;
+        var conflictSummary = '';
+        try {
+            conflictDetected = !!(p && p.conflict_detected);
+            conflictSummary = (p && p.conflict_summary != null) ? String(p.conflict_summary) : '';
+        } catch (e_cf0) {
+            conflictDetected = false;
+            conflictSummary = '';
+        }
+        _ru.conflict_override = false;
+
         // If there are no system updates, exit early (no need for confirmation step).
         var noUpdates = false;
         try {
@@ -8664,11 +8728,23 @@ generate_dashboard() {
             return;
         }
 
+        var cfBlock = '';
+        if (conflictDetected) {
+            cfBlock = [
+                '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
+                '  <div style="font-weight:950;">Conflict detected</div>',
+                '  <div style="margin-top:6px; font-weight:800;">The preview suggests solver conflicts / manual decisions. Non-interactive <code>zypper dup</code> may abort. Recommended: run the update in a terminal.</div>',
+                (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + conflictSummary.replace(/</g,'&lt;') + '</pre>') : ''),
+                '</div>',
+            ].join('\n');
+        }
+
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
             '  <div style="font-weight:950;">Preview first (safe)</div>',
             '  <div style="margin-top:6px; font-weight:800;">This is a <code>zypper dup --dry-run --details</code> preview. No packages are installed in this step.</div>',
             '</div>',
+            cfBlock,
             '<div style="color: var(--muted); font-size:0.92rem;">',
             '  <strong>What the Rocket Wizard does next:</strong> if you continue and confirm, it will run <code>zypper dup</code> in a dedicated systemd unit and stream the output here, then run <code>zypper ps -s</code> to show what needs restarting.',
             '</div>',
@@ -8680,6 +8756,7 @@ generate_dashboard() {
             '</div>',
             '<pre class="overlay-pre" id="ru-preview-out" style="max-height: 360px;">' + (out ? out.replace(/</g,'&lt;') : '(no output)') + '</pre>',
             '<label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="ru-accept" /> I reviewed the preview and I want to continue.</label>',
+            (conflictDetected ? '<label class="pill" style="gap:10px; justify-content:flex-start; margin-top: 8px;"><input type="checkbox" id="ru-conflict-ok" /> I understand conflicts may require manual terminal decisions, but I want to try anyway.</label>' : ''),
             '<div style="color: var(--muted); font-size:0.88rem;">Tip: if zypper reports conflicts / manual decisions in the preview, the wizard may fail in non-interactive mode. In that case, use the normal terminal-based install flow.</div>'
         ].join('\n');
 
@@ -8695,21 +8772,37 @@ generate_dashboard() {
             footer_center: false
         });
 
+        function _ruPreviewUpdateNextEnabled() {
+            var ok = !!_ru.accepted;
+            if (conflictDetected) {
+                ok = ok && !!_ru.conflict_override;
+            }
+            _suSetButtons({
+                show_cancel: true,
+                show_back: false,
+                show_next: true,
+                show_install: false,
+                show_close: false,
+                next_disabled: !ok,
+                footer_center: false
+            });
+        }
+
         var acc = document.getElementById('ru-accept');
+        var cfok = document.getElementById('ru-conflict-ok');
         if (acc) {
             acc.addEventListener('change', function() {
                 _ru.accepted = !!acc.checked;
-                _suSetButtons({
-                    show_cancel: true,
-                    show_back: false,
-                    show_next: true,
-                    show_install: false,
-                    show_close: false,
-                    next_disabled: !_ru.accepted,
-                    footer_center: false
-                });
+                _ruPreviewUpdateNextEnabled();
             });
         }
+        if (cfok) {
+            cfok.addEventListener('change', function() {
+                _ru.conflict_override = !!cfok.checked;
+                _ruPreviewUpdateNextEnabled();
+            });
+        }
+        _ruPreviewUpdateNextEnabled();
 
         var simPrev = document.getElementById('ru-auto-sim');
         if (simPrev) {
@@ -9007,9 +9100,34 @@ generate_dashboard() {
         } catch (e0) { opts = {}; }
 
         var autoSim = false;
+        var autoSimSpecified = false;
         try {
-            autoSim = !!(opts && (opts.auto_simulate || opts.auto_dry_run || opts.simulate || opts.dry_run));
-        } catch (e1) { autoSim = false; }
+            if (opts && typeof opts === 'object') {
+                if (Object.prototype.hasOwnProperty.call(opts, 'auto_simulate')) {
+                    autoSimSpecified = true;
+                    autoSim = !!opts.auto_simulate;
+                } else if (Object.prototype.hasOwnProperty.call(opts, 'auto_dry_run')) {
+                    autoSimSpecified = true;
+                    autoSim = !!opts.auto_dry_run;
+                } else if (Object.prototype.hasOwnProperty.call(opts, 'simulate')) {
+                    autoSimSpecified = true;
+                    autoSim = !!opts.simulate;
+                } else if (Object.prototype.hasOwnProperty.call(opts, 'dry_run')) {
+                    autoSimSpecified = true;
+                    autoSim = !!opts.dry_run;
+                }
+            }
+        } catch (e1) {
+            autoSim = false;
+            autoSimSpecified = false;
+        }
+
+        // Default (pre-selected) behavior: pull from settings only when caller did not specify.
+        if (!autoSimSpecified) {
+            try {
+                autoSim = String((_settingsConfig || {}).ROCKET_WIZARD_DEFAULT_SIMULATE || '').toLowerCase() === 'true';
+            } catch (e2) { autoSim = false; }
+        }
 
         // Ensure any self-update timers are stopped so flows don't fight.
         try { _suReset(); } catch (e) {}
@@ -9110,10 +9228,223 @@ generate_dashboard() {
         // Keep a copy so we can log diffs on save/autosave.
         try { _settingsLastConfig = JSON.parse(JSON.stringify(cfg || {})); } catch (e) { _settingsLastConfig = cfg || {}; }
 
+        // Safety UX:
+        // - Advanced settings are hidden by default.
+        // - Advanced settings require a confirmation phrase to show (prevents accidental enable).
+        // - Danger settings are disabled until explicitly unlocked (and are never persisted unlocked).
+        var showAdvanced = false;
+        try { showAdvanced = (localStorage.getItem('znh_settings_show_advanced') || '') === '1'; } catch (e) { showAdvanced = false; }
+
+        // Advanced unlock is intentionally NOT persisted for safety.
+        // Even if the user toggles "show advanced", they must re-unlock per page load.
+        var advancedUnlocked = false;
+        var dangerUnlocked = false; // never persisted for safety
+        try { window.__znh_settings_danger_unlocked = false; } catch (e) {}
+
+        var advRows = [];
+        var dangerRows = [];
+        var dangerControls = [];
+
+        function _applyAdvancedVisibility() {
+            var advVisible = !!(showAdvanced && advancedUnlocked);
+            (advRows || []).forEach(function(r) {
+                if (!r) return;
+                r.style.display = advVisible ? 'grid' : 'none';
+            });
+        }
+
+        function _applyDangerLock() {
+            var unlocked = !!(dangerUnlocked && advancedUnlocked);
+            (dangerControls || []).forEach(function(el) {
+                if (!el) return;
+                try { el.disabled = !unlocked; } catch (e) {}
+            });
+            (dangerRows || []).forEach(function(r) {
+                if (!r) return;
+                try { r.style.opacity = unlocked ? '1' : '0.75'; } catch (e) {}
+            });
+            try { window.__znh_settings_danger_unlocked = unlocked; } catch (e) {}
+        }
+
+        function _dangerPhraseForField(f) {
+            try {
+                if (f && f.danger_phrase) return String(f.danger_phrase || '').trim();
+                if (f && f.key) return 'DANGER-' + String(f.key);
+            } catch (e) {}
+            return 'DANGER';
+        }
+
+        function _dangerConfirmChange(f) {
+            var req = '';
+            try { req = _dangerPhraseForField(f); } catch (e) { req = 'DANGER'; }
+            req = String(req || 'DANGER').trim().toUpperCase();
+
+            var msg = 'Danger setting change: ' + String((f && f.key) ? f.key : '') + '\n\n' +
+                      'Type ' + req + ' to confirm.';
+
+            // Use a blocking prompt on purpose (hard mode).
+            // If the user cancels or types wrong, we revert.
+            var got = '';
+            try { got = String(prompt(msg, '') || ''); } catch (e2) { got = ''; }
+            got = String(got || '').trim().toUpperCase();
+            return got === req;
+        }
+
+        // Gate controls (always rendered at the top)
+        (function() {
+            var gate = document.createElement('div');
+            gate.style.border = '1px solid var(--border)';
+            gate.style.borderRadius = '12px';
+            gate.style.padding = '10px 12px';
+            gate.style.background = 'rgba(255,255,255,0.03)';
+            gate.style.marginBottom = '12px';
+
+            var row1 = document.createElement('div');
+            row1.style.display = 'flex';
+            row1.style.gap = '10px';
+            row1.style.flexWrap = 'wrap';
+            row1.style.alignItems = 'center';
+
+            var advLab = document.createElement('label');
+            advLab.className = 'pill';
+            advLab.style.gap = '10px';
+            advLab.style.justifyContent = 'flex-start';
+            var advCb = document.createElement('input');
+            advCb.type = 'checkbox';
+            try { advCb.checked = !!showAdvanced; } catch (e) {}
+            advLab.appendChild(advCb);
+            advLab.appendChild(document.createTextNode('Show advanced settings'));
+
+            var dangLab = document.createElement('label');
+            dangLab.className = 'pill';
+            dangLab.style.gap = '10px';
+            dangLab.style.justifyContent = 'flex-start';
+            dangLab.style.borderColor = 'rgba(239,68,68,0.35)';
+            dangLab.style.background = 'rgba(239,68,68,0.08)';
+            var dangCb = document.createElement('input');
+            dangCb.type = 'checkbox';
+            try { dangCb.checked = false; } catch (e) {}
+            dangLab.appendChild(dangCb);
+            dangLab.appendChild(document.createTextNode('Unlock danger zone (temporary)'));
+
+            row1.appendChild(advLab);
+            row1.appendChild(dangLab);
+
+            // Advanced unlock: requires typing a phrase.
+            var row2 = document.createElement('div');
+            row2.style.display = 'grid';
+            row2.style.gridTemplateColumns = 'minmax(180px, 1fr) minmax(180px, 1fr)';
+            row2.style.gap = '10px';
+            row2.style.alignItems = 'center';
+            row2.style.marginTop = '10px';
+
+            var unlockInfo = document.createElement('div');
+            unlockInfo.innerHTML = '<div style="font-weight:900;">Advanced unlock</div>' +
+                                   '<div style="color:var(--muted); font-size:0.86rem;">Type <code>ADVANCED</code> to reveal advanced options (per page load).</div>';
+
+            var unlockWrap = document.createElement('div');
+            unlockWrap.style.display = 'grid';
+            unlockWrap.style.gridTemplateColumns = '1fr auto';
+            unlockWrap.style.gap = '10px';
+            unlockWrap.style.alignItems = 'center';
+
+            var unlockInp = document.createElement('input');
+            unlockInp.type = 'text';
+            unlockInp.placeholder = 'Type ADVANCED…';
+            unlockInp.style.width = '100%';
+            unlockInp.style.padding = '10px 12px';
+            unlockInp.style.borderRadius = '12px';
+            unlockInp.style.border = '1px solid var(--border)';
+            unlockInp.style.background = 'rgba(255,255,255,0.04)';
+            unlockInp.style.color = 'var(--text)';
+
+            var unlockBtn = document.createElement('button');
+            unlockBtn.type = 'button';
+            unlockBtn.className = 'pill';
+            unlockBtn.textContent = 'Unlock';
+
+            unlockWrap.appendChild(unlockInp);
+            unlockWrap.appendChild(unlockBtn);
+            row2.appendChild(unlockInfo);
+            row2.appendChild(unlockWrap);
+
+            var hint = document.createElement('div');
+            hint.style.color = 'var(--muted)';
+            hint.style.fontSize = '0.86rem';
+            hint.style.marginTop = '8px';
+            hint.textContent = 'Tip: defaults are safe. Advanced options are hidden to reduce accidental breakage.';
+
+            gate.appendChild(row1);
+            gate.appendChild(row2);
+            gate.appendChild(hint);
+            form.appendChild(gate);
+
+            function updateGateUi() {
+                // Only show the unlock row when "show advanced" is checked.
+                try { row2.style.display = showAdvanced ? 'grid' : 'none'; } catch (e) {}
+
+                // Danger zone is only meaningful when advanced is actually visible.
+                try { dangCb.disabled = !(showAdvanced && advancedUnlocked); } catch (e) {}
+                if (!(showAdvanced && advancedUnlocked)) {
+                    dangerUnlocked = false;
+                    try { dangCb.checked = false; } catch (e) {}
+                }
+
+                _applyAdvancedVisibility();
+                _applyDangerLock();
+            }
+
+            function tryUnlockAdvanced() {
+                var phrase = '';
+                try { phrase = String(unlockInp.value || '').trim().toUpperCase(); } catch (e) { phrase = ''; }
+                if (phrase === 'ADVANCED') {
+                    advancedUnlocked = true;
+                    toast('Advanced unlocked', 'Advanced settings are now visible for this page load.', 'ok');
+                } else {
+                    advancedUnlocked = false;
+                    toast('Advanced unlock failed', 'Type ADVANCED exactly.', 'err');
+                }
+                updateGateUi();
+            }
+
+            advCb.addEventListener('change', function() {
+                showAdvanced = !!advCb.checked;
+                try { localStorage.setItem('znh_settings_show_advanced', showAdvanced ? '1' : '0'); } catch (e) {}
+
+                // Lock everything again when toggling off.
+                if (!showAdvanced) {
+                    advancedUnlocked = false;
+                    dangerUnlocked = false;
+                    try { dangCb.checked = false; } catch (e) {}
+                    try { unlockInp.value = ''; } catch (e) {}
+                }
+
+                updateGateUi();
+            });
+
+            if (unlockBtn) unlockBtn.addEventListener('click', function() { tryUnlockAdvanced(); });
+            if (unlockInp) unlockInp.addEventListener('keydown', function(ev) {
+                if (!ev) return;
+                if (ev.key === 'Enter') {
+                    try { ev.preventDefault(); } catch (e) {}
+                    tryUnlockAdvanced();
+                }
+            });
+
+            dangCb.addEventListener('change', function() {
+                dangerUnlocked = !!dangCb.checked;
+                updateGateUi();
+            });
+
+            // Initial render
+            updateGateUi();
+        })();
+
         SETTINGS_FIELDS.forEach(function(f) {
             if (!schema || !schema[f.key]) return;
             var meta = schema[f.key];
             var row = document.createElement('div');
+            row.className = 'znh-settings-row';
             row.style.display = 'grid';
             row.style.gridTemplateColumns = 'minmax(180px, 1fr) minmax(180px, 1fr)';
             row.style.gap = '10px';
@@ -9123,9 +9454,24 @@ generate_dashboard() {
             row.style.borderRadius = '12px';
             row.style.background = 'var(--subtle)';
 
+            if (f.advanced || f.danger) {
+                try { row.classList.add('znh-advanced'); } catch (e) {}
+                advRows.push(row);
+            }
+            if (f.danger) {
+                try { row.classList.add('znh-danger'); } catch (e) {}
+                try { row.style.borderColor = 'rgba(239,68,68,0.35)'; } catch (e) {}
+                dangerRows.push(row);
+            }
+
             var lab = document.createElement('div');
+            var helpHtml = '';
+            if (f.help) {
+                helpHtml = '<div style="color:var(--muted); font-size:0.82rem; margin-top:4px;">' + String(f.help).replace(/</g, '&lt;') + '</div>';
+            }
             lab.innerHTML = '<div style="font-weight:950;">' + f.label + '</div>' +
-                            '<div style="color:var(--muted); font-size:0.82rem;">' + f.key + '</div>';
+                            '<div style="color:var(--muted); font-size:0.82rem;">' + f.key + '</div>' +
+                            helpHtml;
 
             var ctrlWrap = document.createElement('div');
 
@@ -9137,10 +9483,33 @@ generate_dashboard() {
                 inp.type = 'checkbox';
                 inp.dataset.key = f.key;
                 inp.checked = String(cfg[f.key]).toLowerCase() === 'true';
+                inp.dataset.prev = inp.checked ? '1' : '0';
+                if (f.danger) {
+                    try { inp.disabled = true; } catch (e) {}
+                    dangerControls.push(inp);
+                }
                 c.appendChild(inp);
-                c.appendChild(document.createTextNode(inp.checked ? 'ON' : 'OFF'));
+                var txtNode = document.createTextNode(inp.checked ? 'ON' : 'OFF');
+                c.appendChild(txtNode);
                 inp.addEventListener('change', function() {
-                    c.lastChild.nodeValue = inp.checked ? 'ON' : 'OFF';
+                    var prev = String(inp.dataset.prev || (inp.checked ? '1' : '0'));
+                    var now = inp.checked ? '1' : '0';
+
+                    if (f.danger && prev !== now) {
+                        // Hard mode: require per-setting phrase confirmation on EVERY change.
+                        if (!_dangerConfirmChange(f)) {
+                            // revert
+                            inp.checked = (prev === '1');
+                            now = prev;
+                            toast('Danger change blocked', 'Confirmation phrase mismatch.', 'err');
+                            txtNode.nodeValue = inp.checked ? 'ON' : 'OFF';
+                            return;
+                        }
+                        toast('Danger change confirmed', f.key, 'ok');
+                    }
+
+                    inp.dataset.prev = now;
+                    txtNode.nodeValue = inp.checked ? 'ON' : 'OFF';
                     _settingsMarkDirty();
                 });
                 ctrlWrap.appendChild(c);
@@ -9160,6 +9529,10 @@ generate_dashboard() {
                     sel.appendChild(o);
                 });
                 sel.value = String(cfg[f.key]);
+                if (f.danger) {
+                    try { sel.disabled = true; } catch (e) {}
+                    dangerControls.push(sel);
+                }
                 sel.addEventListener('change', function() { _settingsMarkDirty(); });
                 ctrlWrap.appendChild(sel);
             } else if (meta.type === 'int') {
@@ -9184,6 +9557,10 @@ generate_dashboard() {
                         sel2.appendChild(o2);
                     }
                     sel2.value = String(cfg[f.key]);
+                    if (f.danger) {
+                        try { sel2.disabled = true; } catch (e) {}
+                        dangerControls.push(sel2);
+                    }
                     sel2.addEventListener('change', function() { _settingsMarkDirty(); });
                     ctrlWrap.appendChild(sel2);
                 } else {
@@ -9195,6 +9572,10 @@ generate_dashboard() {
                     num.step = String(st);
                     num.dataset.key = f.key;
                     num.value = String(cfg[f.key]);
+                    if (f.danger) {
+                        try { num.disabled = true; } catch (e) {}
+                        dangerControls.push(num);
+                    }
                     num.addEventListener('input', function() { _settingsMarkDirty(); });
                     num.style.width = '100%';
                     num.style.padding = '10px 12px';
@@ -9285,6 +9666,10 @@ generate_dashboard() {
             row.appendChild(ctrlWrap);
             form.appendChild(row);
         });
+
+        // Apply initial gate state
+        _applyAdvancedVisibility();
+        _applyDangerLock();
     }
 
     function _collectSettingsPatch(schema) {
@@ -9295,6 +9680,20 @@ generate_dashboard() {
         inputs.forEach(function(el) {
             var k = el.dataset.key;
             if (!schema || !schema[k]) return;
+
+            // Safety UX: do not persist hidden advanced settings or locked danger settings.
+            try {
+                var row = el.closest ? el.closest('.znh-settings-row') : null;
+                if (row && row.style && row.style.display === 'none') {
+                    return;
+                }
+                if (row && row.classList && row.classList.contains('znh-danger')) {
+                    if (!window.__znh_settings_danger_unlocked) {
+                        return;
+                    }
+                }
+            } catch (e) {}
+
             if (el.tagName.toLowerCase() === 'input' && el.type === 'checkbox') {
                 patch[k] = el.checked ? 'true' : 'false';
             } else if (el.tagName.toLowerCase() === 'select') {
@@ -26859,8 +27258,132 @@ SELF_UPDATE_STATE_FILE = "/var/lib/zypper-auto/self-update-state.json"
 ZYPPER_BIN = "/usr/bin/zypper"
 
 
+def _zypp_lock_info() -> tuple[str, str, bool]:
+    """Return (lock_file, pid, active)."""
+    lock_file = ""
+    pid = ""
+
+    try:
+        if os.path.exists("/run/zypp.pid"):
+            lock_file = "/run/zypp.pid"
+        elif os.path.exists("/var/run/zypp.pid"):
+            lock_file = "/var/run/zypp.pid"
+    except Exception:
+        lock_file = ""
+
+    if not lock_file:
+        return "", "", False
+
+    try:
+        with open(lock_file, "r", encoding="utf-8", errors="replace") as f:
+            pid = (f.read() or "").strip()
+    except Exception:
+        pid = ""
+
+    # Active if PID exists and is alive, OR if any zypper process exists.
+    active = False
+    try:
+        if pid and re.fullmatch(r"[0-9]+", pid or ""):
+            p = subprocess.run(["/usr/bin/kill", "-0", pid], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if p.returncode == 0:
+                active = True
+    except Exception:
+        pass
+
+    if not active:
+        try:
+            p2 = subprocess.run(["/usr/bin/pgrep", "-x", "zypper"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if p2.returncode == 0:
+                active = True
+        except Exception:
+            pass
+
+    return lock_file, pid, bool(active)
+
+
+def _wait_for_zypp_lock(max_wait_s: int, *, step_s: float = 5.0) -> tuple[int, str, str, bool]:
+    """Wait for zypp lock up to max_wait_s. Returns (waited_s, lock_file, pid, timed_out)."""
+    waited = 0
+    timed_out = False
+
+    while waited < int(max_wait_s):
+        lf, pid, active = _zypp_lock_info()
+        if not active:
+            return waited, lf, pid, False
+        time.sleep(step_s)
+        waited += int(step_s)
+
+    lf, pid, active = _zypp_lock_info()
+    if active:
+        timed_out = True
+    return waited, lf, pid, bool(timed_out)
+
+
+def _detect_solver_conflict(text: str, rc: int) -> tuple[bool, str]:
+    """Best-effort solver conflict detection for zypper output."""
+    if rc == 0:
+        return False, ""
+
+    t = (text or "")
+    low = t.lower()
+
+    # Common patterns for libzypp/zypper solver problems.
+    markers = [
+        "problem:",
+        "solverrun solutions:",
+        "nothing provides",
+        "conflict",
+        "package requires",
+        "unresolvable",
+        "found incompatible",
+        "requires:",
+    ]
+
+    if not any(m in low for m in markers):
+        return False, ""
+
+    # Try to extract a short, readable summary block.
+    lines = t.splitlines()
+    start = 0
+    for i, ln in enumerate(lines):
+        if "problem:" in (ln or "").lower():
+            start = i
+            break
+    snippet = "\n".join(lines[start:start + 30]).strip()
+    if len(snippet) > 4000:
+        snippet = snippet[:4000] + "\n..."
+    return True, snippet
+
+
+def _zypper_xml_pretty(text: str) -> str:
+    """Convert zypper --xmlout output to a more readable text form (best-effort)."""
+    if not text:
+        return ""
+    if "<" not in text:
+        return text
+
+    out_lines = []
+    for ln in (text or "").splitlines():
+        s = (ln or "").strip()
+        if not s:
+            out_lines.append("")
+            continue
+        if s.startswith("<?xml"):
+            continue
+        if s.startswith("<") and ">" in s:
+            # Remove tags; keep inner text.
+            cleaned = re.sub(r"<[^>]+>", " ", s)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if cleaned:
+                out_lines.append(cleaned)
+            continue
+        out_lines.append(ln)
+
+    return "\n".join(out_lines)
+
+
+
 def _parse_extra_flags(raw: str) -> list[str]:
-    raw = (raw or "").strip()
     if not raw:
         return []
     try:
@@ -27077,6 +27600,8 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
     except Exception:
         restart_out = ""
 
+    tail_pretty = _zypper_xml_pretty(tail)
+
     return {
         "job_id": jid,
         "type": "system-dup",
@@ -27086,7 +27611,7 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
         "rc": rc,
         "stage": stage,
         "progress": int(progress),
-        "output": tail,
+        "output": tail_pretty,
         "output_truncated": bool(truncated),
         "restart_check_output": restart_out,
         "resumed": True,
@@ -27259,8 +27784,10 @@ def _job_update_progress_dup(job: dict, line: str) -> None:
     """Best-effort progress estimation for system updates (zypper dup).
 
     This is heuristic: zypper output varies by version/locale.
+    If zypper is run with --xmlout, we also attempt to parse percent progress.
     """
-    l = (line or "").lower()
+    raw = (line or "")
+    l = raw.lower()
     stage = job.get("stage") or "Starting"
     prog = int(job.get("progress") or 0)
 
@@ -27269,6 +27796,25 @@ def _job_update_progress_dup(job: dict, line: str) -> None:
         if p > prog:
             prog = p
         stage = st
+
+    # Lock wait UX
+    if "zypp" in l and "lock" in l and "wait" in l:
+        bump(5, "Waiting for lock")
+
+    # XML progress parsing (zypper --xmlout)
+    # Example patterns vary, but many include percent="NN".
+    try:
+        if "<progress" in l and "percent=\"" in l:
+            m = re.search(r"percent=\"([0-9]{1,3})\"", raw)
+            if m:
+                p = int(m.group(1))
+                nm = re.search(r"name=\"([^\"]+)\"", raw)
+                if nm:
+                    bump(p, str(nm.group(1)))
+                else:
+                    bump(p, stage)
+    except Exception:
+        pass
 
     if "dry run" in l or "dry-run" in l:
         bump(10, "Dry-run")
@@ -27645,7 +28191,8 @@ class Handler(BaseHTTPRequestHandler):
                                 return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
                         out = str(job.get("output", ""))
-                        tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                        tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                        tail = _zypper_xml_pretty(tail_raw)
                         return _json_response(self, 200, {
                             "job_id": job_id,
                             "type": job.get("type"),
@@ -27669,7 +28216,8 @@ class Handler(BaseHTTPRequestHandler):
                             return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
                     out = str(job.get("output", ""))
-                    tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                    tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                    tail = _zypper_xml_pretty(tail_raw)
                     return _json_response(self, 200, {
                         "job_id": job_id,
                         "type": job.get("type"),
@@ -27692,6 +28240,42 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/system/dup/preview":
             eff, _warnings, _invalid = _read_conf(self.server.conf_path)
             extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
+
+            # Better lock handling: if zypper/YaST is running, wait a bit instead of failing instantly.
+            # Controlled via /etc/zypper-auto.conf (and WebUI Settings).
+            lock_wait_s = 180
+            try:
+                lock_wait_s = int(str(eff.get("ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS", "180") or "180").strip() or "180")
+            except Exception:
+                lock_wait_s = 180
+            if lock_wait_s < 0:
+                lock_wait_s = 0
+            if lock_wait_s > 600:
+                lock_wait_s = 600
+
+            if lock_wait_s <= 0:
+                waited_s, lock_file, lock_pid, timed_out = 0, "", "", False
+            else:
+                waited_s, lock_file, lock_pid, timed_out = _wait_for_zypp_lock(float(lock_wait_s), step_s=5.0)
+            preface = ""
+            if waited_s > 0:
+                who = f"pid={lock_pid}" if lock_pid else "(unknown pid)"
+                preface = f"[webui] Waiting for zypp lock: {lock_file} {who} (waited {waited_s}s)\n"
+            if timed_out:
+                msg = preface + "[webui] ERROR: zypp lock still active. Please close YaST/zypper and try again.\n"
+                return _json_response(self, 200, {
+                    "ok": False,
+                    "rc": 1,
+                    "output": msg,
+                    "cmd": "(preview blocked by zypp lock)",
+                    "used_systemd_run": True,
+                    "zypp_lock_waited_seconds": waited_s,
+                    "zypp_lock_file": lock_file,
+                    "zypp_lock_pid": lock_pid,
+                    "zypp_lock_timed_out": True,
+                    "conflict_detected": False,
+                    "conflict_summary": "",
+                }, origin)
 
             cmd = [ZYPPER_BIN, "--non-interactive", "dup", "--dry-run", "--details"] + extra_flags
 
@@ -27743,6 +28327,9 @@ class Handler(BaseHTTPRequestHandler):
                 used_systemd_run = False
                 rc, out = _run_cmd(cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
 
+            out = (preface or "") + (out or "")
+            conflict_detected, conflict_summary = _detect_solver_conflict(out, rc)
+
             # IMPORTANT: Always return HTTP 200 so the WebUI can display the full zypper output,
             # even when zypper returns a non-zero rc (lock/conflict/manual decision/etc.).
             return _json_response(self, 200, {
@@ -27751,6 +28338,12 @@ class Handler(BaseHTTPRequestHandler):
                 "output": out,
                 "cmd": " ".join(cmd),
                 "used_systemd_run": used_systemd_run,
+                "zypp_lock_waited_seconds": waited_s,
+                "zypp_lock_file": lock_file,
+                "zypp_lock_pid": lock_pid,
+                "zypp_lock_timed_out": False,
+                "conflict_detected": bool(conflict_detected),
+                "conflict_summary": conflict_summary,
             }, origin)
 
         # --- System update (Rocket) job status ---
@@ -27787,7 +28380,8 @@ class Handler(BaseHTTPRequestHandler):
                                 return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
                         out = str(job.get("output", ""))
-                        tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                        tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                        tail = _zypper_xml_pretty(tail_raw)
                         return _json_response(self, 200, {
                             "job_id": job_id,
                             "type": job.get("type"),
@@ -27809,7 +28403,8 @@ class Handler(BaseHTTPRequestHandler):
                             return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
                     out = str(job.get("output", ""))
-                    tail = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                    tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                    tail = _zypper_xml_pretty(tail_raw)
                     return _json_response(self, 200, {
                         "job_id": job_id,
                         "type": job.get("type"),
@@ -28220,10 +28815,50 @@ class Handler(BaseHTTPRequestHandler):
             eff, _warnings, _invalid = _read_conf(self.server.conf_path)
             extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
 
+            # Rocket defaults (UI pre-selected / allowed values)
+            lock_wait_install_s = 1800
+            try:
+                lock_wait_install_s = int(str(eff.get("ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS", "1800") or "1800").strip() or "1800")
+            except Exception:
+                lock_wait_install_s = 1800
+            if lock_wait_install_s < 0:
+                lock_wait_install_s = 0
+            if lock_wait_install_s > 7200:
+                lock_wait_install_s = 7200
+
+            use_xmlout = True
+            try:
+                use_xmlout = str(eff.get("ROCKET_WIZARD_USE_XMLOUT", "true") or "true").strip().lower() == "true"
+            except Exception:
+                use_xmlout = True
+
+            force_resolution = False
+            try:
+                force_resolution = str(eff.get("ROCKET_WIZARD_FORCE_RESOLUTION", "false") or "false").strip().lower() == "true"
+            except Exception:
+                force_resolution = False
+
+            if force_resolution and "--force-resolution" not in extra_flags:
+                extra_flags = ["--force-resolution"] + list(extra_flags)
+
             job_id = secrets.token_urlsafe(18)
             unit = f"znh-webui-dup-{job_id[:8]}"
             log_path = f"/var/log/zypper-auto/service-logs/webui-dup-{job_id[:10]}.log"
             status_path = f"/var/lib/zypper-auto/webui-dup-{job_id[:10]}.status"
+
+            # Precreate log + status so job recovery can't race before the unit writes anything.
+            try:
+                os.makedirs("/var/log/zypper-auto/service-logs", exist_ok=True)
+                os.makedirs("/var/lib/zypper-auto", exist_ok=True)
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+                with open(status_path, "w", encoding="utf-8") as f:
+                    f.write("done=0\n")
+                    f.write("rc=0\n")
+                    f.write("stage=starting\n")
+                    f.write(f"simulate={1 if simulate else 0}\n")
+            except Exception:
+                pass
 
             job = {
                 "job_id": job_id,
@@ -28264,10 +28899,11 @@ class Handler(BaseHTTPRequestHandler):
                 # some systems.
                 # Output is written into /var/log/zypper-auto where the dashboard already reads.
                 extra = " ".join(shlex.quote(x) for x in extra_flags)
+                xml_flag = "--xmlout" if use_xmlout else ""
                 if simulate:
-                    zcmd = f"{ZYPPER_BIN} --non-interactive dup --dry-run --details {extra}".strip()
+                    zcmd = f"{ZYPPER_BIN} --non-interactive {xml_flag} dup --dry-run --details {extra}".strip()
                 else:
-                    zcmd = f"{ZYPPER_BIN} --non-interactive dup -y {extra}".strip()
+                    zcmd = f"{ZYPPER_BIN} --non-interactive {xml_flag} dup -y --details {extra}".strip()
 
                 script_text = "\n".join([
                     'set -euo pipefail',
@@ -28317,6 +28953,45 @@ class Handler(BaseHTTPRequestHandler):
                     '  env PATH="${USER_PATH}" "$@"',
                     '}',
 
+                    # Better lock handling (match CLI): wait for zypp lock instead of failing instantly.
+                    'zypp_lock_file() {',
+                    '  if [ -f /run/zypp.pid ]; then echo /run/zypp.pid; return 0; fi',
+                    '  if [ -f /var/run/zypp.pid ]; then echo /var/run/zypp.pid; return 0; fi',
+                    '  echo ""',
+                    '  return 1',
+                    '}',
+                    'zypp_lock_active() {',
+                    '  local lf pid',
+                    '  lf="$(zypp_lock_file 2>/dev/null || true)"',
+                    '  [ -z "${lf}" ] && return 1',
+                    '  pid="$(cat "${lf}" 2>/dev/null || true)"',
+                    '  if echo "${pid}" | grep -qE "^[0-9]+$" && kill -0 "${pid}" 2>/dev/null; then return 0; fi',
+                    '  if command -v pgrep >/dev/null 2>&1 && pgrep -x zypper >/dev/null 2>&1; then return 0; fi',
+                    '  return 1',
+                    '}',
+                    'wait_for_zypp_lock() {',
+                    f'  local max_wait={lock_wait_install_s}',
+                    '  local step=5',
+                    '  local waited=0',
+                    '  if [ "${max_wait}" -le 0 ] 2>/dev/null; then return 0; fi',
+                    '  while zypp_lock_active; do',
+                    '    local lf pid',
+                    '    lf="$(zypp_lock_file 2>/dev/null || true)"',
+                    '    pid="$(cat "${lf}" 2>/dev/null || true)"',
+                    '    echo "[webui] Zypp lock active (${lf:-unknown} pid=${pid:-unknown}). Waiting..." >>"$LOG" || true',
+                    '    write_status 0 0 waiting-for-lock',
+                    '    sleep "${step}"',
+                    '    waited=$((waited + step))',
+                    '    if [ "${waited}" -ge "${max_wait}" ] 2>/dev/null; then',
+                    '      echo "[webui] ERROR: Zypp lock still active after ${waited}s. Aborting." >>"$LOG" || true',
+                    '      write_status 1 1 lock-timeout',
+                    '      return 1',
+                    '    fi',
+                    '  done',
+                    '  return 0',
+                    '}',
+                    'wait_for_zypp_lock || exit 1',
+
                     'echo "==========================================" >>"$LOG"',
                     'echo " Rocket Update Wizard: zypper dup " >>"$LOG"',
                     'echo "==========================================" >>"$LOG"',
@@ -28333,7 +29008,8 @@ class Handler(BaseHTTPRequestHandler):
                     'rc=$?',
                     'set -e',
                     'did_updates=1',
-                    'if grep -q "Nothing to do\\." "$TMP_OUT" 2>/dev/null; then did_updates=0; fi',
+                    # With --xmlout, the phrase may appear inside XML message tags; be case-insensitive.
+                    'if grep -qi "nothing to do" "$TMP_OUT" 2>/dev/null; then did_updates=0; fi',
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
                     'echo "" >>"$LOG"',
                     'echo "[webui] zypper dup rc=$rc" >>"$LOG"',
