@@ -1304,6 +1304,11 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
 - Pending updates count (parsed from the cached dry-run output: `/var/log/zypper-auto/dry-run-last.txt`)
 - Visual feature toggles (Flatpak/Snap/Soar/Brew/Pipx on/off)
 - A **Self-Update** panel to show/toggle the update channel (**rolling** vs **stable**) and fetch the latest changelog from GitHub
+  - Status labels:
+    - **Up to date**: your installed build matches the remote ref for the selected channel.
+    - **Update available**: your installed ref is known and differs from the remote ref (same channel).
+    - **Install available**: the remote ref is known, but the installed ref is unknown (common after local/manual installs). Installing is allowed, but it is not labeled as an “update”.
+    - **Switch available**: you changed channel (stable ↔ rolling). This is treated as a channel switch (not an update), because stable tags and rolling commit SHAs are not directly comparable.
 - A **Settings drawer** (slide-open panel) that lets you toggle common options, timer intervals, and **Snapper safety caps** (retention/timeline limits + deep-clean safety) without editing `/etc/zypper-auto.conf` by hand (auto-saves changes; failures show a prompt offering Factory Reset)
 - A **Snapper Manager** panel (root actions via localhost API) that exposes Snapper menu options **1–6**:
   - Status, list recent snapshots, create snapshot, full cleanup, AUTO enable timers, AUTO disable timers

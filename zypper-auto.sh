@@ -7453,6 +7453,18 @@ generate_dashboard() {
                 return r;
             }
 
+            if (r.channel_switch) {
+                _selfUpdateSetStatus('Switch available');
+                _selfUpdateSetRunBtn(true, 'Switch to ' + String(ch || 'stable'));
+                return r;
+            }
+
+            if (r.install_available && !r.known_installed) {
+                _selfUpdateSetStatus('Install available');
+                _selfUpdateSetRunBtn(true, 'Install latest');
+                return r;
+            }
+
             if (r.remote_is_older) {
                 _selfUpdateSetStatus('Remote older (no downgrade)');
                 _selfUpdateSetRunBtn(false, 'No downgrade');
@@ -18624,6 +18636,7 @@ __znh_self_update_state_write() {
     local rolling_sha="$2"
     local last_channel="$3"
     local last_ref="$4"
+    local install_source="${5:-}"
 
     local file dir tmp ts
     file="$(__znh_self_update_state_file)"
@@ -18638,11 +18651,12 @@ __znh_self_update_state_write() {
 
     {
         echo '{'
-        echo '  "schema_version": 1,'
+        echo '  "schema_version": 2,'
         echo "  \"stable_tag\": \"${stable_tag}\","
         echo "  \"rolling_sha\": \"${rolling_sha}\","
         echo "  \"last_update_channel\": \"${last_channel}\","
         echo "  \"last_update_ref\": \"${last_ref}\","
+        echo "  \"install_source\": \"${install_source}\","
         echo "  \"last_update_at_utc\": \"${ts}\""
         echo '}'
     } >"${tmp}" 2>/dev/null || true
@@ -25983,6 +25997,56 @@ if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PA
     log_success "Command installed: zypper-auto-helper"
     log_info "You can now run: zypper-auto-helper --help"
 
+    # Seed the self-update state file so the dashboard can correctly tell whether
+    # you're up-to-date on stable/rolling WITHOUT falsely showing "Update available"
+    # when the install method didn't go through the self-updater.
+    #
+    # - stable_tag is derived from the VERSION header (vNN)
+    # - rolling_sha is derived from git when installing from a git working tree
+    # - last_update_channel is seeded from SELF_UPDATE_CHANNEL so UI can detect channel switches
+    #
+    # This is best-effort and non-fatal.
+    (
+        set +e
+        stable_tag=""
+        rolling_sha=""
+        last_ch="${SELF_UPDATE_CHANNEL:-stable}"
+        last_ch="${last_ch,,}"
+        if [ "${last_ch}" != "stable" ] && [ "${last_ch}" != "rolling" ]; then
+            last_ch="stable"
+        fi
+
+        # Stable tag from installed helper VERSION header (vNN)
+        ver_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${COMMAND_PATH}" 2>/dev/null || true)
+        ver_n=$(printf '%s' "${ver_line}" | sed -E 's/^#\s*VERSION\s+([0-9]+).*/\1/' 2>/dev/null || echo "")
+        if [[ "${ver_n:-}" =~ ^[0-9]+$ ]] && [ "${ver_n}" -gt 0 ] 2>/dev/null; then
+            stable_tag="v${ver_n}"
+        fi
+
+        # Rolling SHA from git (only when running from a git worktree)
+        install_source="local-install"
+        if command -v git >/dev/null 2>&1; then
+            git_top=$(git -C "$(dirname "${INSTALLER_SCRIPT_PATH}")" rev-parse --show-toplevel 2>/dev/null || true)
+            if [ -n "${git_top:-}" ] && [[ "${INSTALLER_SCRIPT_PATH}" == "${git_top}"* ]]; then
+                install_source="local-git"
+                rolling_sha=$(git -C "${git_top}" rev-parse HEAD 2>/dev/null || true)
+            fi
+        fi
+
+        last_ref=""
+        if [ "${last_ch}" = "stable" ]; then
+            last_ref="${stable_tag}"
+        else
+            last_ref="${rolling_sha}"
+        fi
+
+        if __znh_self_update_state_write "${stable_tag}" "${rolling_sha}" "${last_ch}" "${last_ref}" "${install_source}"; then
+            log_info "[install] Seeded self-update state file: $(__znh_self_update_state_file)"
+        else
+            log_warn "[install] Failed to seed self-update state file (non-fatal): $(__znh_self_update_state_file)"
+        fi
+    ) || true
+
     # Polkit action (pkexec UX polish for desktop shortcut actions)
     __znh_install_polkit_policy || log_warn "Failed to install Polkit policy (non-fatal)"
 else
@@ -26501,6 +26565,17 @@ class Handler(BaseHTTPRequestHandler):
             installed_stable = str(state.get("stable_tag", "") or "").strip()
             installed_rolling = str(state.get("rolling_sha", "") or "").strip()
 
+            # Track what channel the current install *came from* (last updater run).
+            # This is important for avoiding false "Update available" statuses when a user
+            # switches channel (stable <-> rolling).
+            active_channel = str(state.get("last_update_channel", "") or "").strip().lower()
+            active_ref = str(state.get("last_update_ref", "") or "").strip()
+            if active_channel not in ("stable", "rolling"):
+                active_channel = ""
+                active_ref = ""
+
+            channel_switch = bool(active_channel and active_channel != ch)
+
             installed_ref = installed_stable if ch == "stable" else installed_rolling
             known_installed = bool(installed_ref)
             guessed = False
@@ -26527,26 +26602,46 @@ class Handler(BaseHTTPRequestHandler):
 
             up_to_date = False
             update_available = False
+            install_available = False
             remote_is_older = False
 
-            if installed_ref and remote_ref:
-                if installed_ref == remote_ref:
-                    up_to_date = True
-                elif ch == "stable":
-                    iv = _tag_to_int(installed_ref)
-                    rv = _tag_to_int(remote_ref)
-                    if iv is not None and rv is not None and rv < iv:
-                        remote_is_older = True
+            if channel_switch:
+                # We do not attempt to compare rolling SHA vs stable tag. Treat this as a
+                # channel switch (explicit user choice), not an update.
+                install_available = bool(remote_ref)
+
+                # Prefer showing the *actual* installed build reference if we have it.
+                if active_ref:
+                    installed_ref = active_ref
+                    known_installed = True
+                    guessed = False
+                else:
+                    # Fall back to whatever we know.
+                    known_installed = bool(installed_ref)
+
+            else:
+                if installed_ref and remote_ref:
+                    if installed_ref == remote_ref:
+                        up_to_date = True
+                    elif ch == "stable":
+                        iv = _tag_to_int(installed_ref)
+                        rv = _tag_to_int(remote_ref)
+                        if iv is not None and rv is not None and rv < iv:
+                            remote_is_older = True
+                        else:
+                            update_available = True
                     else:
                         update_available = True
-                else:
-                    update_available = True
-            elif remote_ref:
-                # Unknown installed ref but remote exists: allow "install latest".
-                update_available = True
+                elif remote_ref:
+                    # Remote exists but installed ref is unknown. This is an INSTALL,
+                    # not an UPDATE. The UI will label it correctly.
+                    install_available = True
 
             return _json_response(self, 200, {
                 "channel": ch,
+                "active_channel": active_channel,
+                "active_ref": active_ref,
+                "channel_switch": channel_switch,
                 "known_installed": known_installed,
                 "guessed_from_version": guessed,
                 "installed_ref": installed_ref,
@@ -26554,8 +26649,10 @@ class Handler(BaseHTTPRequestHandler):
                 "installed_version_header": installed_ver,
                 "up_to_date": up_to_date,
                 "update_available": update_available,
+                "install_available": install_available,
                 "remote_is_older": remote_is_older,
                 "state_file": SELF_UPDATE_STATE_FILE,
+                "install_source": str(state.get("install_source", "") or ""),
                 "error": err,
             }, origin)
 
