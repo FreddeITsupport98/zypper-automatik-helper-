@@ -1727,9 +1727,12 @@ systemctl status zypper-autodownload.service
   - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:
     - `ROCKET_WIZARD_DEFAULT_SIMULATE` (opens with Simulation mode pre-selected by default)
     - `ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS` + `ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS` (lock wait timeouts)
+    - `ROCKET_WIZARD_MIN_FREE_MB` (pre-flight safety: blocks Rocket install if / is critically low)
     - `ROCKET_WIZARD_USE_XMLOUT` (toggle xmlout progress mode)
     - `ROCKET_WIZARD_FORCE_RESOLUTION` (dangerous: adds `--force-resolution`)
   - 🧾 **IMPROVED:** Rocket job log tail shown in the WebUI is now XML-prettified (more readable when `--xmlout` is enabled).
+  - 🛡️ **IMPROVED:** When `ROCKET_WIZARD_FORCE_RESOLUTION=true`, the Rocket Wizard now requires an extra typed confirmation inside the wizard ("I UNDERSTAND") before enabling Install.
+  - 🎚️ **IMPROVED:** Progress bars now use smoother width easing and show a subtle pulse animation for waiting/reconnecting stages.
   - 🛡️ **IMPROVED:** WebUI Settings drawer now hides **Advanced** settings by default, requires typing a confirmation phrase (`ADVANCED`) to reveal them (per page load), requires an explicit temporary **Unlock danger zone** toggle, and (hard mode) each dangerous setting change requires typing its own confirmation phrase (example: `REMOUNT`, `FORCE`).
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 

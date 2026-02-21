@@ -8830,6 +8830,11 @@ generate_dashboard() {
         _ru.confirm = confirmInfo || null;
         _ru.required_phrase = (confirmInfo && confirmInfo.phrase) ? String(confirmInfo.phrase) : 'INSTALL';
 
+        // If force-resolution is enabled in config, require an extra typed confirmation
+        // inside the wizard before enabling the Install button.
+        var forceRes = false;
+        try { forceRes = String((_settingsConfig || {}).ROCKET_WIZARD_FORCE_RESOLUTION || '').toLowerCase() === 'true'; } catch (eF0) { forceRes = false; }
+
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
             '  <div style="font-weight:950;">Final confirmation</div>',
@@ -8838,6 +8843,7 @@ generate_dashboard() {
             '<div class="overlay-kv">',
             '  <div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Confirmation phrase: <strong>' + String(_ru.required_phrase) + '</strong></div>',
             '  <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Safety: <strong>no click, no install</strong></div>',
+            (forceRes ? '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Force resolution: <strong>ENABLED</strong></div>' : ''),
             '</div>',
             '<div style="color: var(--muted); font-size:0.92rem;">To proceed, type the confirmation phrase exactly. This prevents accidental installs.</div>',
             '<div style="display:grid; gap:10px;">',
@@ -8846,6 +8852,14 @@ generate_dashboard() {
             '    <input id="ru-simulate" type="checkbox" /> Simulation mode (dry-run only; does NOT install packages)',
             '  </label>',
             '</div>',
+
+            // Danger zone typed confirmation (only required for real installs, not simulation)
+            '<div id="ru-danger-zone" class="overlay-alert overlay-alert-warn znh-hidden" style="margin-top: 10px; border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08);">',
+            '  <div style="font-weight:950;">DANGER ZONE: Force Resolution Enabled</div>',
+            '  <div style="font-size:0.88rem; margin-top: 6px; font-weight:800;">You are about to force zypper to make package decisions automatically. Type <strong>I UNDERSTAND</strong> to proceed.</div>',
+            '  <input type="text" id="ru-danger-confirm" placeholder="Type I UNDERSTAND…" autocomplete="off" style="margin-top: 10px; width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />',
+            '</div>',
+
             '<div class="overlay-progress">',
             '  <div class="overlay-progress-row"><span id="su-stage">Waiting</span><span id="su-percent">0%</span></div>',
             '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
@@ -8880,6 +8894,23 @@ generate_dashboard() {
             try {
                 ok = inp && String(inp.value || '').trim().toUpperCase() === String(_ru.required_phrase).toUpperCase();
             } catch (e2) { ok = false; }
+
+            // Extra hard confirmation when force-resolution is enabled.
+            // Only required for real installs (not simulation).
+            try {
+                var dz = document.getElementById('ru-danger-zone');
+                var dzInp = document.getElementById('ru-danger-confirm');
+                var needDz = forceRes && !_ru.simulate;
+                if (dz) {
+                    if (needDz) dz.classList.remove('znh-hidden');
+                    else dz.classList.add('znh-hidden');
+                }
+                if (needDz) {
+                    var got = dzInp ? String(dzInp.value || '').trim().toUpperCase() : '';
+                    if (got !== 'I UNDERSTAND') ok = false;
+                }
+            } catch (eDZ) {}
+
             _suSetButtons({
                 show_cancel: true,
                 show_back: true,
@@ -8895,7 +8926,10 @@ generate_dashboard() {
         if (sim) sim.addEventListener('change', function() {
             _ru.simulate = !!sim.checked;
             _ru.auto_simulate = _ru.simulate;
+            updateInstallEnabled();
         });
+        var dzInp2 = document.getElementById('ru-danger-confirm');
+        if (dzInp2) dzInp2.addEventListener('input', updateInstallEnabled);
         updateInstallEnabled();
 
         _suUpdateProgress('Waiting', 0);
@@ -28969,28 +29003,39 @@ class Handler(BaseHTTPRequestHandler):
                     '  if command -v pgrep >/dev/null 2>&1 && pgrep -x zypper >/dev/null 2>&1; then return 0; fi',
                     '  return 1',
                     '}',
-                    'wait_for_zypp_lock() {',
-                    f'  local max_wait={lock_wait_install_s}',
-                    '  local step=5',
-                    '  local waited=0',
-                    '  if [ "${max_wait}" -le 0 ] 2>/dev/null; then return 0; fi',
-                    '  while zypp_lock_active; do',
-                    '    local lf pid',
+                    '# Smart lock waiting with exponential backoff and process identity',
+                    'wait_for_zypp_lock_smart() {',
+                    f'  local max_wait_seconds={lock_wait_install_s}',
+                    '  if [ "${max_wait_seconds}" -le 0 ] 2>/dev/null; then return 0; fi',
+                    '  local start_time current_time elapsed backoff attempt',
+                    '  start_time="$(date +%s 2>/dev/null || echo 0)"',
+                    '  attempt=1',
+                    '  backoff=2',
+                    '  while true; do',
+                    '    if ! zypp_lock_active; then return 0; fi',
+                    '    local lf pid owner',
                     '    lf="$(zypp_lock_file 2>/dev/null || true)"',
                     '    pid="$(cat "${lf}" 2>/dev/null || true)"',
-                    '    echo "[webui] Zypp lock active (${lf:-unknown} pid=${pid:-unknown}). Waiting..." >>"$LOG" || true',
-                    '    write_status 0 0 waiting-for-lock',
-                    '    sleep "${step}"',
-                    '    waited=$((waited + step))',
-                    '    if [ "${waited}" -ge "${max_wait}" ] 2>/dev/null; then',
-                    '      echo "[webui] ERROR: Zypp lock still active after ${waited}s. Aborting." >>"$LOG" || true',
+                    '    owner=""',
+                    '    if echo "${pid}" | grep -qE "^[0-9]+$"; then',
+                    '      owner="$(ps -p "${pid}" -o comm= 2>/dev/null || echo "")"',
+                    '    fi',
+                    '    current_time="$(date +%s 2>/dev/null || echo 0)"',
+                    '    elapsed=$((current_time - start_time))',
+                    '    if [ "${elapsed}" -ge "${max_wait_seconds}" ] 2>/dev/null; then',
+                    '      echo "[webui] ERROR: Timeout: Zypp lock held by PID ${pid:-unknown} (${owner:-Unknown}) for over ${max_wait_seconds}s." >>"$LOG" || true',
                     '      write_status 1 1 lock-timeout',
                     '      return 1',
                     '    fi',
+                    '    echo "[webui] Zypp lock held by PID ${pid:-unknown} (${owner:-Unknown}). Attempt ${attempt}. Retrying in ${backoff}s..." >>"$LOG" || true',
+                    '    write_status 0 0 waiting-for-lock',
+                    '    sleep "${backoff}"',
+                    '    backoff=$((backoff * 2))',
+                    '    if [ "${backoff}" -gt 30 ] 2>/dev/null; then backoff=30; fi',
+                    '    attempt=$((attempt + 1))',
                     '  done',
-                    '  return 0',
                     '}',
-                    'wait_for_zypp_lock || exit 1',
+                    'wait_for_zypp_lock_smart || exit 1',
 
                     'echo "==========================================" >>"$LOG"',
                     'echo " Rocket Update Wizard: zypper dup " >>"$LOG"',
