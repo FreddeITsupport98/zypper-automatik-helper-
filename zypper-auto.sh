@@ -7435,7 +7435,7 @@ generate_dashboard() {
         _selfUpdateSetRunBtn(false, 'Checking…');
 
         return _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).then(function(r) {
-            // r: { channel, installed_ref, remote_ref, up_to_date, update_available, remote_is_older, known_installed, error, installed_version_header }
+            // r: legacy + extended flags (externally-managed, dirty detection, evaluation)
             if (!r) {
                 _selfUpdateSetStatus('Unknown');
                 _selfUpdateSetRunBtn(true, 'Install latest');
@@ -7453,39 +7453,90 @@ generate_dashboard() {
                 return r;
             }
 
+            var suffix = (r.is_dirty ? ' (local edits)' : '');
+
+            // Local edits detection (best-effort): still allow update, but warn.
+            if (r.is_dirty && showToast) {
+                toast('Local edits detected', 'Self-update will overwrite manual changes', 'err');
+            }
+
+            // Prefer the API's consolidated evaluation so JS doesn't guess.
+            var act = '';
+            try { act = (r.evaluation && r.evaluation.action_type) ? String(r.evaluation.action_type) : ''; } catch (eAct) { act = ''; }
+            act = String(act || '').toLowerCase();
+
+            if (act === 'managed' || r.is_externally_managed) {
+                _selfUpdateSetStatus('Managed by system');
+                _selfUpdateSetRunBtn(false, 'Managed');
+                return r;
+            }
+
+            if (act === 'switch' || r.channel_switch) {
+                _selfUpdateSetStatus('Switch available' + suffix);
+                _selfUpdateSetRunBtn(true, 'Switch to ' + String(ch || 'stable'));
+                return r;
+            }
+
+            if (act === 'update') {
+                _selfUpdateSetStatus('Update available' + suffix);
+                _selfUpdateSetRunBtn(true, 'Update now');
+                if (showToast) toast('Update available', String(r.remote_ref || ''), 'ok');
+                return r;
+            }
+
+            if (act === 'install') {
+                _selfUpdateSetStatus('Install available' + suffix);
+                _selfUpdateSetRunBtn(true, 'Install latest');
+                return r;
+            }
+
+            if (act === 'none') {
+                if (r.remote_is_older) {
+                    _selfUpdateSetStatus('Remote older (no downgrade)' + suffix);
+                    _selfUpdateSetRunBtn(false, 'No downgrade');
+                    return r;
+                }
+                if (r.up_to_date) {
+                    _selfUpdateSetStatus('Up to date' + suffix);
+                    _selfUpdateSetRunBtn(false, 'Up to date');
+                    return r;
+                }
+            }
+
+            // Fallback (legacy server): keep older behavior.
             if (r.channel_switch) {
-                _selfUpdateSetStatus('Switch available');
+                _selfUpdateSetStatus('Switch available' + suffix);
                 _selfUpdateSetRunBtn(true, 'Switch to ' + String(ch || 'stable'));
                 return r;
             }
 
             if (r.install_available && !r.known_installed) {
-                _selfUpdateSetStatus('Install available');
+                _selfUpdateSetStatus('Install available' + suffix);
                 _selfUpdateSetRunBtn(true, 'Install latest');
                 return r;
             }
 
             if (r.remote_is_older) {
-                _selfUpdateSetStatus('Remote older (no downgrade)');
+                _selfUpdateSetStatus('Remote older (no downgrade)' + suffix);
                 _selfUpdateSetRunBtn(false, 'No downgrade');
                 return r;
             }
 
             if (r.up_to_date) {
-                _selfUpdateSetStatus('Up to date');
+                _selfUpdateSetStatus('Up to date' + suffix);
                 _selfUpdateSetRunBtn(false, 'Up to date');
                 return r;
             }
 
             if (r.update_available) {
-                _selfUpdateSetStatus('Update available');
+                _selfUpdateSetStatus('Update available' + suffix);
                 _selfUpdateSetRunBtn(true, 'Update now');
                 if (showToast) toast('Update available', String(r.remote_ref || ''), 'ok');
                 return r;
             }
 
             // Unknown installed ref: still allow installing latest.
-            _selfUpdateSetStatus('Install available');
+            _selfUpdateSetStatus('Install available' + suffix);
             _selfUpdateSetRunBtn(true, 'Install latest');
             return r;
         }).catch(function(e) {
@@ -7651,6 +7702,18 @@ generate_dashboard() {
         }
     }
 
+    function _znhEscapeHtml(s) {
+        // Escape untrusted strings before inserting into innerHTML.
+        // (Refs/SHAs normally are safe, but defense-in-depth is cheap.)
+        var x = String(s == null ? '' : s);
+        return x
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function _suLongDisclosureHtml(ch) {
         // Long, explicit, human-readable disclosure text.
         var common = [
@@ -7727,14 +7790,39 @@ generate_dashboard() {
 
         var info = [];
         info.push('<div class="overlay-kv">');
-        info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Channel: <strong>' + String(ch) + '</strong></div>');
-        info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Installed: <strong>' + String(st.installed_ref || '(unknown)') + '</strong></div>');
-        info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Remote: <strong>' + String(st.remote_ref || '(unknown)') + '</strong></div>');
+
+        var installedRef = (st && st.installed && st.installed.ref) ? st.installed.ref : (st.installed_ref || '(unknown)');
+        var remoteRef = (st && st.remote && st.remote.ref) ? st.remote.ref : (st.remote_ref || '(unknown)');
+        var installedCh = (st && st.installed && st.installed.channel) ? st.installed.channel : (st.active_channel || '');
+        var actionType = (st && st.evaluation && st.evaluation.action_type) ? st.evaluation.action_type : '';
+        var actionMsg = (st && st.evaluation && st.evaluation.message) ? st.evaluation.message : '';
+        var source = (st && st.install_source) ? st.install_source : '';
+
+        info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Target channel: <strong>' + _znhEscapeHtml(ch) + '</strong></div>');
+        if (installedCh) {
+            info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Installed channel: <strong>' + _znhEscapeHtml(installedCh) + '</strong></div>');
+        }
+        info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Installed ref: <strong>' + _znhEscapeHtml(installedRef) + '</strong></div>');
+        info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Remote ref: <strong>' + _znhEscapeHtml(remoteRef) + '</strong></div>');
+        if (source) {
+            info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Install source: <strong>' + _znhEscapeHtml(source) + '</strong></div>');
+        }
+        if (actionType) {
+            info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Action: <strong>' + _znhEscapeHtml(actionType) + '</strong></div>');
+        }
         info.push('</div>');
 
         var warn = '';
-        if (st.remote_is_older) {
+        if (st && st.is_externally_managed) {
+            warn = '<div class="overlay-alert overlay-alert-warn">This helper appears to be managed by the system package manager (not installed in <code>/usr/local/bin</code>). Self-update is disabled to avoid overwriting OS-managed files.</div>';
+        } else if (st && st.remote_is_older) {
             warn = '<div class="overlay-alert overlay-alert-warn">Remote stable tag is older than your installed build. Downgrades are blocked by default.</div>';
+        } else if (st && st.is_dirty) {
+            warn = '<div class="overlay-alert overlay-alert-warn">Local edits detected: your installed helper differs from the last recorded install/update. Self-update will overwrite manual changes.</div>';
+        }
+
+        if (actionMsg && !warn) {
+            warn = '<div class="overlay-alert overlay-alert-warn">' + _znhEscapeHtml(actionMsg) + '</div>';
         }
 
         var d = _suLongDisclosureHtml(ch);
@@ -18637,6 +18725,8 @@ __znh_self_update_state_write() {
     local last_channel="$3"
     local last_ref="$4"
     local install_source="${5:-}"
+    local installed_file_sha256="${6:-}"
+    local installed_helper_path="${7:-}"
 
     local file dir tmp ts
     file="$(__znh_self_update_state_file)"
@@ -18651,12 +18741,14 @@ __znh_self_update_state_write() {
 
     {
         echo '{'
-        echo '  "schema_version": 2,'
+        echo '  "schema_version": 3,'
         echo "  \"stable_tag\": \"${stable_tag}\","
         echo "  \"rolling_sha\": \"${rolling_sha}\","
         echo "  \"last_update_channel\": \"${last_channel}\","
         echo "  \"last_update_ref\": \"${last_ref}\","
         echo "  \"install_source\": \"${install_source}\","
+        echo "  \"installed_helper_path\": \"${installed_helper_path}\","
+        echo "  \"installed_file_sha256\": \"${installed_file_sha256}\","
         echo "  \"last_update_at_utc\": \"${ts}\""
         echo '}'
     } >"${tmp}" 2>/dev/null || true
@@ -18842,7 +18934,16 @@ run_self_update_only() {
 
             if [ -n "${guess_tag}" ]; then
                 log_info "[self-update] Bootstrapping state file from installed VERSION header: stable_tag=${guess_tag}"
-                __znh_self_update_state_write "${guess_tag}" "${installed_rolling_sha}" "bootstrap" "${guess_tag}" >/dev/null 2>&1 || true
+
+                local cur_sha
+                cur_sha=""
+                if command -v sha256sum >/dev/null 2>&1; then
+                    cur_sha=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 || true)
+                elif command -v openssl >/dev/null 2>&1; then
+                    cur_sha=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' || true)
+                fi
+
+                __znh_self_update_state_write "${guess_tag}" "${installed_rolling_sha}" "bootstrap" "${guess_tag}" "bootstrap" "${cur_sha}" "${dest}" >/dev/null 2>&1 || true
                 installed_stable_tag="${guess_tag}"
                 installed_ref="${guess_tag}"
             fi
@@ -19186,7 +19287,15 @@ run_self_update_only() {
     fi
 
     if [ -n "${last_ref:-}" ]; then
-        if __znh_self_update_state_write "${new_state_stable}" "${new_state_rolling}" "${channel}" "${last_ref}"; then
+        local dest_sha
+        dest_sha=""
+        if command -v sha256sum >/dev/null 2>&1; then
+            dest_sha=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 || true)
+        elif command -v openssl >/dev/null 2>&1; then
+            dest_sha=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' || true)
+        fi
+
+        if __znh_self_update_state_write "${new_state_stable}" "${new_state_rolling}" "${channel}" "${last_ref}" "self-update" "${dest_sha}" "${dest}"; then
             log_info "[self-update] State updated: $(__znh_self_update_state_file)"
         else
             log_warn "[self-update] Failed to write update state file (non-fatal): $(__znh_self_update_state_file)"
@@ -26040,7 +26149,15 @@ if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PA
             last_ref="${rolling_sha}"
         fi
 
-        if __znh_self_update_state_write "${stable_tag}" "${rolling_sha}" "${last_ch}" "${last_ref}" "${install_source}"; then
+        # Track file hash so we can detect manual edits later.
+        installed_sha=""
+        if command -v sha256sum >/dev/null 2>&1; then
+            installed_sha=$(sha256sum "${COMMAND_PATH}" 2>/dev/null | cut -d ' ' -f1 || true)
+        elif command -v openssl >/dev/null 2>&1; then
+            installed_sha=$(openssl dgst -sha256 "${COMMAND_PATH}" 2>/dev/null | sed -E 's/^.*= //' || true)
+        fi
+
+        if __znh_self_update_state_write "${stable_tag}" "${rolling_sha}" "${last_ch}" "${last_ref}" "${install_source}" "${installed_sha}" "${COMMAND_PATH}"; then
             log_info "[install] Seeded self-update state file: $(__znh_self_update_state_file)"
         else
             log_warn "[install] Failed to seed self-update state file (non-fatal): $(__znh_self_update_state_file)"
@@ -26565,6 +26682,34 @@ class Handler(BaseHTTPRequestHandler):
             installed_stable = str(state.get("stable_tag", "") or "").strip()
             installed_rolling = str(state.get("rolling_sha", "") or "").strip()
 
+            install_source = str(state.get("install_source", "") or "").strip()
+            installed_sha_state = str(state.get("installed_file_sha256", "") or "").strip().lower()
+            installed_helper_path_state = str(state.get("installed_helper_path", "") or "").strip()
+
+            # Externally-managed installs should not be self-updated (RPM/OS package manager, etc.)
+            helper_real = ""
+            try:
+                helper_real = os.path.realpath(HELPER_BIN)
+            except Exception:
+                helper_real = HELPER_BIN
+            is_externally_managed = not str(helper_real).startswith("/usr/local/bin/")
+
+            # Calculate current helper file sha256 (for dirty/manual-edit detection)
+            installed_sha_current = ""
+            try:
+                import hashlib
+
+                h = hashlib.sha256()
+                with open(HELPER_BIN, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        h.update(chunk)
+                installed_sha_current = h.hexdigest().strip().lower()
+            except Exception:
+                installed_sha_current = ""
+
+            sha_tracked = bool(installed_sha_state)
+            is_dirty = bool(installed_sha_state and installed_sha_current and installed_sha_state != installed_sha_current)
+
             # Track what channel the current install *came from* (last updater run).
             # This is important for avoiding false "Update available" statuses when a user
             # switches channel (stable <-> rolling).
@@ -26605,6 +26750,14 @@ class Handler(BaseHTTPRequestHandler):
             install_available = False
             remote_is_older = False
 
+            # Even when switching channel, we can still detect stable downgrade risk
+            # (stable tags are comparable to each other).
+            if ch == "stable" and installed_ref and remote_ref:
+                iv = _tag_to_int(installed_ref)
+                rv = _tag_to_int(remote_ref)
+                if iv is not None and rv is not None and rv < iv:
+                    remote_is_older = True
+
             if channel_switch:
                 # We do not attempt to compare rolling SHA vs stable tag. Treat this as a
                 # channel switch (explicit user choice), not an update.
@@ -26624,11 +26777,8 @@ class Handler(BaseHTTPRequestHandler):
                     if installed_ref == remote_ref:
                         up_to_date = True
                     elif ch == "stable":
-                        iv = _tag_to_int(installed_ref)
-                        rv = _tag_to_int(remote_ref)
-                        if iv is not None and rv is not None and rv < iv:
-                            remote_is_older = True
-                        else:
+                        # remote_is_older already computed above
+                        if not remote_is_older:
                             update_available = True
                     else:
                         update_available = True
@@ -26637,7 +26787,32 @@ class Handler(BaseHTTPRequestHandler):
                     # not an UPDATE. The UI will label it correctly.
                     install_available = True
 
-            return _json_response(self, 200, {
+            # Consolidated evaluation: compute the actual action so the UI doesn't guess.
+            action_type = "none"
+            msg = ""
+            can_safely_execute = not is_externally_managed
+
+            if is_externally_managed:
+                action_type = "managed"
+                msg = "Updates managed by system package manager"
+            elif channel_switch:
+                action_type = "switch"
+                msg = f"Switch channel {active_channel or 'unknown'} → {ch}"
+            elif remote_is_older and ch == "stable":
+                action_type = "none"
+                msg = "Remote stable tag is older (downgrade blocked by default)"
+            elif update_available:
+                action_type = "update"
+                msg = "Update available"
+            elif install_available:
+                action_type = "install"
+                msg = "Install available"
+            elif up_to_date:
+                action_type = "none"
+                msg = "Up to date"
+
+            payload = {
+                # Legacy fields (keep UI backward compatible)
                 "channel": ch,
                 "active_channel": active_channel,
                 "active_ref": active_ref,
@@ -26652,9 +26827,41 @@ class Handler(BaseHTTPRequestHandler):
                 "install_available": install_available,
                 "remote_is_older": remote_is_older,
                 "state_file": SELF_UPDATE_STATE_FILE,
-                "install_source": str(state.get("install_source", "") or ""),
+                "install_source": install_source,
                 "error": err,
-            }, origin)
+
+                # New flags
+                "is_externally_managed": is_externally_managed,
+                "is_dirty": is_dirty,
+                "sha_tracked": sha_tracked,
+                "installed_helper_path": helper_real,
+                "installed_helper_path_state": installed_helper_path_state,
+
+                # Consolidated schema
+                "installed": {
+                    "channel": active_channel,
+                    "stable_tag": installed_stable,
+                    "rolling_sha": installed_rolling,
+                    "ref": active_ref or installed_ref,
+                    "version": f"v{installed_ver}" if installed_ver > 0 else "",
+                    "source": install_source,
+                    "is_dirty": is_dirty,
+                    "is_externally_managed": is_externally_managed,
+                },
+                "remote": {
+                    "ref": remote_ref,
+                    "stable_tag": remote_ref if ch == "stable" else "",
+                    "rolling_sha": remote_ref if ch == "rolling" else "",
+                },
+                "configured_target_channel": ch,
+                "evaluation": {
+                    "action_type": action_type,
+                    "can_safely_execute": can_safely_execute,
+                    "message": msg,
+                },
+            }
+
+            return _json_response(self, 200, payload, origin)
 
         # --- Self-update job status (dashboard) ---
         if path == "/api/self-update/job":
@@ -26930,6 +27137,18 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- Self-update control (dashboard) ---
         if path == "/api/self-update/confirm":
+            # Guard: do not allow self-update if the helper looks OS-managed.
+            try:
+                helper_real = os.path.realpath(HELPER_BIN)
+            except Exception:
+                helper_real = HELPER_BIN
+            if not str(helper_real).startswith("/usr/local/bin/"):
+                return _json_response(self, 400, {
+                    "error": "self-update disabled (externally managed install)",
+                    "is_externally_managed": True,
+                    "helper_path": helper_real,
+                }, origin)
+
             body = _read_json(self)
             ch = str(body.get("channel", "") or "").strip().lower()
             if ch not in ("stable", "rolling"):
@@ -26960,6 +27179,18 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         if path == "/api/self-update/start":
+            # Guard: do not allow self-update if the helper looks OS-managed.
+            try:
+                helper_real = os.path.realpath(HELPER_BIN)
+            except Exception:
+                helper_real = HELPER_BIN
+            if not str(helper_real).startswith("/usr/local/bin/"):
+                return _json_response(self, 400, {
+                    "error": "self-update disabled (externally managed install)",
+                    "is_externally_managed": True,
+                    "helper_path": helper_real,
+                }, origin)
+
             body = _read_json(self)
             ch = str(body.get("channel", "") or "").strip().lower()
             if ch not in ("stable", "rolling"):
@@ -27116,6 +27347,18 @@ class Handler(BaseHTTPRequestHandler):
 
         # Backward-compatible synchronous endpoint (no live progress; returns full output).
         if path == "/api/self-update/run":
+            # Guard: do not allow self-update if the helper looks OS-managed.
+            try:
+                helper_real = os.path.realpath(HELPER_BIN)
+            except Exception:
+                helper_real = HELPER_BIN
+            if not str(helper_real).startswith("/usr/local/bin/"):
+                return _json_response(self, 400, {
+                    "error": "self-update disabled (externally managed install)",
+                    "is_externally_managed": True,
+                    "helper_path": helper_real,
+                }, origin)
+
             body = _read_json(self)
             ch = str(body.get("channel", "") or "").strip().lower()
             if ch not in ("stable", "rolling"):

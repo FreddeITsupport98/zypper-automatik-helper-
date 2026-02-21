@@ -1309,6 +1309,8 @@ It is designed as a quick-glance dashboard (card layout + dark mode support) and
     - **Update available**: your installed ref is known and differs from the remote ref (same channel).
     - **Install available**: the remote ref is known, but the installed ref is unknown (common after local/manual installs). Installing is allowed, but it is not labeled as an “update”.
     - **Switch available**: you changed channel (stable ↔ rolling). This is treated as a channel switch (not an update), because stable tags and rolling commit SHAs are not directly comparable.
+    - **Managed by system**: the installed helper appears to be installed outside `/usr/local/bin/` (for example a distro/RPM managed path). In this case the dashboard disables self-update to avoid overwriting OS-managed files (this is enforced in both the WebUI and the localhost Dashboard API endpoints).
+    - **(local edits)**: a best-effort warning suffix when the installed helper file SHA256 differs from the last recorded install/update. Self-update is still allowed, but it will overwrite manual edits.
 - A **Settings drawer** (slide-open panel) that lets you toggle common options, timer intervals, and **Snapper safety caps** (retention/timeline limits + deep-clean safety) without editing `/etc/zypper-auto.conf` by hand (auto-saves changes; failures show a prompt offering Factory Reset)
 - A **Snapper Manager** panel (root actions via localhost API) that exposes Snapper menu options **1–6**:
   - Status, list recent snapshots, create snapshot, full cleanup, AUTO enable timers, AUTO disable timers
