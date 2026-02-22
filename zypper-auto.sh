@@ -28336,23 +28336,43 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 err = str(e)
 
-            # Rolling checksum fallback:
-            # If a user installed from a raw script copy (no .git folder), we may not know the
-            # rolling SHA. In that case, compare file contents by hashing the remote script at
-            # the latest remote SHA and the local helper file.
+            # Rolling content-compare (bulletproof):
+            # Compare the installed helper file SHA256 against the *remote raw helper script* at the
+            # latest rolling commit.
+            #
+            # Why?
+            # - Rolling commit SHAs can change even when zypper-auto.sh did not change (docs-only commits).
+            # - Comparing contents avoids false "Update available" statuses.
             remote_script_sha256 = ""
+            remote_script_path = ""
             rolling_checksum_used = False
             try:
-                if ch == "rolling" and remote_ref and not installed_ref and installed_sha_current:
+                if ch == "rolling" and remote_ref and installed_sha_current:
                     import hashlib
 
-                    raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/zypper-auto.sh"
-                    req = urllib.request.Request(raw_url, headers={"User-Agent": "znh-dashboard-api"})
-                    with urllib.request.urlopen(req, timeout=15) as r:
-                        data = r.read()
-                    remote_script_sha256 = hashlib.sha256(data).hexdigest().strip().lower()
+                    # Try common raw paths (repo layout can evolve; keep this best-effort).
+                    candidates = [
+                        "zypper-auto.sh",
+                        "zypper-auto-helper",
+                        "zypper-auto-helper.sh",
+                    ]
+
+                    for pth in candidates:
+                        try:
+                            raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/{pth}"
+                            req = urllib.request.Request(raw_url, headers={"User-Agent": "znh-dashboard-api"})
+                            with urllib.request.urlopen(req, timeout=15) as r:
+                                data = r.read()
+                            remote_script_sha256 = hashlib.sha256(data).hexdigest().strip().lower()
+                            remote_script_path = pth
+                            rolling_checksum_used = True
+                            break
+                        except Exception:
+                            continue
             except Exception:
                 remote_script_sha256 = ""
+                remote_script_path = ""
+                rolling_checksum_used = False
 
             up_to_date = False
             update_available = False
@@ -28385,7 +28405,6 @@ class Handler(BaseHTTPRequestHandler):
                 if ch == "rolling" and remote_ref and not installed_ref:
                     # Checksum fallback (raw script installs without git SHA).
                     if installed_sha_current and remote_script_sha256:
-                        rolling_checksum_used = True
                         known_installed = True
                         guessed = True
                         if installed_sha_current == remote_script_sha256:
@@ -28399,7 +28418,14 @@ class Handler(BaseHTTPRequestHandler):
                         install_available = True
 
                 elif installed_ref and remote_ref:
-                    if installed_ref == remote_ref:
+                    if ch == "rolling" and installed_sha_current and remote_script_sha256:
+                        # Bulletproof rolling: treat as up-to-date when contents match,
+                        # even if commit SHAs differ (docs-only commits, etc.).
+                        if installed_sha_current == remote_script_sha256:
+                            up_to_date = True
+                        else:
+                            update_available = True
+                    elif installed_ref == remote_ref:
                         up_to_date = True
                     elif ch == "stable":
                         # remote_is_older already computed above
@@ -28487,6 +28513,7 @@ class Handler(BaseHTTPRequestHandler):
                     "stable_tag": remote_ref if ch == "stable" else "",
                     "rolling_sha": remote_ref if ch == "rolling" else "",
                     "script_sha256": remote_script_sha256,
+                    "script_path": remote_script_path,
                 },
                 "configured_target_channel": ch,
                 "evaluation": {
