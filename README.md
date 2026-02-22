@@ -1722,7 +1722,11 @@ systemctl status zypper-autodownload.service
   - 🧰 **FIXED:** WebUI Self-Update now runs in a dedicated transient systemd unit and can resume polling after a dashboard API restart (no more "job not found" during GitHub downloads).
   - 🛡️ **IMPROVED:** WebUI Self-Update is now *fool-proof locked* against mid-flight channel switching: while a self-update status check is running (or while the update job itself is running), the UI disables Stable/Rolling switching and the API rejects `SELF_UPDATE_CHANNEL` changes until the job finishes.
   - 🧿 **NEW:** Self-update panel shows a visible **LOCKED** badge during checks/runs so users understand why buttons are disabled.
+  - 🧾 **IMPROVED:** after a successful self-update, the post-reload “Update installed successfully” dialog now preserves the live log tail (and offers a Copy button) and adds a short “Verified:” message when checksums/tags match.
+  - 🧾 **IMPROVED:** the post-success dialog notes header is now channel-aware (shows **Rolling commits** when on rolling, and **Stable release notes** when on stable), so it’s obvious what you’re looking at.
   - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
+  - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
+  - 🧰 **IMPROVED (advanced):** when Advanced settings are unlocked, the self-update panel shows a small technical line (remote raw path + short SHA256 prefixes) so you can verify exactly what it compared.
   - 🛡️ **IMPROVED:** Dashboard API now blocks starting a second self-update job while one is already running (prevents double-click / multi-tab damage).
   - 🧰 **IMPROVED:** Rocket Update Wizard now exits early when there are no updates ("Nothing to do"), instead of asking for confirmation.
   - 🧰 **IMPROVED:** Rocket Update Wizard now waits for the zypp/zypper lock (e.g. YaST, packagekit, background refresh) instead of failing instantly.

@@ -4947,6 +4947,7 @@ generate_dashboard() {
           <button class="pill" type="button" id="self-update-changelog-btn" title="Fetch latest changelog from GitHub">Fetch changelog</button>
         </div>
         <div id="self-update-detail" style="margin-top:6px; font-size:0.86rem; color: var(--muted); font-weight: 800;"></div>
+        <div id="self-update-tech" class="znh-hidden" style="margin-top:4px; font-size:0.78rem; color: rgba(148,163,184,0.88); font-weight: 800;"></div>
         <div style="margin-top:10px;">
           <pre id="self-update-changelog" style="max-height: 280px;">(tip: click “Fetch changelog”, then “Update” if a newer build is available)</pre>
         </div>
@@ -7529,6 +7530,9 @@ generate_dashboard() {
                 }
             }
         } catch (e) {}
+
+        // Update advanced tech line (if available)
+        try { _selfUpdateMaybeRenderTech(_self_update_ui.last_status); } catch (eTech0) {}
     }
 
     function _selfUpdateGetChannel(cfg) {
@@ -7590,6 +7594,78 @@ generate_dashboard() {
         try { el.style.display = t ? '' : 'none'; } catch (e) {}
     }
 
+    function _selfUpdateSetTech(text) {
+        var el = document.getElementById('self-update-tech');
+        if (!el) return;
+        var t = String(text || '').trim();
+        el.textContent = t;
+        try {
+            if (t) el.classList.remove('znh-hidden');
+            else el.classList.add('znh-hidden');
+        } catch (e) {}
+    }
+
+    function _selfUpdateAdvancedUnlocked() {
+        // Advanced unlock is per page load. Exposed by the Settings drawer gate.
+        try { return !!window.__znh_settings_advanced_unlocked; } catch (e) { return false; }
+    }
+
+    function _selfUpdateMaybeRenderTech(st) {
+        // Only show technical details when the user explicitly unlocked Advanced.
+        if (!_selfUpdateAdvancedUnlocked()) {
+            _selfUpdateSetTech('');
+            return;
+        }
+        st = st || null;
+        if (!st) {
+            _selfUpdateSetTech('');
+            return;
+        }
+
+        // Requested by user: show rolling compare path + sha256 prefixes.
+        var ch = '';
+        try { ch = String(st.channel || st.configured_target_channel || ''); } catch (e0) { ch = ''; }
+        ch = String(ch || '').toLowerCase();
+        if (ch !== 'rolling') {
+            _selfUpdateSetTech('');
+            return;
+        }
+
+        var lsha = '';
+        var rsha = '';
+        var pth = '';
+        var rref = '';
+        try { lsha = String(((st.installed || {}).script_sha256) || ''); } catch (e1) { lsha = ''; }
+        try { rsha = String(((st.remote || {}).script_sha256) || ''); } catch (e2) { rsha = ''; }
+        try { pth = String(((st.remote || {}).script_path) || ''); } catch (e3) { pth = ''; }
+        try { rref = String(((st.remote || {}).ref) || st.remote_ref || ''); } catch (e4) { rref = ''; }
+
+        function shortHex(s, n) {
+            try {
+                s = String(s || '').trim();
+                if (!s) return '';
+                if (s.length <= n) return s;
+                return s.slice(0, n);
+            } catch (e) {
+                return '';
+            }
+        }
+
+        var l12 = shortHex(lsha, 12);
+        var r12 = shortHex(rsha, 12);
+        var ref7 = shortHex(rref, 7);
+        var match = (lsha && rsha && lsha === rsha) ? 'yes' : 'no';
+
+        var parts = [];
+        if (ref7) parts.push('remote=' + ref7);
+        if (pth) parts.push('path=' + pth);
+        if (l12) parts.push('local_sha256=' + l12);
+        if (r12) parts.push('remote_sha256=' + r12);
+        if (l12 && r12) parts.push('match=' + match);
+
+        _selfUpdateSetTech(parts.length ? ('Tech: ' + parts.join(' • ')) : '');
+    }
+
     function _selfUpdateSetRunBtn(enabled, label) {
         var btn = document.getElementById('self-update-run-btn');
         if (!btn) return;
@@ -7636,6 +7712,7 @@ generate_dashboard() {
                 try { _self_update_ui.job_running = false; } catch (eRun1) {}
             }
             try { _self_update_ui.last_status = r; } catch (eRun2) {}
+            try { _selfUpdateMaybeRenderTech(r); } catch (eRun3) {}
 
             // Dashboard update notification: if the installed helper is newer than the version that
             // generated this HTML, prompt the user to refresh/reload to pick up new features.
@@ -8257,7 +8334,95 @@ generate_dashboard() {
         });
     }
 
-    function _suRenderReleaseNotesOk(title, subtitle, logText, notesText) {
+    function _suFetchRollingCommitsText() {
+        var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
+        return _githubApiJson(base + '/commits?per_page=18').then(function(arr) {
+            var out = [];
+            out.push('Rolling channel (latest commits on main)');
+            out.push('');
+
+            // Robustness: GitHub may return a JSON object instead of an array (rate limit, auth error, etc.).
+            if (!Array.isArray(arr)) {
+                var msg0 = '';
+                try { msg0 = String((arr && arr.message) ? arr.message : 'unexpected GitHub response'); } catch (e0) { msg0 = 'unexpected GitHub response'; }
+                out.push('ERROR: ' + msg0);
+                return out.join('\n');
+            }
+
+            if (arr.length === 0) {
+                out.push('(no commits returned)');
+                return out.join('\n');
+            }
+
+            arr.forEach(function(c) {
+                var sha = (c && c.sha) ? String(c.sha).slice(0, 7) : '???????';
+                var msg = '';
+                try { msg = String(((c || {}).commit || {}).message || ''); } catch (e) { msg = ''; }
+                msg = msg.split('\n')[0];
+                var dt = '';
+                try { dt = String((((c || {}).commit || {}).author || {}).date || ''); } catch (e) { dt = ''; }
+                out.push('- ' + sha + (dt ? (' ' + dt) : '') + ' ' + msg);
+            });
+            return out.join('\n');
+        });
+    }
+
+    function _suBoundText(s, maxChars) {
+        try {
+            s = String(s || '');
+            var n = parseInt(maxChars || 0, 10) || 0;
+            if (n > 0 && s.length > n) {
+                s = s.slice(s.length - n);
+            }
+        } catch (e) {
+            s = '';
+        }
+        return s;
+    }
+
+    function _suVerifyTextFromStatus(st, chHint) {
+        // Returns a short, user-friendly verification phrase.
+        st = st || null;
+        var ch = '';
+        try { ch = String((st && (st.channel || st.configured_target_channel)) || chHint || '').toLowerCase(); } catch (e) { ch = ''; }
+        if (ch !== 'stable' && ch !== 'rolling') ch = String(chHint || '').toLowerCase();
+
+        if (!st) return '';
+
+        try {
+            if (st.is_externally_managed) return '';
+        } catch (eM) {}
+
+        if (ch === 'rolling') {
+            var lsha = '';
+            var rsha = '';
+            try { lsha = String(((st.installed || {}).script_sha256) || ''); } catch (e1) { lsha = ''; }
+            try { rsha = String(((st.remote || {}).script_sha256) || ''); } catch (e2) { rsha = ''; }
+            if (lsha && rsha) {
+                return (lsha === rsha) ? 'Verified: rolling checksum match.' : 'Warning: rolling checksum mismatch.';
+            }
+            try {
+                if (st.up_to_date) return 'Verified: up to date.';
+            } catch (e3) {}
+            return '';
+        }
+
+        if (ch === 'stable') {
+            var inst = '';
+            var remote = '';
+            try { inst = String(st.installed_ref || ''); } catch (e4) { inst = ''; }
+            try { remote = String(st.remote_ref || ''); } catch (e5) { remote = ''; }
+            try {
+                if (st.up_to_date && remote) return 'Verified: installed matches ' + remote + '.';
+            } catch (e6) {}
+            if (inst && remote && inst === remote) return 'Verified: installed matches ' + remote + '.';
+            return '';
+        }
+
+        return '';
+    }
+
+    function _suRenderReleaseNotesOk(title, subtitle, logText, notesText, notesHeader) {
         var e = _suEls();
         if (!e.body) return;
 
@@ -8265,17 +8430,26 @@ generate_dashboard() {
             return String(s || '').replace(/</g, '&lt;');
         };
 
+        var hdr = '';
+        try { hdr = String(notesHeader || ''); } catch (eH) { hdr = ''; }
+        if (!hdr) {
+            hdr = (_su && _su.channel === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+        }
+
         if (e.step) e.step.textContent = 'Complete';
-        if (e.mode) e.mode.textContent = 'Release notes';
+        if (e.mode) e.mode.textContent = (_su && _su.channel === 'rolling') ? 'Rolling notes' : 'Release notes';
         if (e.title) e.title.textContent = String(title || 'Done');
 
         e.body.innerHTML = [
             '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
             '<div class="overlay-scroll">',
-              '<div style="font-weight:950; margin-bottom: 8px;">Live log</div>',
-              '<pre class="overlay-pre" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
-              '<div style="font-weight:950; margin-top: 14px; margin-bottom: 8px;">Latest stable release notes</div>',
-              '<pre class="overlay-pre" style="max-height: 260px;">' + safe(notesText || '(no release notes)') + '</pre>',
+              '<div style="display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin-bottom: 8px;">',
+              '  <div style="font-weight:950;">Live log</div>',
+              '  <button class="pill" type="button" onclick="copyBlock(\'su-done-log\', this)" title="Copy the post-update live log">Copy</button>',
+              '</div>',
+              '<pre class="overlay-pre" id="su-done-log" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
+              '<div style="font-weight:950; margin-top: 14px; margin-bottom: 8px;">' + safe(hdr) + '</div>',
+              '<pre class="overlay-pre" style="max-height: 260px;">' + safe(notesText || '(no notes)') + '</pre>',
             '</div>',
             '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
         ].join('\n');
@@ -8381,6 +8555,11 @@ generate_dashboard() {
                         try { _self_update_ui.job_running = false; } catch (eU0) {}
                         try { _selfUpdateUiApplyLocks(); } catch (eU1) {}
 
+                        // Capture log tail so post-reload UI can show "Live log" even after reload.
+                        var _doneLog = '';
+                        try { _doneLog = String(document.getElementById('su-live-log').textContent || ''); } catch (e6a) { _doneLog = ''; }
+                        _doneLog = _suBoundText(_doneLog, 120000);
+
                         // Post-success actions:
                         // - refresh status
                         // - optionally refresh dashboard + reload
@@ -8389,10 +8568,23 @@ generate_dashboard() {
                         }, 900);
 
                         if (!dry_run) {
+                            // Persist details across reload for a more trustworthy confirmation view.
                             try {
                                 localStorage.setItem('znh_su_post_success', '1');
                                 localStorage.setItem('znh_su_channel', String(ch || 'stable'));
+                                localStorage.setItem('znh_su_last_log', _doneLog || '');
+                                localStorage.setItem('znh_su_last_job_id', String(job_id || ''));
                             } catch (e3) {}
+
+                            // Best-effort verification snapshot: store status payload so we can show
+                            // "Verified: checksum match" after reload.
+                            try {
+                                _api('/api/self-update/status?channel=' + encodeURIComponent(String(ch || 'stable')), { method: 'GET' }).then(function(st0) {
+                                    try {
+                                        localStorage.setItem('znh_su_last_status', JSON.stringify(st0 || {}));
+                                    } catch (eS0) {}
+                                }).catch(function() {});
+                            } catch (eS1) {}
 
                             // Dashboard refresh is also performed server-side, but do a best-effort call here too.
                             try { _api('/api/dashboard/refresh', { method: 'POST', body: JSON.stringify({}) }); } catch (e4) {}
@@ -8400,16 +8592,19 @@ generate_dashboard() {
                             // Reload fairly soon so the UI restarts "fresh".
                             setTimeout(function() {
                                 try { window.location.reload(); } catch (e5) {}
-                            }, 3500);
+                            }, 4200);
                         } else {
                             // Dry-run finished: show release notes + OK button.
                             var logText = '';
                             try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e6) { logText = ''; }
-                            _suFetchStableReleaseNotesText().then(function(notes) {
-                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, notes);
+                            logText = _suBoundText(logText, 120000);
+                            var notesHdrDR = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+                            var fetchNotesDR = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+                            fetchNotesDR().then(function(notes) {
+                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, notes, notesHdrDR);
                             }).catch(function(err) {
-                                var msg = (err && err.message) ? err.message : 'failed to fetch release notes';
-                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, 'ERROR: ' + msg);
+                                var msg = (err && err.message) ? err.message : 'failed to fetch notes';
+                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, 'ERROR: ' + msg, notesHdrDR);
                             });
                         }
                     } else {
@@ -8484,32 +8679,114 @@ generate_dashboard() {
         try { flag = localStorage.getItem('znh_su_post_success') || ''; } catch (e) { flag = ''; }
         if (flag !== '1') return;
 
+        var ch = 'stable';
+        var lastLog = '';
+        var lastStatus = null;
+        var lastJobId = '';
+        try { ch = String(localStorage.getItem('znh_su_channel') || 'stable'); } catch (e0) { ch = 'stable'; }
+        if (ch !== 'stable' && ch !== 'rolling') ch = 'stable';
+        try { lastLog = String(localStorage.getItem('znh_su_last_log') || ''); } catch (e1) { lastLog = ''; }
+        lastLog = _suBoundText(lastLog, 120000);
+        try { lastJobId = String(localStorage.getItem('znh_su_last_job_id') || ''); } catch (e1b) { lastJobId = ''; }
+        try {
+            var rawSt = String(localStorage.getItem('znh_su_last_status') || '');
+            lastStatus = rawSt ? JSON.parse(rawSt) : null;
+        } catch (e2a) {
+            lastStatus = null;
+        }
+
+        // Clear flags so this only runs once.
         try {
             localStorage.removeItem('znh_su_post_success');
             localStorage.removeItem('znh_su_channel');
+            localStorage.removeItem('znh_su_last_log');
+            localStorage.removeItem('znh_su_last_job_id');
+            localStorage.removeItem('znh_su_last_status');
         } catch (e2) {}
 
         // Refresh status.
         try { selfUpdateFetchStatus(false); } catch (e3) {}
 
-        // Update the main changelog area too.
+        // Update the main changelog area too (stable is friendlier for most users).
         var old = (_settingsConfig && _settingsConfig.SELF_UPDATE_CHANNEL) ? String(_settingsConfig.SELF_UPDATE_CHANNEL) : 'stable';
         try { _settingsConfig.SELF_UPDATE_CHANNEL = 'stable'; } catch (e4) {}
         selfUpdateFetchChangelog(null).finally(function() {
             try { _settingsConfig.SELF_UPDATE_CHANNEL = old; } catch (e5) {}
         });
 
-        // Open a blocking OK dialog that shows the full latest release notes.
-        _suReset();
-        _su.channel = 'stable';
-        _suShow(true);
-        _suUpdateProgress('Done', 100);
-        _suSetLog('');
-        _suFetchStableReleaseNotesText().then(function(notes) {
-            _suRenderReleaseNotesOk('Update installed successfully', 'The helper is running normally.', '', notes);
-        }).catch(function(err) {
-            var msg = (err && err.message) ? err.message : 'failed to fetch release notes';
-            _suRenderReleaseNotesOk('Update installed successfully', 'The helper is running normally.', '', 'ERROR: ' + msg);
+        // Post-reload trust UX:
+        // - show the actual log tail even if the in-page log capture failed
+        // - show a "Verified" message when checksums/tags match
+        var statusP = null;
+        try {
+            statusP = lastStatus ? Promise.resolve(lastStatus) : _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).catch(function() { return null; });
+        } catch (eSP) {
+            statusP = Promise.resolve(lastStatus);
+        }
+
+        var logP = null;
+        try {
+            if (String(lastLog || '').trim()) {
+                logP = Promise.resolve(lastLog);
+            } else if (String(lastJobId || '').trim()) {
+                logP = _api('/api/self-update/job?job_id=' + encodeURIComponent(lastJobId), { method: 'GET' }).then(function(j) {
+                    try { return _suBoundText(String((j && j.output) ? j.output : ''), 120000); } catch (e) { return ''; }
+                }).catch(function() { return ''; });
+            } else {
+                logP = Promise.resolve('');
+            }
+        } catch (eLP) {
+            logP = Promise.resolve(lastLog);
+        }
+
+        Promise.all([statusP, logP]).then(function(arr) {
+            var st = (arr && arr.length) ? arr[0] : null;
+            var live0 = (arr && arr.length > 1) ? arr[1] : '';
+
+            var verify = '';
+            try { verify = _suVerifyTextFromStatus(st, ch); } catch (eV0) { verify = ''; }
+            var subtitle = 'The helper is running normally.';
+            if (verify) subtitle = subtitle + ' ' + verify;
+
+            // Open a blocking OK dialog that shows the full latest stable release notes (or rolling commits).
+            _suReset();
+            _su.channel = ch;
+            _suShow(true);
+            _suUpdateProgress('Done', 100);
+            _suSetLog('');
+
+            // If there was no captured log, keep UX explicit.
+            var live = live0;
+            if (!String(live || '').trim()) live = '(no output captured)';
+
+            var notesHdr = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+            var fetchNotes = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+            fetchNotes().then(function(notes) {
+                _suRenderReleaseNotesOk('Update installed successfully', subtitle, live, notes, notesHdr);
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'failed to fetch notes';
+                _suRenderReleaseNotesOk('Update installed successfully', subtitle, live, 'ERROR: ' + msg, notesHdr);
+            });
+        }).catch(function() {
+            // If anything fails, fall back to the old behavior.
+            var subtitle2 = 'The helper is running normally.';
+            var live2 = lastLog;
+            if (!String(live2 || '').trim()) live2 = '(no output captured)';
+
+            _suReset();
+            _su.channel = ch;
+            _suShow(true);
+            _suUpdateProgress('Done', 100);
+            _suSetLog('');
+
+            var notesHdr2 = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+            var fetchNotes2 = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+            fetchNotes2().then(function(notes) {
+                _suRenderReleaseNotesOk('Update installed successfully', subtitle2, live2, notes, notesHdr2);
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'failed to fetch notes';
+                _suRenderReleaseNotesOk('Update installed successfully', subtitle2, live2, 'ERROR: ' + msg, notesHdr2);
+            });
         });
     }
 
@@ -9480,6 +9757,7 @@ generate_dashboard() {
         var advancedUnlocked = false;
         var dangerUnlocked = false; // never persisted for safety
         try { window.__znh_settings_danger_unlocked = false; } catch (e) {}
+        try { window.__znh_settings_advanced_unlocked = false; } catch (e2) {}
 
         var advRows = [];
         var dangerRows = [];
@@ -9630,8 +9908,15 @@ generate_dashboard() {
                     try { dangCb.checked = false; } catch (e) {}
                 }
 
+                // Expose advanced unlock state globally so other parts of the UI can
+                // show extra technical details only when explicitly unlocked.
+                try { window.__znh_settings_advanced_unlocked = !!(showAdvanced && advancedUnlocked); } catch (e0) {}
+
                 _applyAdvancedVisibility();
                 _applyDangerLock();
+
+                // Best-effort: refresh any advanced-only status helpers (e.g., self-update tech line).
+                try { _selfUpdateUiApplyLocks(); } catch (e1) {}
             }
 
             function tryUnlockAdvanced() {
