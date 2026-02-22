@@ -7859,7 +7859,10 @@ generate_dashboard() {
         running: false,
         dry_run: false,
         auto_dry_run: false,
-        required_phrase: 'UPDATE'
+        required_phrase: 'UPDATE',
+        // Optional post-action to help apply new units/wrappers after updating the script.
+        // none | verify | install
+        post_action: 'none'
     };
 
     function _suEls() {
@@ -7968,6 +7971,7 @@ generate_dashboard() {
         _su.dry_run = false;
         _su.auto_dry_run = false;
         _su.required_phrase = 'UPDATE';
+        _su.post_action = 'none';
         _suSetMinBtnVisible(false);
         if (_su.poll_timer) {
             try { clearInterval(_su.poll_timer); } catch (e) {}
@@ -8224,6 +8228,15 @@ generate_dashboard() {
             '  <label class="pill" style="gap:10px; justify-content:flex-start;">',
             '    <input id="su-dry-run" type="checkbox" /> Dry-run test (download + verify only; does NOT replace the installed program)',
             '  </label>',
+            '  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+            '    <span style="font-size:0.88rem; color: var(--muted); font-weight: 800;">After update:</span>',
+            '    <select id="su-post-action" style="padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);">',
+            '      <option value="none">Quick update only (atomic script swap)</option>',
+            '      <option value="verify">Verify & Fix (recommended)</option>',
+            '      <option value="install">Full install (recreate services/wrappers)</option>',
+            '    </select>',
+            '  </div>',
+            '  <div style="color: var(--muted); font-size:0.84rem;">Quick update replaces only the helper script file. Verify/Install will also run extra checks after updating so new units/scripts are applied.</div>',
             '</div>',
             '<div class="overlay-progress">',
             '  <div class="overlay-progress-row"><span id="su-stage">Waiting</span><span id="su-percent">0%</span></div>',
@@ -8273,8 +8286,41 @@ generate_dashboard() {
             });
         }
 
+        var postSel = document.getElementById('su-post-action');
+
+        function _suNormalizePostAction(v) {
+            v = String(v || '').toLowerCase();
+            if (v !== 'none' && v !== 'verify' && v !== 'install') v = 'none';
+            return v;
+        }
+
+        function syncPostActionDisabled() {
+            if (!postSel) return;
+            var isDry = false;
+            try { isDry = !!(dry && dry.checked); } catch (eD0) { isDry = false; }
+            if (isDry) {
+                try { postSel.value = 'none'; } catch (eD1) {}
+                _su.post_action = 'none';
+                try { postSel.disabled = true; } catch (eD2) {}
+            } else {
+                try { postSel.disabled = false; } catch (eD3) {}
+            }
+        }
+
+        if (postSel) {
+            try { postSel.value = _suNormalizePostAction(_su.post_action); } catch (eP0) {}
+            postSel.addEventListener('change', function() {
+                try { _su.post_action = _suNormalizePostAction(postSel.value); } catch (eP1) { _su.post_action = 'none'; }
+                syncPostActionDisabled();
+            });
+        }
+
         if (inp) inp.addEventListener('input', updateInstallEnabled);
-        if (dry) dry.addEventListener('change', function() { _su.dry_run = !!dry.checked; });
+        if (dry) dry.addEventListener('change', function() {
+            _su.dry_run = !!dry.checked;
+            syncPostActionDisabled();
+        });
+        syncPostActionDisabled();
         updateInstallEnabled();
     }
 
@@ -8547,7 +8593,25 @@ generate_dashboard() {
                     var rc = (j.rc != null) ? parseInt(j.rc, 10) : -1;
 
                     if (rc === 0) {
-                        toast('Self-update finished', dry_run ? 'Dry-run OK (no install)' : 'Installed OK', 'ok');
+                        var postAction = 'none';
+                        var postRc = 0;
+                        try { postAction = String((j && j.post_action != null) ? j.post_action : 'none'); } catch (ePA1) { postAction = 'none'; }
+                        try { postRc = parseInt((j && j.post_action_rc != null) ? j.post_action_rc : 0, 10) || 0; } catch (ePA2) { postRc = 0; }
+                        postAction = String(postAction || 'none').toLowerCase();
+                        if (postAction !== 'none' && postAction !== 'verify' && postAction !== 'install') postAction = 'none';
+
+                        if (dry_run) {
+                            toast('Self-update finished', 'Dry-run OK (no install)', 'ok');
+                        } else if (postAction !== 'none') {
+                            if (postRc === 0) {
+                                toast('Self-update finished', 'Installed OK + ' + (postAction === 'verify' ? 'verify OK' : 'install OK'), 'ok');
+                            } else {
+                                toast('Post-update step failed', (postAction === 'verify' ? 'verify' : 'install') + ' rc=' + String(postRc) + ' (update installed)', 'err');
+                            }
+                        } else {
+                            toast('Self-update finished', 'Installed OK', 'ok');
+                        }
+
                         _suUpdateProgress(dry_run ? 'Dry-run done' : 'Done', 100);
                         try { znhTaskDone('self-update', true); } catch (e_task3) {}
 
@@ -8866,13 +8930,25 @@ generate_dashboard() {
 
             toast('Self-update starting…', dry ? 'Dry-run test (no install)' : ('Channel=' + ch), 'ok');
 
+            var postAction = 'none';
+            try {
+                var sel = document.getElementById('su-post-action');
+                postAction = sel ? String(sel.value || 'none') : String(_su.post_action || 'none');
+            } catch (ePA0) {
+                postAction = String(_su.post_action || 'none');
+            }
+            postAction = String(postAction || 'none').toLowerCase();
+            if (postAction !== 'none' && postAction !== 'verify' && postAction !== 'install') postAction = 'none';
+            if (dry) postAction = 'none';
+
             _api('/api/self-update/start', {
                 method: 'POST',
                 body: JSON.stringify({
                     channel: ch,
                     confirm_token: confirmToken,
                     confirm_phrase: got,
-                    dry_run: dry
+                    dry_run: dry,
+                    post_action: postAction
                 })
             }).then(function(res) {
                 if (!res || !res.job_id) {
@@ -21092,15 +21168,32 @@ check_and_install() {
 
     log_debug "Checking for command: $cmd (package: $package)"
 
+    local interactive
+    interactive=1
+
+    # Non-interactive contexts (systemd-run jobs / WebUI installs) have no stdin.
+    # In that case we must NOT block on prompts (and must avoid set -e aborting on read).
+    if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then
+        interactive=0
+    fi
+
     if ! command -v "$cmd" &> /dev/null; then
         log_info "---"
         log_info "⚠️  Dependency missing: '$cmd' ($purpose)."
         log_info "   This is provided by the package '$package'."
-        read -p "   Install it now? [Y/n]: " -r REPLY
-        REPLY="${REPLY:-Y}"
-        log_debug "User response: $REPLY"
 
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        local reply
+        reply="Y"
+
+        if [ "${interactive}" -eq 1 ] 2>/dev/null; then
+            read -p "   Install it now? [Y/n]: " -r reply || true
+            reply="${reply:-Y}"
+            log_debug "User response: $reply"
+        else
+            log_info "Non-interactive mode: auto-installing required dependency package '$package'"
+        fi
+
+        if [[ ${reply:-Y} =~ ^[Yy]$ ]]; then
             log_info "Installing $package..."
             update_status "Installing dependency: $package"
 
@@ -22139,7 +22232,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
     log_info "ℹ Recommended tool missing: 'shellcheck' (ShellCheck)"
     log_info "   Purpose: Bash static analysis (helps catch quoting/syntax bugs early)"
     log_info "   Package: ShellCheck"
-    read -p "   Install ShellCheck now? [Y/n]: " -r REPLY_SHELLCHECK
+    read -p "   Install ShellCheck now? [Y/n]: " -r REPLY_SHELLCHECK || true
     REPLY_SHELLCHECK="${REPLY_SHELLCHECK:-Y}"
     log_debug "User response (ShellCheck): $REPLY_SHELLCHECK"
 
@@ -22174,7 +22267,7 @@ log_debug "Checking for PyGObject..."
 if ! python3 -c "import gi" &> /dev/null; then
     log_info "---"
     log_info "⚠️  Dependency missing: 'python3-gobject' (for notifications)."
-    read -p "   Install python3-gobject now? [Y/n]: " -r REPLY_GI
+    read -p "   Install python3-gobject now? [Y/n]: " -r REPLY_GI || true
     REPLY_GI="${REPLY_GI:-Y}"
     log_debug "User response (PyGObject): $REPLY_GI"
 
@@ -28343,6 +28436,22 @@ def _recover_self_update_job(job_id: str) -> dict | None:
         else:
             stage = "Failed"
 
+    post_action = str(status.get("post_action", "") or "").strip().lower()
+    if post_action not in ("none", "verify", "install"):
+        post_action = "none"
+
+    post_action_rc = 0
+    try:
+        post_action_rc = int(str(status.get("post_action_rc", "0") or "0").strip() or "0")
+    except Exception:
+        post_action_rc = 0
+
+    update_rc = rc
+    try:
+        update_rc = int(str(status.get("update_rc", rc if rc is not None else 0) or "0").strip() or "0")
+    except Exception:
+        update_rc = rc
+
     return {
         "job_id": jid,
         "type": "self-update",
@@ -28352,6 +28461,9 @@ def _recover_self_update_job(job_id: str) -> dict | None:
         "running": bool(running),
         "done": bool(done),
         "rc": rc,
+        "update_rc": update_rc,
+        "post_action": post_action,
+        "post_action_rc": post_action_rc,
         "stage": stage,
         "progress": int(progress),
         "output": tail,
@@ -29230,6 +29342,12 @@ class Handler(BaseHTTPRequestHandler):
             confirm_token = str(body.get("confirm_token", "") or "").strip()
             confirm_phrase = str(body.get("confirm_phrase", "") or "").strip().upper()
 
+            post_action = str(body.get("post_action", "none") or "none").strip().lower()
+            if post_action not in ("none", "verify", "install"):
+                post_action = "none"
+            if dry_run:
+                post_action = "none"
+
             now_ts = time.time()
             _confirm_purge(now_ts)
             with tokens_lock:
@@ -29266,6 +29384,9 @@ class Handler(BaseHTTPRequestHandler):
                 with open(status_path, "w", encoding="utf-8") as f:
                     f.write(f"done=0\n")
                     f.write(f"rc=0\n")
+                    f.write(f"update_rc=0\n")
+                    f.write(f"post_action={post_action}\n")
+                    f.write(f"post_action_rc=0\n")
                     f.write(f"stage=starting\n")
                     f.write(f"channel={ch}\n")
                     f.write(f"dry_run={1 if dry_run else 0}\n")
@@ -29282,15 +29403,21 @@ class Handler(BaseHTTPRequestHandler):
                 f'STATUS={shlex.quote(status_path)}',
                 f'CHANNEL={shlex.quote(ch)}',
                 f'DRY_RUN={"1" if dry_run else "0"}',
+                f'POST_ACTION={shlex.quote(post_action)}',
                 'mkdir -p /var/log/zypper-auto/service-logs || true',
                 'mkdir -p /var/lib/zypper-auto || true',
                 'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                'UPDATE_RC=0',
+                'POST_ACTION_RC=0',
                 'write_status() {',
                 '  local done="$1"; local rc="$2"; local stage="$3"',
                 '  local tmp="${STATUS}.tmp.$$"',
                 '  {',
                 '    echo "done=${done}"',
                 '    echo "rc=${rc}"',
+                '    echo "update_rc=${UPDATE_RC:-0}"',
+                '    echo "post_action=${POST_ACTION:-none}"',
+                '    echo "post_action_rc=${POST_ACTION_RC:-0}"',
                 '    echo "stage=${stage}"',
                 '    echo "channel=${CHANNEL:-}"',
                 '    echo "dry_run=${DRY_RUN:-0}"',
@@ -29307,17 +29434,38 @@ class Handler(BaseHTTPRequestHandler):
                 'echo "" >>"$LOG" || true',
                 f'echo "CMD: {su_cmd}" >>"$LOG" || true',
                 'echo "" >>"$LOG" || true',
+                f'echo "POST_ACTION: {post_action}" >>"$LOG" || true',
+                'echo "" >>"$LOG" || true',
                 'export ZNH_SELF_UPDATE_NO_UI=1',
+                'export ZNH_NON_INTERACTIVE=1',
                 'write_status 0 0 running',
                 'set +e',
                 f'( {su_cmd} ) 2>&1 | tee -a "$LOG"',
                 'rc=${PIPESTATUS[0]}',
                 'set -e',
+                'UPDATE_RC=${rc}',
                 'echo "" >>"$LOG" || true',
                 'echo "[webui] self-update rc=$rc" >>"$LOG" || true',
                 'if [ ${rc} -eq 0 ] && [ "${DRY_RUN:-0}" != "1" ]; then',
                 '  write_status 0 ${rc} refreshing-dashboard',
                 f'  ( {HELPER_BIN} --dashboard ) >>"$LOG" 2>&1 || echo "[WARN] dashboard refresh failed (continuing)" >>"$LOG" || true',
+                '  if [ "${POST_ACTION:-none}" = "verify" ]; then',
+                '    write_status 0 ${rc} post-verify',
+                '    set +e',
+                f'    ( {HELPER_BIN} --verify ) >>"$LOG" 2>&1',
+                '    POST_ACTION_RC=$?',
+                '    set -e',
+                '    echo "[webui] post-verify rc=${POST_ACTION_RC}" >>"$LOG" || true',
+                '    if [ "${POST_ACTION_RC}" -ne 0 ] 2>/dev/null; then echo "[webui] WARNING: verify reported issues (rc=${POST_ACTION_RC})" >>"$LOG" || true; fi',
+                '  elif [ "${POST_ACTION:-none}" = "install" ]; then',
+                '    write_status 0 ${rc} post-install',
+                '    set +e',
+                f'    ( {HELPER_BIN} install ) >>"$LOG" 2>&1',
+                '    POST_ACTION_RC=$?',
+                '    set -e',
+                '    echo "[webui] post-install rc=${POST_ACTION_RC}" >>"$LOG" || true',
+                '    if [ "${POST_ACTION_RC}" -ne 0 ] 2>/dev/null; then rc=${POST_ACTION_RC}; fi',
+                '  fi',
                 'fi',
                 'if [ ${rc} -eq 0 ]; then',
                 '  if [ "${DRY_RUN:-0}" = "1" ]; then write_status 1 ${rc} dry-run-done; else write_status 1 ${rc} done; fi',

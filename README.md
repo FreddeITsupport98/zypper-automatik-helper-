@@ -1724,6 +1724,7 @@ systemctl status zypper-autodownload.service
   - 🧿 **NEW:** Self-update panel shows a visible **LOCKED** badge during checks/runs so users understand why buttons are disabled.
   - 🧾 **IMPROVED:** after a successful self-update, the post-reload “Update installed successfully” dialog now preserves the live log tail (and offers a Copy button) and adds a short “Verified:” message when checksums/tags match.
   - 🧾 **IMPROVED:** the post-success dialog notes header is now channel-aware (shows **Rolling commits** when on rolling, and **Stable release notes** when on stable), so it’s obvious what you’re looking at.
+  - 🧰 **NEW:** self-update install step now has an **After update** mode: Quick update only, Verify & Fix (recommended), or Full install (recreate services/wrappers).
   - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
   - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
   - 🧰 **IMPROVED (advanced):** when Advanced settings are unlocked, the self-update panel shows a small technical line (remote raw path + short SHA256 prefixes) so you can verify exactly what it compared.
