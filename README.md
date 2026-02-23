@@ -1674,6 +1674,7 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🐛 **FIXED:** Full install after WebUI self-update no longer logs a scary `cp: ... are the same file` error when the helper is already running from `/usr/local/bin/zypper-auto-helper` (the command install step now skips self-copy).
   - 🐛 **FIXED:** Rocket Update Wizard now writes the transient-unit script to disk before calling `systemd-run` (avoids potential argv/D-Bus size issues that can cause errors like "Failed to start transient service unit: Connection reset by peer" on some systems).
   - 🐛 **FIXED:** Rocket Update Wizard now **streams zypper output live** into the WebUI log (instead of buffering until the command finishes), so it no longer looks “stuck” at 0% during long runs.
   - 🧰 **IMPROVED:** Rocket preview now retries `systemd-run` without `--pipe` and captures output via a log file on transient-unit start failures (improves compatibility on some systems).

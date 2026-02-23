@@ -27628,8 +27628,23 @@ fi
 log_debug "Installer script path: $INSTALLER_SCRIPT_PATH"
 log_debug "Command installation path: $COMMAND_PATH"
 
-# Copy the installer script to /usr/local/bin
-if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PATH" "$COMMAND_PATH"; then
+# Copy the installer script to /usr/local/bin.
+# IMPORTANT: when running the helper *from* /usr/local/bin (common after self-update),
+# INSTALLER_SCRIPT_PATH and COMMAND_PATH can refer to the same inode.
+# In that case, a self-copy is pointless and prints a scary error:
+#   cp: '.../zypper-auto-helper' and '.../zypper-auto-helper' are the same file
+# So we detect and skip it.
+command_install_ok=0
+if [ -f "${COMMAND_PATH}" ] && [ -f "${INSTALLER_SCRIPT_PATH}" ] && [ "${INSTALLER_SCRIPT_PATH}" -ef "${COMMAND_PATH}" ] 2>/dev/null; then
+    log_info "Command already installed at ${COMMAND_PATH} (same file); skipping copy"
+    command_install_ok=1
+else
+    if execute_guarded "Install command to ${COMMAND_PATH}" cp "$INSTALLER_SCRIPT_PATH" "$COMMAND_PATH"; then
+        command_install_ok=1
+    fi
+fi
+
+if [ "${command_install_ok}" -eq 1 ] 2>/dev/null; then
     # NOTE: Because this script uses umask 077, a plain 'chmod +x' would
     # result in 700 (root-only). We want the command to be runnable by the
     # desktop user (wrappers may still use sudo for privileged operations).
