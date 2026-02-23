@@ -5003,7 +5003,8 @@ generate_dashboard() {
     <div class="card">
       <h2>⚡ Quick Actions</h2>
       <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
-        Most buttons copy a command to your clipboard (your browser will not run it automatically). “Run: Refresh Dashboard” triggers a sudo-free refresh via the localhost API.
+        These buttons can run safe helper actions via the localhost API and show output in a small terminal-like window (minimize/close supported).
+        Interactive actions that require a real terminal will stay copy-only for safety.
       </div>
       <div class="action-grid">
         <button class="cmd-btn" id="dash-refresh-run-btn" type="button" title="Regenerate the dashboard via the localhost API (requires Settings API running)">
@@ -5011,35 +5012,35 @@ generate_dashboard() {
             <span class="cmd-desc">Via localhost API (127.0.0.1:8766) • reloads after refresh</span>
             <div class="cmd-copy-feedback">Refreshing…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --verify', this)">
-            <span class="cmd-label">Verify & Fix</span>
+        <button class="cmd-btn" id="rocket-wizard-open-btn" type="button" title="Open the Rocket Update Wizard (preview → confirm → run)">
+            <span class="cmd-label">Open: Rocket Update Wizard</span>
+            <span class="cmd-desc">Default update flow (recommended) • preview first</span>
+            <div class="cmd-copy-feedback">Opening…</div>
+        </button>
+        <button class="cmd-btn" data-qa="verify" data-qa-copy="sudo zypper-auto-helper --verify">
+            <span class="cmd-label">Run: Verify & Fix</span>
             <span class="cmd-desc">Health checks + auto-repair (includes RPM DB repair)</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+            <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper install', this)">
-            <span class="cmd-label">Install Updates</span>
-            <span class="cmd-desc">Launch the interactive updater</span>
-            <div class="cmd-copy-feedback">Copied!</div>
-        </button>
-        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --health', this)">
-            <span class="cmd-label">Health Report</span>
+        <button class="cmd-btn" data-qa="health" data-qa-copy="sudo zypper-auto-helper --health">
+            <span class="cmd-label">Run: Health Report</span>
             <span class="cmd-desc">Analyze recent runs (errors, locks, crashes)</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+            <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --logs', this)">
-            <span class="cmd-label">View Logs</span>
+        <button class="cmd-btn" data-qa="logs" data-qa-copy="sudo zypper-auto-helper --logs">
+            <span class="cmd-label">Run: View Logs</span>
             <span class="cmd-desc">Tail recent installer/service/notifier logs</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+            <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --reset-downloads', this)">
-            <span class="cmd-label">Reset Downloads</span>
-            <span class="cmd-desc">Clear cached state + restart timers</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+        <button class="cmd-btn" data-qa="reset-downloads" data-qa-copy="sudo zypper-auto-helper --reset-downloads" data-qa-danger="1">
+            <span class="cmd-label">Run: Reset Downloads</span>
+            <span class="cmd-desc">Clear cached state + restart timers (confirmation required)</span>
+            <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --reset-config', this)">
-            <span class="cmd-label">Reset Config</span>
-            <span class="cmd-desc">Recreate defaults (with backup)</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+        <button class="cmd-btn" data-qa="reset-config" data-qa-copy="sudo zypper-auto-helper --reset-config" data-qa-danger="1">
+            <span class="cmd-label">Run: Reset Config</span>
+            <span class="cmd-desc">Recreate defaults (with backup) (confirmation required)</span>
+            <div class="cmd-copy-feedback">Running…</div>
         </button>
         <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --dashboard', this)">
             <span class="cmd-label">Copy: Refresh Dashboard</span>
@@ -5071,55 +5072,55 @@ generate_dashboard() {
               <span class="cmd-desc">Open served dashboard in browser</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --live-logs', this)">
+          <button class="cmd-btn" data-qa="live-logs" data-qa-copy="sudo zypper-auto-helper --live-logs" data-qa-interactive="1">
               <span class="cmd-label">Live Logs</span>
-              <span class="cmd-desc">Follow logs in real time (Ctrl+C)</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Interactive (requires terminal) • copy-only in WebUI</span>
+              <div class="cmd-copy-feedback">Open</div>
           </button>
           <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --rm-conflict', this)">
               <span class="cmd-label">Fix RPM Conflicts</span>
               <span class="cmd-desc">Clean safe duplicate RPM versions</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --check', this)">
-              <span class="cmd-label">Self Check</span>
+          <button class="cmd-btn" data-qa="self-check" data-qa-copy="zypper-auto-helper --check">
+              <span class="cmd-label">Run: Self Check</span>
               <span class="cmd-desc">Syntax checks only</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
           <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --test-notify', this)">
               <span class="cmd-label">Test Notification</span>
               <span class="cmd-desc">Verify GUI/DBus wiring</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --snapshot-state', this)">
-              <span class="cmd-label">Snapshot State</span>
+          <button class="cmd-btn" data-qa="snapshot-state" data-qa-copy="sudo zypper-auto-helper --snapshot-state">
+              <span class="cmd-label">Run: Snapshot State</span>
               <span class="cmd-desc">Write diagnostics snapshot</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --diag-bundle', this)">
-              <span class="cmd-label">Diag Bundle</span>
+          <button class="cmd-btn" data-qa="diag-bundle" data-qa-copy="sudo zypper-auto-helper --diag-bundle">
+              <span class="cmd-label">Run: Diag Bundle</span>
               <span class="cmd-desc">Collect a support bundle</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --diag-logs-on', this)">
-              <span class="cmd-label">Diag Logs ON</span>
-              <span class="cmd-desc">Enable aggregated log follower</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+          <button class="cmd-btn" data-qa="diag-logs-on" data-qa-copy="sudo zypper-auto-helper --diag-logs-on" data-qa-danger="1">
+              <span class="cmd-label">Run: Diag Logs ON</span>
+              <span class="cmd-desc">Enable aggregated log follower (confirmation required)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --diag-logs-off', this)">
-              <span class="cmd-label">Diag Logs OFF</span>
-              <span class="cmd-desc">Disable aggregated log follower</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+          <button class="cmd-btn" data-qa="diag-logs-off" data-qa-copy="sudo zypper-auto-helper --diag-logs-off" data-qa-danger="1">
+              <span class="cmd-label">Run: Diag Logs OFF</span>
+              <span class="cmd-desc">Disable aggregated log follower (confirmation required)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --setup-SF', this)">
+          <button class="cmd-btn" data-qa="setup-sf" data-qa-copy="sudo zypper-auto-helper --setup-SF" data-qa-interactive="1" data-qa-danger="1">
               <span class="cmd-label">Setup Snap/Flatpak</span>
-              <span class="cmd-desc">Install + configure stores/remotes</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Interactive + system changes • copy-only in WebUI</span>
+              <div class="cmd-copy-feedback">Open</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper debug', this)">
+          <button class="cmd-btn" data-qa="debug-menu" data-qa-copy="sudo zypper-auto-helper debug" data-qa-interactive="1">
               <span class="cmd-label">Debug Menu</span>
-              <span class="cmd-desc">Interactive diagnostics tools</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Interactive diagnostics tools • copy-only in WebUI</span>
+              <div class="cmd-copy-feedback">Open</div>
           </button>
           <button class="cmd-btn" id="self-update-sim-run-btn" type="button" title="Open self-update overlay in SAFE dry-run simulation mode (no install)">
               <span class="cmd-label">Simulate: Self-Update (Dry-run)</span>
@@ -6828,21 +6829,32 @@ generate_dashboard() {
     }
 
     function znhTaskSet(taskObj) {
-        // taskObj: {type:'self-update'|'system-update', job_id, channel?, dry_run?, simulate?, started_iso?}
+        // taskObj: {type:'self-update'|'system-update'|'quick-action', job_id, channel?, dry_run?, simulate?, action?, title?, started_iso?}
         if (!taskObj || !taskObj.type || !taskObj.job_id) return;
         if (!taskObj.started_iso) {
             try { taskObj.started_iso = new Date().toISOString(); } catch (e) {}
         }
         _znhTaskSave(taskObj);
 
-        var title = (taskObj.type === 'self-update') ? 'Update manager' : 'Update system';
+        var title = 'Task';
+        if (taskObj.type === 'self-update') title = 'Update manager';
+        else if (taskObj.type === 'system-update') title = 'Update system';
+        else if (taskObj.type === 'quick-action') {
+            try { title = String(taskObj.title || taskObj.action || 'Quick action'); } catch (e) { title = 'Quick action'; }
+        }
+
         _znhTaskBubbleSetText(title, 'Running…');
         _znhTaskBubbleSetVisible(true);
     }
 
     function znhTaskUpdateFromJob(taskType, job) {
         if (!job) return;
-        var title = (taskType === 'self-update') ? 'Update manager' : 'Update system';
+        var title = 'Task';
+        if (taskType === 'self-update') title = 'Update manager';
+        else if (taskType === 'system-update') title = 'Update system';
+        else if (taskType === 'quick-action') {
+            try { title = String(job.title || job.action || 'Quick action'); } catch (e) { title = 'Quick action'; }
+        }
 
         var st = '';
         try { st = String(job.stage || job.state || 'Running'); } catch (e) { st = 'Running'; }
@@ -6860,7 +6872,12 @@ generate_dashboard() {
     function znhTaskDone(taskType, ok) {
         // Clear persistent task state. Bubble hides shortly after.
         _znhTaskClear();
-        var title = (taskType === 'self-update') ? 'Update manager' : 'Update system';
+
+        var title = 'Task';
+        if (taskType === 'self-update') title = 'Update manager';
+        else if (taskType === 'system-update') title = 'Update system';
+        else if (taskType === 'quick-action') title = 'Quick action';
+
         _znhTaskBubbleSetText(title, ok ? 'Done' : 'Failed');
         _znhTaskBubbleSetVisible(true);
         setTimeout(function() { _znhTaskBubbleSetVisible(false); }, 8000);
@@ -6901,6 +6918,7 @@ generate_dashboard() {
         // Resume hidden polling (so bubble stays accurate) without forcing the overlay open.
         try { _suReset(); } catch (e0) {}
         try { _ruReset(); } catch (e1) {}
+        try { if (typeof _qaReset === 'function') _qaReset(); } catch (e1b) {}
 
         if (t.type === 'self-update') {
             try { _su.channel = String(t.channel || 'stable'); } catch (e2) {}
@@ -6913,6 +6931,18 @@ generate_dashboard() {
             try { _suShow(false); } catch (e8) {}
             try { _ruRenderRunning(t); } catch (e9) {}
             try { _ruPollJob(String(t.job_id)); } catch (e10) {}
+        } else if (t.type === 'quick-action') {
+            try {
+                if (typeof _qaRenderRunning === 'function') {
+                    _suShow(false);
+                    _qaRenderRunning(t);
+                }
+            } catch (e11) {}
+            try {
+                if (typeof _qaPollJob === 'function') {
+                    _qaPollJob(String(t.job_id), String(t.action || ''), String(t.title || 'Quick action'));
+                }
+            } catch (e12) {}
         }
     }
 
@@ -7362,6 +7392,39 @@ generate_dashboard() {
         if (!btn) return;
         btn.addEventListener('click', function() {
             dashboardRefreshRun(btn);
+        });
+    }
+
+    function _wireQuickActionsUI() {
+        // Wire any <button class="cmd-btn" data-qa="..."> elements.
+        // These run allowlisted commands via the localhost API and show output in the overlay.
+        var btns = [];
+        try { btns = Array.prototype.slice.call(document.querySelectorAll('button.cmd-btn[data-qa]') || []); } catch (e) { btns = []; }
+        if (!btns || btns.length === 0) return;
+
+        btns.forEach(function(btn) {
+            if (!btn) return;
+            btn.addEventListener('click', function(ev) {
+                try { if (ev) addRipple(btn, ev.clientX, ev.clientY); } catch (e0) {}
+                try {
+                    if (typeof quickActionOpenFromButton === 'function') {
+                        quickActionOpenFromButton(btn);
+                        return;
+                    }
+                } catch (e1) {}
+
+                // Fallback: copy the command if quick actions are not available.
+                try {
+                    var cmd = String(btn.getAttribute('data-qa-copy') || '').trim();
+                    if (cmd) {
+                        copyCmd(cmd, btn);
+                        toast('Copy only', 'Quick Action runner not available in this dashboard build', 'err');
+                        return;
+                    }
+                } catch (e2) {}
+
+                toast('Not available', 'Quick Action runner not available', 'err');
+            });
         });
     }
 
@@ -8393,6 +8456,421 @@ generate_dashboard() {
             try { pre.scrollTop = pre.scrollHeight; } catch (ee) {}
         }
         highlightBlock('su-live-log');
+    }
+
+    // --- Quick Actions (run allowlisted helper commands from WebUI) ---
+    var _qa = {
+        action: '',
+        title: '',
+        copy_cmd: '',
+        danger: false,
+        interactive: false,
+        confirm: null,
+        required_phrase: '',
+        job_id: '',
+        running: false,
+        poll_timer: null
+    };
+
+    function _qaReset() {
+        _qa.action = '';
+        _qa.title = '';
+        _qa.copy_cmd = '';
+        _qa.danger = false;
+        _qa.interactive = false;
+        _qa.confirm = null;
+        _qa.required_phrase = '';
+        _qa.job_id = '';
+        _qa.running = false;
+        if (_qa.poll_timer) {
+            try { clearTimeout(_qa.poll_timer); } catch (e) {}
+            _qa.poll_timer = null;
+        }
+    }
+
+    function _qaSetHeader(mode, stepText, title) {
+        var e = _suEls();
+        if (e.title) e.title.textContent = String(title || 'Quick Action');
+        if (e.mode) e.mode.textContent = String(mode || 'Quick Action');
+        if (e.step) e.step.textContent = String(stepText || '');
+    }
+
+    function _qaEscapeHtml(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function quickActionOpenFromButton(btn) {
+        if (!btn) return;
+        var action = String(btn.getAttribute('data-qa') || '').trim();
+        if (!action) return;
+
+        var copyCmdText = String(btn.getAttribute('data-qa-copy') || '').trim();
+        var danger = String(btn.getAttribute('data-qa-danger') || '') === '1';
+        var interactive = String(btn.getAttribute('data-qa-interactive') || '') === '1';
+
+        var title = action;
+        try {
+            var lab = btn.querySelector('.cmd-label');
+            if (lab && String(lab.textContent || '').trim()) title = String(lab.textContent || '').trim();
+        } catch (e) {}
+        title = title.replace(/^Run:\s*/i, '').replace(/^Open:\s*/i, '').trim();
+
+        return quickActionOpen({ action: action, title: title, copy_cmd: copyCmdText, danger: danger, interactive: interactive });
+    }
+
+    function _qaTaskIsActive() {
+        try {
+            var t = _znhTaskLoad();
+            return !!(t && t.type && t.job_id);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function quickActionOpen(opts) {
+        opts = opts || {};
+
+        // Ensure other overlay flows are stopped.
+        try { _suReset(); } catch (e0) {}
+        try { _ruReset(); } catch (e1) {}
+        _qaReset();
+
+        _qa.action = String(opts.action || '').trim();
+        _qa.title = String(opts.title || opts.action || 'Quick action').trim();
+        _qa.copy_cmd = String(opts.copy_cmd || '').trim();
+        _qa.danger = !!opts.danger;
+        _qa.interactive = !!opts.interactive;
+
+        if (!_qa.action) return null;
+
+        _suShow(true);
+        _suSetMinBtnVisible(false);
+
+        // Copy-only actions are allowed even when an update job is running.
+        if (_qa.interactive) {
+            return _qaRenderInteractiveOnly();
+        }
+
+        // Safety: don't clobber an active long-running update job.
+        if (_qaTaskIsActive()) {
+            toast('Task running', 'A background job is already running. Use the bottom-right bubble to view it.', 'err');
+            return _qaRenderCopyOnly('A background job is already running. This Quick Action is copy-only until the running task finishes.');
+        }
+
+        if (_qa.danger) {
+            _qaSetHeader('Confirm', 'Step 1/2', _qa.title);
+            var e = _suEls();
+            if (e.body) e.body.innerHTML = '<div style="color: var(--muted); font-weight:900;">Loading confirmation…</div>';
+            _suSetButtons({ show_cancel: true, show_back: false, show_next: false, show_install: false, show_close: false, footer_center: true });
+
+            // Request confirm token + phrase from the API.
+            return _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: _qa.action }) }).then(function(r) {
+                _qa.confirm = r || null;
+                try { _qa.required_phrase = String((r && r.phrase) ? r.phrase : 'CONFIRM').trim(); } catch (e2) { _qa.required_phrase = 'CONFIRM'; }
+                return _qaRenderForm();
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'confirm failed';
+                toast('Confirm failed', msg, 'err');
+                return _qaRenderCopyOnly('Confirmation failed: ' + msg);
+            });
+        }
+
+        // Safe action: no confirm required.
+        _qa.required_phrase = '';
+        _qa.confirm = null;
+        return _qaRenderForm();
+    }
+
+    function _qaRenderCopyOnly(reasonText) {
+        var e = _suEls();
+        if (!e.body) return;
+
+        var cmdHtml = _qa.copy_cmd ? ('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command: <code style="font-size:0.85rem;">' + _qaEscapeHtml(_qa.copy_cmd) + '</code></div>') : '';
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Quick Action</div>',
+            '  <div style="margin-top:6px; font-weight:800;">' + _qaEscapeHtml(String(reasonText || 'This action cannot be run from the WebUI.')) + '</div>',
+            '</div>',
+            cmdHtml,
+            (_qa.copy_cmd ? '<button class="pill" type="button" id="qa-copy-btn">Copy command</button>' : ''),
+            '<div style="color: var(--muted); font-size:0.88rem;">Tip: run the command in a terminal window.</div>'
+        ].join('\n');
+
+        _qaSetHeader('Copy only', 'Info', _qa.title);
+
+        _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
+        if (e.close) e.close.onclick = function() { _suShow(false); };
+
+        var cb = document.getElementById('qa-copy-btn');
+        if (cb) cb.addEventListener('click', function() {
+            try { copyCmd(_qa.copy_cmd, cb); } catch (e2) {}
+        });
+    }
+
+    function _qaRenderInteractiveOnly() {
+        _qaSetHeader('Interactive', 'Copy only', _qa.title);
+        return _qaRenderCopyOnly('This action is interactive and requires a real terminal (WebUI cannot provide stdin safely).');
+    }
+
+    function _qaRenderForm() {
+        var e = _suEls();
+        if (!e.body) return;
+
+        var needsConfirm = !!_qa.danger;
+        var phrase = String(_qa.required_phrase || '').trim();
+
+        var confirmBlock = '';
+        if (needsConfirm) {
+            confirmBlock = [
+                '<div class="overlay-kv">',
+                '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Confirmation phrase: <strong>' + _qaEscapeHtml(phrase) + '</strong></div>',
+                '</div>',
+                '<div style="color: var(--muted); font-size:0.92rem;">To run this action, type the confirmation phrase exactly.</div>',
+                '<input id="qa-phrase" type="text" placeholder="Type confirmation phrase…" style="width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />'
+            ].join('\n');
+        }
+
+        var cmdHtml = _qa.copy_cmd ? ('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command: <code style="font-size:0.85rem;">' + _qaEscapeHtml(_qa.copy_cmd) + '</code></div>') : '';
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Quick Action</div>',
+            '  <div style="margin-top:6px; font-weight:800;">Runs an allowlisted helper command via the localhost API and shows output here.</div>',
+            '</div>',
+            cmdHtml,
+            (_qa.copy_cmd ? '<div style="margin-top:10px;"><button class="pill" type="button" id="qa-copy-btn">Copy command</button></div>' : ''),
+            (needsConfirm ? '<div style="margin-top:12px;">' + confirmBlock + '</div>' : ''),
+            '<div class="overlay-progress" style="margin-top: 12px;">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Waiting</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="su-live-log" style="max-height: 280px;">(output will appear here)</pre>',
+            '<div style="color: var(--muted); font-size:0.88rem;">You can minimize this window and reopen it from the bottom-right bubble while it runs.</div>'
+        ].join('\n');
+
+        _qaSetHeader(needsConfirm ? 'Confirm' : 'Ready', needsConfirm ? 'Step 1/2' : 'Ready', _qa.title);
+
+        _suSetButtons({
+            show_cancel: true,
+            show_back: false,
+            show_next: false,
+            show_install: true,
+            show_close: false,
+            install_disabled: needsConfirm,
+            footer_center: true
+        });
+
+        if (e.install) e.install.textContent = needsConfirm ? 'Run' : 'Run';
+
+        if (e.cancel) e.cancel.onclick = function(ev) {
+            if (_qa.running) return;
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            _suShow(false);
+        };
+
+        var copyBtn = document.getElementById('qa-copy-btn');
+        if (copyBtn) copyBtn.addEventListener('click', function() {
+            try { copyCmd(_qa.copy_cmd, copyBtn); } catch (e2) {}
+        });
+
+        function updateRunEnabled() {
+            var ok = true;
+            if (needsConfirm) {
+                var inp = document.getElementById('qa-phrase');
+                var got = '';
+                try { got = inp ? String(inp.value || '').trim().toUpperCase() : ''; } catch (e2) { got = ''; }
+                ok = (got === String(phrase || '').trim().toUpperCase());
+            }
+            _suSetButtons({
+                show_cancel: true,
+                show_back: false,
+                show_next: false,
+                show_install: true,
+                show_close: false,
+                install_disabled: !ok,
+                footer_center: true
+            });
+        }
+
+        var inp2 = document.getElementById('qa-phrase');
+        if (inp2) inp2.addEventListener('input', updateRunEnabled);
+        updateRunEnabled();
+
+        if (e.install) e.install.onclick = function() {
+            if (_qa.running) return;
+
+            var body = { action: _qa.action };
+            if (needsConfirm) {
+                var got2 = '';
+                try { got2 = String((document.getElementById('qa-phrase') || {}).value || '').trim(); } catch (e) { got2 = ''; }
+                var tok = '';
+                try { tok = String((_qa.confirm && _qa.confirm.confirm_token) ? _qa.confirm.confirm_token : '').trim(); } catch (e2) { tok = ''; }
+                body.confirm_token = tok;
+                body.confirm_phrase = got2;
+            }
+
+            toast('Starting…', _qa.title, 'ok');
+            _api('/api/quick/start', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
+                if (!r || !r.job_id) throw new Error('missing job_id');
+                _qaPollJob(String(r.job_id), _qa.action, _qa.title);
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'start failed';
+                toast('Quick Action failed to start', msg, 'err');
+                try { _settingsClientLog('warn', 'quick action start failed', { action: _qa.action, error: msg }); } catch (e3) {}
+            });
+        };
+
+        _suUpdateProgress('Waiting', 0);
+        _suSetLog('');
+    }
+
+    function _qaRenderRunning(taskInfo) {
+        var e = _suEls();
+        if (!e.body) return;
+        var title = '';
+        try { title = String((taskInfo && (taskInfo.title || taskInfo.action)) || 'Quick action'); } catch (e0) { title = 'Quick action'; }
+
+        _suSetMinBtnVisible(true);
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Quick Action running</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This job is still running in the background. You can minimize this window and reopen it from the bottom-right bubble.</div>',
+            '</div>',
+            '<div class="overlay-progress">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Running</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="su-live-log" style="max-height: 320px;">(resuming logs…)</pre>'
+        ].join('\n');
+
+        _qaSetHeader('Running', 'In progress', title);
+    }
+
+    function _qaRenderDone(ok, title, subtitle, logText) {
+        var e = _suEls();
+        if (!e.body) return;
+        var safe = function(s) { return _qaEscapeHtml(String(s || '')); };
+
+        _qaSetHeader('Result', 'Complete', String(title || 'Done'));
+
+        e.body.innerHTML = [
+            '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
+            '<div class="overlay-scroll">',
+            '  <div style="font-weight:950; margin-bottom: 8px;">Output (tail)</div>',
+            '  <pre class="overlay-pre" style="max-height: 320px;">' + safe(logText || '(no output)') + '</pre>',
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
+        ].join('\n');
+
+        var btns = { show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true };
+        _suSetButtons(btns);
+        if (e.close) e.close.textContent = 'OK';
+        if (e.close) e.close.onclick = function() { _suShow(false); };
+
+        try { znhTaskDone('quick-action', !!ok); } catch (e0) {}
+    }
+
+    function _qaPollJob(job_id, action, title) {
+        _qa.job_id = job_id;
+        _qa.running = true;
+        _suSetMinBtnVisible(true);
+
+        try {
+            znhTaskSet({
+                type: 'quick-action',
+                job_id: String(job_id),
+                action: String(action || ''),
+                title: String(title || 'Quick action')
+            });
+        } catch (e_task) {}
+
+        _qaSetHeader('Running', 'In progress', String(title || 'Quick action'));
+
+        // Disable the Run button while running.
+        _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: true, show_close: false, install_disabled: true, footer_center: true });
+        var installBtn = _suEls().install;
+        if (installBtn) installBtn.textContent = 'Running…';
+
+        var _pollFailures = 0;
+        var _pollMaxFailures = 10;
+        var _pollInFlight = false;
+        var _pollWarned = false;
+        var _lastPct = 0;
+
+        function tick() {
+            if (_pollInFlight) return;
+            _pollInFlight = true;
+
+            return _api('/api/quick/job?job_id=' + encodeURIComponent(job_id), { method: 'GET' }).then(function(j) {
+                if (!j) return null;
+
+                if (_pollFailures > 0) {
+                    _pollFailures = 0;
+                    if (_pollWarned) {
+                        toast('Quick Action reconnected', 'Polling resumed', 'ok');
+                        _pollWarned = false;
+                    }
+                }
+
+                _lastPct = parseInt(j.progress || 0, 10) || 0;
+                _suUpdateProgress(j.stage || 'Running', _lastPct);
+                if (j.output != null) _suSetLog(String(j.output));
+                try { znhTaskUpdateFromJob('quick-action', j); } catch (e_task2) {}
+
+                if (j.done) {
+                    if (_qa.poll_timer) {
+                        try { clearTimeout(_qa.poll_timer); } catch (e) {}
+                        _qa.poll_timer = null;
+                    }
+                    _qa.running = false;
+                    var rc = (j.rc != null) ? parseInt(j.rc, 10) : -1;
+                    var logText = '';
+                    try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e2) { logText = ''; }
+
+                    if (rc === 0) {
+                        toast('Quick Action complete', String(title || ''), 'ok');
+                        _suUpdateProgress('Done', 100);
+                        _qaRenderDone(true, String(title || 'Done'), 'Completed successfully.', logText);
+                    } else {
+                        toast('Quick Action failed', 'rc=' + String(rc), 'err');
+                        _suUpdateProgress('Failed', 100);
+                        _qaRenderDone(false, String(title || 'Failed'), 'Command returned a non-zero exit code (see output).', logText);
+                    }
+                }
+
+                return j;
+            }).catch(function(e) {
+                _pollFailures++;
+                var msg = (e && e.message) ? e.message : 'job poll failed';
+
+                if (!_pollWarned) {
+                    _pollWarned = true;
+                    toast('Quick Action polling error', msg, 'err');
+                }
+
+                _suUpdateProgress('Reconnecting…', _lastPct);
+                _suSetLog('ERROR polling job (' + String(_pollFailures) + '/' + String(_pollMaxFailures) + '): ' + msg + '\nRetrying…');
+
+                if (_pollFailures >= _pollMaxFailures) {
+                    toast('Quick Action polling failed', 'Too many errors. Please reload the page.', 'err');
+                    if (_qa.poll_timer) {
+                        try { clearTimeout(_qa.poll_timer); } catch (ee) {}
+                        _qa.poll_timer = null;
+                    }
+                    _qa.running = false;
+                    _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
+                }
+                return null;
+            }).finally(function() {
+                _pollInFlight = false;
+                if (_qa.running) {
+                    _qa.poll_timer = setTimeout(tick, 850);
+                }
+            });
+        }
+
+        tick();
     }
 
     function _suFetchStableReleaseNotesText() {
@@ -10557,17 +11035,37 @@ generate_dashboard() {
 
     // Wire dashboard actions.
     _wireDashboardRefreshUI();
+    _wireQuickActionsUI();
     // Wire settings drawer once DOM is ready (we are at end of body).
     _wireSettingsUI();
     function _wireRocketUI() {
         var btn = document.getElementById('rocket-btn');
         var simBtn = document.getElementById('rocket-update-sim-run-btn');
+        var openBtn = document.getElementById('rocket-wizard-open-btn');
 
-        if (!btn && !simBtn) return;
+        if (!btn && !simBtn && !openBtn) return;
 
         if (btn) btn.addEventListener('click', function(ev) {
             try { addRipple(btn, ev.clientX, ev.clientY); } catch (e) {}
             try {
+                if (typeof rocketUpdateWizardOpen === 'function') {
+                    rocketUpdateWizardOpen();
+                } else {
+                    toast('Update wizard not ready', 'Reload dashboard after reinstall', 'err');
+                }
+            } catch (e2) {
+                var msg = (e2 && e2.message) ? e2.message : 'failed';
+                toast('Rocket action failed', msg, 'err');
+            }
+        });
+
+        if (openBtn) openBtn.addEventListener('click', function(ev) {
+            try { addRipple(openBtn, ev.clientX, ev.clientY); } catch (e) {}
+            try {
+                var fb = null;
+                try { fb = openBtn ? openBtn.querySelector('.cmd-copy-feedback') : null; } catch (eFB) { fb = null; }
+                if (fb) fb.textContent = 'Opening…';
+
                 if (typeof rocketUpdateWizardOpen === 'function') {
                     rocketUpdateWizardOpen();
                 } else {
@@ -28276,6 +28774,291 @@ JOB_TTL_SECONDS = 30 * 60
 DUP_LOG_DIR = "/var/log/zypper-auto/service-logs"
 DUP_STATUS_DIR = "/var/lib/zypper-auto"
 
+# --- Quick Actions job runner (dashboard API) ---
+# These are allowlisted helper operations that can be started from the WebUI and
+# streamed into the terminal-like overlay.
+QUICK_LOG_DIR = DUP_LOG_DIR
+QUICK_STATUS_DIR = DUP_STATUS_DIR
+
+
+def _quick_paths(job_id: str) -> tuple[str, str, str, str]:
+    jid = (job_id or "").strip()
+    unit = f"znh-webui-quick-{jid[:8]}"
+    log_path = f"{QUICK_LOG_DIR}/webui-quick-{jid[:10]}.log"
+    status_path = f"{QUICK_STATUS_DIR}/webui-quick-{jid[:10]}.status"
+    script_path = f"{QUICK_STATUS_DIR}/webui-quick-{jid[:10]}.sh"
+    return unit, log_path, status_path, script_path
+
+
+def _quick_action_table() -> dict:
+    """Return allowlisted quick actions.
+
+    IMPORTANT: this must remain an allowlist. Do not accept arbitrary shell
+    commands from the browser.
+    """
+    return {
+        # Read-only / safe
+        "verify": {
+            "title": "Verify & Fix",
+            "cmd": [HELPER_BIN, "--verify"],
+            "timeout_s": 25 * 60,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+        "health": {
+            "title": "Health Report",
+            "cmd": [HELPER_BIN, "--health"],
+            "timeout_s": 180,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+        "logs": {
+            "title": "View Logs",
+            "cmd": [HELPER_BIN, "--logs"],
+            "timeout_s": 45,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+        "self-check": {
+            "title": "Self Check",
+            "cmd": [HELPER_BIN, "--check"],
+            "timeout_s": 90,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+        "snapshot-state": {
+            "title": "Snapshot State",
+            "cmd": [HELPER_BIN, "--snapshot-state"],
+            "timeout_s": 120,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+        "diag-bundle": {
+            "title": "Diag Bundle",
+            "cmd": [HELPER_BIN, "--diag-bundle"],
+            "timeout_s": 12 * 60,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+
+        # State-changing (confirmation required)
+        "reset-downloads": {
+            "title": "Reset Downloads",
+            "cmd": [HELPER_BIN, "--reset-downloads"],
+            "timeout_s": 120,
+            "needs_confirm": True,
+            "phrase": "RESET",
+        },
+        "reset-config": {
+            "title": "Reset Config",
+            "cmd": [HELPER_BIN, "--reset-config", "--yes"],
+            "timeout_s": 120,
+            "needs_confirm": True,
+            "phrase": "RESETCONF",
+        },
+        "diag-logs-on": {
+            "title": "Diag Logs ON",
+            "cmd": [HELPER_BIN, "--diag-logs-on"],
+            "timeout_s": 60,
+            "needs_confirm": True,
+            "phrase": "DIAGLOGS",
+        },
+        "diag-logs-off": {
+            "title": "Diag Logs OFF",
+            "cmd": [HELPER_BIN, "--diag-logs-off"],
+            "timeout_s": 60,
+            "needs_confirm": True,
+            "phrase": "DIAGLOGS",
+        },
+    }
+
+
+def _recover_quick_job(job_id: str) -> dict | None:
+    # token_urlsafe() uses [A-Za-z0-9_-]. Reject anything else.
+    jid = (job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", jid or ""):
+        return None
+
+    unit, log_path, status_path, _script_path = _quick_paths(jid)
+
+    have_any = os.path.exists(log_path) or os.path.exists(status_path)
+
+    props = {}
+    rc_show, out_show = _run_cmd(
+        ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus"],
+        timeout_s=3,
+        log=None,
+    )
+    if rc_show == 0:
+        for line in (out_show or "").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k.strip()] = v.strip()
+        if props.get("ActiveState"):
+            have_any = True
+
+    if not have_any:
+        return None
+
+    active = props.get("ActiveState", "")
+    sub = props.get("SubState", "")
+
+    status = _read_kv_status(status_path) if os.path.exists(status_path) else {}
+
+    done = False
+    rc = None
+
+    try:
+        done = str(status.get("done", "")).strip() in ("1", "true", "yes")
+    except Exception:
+        done = False
+
+    if done:
+        try:
+            rc = int(str(status.get("rc", "1") or "1"))
+        except Exception:
+            rc = 1
+
+    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
+        done = True
+        try:
+            rc = int(props.get("ExecMainStatus", "1") or "1")
+        except Exception:
+            rc = 1
+
+    running = not done
+
+    tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
+
+    stage = str(status.get("stage") or ("Running" if active == "active" else "Starting"))
+    if done:
+        if rc == 0:
+            stage = "Done"
+        else:
+            stage = "Failed"
+
+    progress = 0
+    try:
+        if done:
+            progress = 100
+        elif stage.lower().startswith("starting"):
+            progress = 5
+        else:
+            progress = 20
+    except Exception:
+        progress = 0
+
+    action = str(status.get("action", "") or "").strip()
+    title = str(status.get("title", "") or "").strip()
+
+    return {
+        "job_id": jid,
+        "type": "quick-action",
+        "action": action,
+        "title": title,
+        "running": bool(running),
+        "done": bool(done),
+        "rc": rc,
+        "stage": stage,
+        "progress": int(progress),
+        "output": tail,
+        "output_truncated": bool(truncated),
+        "resumed": True,
+        "unit": unit,
+        "log_path": log_path,
+        "status_path": status_path,
+    }
+
+
+def _quick_any_running() -> dict:
+    """Best-effort: detect if any quick-action unit is currently running."""
+    out = {
+        "running": False,
+        "action": "",
+        "title": "",
+        "unit": "",
+        "status_path": "",
+        "checked": 0,
+    }
+
+    try:
+        paths = glob.glob(os.path.join(QUICK_STATUS_DIR, "webui-quick-*.status"))
+    except Exception:
+        paths = []
+
+    # Prefer newest status files.
+    try:
+        paths = sorted(paths, key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+
+    now = time.time()
+    for p in (paths or [])[:40]:
+        out["checked"] = out.get("checked", 0) + 1
+
+        # Ignore very old leftovers.
+        age = 0.0
+        try:
+            age = float(now - os.path.getmtime(p))
+        except Exception:
+            age = 0.0
+        if age > 6 * 3600:
+            continue
+
+        st = {}
+        try:
+            st = _read_kv_status(p)
+        except Exception:
+            st = {}
+
+        done = False
+        try:
+            done = str(st.get("done", "")).strip() in ("1", "true", "yes")
+        except Exception:
+            done = False
+        if done:
+            continue
+
+        # Derive unit name from status file prefix.
+        base = os.path.basename(p)
+        prefix = ""
+        try:
+            prefix = base.replace("webui-quick-", "", 1).replace(".status", "", 1)
+        except Exception:
+            prefix = ""
+        unit = f"znh-webui-quick-{prefix[:8]}" if prefix else ""
+
+        active = ""
+        sub = ""
+        if unit:
+            try:
+                rc_show, out_show = _run_cmd(
+                    ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState"],
+                    timeout_s=2,
+                    log=None,
+                )
+                if rc_show == 0:
+                    for line in (out_show or "").splitlines():
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            if k.strip() == "ActiveState":
+                                active = v.strip()
+                            if k.strip() == "SubState":
+                                sub = v.strip()
+            except Exception:
+                pass
+
+        is_running = (active == "active") or (age < 30 * 60)
+        if is_running:
+            out["running"] = True
+            out["action"] = str(st.get("action", "") or "").strip()
+            out["title"] = str(st.get("title", "") or "").strip()
+            out["unit"] = unit
+            out["status_path"] = p
+            return out
+
+    return out
+
 
 def _dup_paths(job_id: str) -> tuple[str, str, str]:
     jid = (job_id or "").strip()
@@ -28794,8 +29577,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper, self-update, and system-update endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/"):
+        # Snapper, self-update, system-update, and quick-action endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/quick/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -29401,8 +30184,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return _json_response(self, 500, {"error": f"job lookup failed: {e}"}, origin)
 
+        # --- Quick Actions job status ---
+        if path == "/api/quick/job":
+            job_id = ""
+            try:
+                job_id = str((qs.get("job_id") or [""])[0]).strip()
+            except Exception:
+                job_id = ""
+            if not job_id:
+                return _json_response(self, 400, {"error": "job_id required"}, origin)
+
+            recovered = _recover_quick_job(job_id)
+            if recovered:
+                return _json_response(self, 200, recovered, origin)
+            return _json_response(self, 404, {"error": "job not found"}, origin)
+
         # If we got here and the path is under an auth-required prefix, it's not implemented.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/"):
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/quick/"):
             return _json_response(self, 404, {"error": "not found"}, origin)
 
         if path == "/api/ping":
@@ -29415,6 +30213,7 @@ class Handler(BaseHTTPRequestHandler):
                     "dashboard_refresh": True,
                     "snapper": True,
                     "settings": True,
+                    "quick_actions": True,
                 },
             }, origin)
 
@@ -29469,6 +30268,242 @@ class Handler(BaseHTTPRequestHandler):
                         items.pop(k, None)
             except Exception:
                 return
+
+        # --- Quick Actions control (dashboard) ---
+        if path == "/api/quick/confirm":
+            body = _read_json(self)
+            action = str(body.get("action", "") or "").strip()
+            tbl = _quick_action_table()
+            meta = tbl.get(action)
+            if not meta:
+                return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
+
+            if not bool(meta.get("needs_confirm")):
+                return _json_response(self, 400, {"error": "confirmation not required"}, origin)
+
+            now_ts = time.time()
+            _confirm_purge(now_ts)
+
+            token = secrets.token_urlsafe(24)
+            exp = now_ts + 120.0
+            phrase = str(meta.get("phrase", "") or "").strip().upper()
+            if not phrase:
+                phrase = "CONFIRM"
+
+            try:
+                with tokens_lock:
+                    if not hasattr(self.server, "confirm_tokens"):
+                        self.server.confirm_tokens = {}
+                    self.server.confirm_tokens[token] = {
+                        "action": "quick",
+                        "quick_action": action,
+                        "exp": exp,
+                        "phrase": phrase,
+                    }
+            except Exception:
+                return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
+
+            title = str(meta.get("title", action) or action)
+            hint = f"Type {phrase} to confirm: {title}"
+
+            return _json_response(self, 200, {
+                "confirm_token": token,
+                "expires_in_seconds": 120,
+                "phrase": phrase,
+                "hint": hint,
+            }, origin)
+
+        if path == "/api/quick/start":
+            # Best-effort concurrency guard: avoid clobbering the single-task bubble UX.
+            try:
+                ri = _quick_any_running()
+                if ri.get("running"):
+                    return _json_response(self, 409, {
+                        "error": "a quick action is already running",
+                        "job_running": True,
+                        "unit": ri.get("unit"),
+                        "status_path": ri.get("status_path"),
+                        "action": ri.get("action"),
+                        "title": ri.get("title"),
+                    }, origin)
+            except Exception:
+                pass
+
+            body = _read_json(self)
+            action = str(body.get("action", "") or "").strip()
+
+            tbl = _quick_action_table()
+            meta = tbl.get(action)
+            if not meta:
+                return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
+
+            cmd = meta.get("cmd")
+            if not isinstance(cmd, list) or not cmd:
+                return _json_response(self, 500, {"error": "invalid action command"}, origin)
+
+            title = str(meta.get("title", action) or action)
+
+            needs_confirm = bool(meta.get("needs_confirm"))
+            required_phrase = str(meta.get("phrase", "") or "").strip().upper()
+
+            confirm_token = str(body.get("confirm_token", "") or "").strip()
+            confirm_phrase = str(body.get("confirm_phrase", "") or "").strip().upper()
+
+            if needs_confirm:
+                now_ts = time.time()
+                _confirm_purge(now_ts)
+                with tokens_lock:
+                    items = getattr(self.server, "confirm_tokens", {})
+                    m = items.get(confirm_token)
+                    if not m:
+                        return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                    if m.get("action") != "quick":
+                        return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+                    if m.get("quick_action") != action:
+                        return _json_response(self, 400, {"error": "confirm token does not match quick action"}, origin)
+                    if float(m.get("exp", 0)) < now_ts:
+                        return _json_response(self, 400, {"error": "confirm token expired"}, origin)
+
+                    exp_phrase = str(m.get("phrase", "") or "").strip().upper()
+                    if exp_phrase and confirm_phrase != exp_phrase:
+                        return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+                    if required_phrase and confirm_phrase != required_phrase:
+                        return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+
+                    # One-time token.
+                    try:
+                        items.pop(confirm_token, None)
+                    except Exception:
+                        pass
+
+            timeout_s = 300
+            try:
+                timeout_s = int(meta.get("timeout_s", 300))
+            except Exception:
+                timeout_s = 300
+            if timeout_s < 10:
+                timeout_s = 10
+            if timeout_s > 2 * 3600:
+                timeout_s = 2 * 3600
+
+            job_id = secrets.token_urlsafe(18)
+            unit, log_path, status_path, script_file = _quick_paths(job_id)
+
+            # Precreate log + status so the first poll can't race before the unit writes anything.
+            try:
+                os.makedirs(QUICK_LOG_DIR, exist_ok=True)
+                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+                with open(status_path, "w", encoding="utf-8") as f:
+                    f.write("done=0\n")
+                    f.write("rc=0\n")
+                    f.write("stage=starting\n")
+                    f.write(f"action={action}\n")
+                    f.write(f"title={title}\n")
+            except Exception:
+                pass
+
+            # Compose a shell script for the transient unit.
+            cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
+
+            script_text = "\n".join([
+                'set -euo pipefail',
+                f'LOG={shlex.quote(log_path)}',
+                f'STATUS={shlex.quote(status_path)}',
+                f'ACTION={shlex.quote(action)}',
+                f'TITLE={shlex.quote(title)}',
+                f'TIMEOUT_S={timeout_s}',
+                'mkdir -p /var/log/zypper-auto/service-logs || true',
+                'mkdir -p /var/lib/zypper-auto || true',
+                'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                'write_status() {',
+                '  local done="$1"; local rc="$2"; local stage="$3"',
+                '  local tmp="${STATUS}.tmp.$$"',
+                '  {',
+                '    echo "done=${done}"',
+                '    echo "rc=${rc}"',
+                '    echo "stage=${stage}"',
+                '    echo "action=${ACTION:-}"',
+                '    echo "title=${TITLE:-}"',
+                '    echo "started_at_utc=${STARTED_AT}"',
+                '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                '  } >"${tmp}" 2>/dev/null || true',
+                '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
+                '}',
+                'write_status 0 0 starting',
+                'echo "==========================================" >>"$LOG" || true',
+                'echo " WebUI Quick Action job " >>"$LOG" || true',
+                'echo "==========================================" >>"$LOG" || true',
+                'date >>"$LOG" 2>/dev/null || true',
+                'echo "" >>"$LOG" || true',
+                'echo "ACTION: ${ACTION}" >>"$LOG" || true',
+                'echo "TITLE : ${TITLE}" >>"$LOG" || true',
+                f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
+                'echo "" >>"$LOG" || true',
+                'export ZNH_NON_INTERACTIVE=1',
+                'write_status 0 0 running',
+                'set +e',
+                f'( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
+                'rc=${PIPESTATUS[0]}',
+                'set -e',
+                'echo "" >>"$LOG" || true',
+                'echo "[webui] quick action rc=${rc}" >>"$LOG" || true',
+                'if [ ${rc} -eq 124 ] 2>/dev/null; then',
+                '  write_status 1 ${rc} timed-out',
+                '  echo "[webui] ERROR: timed out" >>"$LOG" || true',
+                '  rm -f "$0" >/dev/null 2>&1 || true',
+                '  exit ${rc}',
+                'fi',
+                'if [ ${rc} -eq 0 ]; then',
+                '  write_status 1 ${rc} done',
+                'else',
+                '  write_status 1 ${rc} failed',
+                'fi',
+                'rm -f "$0" >/dev/null 2>&1 || true',
+                'exit ${rc}',
+            ])
+
+            # Write unit script to disk (inside the API service sandbox).
+            try:
+                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
+                with open(script_file, "w", encoding="utf-8") as f:
+                    f.write("#!/usr/bin/env bash\n")
+                    f.write(script_text)
+                    f.write("\n")
+                os.chmod(script_file, 0o700)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"failed to write quick-action unit script: {e}"}, origin)
+
+            sys_cmd = [
+                "systemd-run",
+                "--quiet",
+                "--collect",
+                "--unit",
+                unit,
+                "--",
+                "/usr/bin/bash",
+                script_file,
+            ]
+
+            try:
+                p = subprocess.run(
+                    sys_cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                if p.returncode != 0:
+                    out = (p.stdout or "").strip()
+                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
+
+            return _json_response(self, 200, {"job_id": job_id}, origin)
 
         # --- Self-update control (dashboard) ---
         if path == "/api/self-update/confirm":
