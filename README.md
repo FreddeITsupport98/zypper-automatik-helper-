@@ -1703,6 +1703,9 @@ systemctl status zypper-autodownload.service
   - 🖱️ **IMPROVED:** Recent Activity log polling no longer fights the user’s scroll position (updates are staged while scrolled up).
   - 🧿 **NEW:** when a Self-update or System Update job is running, the dashboard shows a bottom-right “background job bubble” (spinner + name like “Update system”) so accidental overlay closes don’t lose the running job view.
   - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
+  - 🐛 **FIXED:** Rocket Update Wizard preview now syncs the dashboard pending count when zypper reports **"Nothing to do"** (it updates the cached dry-run output under `/var/log/zypper-auto/dry-run-last.txt` and applies a short-lived UI override in Live mode to avoid stale counts).
+  - 🧰 **IMPROVED:** Rocket Update Wizard preview now also returns a `reboot_required` flag so the WebUI can say “Up to date, but reboot required” when applicable.
+  - 🟡 **CHANGED:** dashboard now shows **Reboot Required** as a separate warning badge (via `reboot_required` in `status-data.json`) instead of encoding it as `FAILED: Reboot Required` in `last-status.txt`.
   - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
   - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.
   - 🧰 **IMPROVED:** Self-Update status API now returns a consolidated `evaluation.action_type` + message so the WebUI doesn’t need to guess (update vs install vs switch).

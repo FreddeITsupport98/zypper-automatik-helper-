@@ -3832,6 +3832,13 @@ generate_dashboard() {
     now_iso="$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
     last_status=$(cat "${STATUS_FILE}" 2>/dev/null || echo "Unknown")
 
+    # Backward-compat normalization:
+    # Older builds used to write "FAILED: Reboot Required" into last-status.txt.
+    # A reboot requirement is a WARNING, not a failure, so normalize the display.
+    if [[ "${last_status,,}" == *"failed: reboot required"* ]]; then
+        last_status=$(printf '%s' "${last_status}" | sed -E 's/(\][[:space:]]*)[Ff][Aa][Ii][Ll][Ee][Dd]:[[:space:]]*Reboot Required/\1Reboot Required/' 2>/dev/null || printf '%s' "${last_status}")
+    fi
+
     # Helper VERSION header embedded into the dashboard so the WebUI can detect
     # when it is outdated compared to the installed helper binary.
     local helper_version_at_gen helper_version_line
@@ -3864,6 +3871,16 @@ generate_dashboard() {
         fi
     fi
 
+    # Reboot-required warning badge (separate from FAILED status)
+    local reboot_required_json reboot_badge_class reboot_badge_title
+    reboot_required_json=false
+    reboot_badge_class="znh-hidden"
+    reboot_badge_title="Reboot required to fully apply kernel/core library updates."
+    if check_reboot_required; then
+        reboot_required_json=true
+        reboot_badge_class=""
+    fi
+
     # Feature toggles (visual state)
     local feat_flatpak feat_snap feat_soar feat_brew feat_pipx
     local feat_flatpak_class feat_snap_class feat_soar_class feat_brew_class feat_pipx_class
@@ -3884,7 +3901,9 @@ generate_dashboard() {
     local status_color last_status_lc
     status_color="#7f8c8d" # Default gray
     last_status_lc="${last_status,,}"
-    if [[ "${last_status_lc}" == *"error"* ]] || [[ "${last_status_lc}" == *"failed"* ]] || [[ "${last_status_lc}" == *"crash"* ]]; then
+    if [[ "${last_status_lc}" == *"reboot required"* ]]; then
+        status_color="#f59e0b" # Amber (warning)
+    elif [[ "${last_status_lc}" == *"error"* ]] || [[ "${last_status_lc}" == *"failed"* ]] || [[ "${last_status_lc}" == *"crash"* ]]; then
         status_color="#e74c3c" # Red
     elif [[ "${last_status_lc}" == *"complete"* ]] || [[ "${last_status_lc}" == *"success"* ]]; then
         status_color="#2ecc71" # Green
@@ -4125,12 +4144,16 @@ generate_dashboard() {
     fi
 
     local last_status_esc last_tail_esc last_install_log_esc flight_report_esc flight_report_log_esc
+    local reboot_badge_title_esc
     local zypp_lock_badge_text_esc zypp_lock_badge_title_esc
+
     last_status_esc="$(_html_escape "$last_status")"
     last_tail_esc="$(_html_escape "$last_install_tail")"
     last_install_log_esc="$(_html_escape "$last_install_log")"
     flight_report_esc="$(_html_escape "$flight_report_raw")"
     flight_report_log_esc="$(_html_escape "$flight_report_log")"
+
+    reboot_badge_title_esc="$(_html_escape "${reboot_badge_title}")"
 
     zypp_lock_badge_text_esc="$(_html_escape "${zypp_lock_badge_text}")"
     zypp_lock_badge_title_esc="$(_html_escape "${zypp_lock_badge_title}")"
@@ -4649,6 +4672,9 @@ generate_dashboard() {
         overflow-wrap: anywhere;
     }
 
+    /* Reboot-required warning badge (separate from FAILED status) */
+    .reboot-badge { --status-color: rgba(245,158,11,0.92); }
+
     /* JS health badge (used to quickly tell if the page JS is alive) */
     .js-health-badge { --status-color: rgba(100,116,139,0.92); }
     .js-health-badge.js-ok { --status-color: rgba(34,197,94,0.92); }
@@ -4858,6 +4884,7 @@ generate_dashboard() {
           </h1>
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
             <span class="status-badge" id="status-badge">${last_status_esc}</span>
+            <span class="status-badge reboot-badge ${reboot_badge_class}" id="reboot-required-badge" title="${reboot_badge_title_esc}">↻ Reboot Required</span>
             <span class="status-badge js-health-badge" id="js-health-badge" title="JavaScript status (if this shows FAIL, open DevTools → Console)">JS: loading…</span>
             <span class="status-badge lock-badge ${zypp_lock_badge_class}" id="zypp-lock-badge" title="${zypp_lock_badge_title_esc}">${zypp_lock_badge_text_esc}</span>
           </div>
@@ -5847,6 +5874,7 @@ generate_dashboard() {
                     run_id: 'MOCK',
                     last_status: 'MOCK: status-data.json',
                     status_color: 'rgba(124,58,237,0.92)',
+                    reboot_required: false,
                     zypp_lock_state: 'none',
                     zypp_lock_pid: '',
                     zypp_lock_file: '',
@@ -9280,10 +9308,45 @@ generate_dashboard() {
         } catch (e_noup) { noUpdates = false; }
 
         if (noUpdates) {
-            toast('Up to date', 'No system updates available (Nothing to do).', 'ok');
+            // If the system is up to date, keep the dashboard UI consistent:
+            // - Set pending updates to 0 immediately (avoid stale cached count)
+            // - If live mode is enabled, request a dashboard refresh so status-data.json updates
+            //   quickly (best-effort; silent on failure).
+            var rebootReq = false;
+            try { rebootReq = !!(p && p.reboot_required); } catch (e_rr0) { rebootReq = false; }
+
+            var subtitle0 = rebootReq
+                ? 'No system updates available (Nothing to do). Reboot is still required.'
+                : 'No system updates available (Nothing to do).';
+
+            toast('Up to date', subtitle0, 'ok');
             _ru.running = false;
+
+            // Prevent stale UI badge/count when dry-run cache is old.
+            try { setText('pending-count', 0); } catch (e_pc0) {}
+            try {
+                window.__znh_pending_override = 0;
+                window.__znh_pending_override_until = Date.now() + 60 * 1000;
+            } catch (e_po0) {}
+
+            // Best-effort: refresh dashboard artifacts so Live mode won't keep showing a stale pending count.
+            try {
+                if (typeof liveEnabled !== 'undefined' && liveEnabled) {
+                    _api('/api/dashboard/refresh', {
+                        method: 'POST',
+                        body: JSON.stringify({ reason: 'rocket-preview-no-updates' })
+                    }).then(function() {
+                        try {
+                            if (ZNH_DEBUG) znhDebugLog('dashboard refreshed after no-updates preview');
+                        } catch (e0) {}
+                    }).catch(function() {
+                        // ignore
+                    });
+                }
+            } catch (e_sync0) {}
+
             try { znhTaskDone('system-update', true); } catch (e_task_ru_done0) {}
-            _ruRenderDone('Up to date', 'No system updates available (Nothing to do).', out, '');
+            _ruRenderDone('Up to date', subtitle0, out, '');
             return;
         }
 
@@ -9619,6 +9682,22 @@ generate_dashboard() {
                         // but setting this to 0 avoids confusing "stuck" pending count.
                         if (!_ru.simulate) {
                             try { setText('pending-count', 0); } catch (e_pc) {}
+                            try {
+                                window.__znh_pending_override = 0;
+                                window.__znh_pending_override_until = Date.now() + 60 * 1000;
+                            } catch (e_po2) {}
+
+                            // Best-effort: refresh dashboard artifacts so Live mode won't keep showing a stale pending count.
+                            try {
+                                if (typeof liveEnabled !== 'undefined' && liveEnabled) {
+                                    _api('/api/dashboard/refresh', {
+                                        method: 'POST',
+                                        body: JSON.stringify({ reason: 'rocket-job-finished' })
+                                    }).catch(function() {
+                                        // ignore
+                                    });
+                                }
+                            } catch (e_sync2) {}
                         }
                         try { znhTaskDone('system-update', true); } catch (e_task_ru3) {}
 
@@ -10909,6 +10988,20 @@ generate_dashboard() {
         else el.classList.add('lock-stale');
     }
 
+    function updateRebootRequiredBadge(d) {
+        var el = document.getElementById('reboot-required-badge');
+        if (!el) return;
+
+        var rr = false;
+        try { rr = !!(d && d.reboot_required); } catch (e0) { rr = false; }
+
+        if (rr) {
+            el.classList.remove('znh-hidden');
+        } else {
+            el.classList.add('znh-hidden');
+        }
+    }
+
     function applyLiveData(d) {
         if (!d) return;
 
@@ -10933,9 +11026,24 @@ generate_dashboard() {
         }
 
         setText('status-badge', d.last_status);
+        try { updateRebootRequiredBadge(d); } catch (e0rr) {}
         try { updateZyppLockBadge(d); } catch (e0) {}
         setText('generated-at', d.generated_human);
-        setText('pending-count', d.pending_count);
+
+        // Pending updates override: if a live Rocket preview/job just determined
+        // "Nothing to do", keep the UI consistent even if status-data.json is stale
+        // until the next dashboard refresh regenerates it.
+        var pc = d.pending_count;
+        try {
+            if (window.__znh_pending_override_until && Date.now() < window.__znh_pending_override_until) {
+                pc = window.__znh_pending_override;
+                // Auto-clear override once the server-side data matches.
+                if (d.pending_count === pc) {
+                    window.__znh_pending_override_until = 0;
+                }
+            }
+        } catch (e_pc_ov) {}
+        setText('pending-count', pc);
 
         setText('kernel-ver', d.kernel_ver);
         setText('uptime-info', d.uptime_info);
@@ -11846,6 +11954,7 @@ JSON_EOF
 
   "last_status": "${json_last_status}",
   "status_color": "$(_json_escape "$status_color")",
+  "reboot_required": ${reboot_required_json},
 
   "zypp_lock_state": "$(_json_escape "$zypp_lock_state")",
   "zypp_lock_pid": "$(_json_escape "$zypp_lock_pid")",
@@ -14764,15 +14873,13 @@ else
     fi
 fi
 
-# Dashboard UX: surface reboot-required state as a top-level status so users
-# don't forget to reboot after kernel/core library updates.
+# Dashboard UX: reboot-required is a WARNING badge, not a FAILED status.
+# Detect it here for logging, but do not overwrite last-status.txt.
+local REBOOT_REQUIRED
+REBOOT_REQUIRED=0
 if check_reboot_required; then
+    REBOOT_REQUIRED=1
     log_warn "⚠ Reboot required to fully apply updates (kernel/core libs)."
-    if [ "${VERIFICATION_FAILED}" -eq 0 ] 2>/dev/null; then
-        update_status "Reboot Required"
-    else
-        update_status "FAILED: Reboot Required"
-    fi
 fi
 
 # If we performed a critical repair (e.g. restarted the dashboard API), run a
@@ -14811,6 +14918,7 @@ verify_summary_file="${LOG_DIR}/last-verify-summary.txt"
     echo "detected=${PROBLEMS_DETECTED}"
     echo "fixed=${PROBLEMS_FIXED}"
     echo "remaining=${VERIFICATION_FAILED}"
+    echo "reboot_required=${REBOOT_REQUIRED}"
 } >"${verify_summary_file}" 2>/dev/null || true
 chmod 644 "${verify_summary_file}" 2>/dev/null || true
 
@@ -14840,6 +14948,17 @@ if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null; then
         log_info "     - Verify DBUS session: echo \$DBUS_SESSION_BUS_ADDRESS"
         log_info "     - Re-run installation: sudo $0 install"
     fi
+fi
+
+# Update top-level status for dashboards/automation (separate from reboot-required warning).
+if [ "${VERIFICATION_FAILED}" -eq 0 ] 2>/dev/null; then
+    if [ "${PROBLEMS_FIXED}" -gt 0 ] 2>/dev/null; then
+        update_status "SUCCESS: Verification passed (auto-fixed ${PROBLEMS_FIXED} issue(s))"
+    else
+        update_status "SUCCESS: Verification passed"
+    fi
+else
+    update_status "FAILED: Verification issues remain (${VERIFICATION_FAILED} check(s) failing)"
 fi
 
 # Optionally notify the primary user when auto-repair fixed issues.
@@ -27876,6 +27995,59 @@ SELF_UPDATE_STATE_FILE = "/var/lib/zypper-auto/self-update-state.json"
 # --- System update helpers (Rocket Update Wizard) ---
 ZYPPER_BIN = "/usr/bin/zypper"
 
+# Keep the dashboard's cached dry-run output in sync with the Rocket Wizard preview.
+# This file is consumed by:
+# - HTML dashboard pending_count (generate_dashboard reads /var/log/zypper-auto/dry-run-last.txt)
+# - user notifier (reads the same file)
+DRYRUN_OUTPUT_FILE = "/var/log/zypper-auto/dry-run-last.txt"
+
+
+def _write_atomic_text(path: str, text: str, *, mode: int = 0o644) -> None:
+    tmp = f"{path}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text or "")
+        if text and not text.endswith("\n"):
+            f.write("\n")
+    try:
+        os.chmod(tmp, mode)
+    except Exception:
+        pass
+    os.replace(tmp, path)
+
+
+def _reboot_required() -> bool:
+    # Prefer zypper's own hint when available.
+    try:
+        p = subprocess.run(
+            [ZYPPER_BIN, "needs-reboot"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+        # On openSUSE, rc=1 means reboot needed, rc=0 means no reboot.
+        if int(p.returncode) == 1:
+            return True
+        if int(p.returncode) == 0:
+            return False
+    except Exception:
+        pass
+
+    # Fallback marker files used by various tools.
+    for f in (
+        "/run/reboot-needed",
+        "/var/run/reboot-needed",
+        "/run/reboot-required",
+        "/var/run/reboot-required",
+    ):
+        try:
+            if os.path.exists(f):
+                return True
+        except Exception:
+            continue
+
+    return False
 
 def _zypp_lock_info() -> tuple[str, str, bool]:
     """Return (lock_file, pid, active)."""
@@ -29098,15 +29270,35 @@ class Handler(BaseHTTPRequestHandler):
                 used_systemd_run = False
                 rc, out = _run_cmd(cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
 
-            out = (preface or "") + (out or "")
-            conflict_detected, conflict_summary = _detect_solver_conflict(out, rc)
+            out_zypper = out or ""
+            out_full = (preface or "") + out_zypper
+            conflict_detected, conflict_summary = _detect_solver_conflict(out_full, rc)
+
+            reboot_required = False
+            try:
+                reboot_required = bool(_reboot_required())
+            except Exception:
+                reboot_required = False
+
+            # Keep dry-run cache in sync so the dashboard pending_count can't drift.
+            # Only update the cache on successful previews.
+            cache_updated = False
+            try:
+                if rc == 0:
+                    _write_atomic_text(DRYRUN_OUTPUT_FILE, out_zypper)
+                    cache_updated = True
+            except Exception as e:
+                try:
+                    getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Could not persist dry-run cache: {e}")
+                except Exception:
+                    pass
 
             # IMPORTANT: Always return HTTP 200 so the WebUI can display the full zypper output,
             # even when zypper returns a non-zero rc (lock/conflict/manual decision/etc.).
             return _json_response(self, 200, {
                 "ok": (rc == 0),
                 "rc": rc,
-                "output": out,
+                "output": out_full,
                 "cmd": " ".join(cmd),
                 "used_systemd_run": used_systemd_run,
                 "zypp_lock_waited_seconds": waited_s,
@@ -29115,6 +29307,8 @@ class Handler(BaseHTTPRequestHandler):
                 "zypp_lock_timed_out": False,
                 "conflict_detected": bool(conflict_detected),
                 "conflict_summary": conflict_summary,
+                "reboot_required": bool(reboot_required),
+                "cache_updated": bool(cache_updated),
             }, origin)
 
         # --- System update (Rocket) job status ---
