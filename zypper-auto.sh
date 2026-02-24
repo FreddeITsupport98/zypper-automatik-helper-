@@ -7267,6 +7267,180 @@ generate_dashboard() {
         }
     } catch (e_h0) {}
 
+    // Direct UI -> backend log bridge.
+    // IMPORTANT: This bypasses _api()/znhFetch so it won't recurse into API trace logging.
+    function _clientLogDirect(tok, level, msg, ctx) {
+        try {
+            if (!tok) return;
+            var body = JSON.stringify({
+                level: level || 'debug',
+                msg: String(msg || ''),
+                ctx: ctx || {}
+            });
+
+            fetch(SETTINGS_API_BASE + '/api/client-log', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-ZNH-Token': tok
+                },
+                body: body
+            }).catch(function() { /* ignore */ });
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    function _znhPeekTokenNoUI() {
+        // Silent best-effort token peek (no banners/toasts).
+        try {
+            if (_settingsToken && String(_settingsToken).trim()) return String(_settingsToken).trim();
+        } catch (e0) {}
+        try {
+            var tc = _cookieGet(_tokCookie) || '';
+            if (tc && String(tc).trim()) return String(tc).trim();
+        } catch (e1) {}
+        try {
+            var t0 = localStorage.getItem(_tokKey) || '';
+            if (t0 && String(t0).trim()) return String(t0).trim();
+        } catch (e2) {}
+        return '';
+    }
+
+    function _clientLogDirectMaybe(level, msg, ctx) {
+        // Use silent token peek to avoid creating UI noise when token is missing.
+        var tok = '';
+        try { tok = _znhPeekTokenNoUI(); } catch (e) { tok = ''; }
+        if (!tok) return;
+        _clientLogDirect(tok, level, msg, ctx);
+    }
+
+    // Optional console -> backend bridge.
+    // Enable via URL: &console=1 (warn+error) or &console=all (log+warn+error)
+    // Only active when verbose debug is enabled (ZNH_DEBUG true) to avoid log spam.
+    (function() {
+        try {
+            if (window.__znh_console_bridge_bound) return;
+            window.__znh_console_bridge_bound = true;
+        } catch (e0) {}
+
+        try {
+            if (!ZNH_URL || !ZNH_URL.params) return;
+            var raw = String(ZNH_URL.params.get('console') || ZNH_URL.params.get('znh_console') || '').toLowerCase();
+            if (!raw) return;
+
+            // Only on served dashboards (http/https). file:// has no API.
+            try {
+                if (!window.location || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) return;
+            } catch (eP) { return; }
+
+            if (!ZNH_DEBUG) return;
+
+            var allowLog = (raw === 'all' || raw === 'log');
+            var allowWarn = (raw === 'all' || raw === '1' || raw === 'true' || raw === 'yes' || raw === 'warn' || raw === 'log');
+            var allowErr = true; // always when enabled
+
+            if (!console) return;
+
+            var origLog = console.log;
+            var origWarn = console.warn;
+            var origErr = console.error;
+
+            function _joinArgs(args) {
+                try {
+                    var arr = Array.prototype.slice.call(args || []);
+                    var txt = arr.map(function(a) {
+                        if (a == null) return '';
+                        if (typeof a === 'string') return a;
+                        try { return JSON.stringify(a); } catch (eJ) { return String(a); }
+                    }).join(' ');
+                    txt = String(txt || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length > 500) txt = txt.slice(0, 500) + '…';
+                    return txt;
+                } catch (e) {
+                    return '';
+                }
+            }
+
+            function wrap(fn, level, prefix, shouldForward) {
+                return function() {
+                    try {
+                        if (shouldForward) {
+                            var txt = _joinArgs(arguments);
+                            if (txt) _clientLogDirectMaybe(level, prefix, { text: txt });
+                        }
+                    } catch (e1) {}
+                    try { return fn && fn.apply ? fn.apply(console, arguments) : undefined; } catch (e2) { return undefined; }
+                };
+            }
+
+            if (allowLog) console.log = wrap(origLog, 'debug', '[CONSOLE LOG]', true);
+            if (allowWarn) console.warn = wrap(origWarn, 'warn', '[CONSOLE WARN]', true);
+            if (allowErr) console.error = wrap(origErr, 'error', '[CONSOLE ERR]', true);
+
+            _clientLogDirectMaybe('info', 'Console bridge enabled', { mode: raw });
+        } catch (e) {
+            // ignore
+        }
+    })();
+
+    // Forward JS runtime errors to backend log (errors only; low volume).
+    // JS health bootstrap already records these into localStorage; this just helps
+    // unify them with backend logs.
+    (function() {
+        try {
+            if (window.__znh_backend_error_bridge_bound) return;
+            window.__znh_backend_error_bridge_bound = true;
+        } catch (e0) {}
+
+        var lastSig = '';
+        var lastTs = 0;
+
+        function _dedupe(sig) {
+            var now = 0;
+            try { now = Date.now(); } catch (e) { now = 0; }
+            if (sig && sig === lastSig && now && lastTs && (now - lastTs) < 1500) return true;
+            lastSig = sig;
+            lastTs = now;
+            return false;
+        }
+
+        try {
+            window.addEventListener('error', function(ev) {
+                try {
+                    var msg = (ev && ev.message) ? String(ev.message) : 'error';
+                    var file = (ev && ev.filename) ? String(ev.filename) : '';
+                    var line = (ev && ev.lineno) ? parseInt(ev.lineno, 10) : 0;
+                    var col = (ev && ev.colno) ? parseInt(ev.colno, 10) : 0;
+                    var sig = 'e|' + msg + '|' + file + '|' + String(line) + '|' + String(col);
+                    if (_dedupe(sig)) return;
+
+                    _clientLogDirectMaybe('error', 'Uncaught JS Exception', {
+                        message: msg,
+                        file: file,
+                        line: line,
+                        col: col
+                    });
+                } catch (e2) {}
+            });
+        } catch (e3) {}
+
+        try {
+            window.addEventListener('unhandledrejection', function(ev) {
+                try {
+                    var reason = '';
+                    try { reason = (ev && ev.reason != null) ? String(ev.reason) : 'promise rejection'; } catch (eR) { reason = 'promise rejection'; }
+                    if (reason.length > 500) reason = reason.slice(0, 500) + '…';
+
+                    var sig = 'r|' + reason;
+                    if (_dedupe(sig)) return;
+
+                    _clientLogDirectMaybe('error', 'Unhandled Promise Rejection', { reason: reason });
+                } catch (e2) {}
+            });
+        } catch (e4) {}
+    })();
+
     function _api(path, opts, _didRetryAuth) {
         opts = opts || {};
         if (ZNH_DEBUG) {

@@ -1711,6 +1711,12 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** When `DASHBOARD_JS_VERBOSE_DEBUG=true`, the WebUI now forwards extra telemetry into `dashboard-api.log`:
     - UI interactions (click/change metadata)
     - Settings API request/response traces (method/path/status/duration)
+    - JS runtime crashes (uncaught errors + unhandled promise rejections)
+    - Optional: Console forwarding (URL: `&console=1` for warn+error, or `&console=all` for log+warn+error)
+  - 🧪 **DEV (advanced):** Debug HUD overlay is available in the dashboard:
+    - Toggle: `Ctrl+Alt+H` (or `Ctrl+Backquote`)
+    - URL: `&hud=1` auto-opens it
+    - URL: `&domflash=1` highlights UI elements when they update (render tracing)
   - 🧿 **NEW:** when a Self-update or System Update job is running, the dashboard shows a bottom-right “background job bubble” (spinner + name like “Update system”) so accidental overlay closes don’t lose the running job view.
   - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
   - 🐛 **FIXED:** Rocket Update Wizard preview now syncs the dashboard pending count when zypper reports **"Nothing to do"** (it updates the cached dry-run output under `/var/log/zypper-auto/dry-run-last.txt` and applies a short-lived UI override in Live mode to avoid stale counts).
