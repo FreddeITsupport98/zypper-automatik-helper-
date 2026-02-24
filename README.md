@@ -1682,6 +1682,7 @@ systemctl status zypper-autodownload.service
   - 🧿 **NEW:** WebUI **Quick Actions** can now run allowlisted helper commands directly from the dashboard in a terminal-like overlay (with **minimize/close** and live log output), instead of only copying commands.
     - Dangerous state-changing actions require a typed confirmation phrase (server-side enforced).
     - Interactive actions that need stdin (menus, live tails, etc.) remain copy-only for safety.
+  - 🐛 **FIXED:** Snapper Manager / cleanup now returns HTTP 200 with `rc` + output so the WebUI shows the full report even when Snapper returns non-zero (instead of a generic `HTTP 500`).
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
   - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
   - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.

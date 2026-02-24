@@ -29590,7 +29590,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/snapper/status":
             cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "status"]
             rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))
-            return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
+            # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
+            return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out}, origin)
 
         if path == "/api/snapper/list":
             n = "10"
@@ -29611,7 +29612,8 @@ class Handler(BaseHTTPRequestHandler):
                 nn = 50
             cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "list", str(nn)]
             rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))
-            return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
+            # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
+            return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out}, origin)
 
         # --- Self-update status (dashboard) ---
         if path == "/api/self-update/status":
@@ -31571,8 +31573,8 @@ class Handler(BaseHTTPRequestHandler):
                     return _json_response(self, 409, {"error": "snapper appears to be running already; try again later"}, origin)
 
             rc, out = _run_cmd(cmd, timeout_s=timeout_s, log=getattr(self.server, "_znh_log", None))
-            code = 200 if rc == 0 else 500
-            return _json_response(self, code, {"rc": rc, "output": out, "action": action}, origin)
+            # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
+            return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out, "action": action}, origin)
 
         if path == "/api/client-log":
             body = _read_json(self)
