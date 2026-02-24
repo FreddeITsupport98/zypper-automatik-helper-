@@ -7294,15 +7294,50 @@ generate_dashboard() {
             }
         } catch (eM1) {}
 
+        var started = 0;
+        try { started = Date.now(); } catch (eT) { started = 0; }
+
+        var tok0 = '';
+        var method = 'GET';
+        try { method = String((opts && opts.method) ? opts.method : 'GET'); } catch (eM) { method = 'GET'; }
+
         return _fetchToken().then(function(tok) {
+            tok0 = tok;
             var headers = opts.headers || {};
             headers['X-ZNH-Token'] = tok;
             if (opts.body && !headers['Content-Type']) {
                 headers['Content-Type'] = 'application/json';
             }
             opts.headers = headers;
+
+            // Verbose: trace API calls into the backend log.
+            // Avoid recursion: do not trace the /api/client-log endpoint itself.
+            if (ZNH_DEBUG && path !== '/api/client-log') {
+                try {
+                    _clientLogDirect(tok0, 'debug', 'API request', {
+                        method: method,
+                        path: String(path || '')
+                    });
+                } catch (eDbg0) {}
+            }
+
             return znhFetch(SETTINGS_API_BASE + path, opts);
         }).then(function(r) {
+            // Verbose: trace responses too.
+            if (ZNH_DEBUG && path !== '/api/client-log') {
+                try {
+                    var dur = 0;
+                    try { dur = started ? (Date.now() - started) : 0; } catch (eD) { dur = 0; }
+                    _clientLogDirect(tok0, 'debug', 'API response', {
+                        method: method,
+                        path: String(path || ''),
+                        status: r.status,
+                        ok: !!r.ok,
+                        dur_ms: dur
+                    });
+                } catch (eDbg1) {}
+            }
+
             // Parse body defensively so we can still display errors even when the
             // API returns non-JSON (or empty) output.
             return r.text().then(function(txt) {
@@ -7321,6 +7356,21 @@ generate_dashboard() {
                 }
 
                 if (!r.ok) {
+                    // Verbose: trace payload for failing responses (truncated).
+                    if (ZNH_DEBUG && path !== '/api/client-log') {
+                        try {
+                            var jtxt = '';
+                            try { jtxt = JSON.stringify(j || {}); } catch (eJ) { jtxt = ''; }
+                            if (jtxt && jtxt.length > 500) jtxt = jtxt.slice(0, 500) + '…';
+                            _clientLogDirect(tok0, 'warn', 'API error', {
+                                method: method,
+                                path: String(path || ''),
+                                status: r.status,
+                                payload: jtxt
+                            });
+                        } catch (eDbg2) {}
+                    }
+
                     var e3 = new Error((j && j.error) ? j.error : ('HTTP ' + r.status));
                     e3.payload = j;
                     e3.http_status = r.status;
@@ -7333,13 +7383,86 @@ generate_dashboard() {
 
     function _settingsClientLog(level, msg, ctx) {
         // Best-effort: send UI events to the API log so debug level matches the rest of the project.
-        // If API is down, this will fail silently.
+        // Never throw + never leave unhandled rejections.
         try {
-            return _api('/api/client-log', { method: 'POST', body: JSON.stringify({ level: level || 'info', msg: String(msg || ''), ctx: ctx || {} }) });
+            return _api('/api/client-log', {
+                method: 'POST',
+                body: JSON.stringify({
+                    level: level || 'info',
+                    msg: String(msg || ''),
+                    ctx: ctx || {}
+                })
+            }).catch(function() { return null; });
         } catch (e) {
             return null;
         }
     }
+
+    // Verbose UI interaction telemetry:
+    // When verbose debug is enabled, log most user interactions into the backend API log.
+    // This is intentionally gated behind ZNH_DEBUG to avoid spamming logs during normal usage.
+    (function() {
+        var lastTs = 0;
+        function shouldLog() {
+            try { return !!ZNH_DEBUG; } catch (e) { return false; }
+        }
+        function trunc(s, n) {
+            s = String(s || '');
+            s = s.replace(/\s+/g, ' ').trim();
+            if (s.length <= n) return s;
+            return s.slice(0, n) + '…';
+        }
+
+        document.addEventListener('click', function(ev) {
+            if (!shouldLog()) return;
+            var now = 0;
+            try { now = Date.now(); } catch (e0) { now = 0; }
+            // Simple rate limit (avoid log spam when holding mouse down).
+            if (now && lastTs && (now - lastTs) < 140) return;
+            lastTs = now;
+
+            var t = null;
+            try {
+                t = (ev && ev.target && ev.target.closest) ? ev.target.closest('button, a, .pill, summary, details, input, select, textarea') : null;
+            } catch (e1) {
+                t = null;
+            }
+            if (!t) return;
+
+            // Do not capture typed secrets/phrases; only log metadata.
+            var ctx = {
+                event: 'click',
+                tag: t.tagName,
+                id: t.id || '',
+                cls: trunc(t.className || '', 160),
+                text: trunc((t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') ? '' : (t.innerText || t.textContent || ''), 60)
+            };
+
+            _settingsClientLog('debug', 'UI interaction', ctx);
+        }, { passive: true });
+
+        document.addEventListener('change', function(ev) {
+            if (!shouldLog()) return;
+            var t = null;
+            try {
+                t = (ev && ev.target && ev.target.closest) ? ev.target.closest('input, select, textarea') : null;
+            } catch (e1) {
+                t = null;
+            }
+            if (!t) return;
+
+            var ctx = {
+                event: 'change',
+                tag: t.tagName,
+                id: t.id || '',
+                name: t.name || '',
+                type: t.type || '',
+                key: (t.dataset && t.dataset.key) ? String(t.dataset.key) : ''
+            };
+
+            _settingsClientLog('debug', 'UI change', ctx);
+        }, { passive: true });
+    })();
 
     // --- Dashboard refresh (dashboard -> root API) ---
     function dashboardRefreshRun(btnEl) {

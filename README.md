@@ -1708,6 +1708,9 @@ systemctl status zypper-autodownload.service
   - 🧯 **FIXED:** user-visible `dashboard-live.log` is now capped to the most recent ~2500 lines by the sync worker to prevent browser/resource blow-ups.
   - 🖱️ **IMPROVED:** Recent Activity log polling no longer fights the user’s scroll position (updates are staged while scrolled up).
   - 🐛 **FIXED:** Recent Activity log polling no longer clears the visible log output when a log file is temporarily missing/empty (HTTP 404/416); it keeps the last visible text until the file is available again.
+  - 🧰 **IMPROVED:** When `DASHBOARD_JS_VERBOSE_DEBUG=true`, the WebUI now forwards extra telemetry into `dashboard-api.log`:
+    - UI interactions (click/change metadata)
+    - Settings API request/response traces (method/path/status/duration)
   - 🧿 **NEW:** when a Self-update or System Update job is running, the dashboard shows a bottom-right “background job bubble” (spinner + name like “Update system”) so accidental overlay closes don’t lose the running job view.
   - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
   - 🐛 **FIXED:** Rocket Update Wizard preview now syncs the dashboard pending count when zypper reports **"Nothing to do"** (it updates the cached dry-run output under `/var/log/zypper-auto/dry-run-last.txt` and applies a short-lived UI override in Live mode to avoid stale counts).
