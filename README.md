@@ -1205,6 +1205,10 @@ Most critical operations (systemctl enable/restart, zypper maintenance commands,
 
 Notes:
 - To also persist successful command output (very verbose), run with `--debug` or set `ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1`.
+  - You can set it in `/etc/zypper-auto.conf` (values: `1` or `true`).
+- To enable maximum backend trace verbosity (shell xtrace into `/var/log/zypper-auto/trace.log`), set:
+  - `ZYPPER_AUTO_DEBUG_LEVEL=trace`
+  - This can be set as an environment variable or inside `/etc/zypper-auto.conf`.
 
 #### Journald / syslog integration (best-effort)
 
@@ -1283,6 +1287,8 @@ Drop executable hook scripts into:
 The installer also drops safe **template examples** (not executable) so users can quickly enable hooks:
 - `/etc/zypper-auto/hooks/pre.d/00-example-pre.sh.example`
 - `/etc/zypper-auto/hooks/post.d/00-example-post.sh.example`
+- Developer/forensics (optional): `/etc/zypper-auto/hooks/pre.d/99-debug-dump.sh.example`
+  - When enabled, it appends a small state dump into `dashboard-api.log` so WebUI telemetry and backend state line up in one timeline.
 
 Enable a template by copying it to a new filename and making it executable:
 
@@ -1714,6 +1720,10 @@ systemctl status zypper-autodownload.service
     - JS runtime crashes (uncaught errors + unhandled promise rejections)
     - Optional: Console forwarding (URL: `&console=1` for warn+error, or `&console=all` for log+warn+error)
       - UI toggle: **Recent Activity Log → “🧪 JS health (debug)” → “Console forward”** button (cycles **OFF → WARN+ERR → ALL**; persisted in `localStorage`; active only when verbose debug is enabled)
+  - 🧰 **IMPROVED (dev/forensics):** default `/etc/zypper-auto.conf` template now documents ultra-verbose backend knobs:
+    - `ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1` (persist stdout/stderr even on successful commands)
+    - `ZYPPER_AUTO_DEBUG_LEVEL=trace` (enable maximum backend trace logging)
+    - New optional hook template: `/etc/zypper-auto/hooks/pre.d/99-debug-dump.sh.example`
   - 🧪 **DEV (advanced):** Debug HUD overlay is available in the dashboard:
     - Toggle: `Ctrl+Alt+H` (or `Ctrl+Backquote`)
     - URL: `&hud=1` auto-opens it

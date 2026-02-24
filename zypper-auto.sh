@@ -1108,6 +1108,58 @@ NT_TIMER_INTERVAL_MINUTES=1
 # Global config file (optional but recommended for advanced users)
 CONFIG_FILE="/etc/zypper-auto.conf"
 
+# --- Early config peek (Developer / Forensics knobs) ---
+# Some environment-controlled observability toggles (like shell tracing) must be
+# applied BEFORE we source the full config later (load_config runs after log
+# init and root sanity checks).
+#
+# We intentionally parse only a small allowlist of keys here instead of sourcing
+# the full config, to avoid executing arbitrary code before sanity checks.
+__znh_conf_peek_value() {
+    # Usage: __znh_conf_peek_value KEY
+    # Prints the raw value (with surrounding quotes removed) or empty.
+    local key="$1"
+    [ -n "${key:-}" ] || { printf '%s' ""; return 0; }
+    [ -r "${CONFIG_FILE}" ] || { printf '%s' ""; return 0; }
+
+    local line val
+    line=$(grep -E "^[[:space:]]*${key}=" "${CONFIG_FILE}" 2>/dev/null | head -n 1 || true)
+    if [ -z "${line:-}" ]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    val="${line#*=}"
+    # Trim leading/trailing whitespace
+    val="$(printf '%s' "${val}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' 2>/dev/null || printf '%s' "${val}")"
+
+    # Strip one layer of surrounding quotes
+    case "${val}" in
+        \"*\") val="${val#\"}"; val="${val%\"}" ;;
+        \'.*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+
+    printf '%s' "${val}"
+    return 0
+}
+
+# Allow /etc/zypper-auto.conf to set these early-start observability toggles.
+# Do NOT override explicit environment variables.
+if [ -r "${CONFIG_FILE}" ]; then
+    if [ -z "${ZYPPER_AUTO_DEBUG_LEVEL:-}" ]; then
+        _znh_dbg_lvl="$(__znh_conf_peek_value ZYPPER_AUTO_DEBUG_LEVEL)"
+        if [ -n "${_znh_dbg_lvl:-}" ]; then
+            ZYPPER_AUTO_DEBUG_LEVEL="${_znh_dbg_lvl}"
+        fi
+    fi
+    if [ -z "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-}" ]; then
+        _znh_guard_out="$(__znh_conf_peek_value ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT)"
+        if [ -n "${_znh_guard_out:-}" ]; then
+            ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT="${_znh_guard_out}"
+        fi
+    fi
+fi
+
 # Feature toggles (may be overridden by CONFIG_FILE)
 ENABLE_FLATPAK_UPDATES="true"
 ENABLE_SNAP_UPDATES="true"
@@ -1609,6 +1661,19 @@ _format_cmd() {
     printf '%s' "${out% }"
 }
 
+__znh_is_truthy() {
+    # Treat common "enabled" values as true.
+    # Usage: __znh_is_truthy "value"; returns 0 when true.
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON|enabled|ENABLED)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Execute a command with full capturing.
 # Usage: execute_guarded "Description of task" command arg1 arg2 ...
 #
@@ -1631,7 +1696,7 @@ execute_guarded() {
         log_success "${desc}"
 
         # Persist successful command output only when explicitly requested.
-        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null || [ "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-0}" -eq 1 ] 2>/dev/null; then
+        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null || __znh_is_truthy "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-0}"; then
             if [ -s "$tmp_out" ] 2>/dev/null; then
                 sed 's/^/  [CMD_OUT] /' "$tmp_out" >>"${LOG_FILE}" 2>/dev/null || true
                 if [ -n "${TRACE_LOG:-}" ]; then
@@ -1679,7 +1744,7 @@ execute_optional() {
         # Optional operations should not clutter logs on success.
         log_debug "OPTIONAL OK: ${desc}"
 
-        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null || [ "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-0}" -eq 1 ] 2>/dev/null; then
+        if [ "${DEBUG_MODE:-0}" -eq 1 ] 2>/dev/null || __znh_is_truthy "${ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT:-0}"; then
             if [ -s "$tmp_out" ] 2>/dev/null; then
                 sed 's/^/  [CMD_OUT] /' "$tmp_out" >>"${LOG_FILE}" 2>/dev/null || true
                 if [ -n "${TRACE_LOG:-}" ]; then
@@ -1965,6 +2030,26 @@ AUTO_REPAIR_TRY_REMOUNT_RW=false
 #   Slack  : https://hooks.slack.com/services/....
 #   ntfy   : https://ntfy.sh/<topic>
 WEBHOOK_URL=""
+
+# ---------------------------------------------------------------------
+# Developer / Forensics (very verbose)
+# ---------------------------------------------------------------------
+# These settings can drastically increase log volume. Use them only when
+# actively troubleshooting.
+#
+# ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT
+# When enabled, execute_guarded() will persist stdout/stderr for successful
+# commands (normally only logged on failure).
+# Allowed values: 0/1 (also accepts: true/yes/on/enabled)
+# Default: 0
+ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=0
+
+# ZYPPER_AUTO_DEBUG_LEVEL
+# Enables extra debug/trace behaviour for this script, including shell xtrace
+# when set to "trace".
+# Allowed values: info|debug|trace
+# Default: info
+ZYPPER_AUTO_DEBUG_LEVEL=info
 
 # ---------------------------------------------------------------------
 # Extensibility (hooks)
@@ -3762,6 +3847,68 @@ EOF
             log_success "Hook template installed: ${post_tpl}"
         else
             log_warn "Failed to write hook template: ${post_tpl} (non-fatal)"
+        fi
+    fi
+
+    # Developer/forensics helper: high-signal state dump before updates.
+    # This is shipped as a template (not executable) so it is opt-in.
+    local dbg_tpl
+    dbg_tpl="${base}/pre.d/99-debug-dump.sh.example"
+    if [ ! -f "${dbg_tpl}" ]; then
+        if write_atomic "${dbg_tpl}" <<'EOF'
+#!/usr/bin/env bash
+# Developer / forensics pre-update hook (template)
+#
+# Purpose:
+#   Dump high-signal system state into the dashboard Settings API log so WebUI
+#   traces and backend state appear in one timeline.
+#
+# To enable:
+#   sudo cp /etc/zypper-auto/hooks/pre.d/99-debug-dump.sh.example /etc/zypper-auto/hooks/pre.d/99-debug-dump.sh
+#   sudo chmod +x /etc/zypper-auto/hooks/pre.d/99-debug-dump.sh
+#
+# Notes:
+# - This hook runs as root (via the helper/wrapper).
+# - Keep it fast; avoid slow commands.
+# - Treat logs as potentially sensitive.
+
+set +e
+
+LOG="/var/log/zypper-auto/service-logs/dashboard-api.log"
+TS="$(date '+%Y-%m-%d %H:%M:%S')"
+RUN="${ZNH_RUN_ID:-}"
+TID="${ZYPPER_TRACE_ID:-}"
+
+{
+  echo "[DEBUG HOOK] ts=${TS} stage=${HOOK_STAGE:-pre} RUN=${RUN}${TID:+ TID=${TID}}"
+  echo "[DEBUG HOOK] ---- free -h ----"
+  free -h 2>&1
+  echo "[DEBUG HOOK] ---- zypp lock ----"
+  if [ -f /run/zypp.pid ]; then
+    pid=$(cat /run/zypp.pid 2>/dev/null | tr -cd '0-9')
+    echo "zypp.pid=${pid:-?}"
+    if [ -n "${pid:-}" ]; then
+      ps -p "${pid}" -o pid,ppid,comm,args 2>&1 || true
+    fi
+  else
+    echo "zypp.pid not present"
+  fi
+  echo "[DEBUG HOOK] ---- zypper/yast/packagekit processes ----"
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -a -i -f 'zypper|yast|y2base|packagekit' 2>&1 || echo "(none)"
+  else
+    ps aux 2>/dev/null | grep -Ei 'zypper|yast|y2base|packagekit' 2>&1 | grep -v grep || echo "(none)"
+  fi
+  echo "[DEBUG HOOK] ---- end ----"
+} >>"${LOG}" 2>/dev/null || true
+
+exit 0
+EOF
+        then
+            chmod 644 "${dbg_tpl}" 2>/dev/null || true
+            log_success "Hook template installed: ${dbg_tpl}"
+        else
+            log_warn "Failed to write hook template: ${dbg_tpl} (non-fatal)"
         fi
     fi
 }
@@ -17132,7 +17279,13 @@ run_diag_logs_runner_only() {
         fi
         echo "Config snapshot (${CONFIG_FILE}):"
         if [ -f "${CONFIG_FILE}" ]; then
-            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|CACHE_EXPIRY_MINUTES|SNOOZE_SHORT_HOURS|SNOOZE_MEDIUM_HOURS|SNOOZE_LONG_HOURS|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|INSTALL_CLICK_SUPPRESS_MINUTES|VERIFY_NOTIFY_USER_ENABLED)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
+            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|CACHE_EXPIRY_MINUTES|SNOOZE_SHORT_HOURS|SNOOZE_MEDIUM_HOURS|SNOOZE_LONG_HOURS|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|INSTALL_CLICK_SUPPRESS_MINUTES|VERIFY_NOTIFY_USER_ENABLED|ZYPPER_AUTO_DEBUG_LEVEL|ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
+
+            # Webhook URL is treated as a secret; only log a redacted host.
+            wh="$(__znh_conf_peek_value WEBHOOK_URL)"
+            if [ -n "${wh:-}" ]; then
+                echo "WEBHOOK_URL=$(_redact_url "${wh}")"
+            fi
         else
             echo "  (config file missing)"
         fi
