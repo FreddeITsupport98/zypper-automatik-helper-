@@ -1926,10 +1926,17 @@ __znh_write_dashboard_schema_json() {
 
     "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED": {"type": "bool", "default": "true"},
     "SNAP_CLEANUP_CRITICAL_FREE_MB": {"type": "int", "min": 0, "max": 5000, "step": 50, "default": "300"},
+    "SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST": {"type": "int", "min": 1, "max": 50, "step": 1, "default": "3"},
 
     "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED": {"type": "bool", "default": "false"},
     "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX": {"type": "string", "max_len": 200, "default": "aborted|failed", "presets": ["aborted|failed", "aborted", "failed", "error", "aborted|failed|error"]},
-    "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM": {"type": "bool", "default": "true"}
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM": {"type": "bool", "default": "true"},
+
+    "KERNEL_PURGE_ENABLED": {"type": "bool", "default": "false"},
+    "KERNEL_PURGE_MODE": {"type": "enum", "allowed": ["auto","zypper","systemd"], "default": "auto"},
+    "KERNEL_PURGE_CONFIRM": {"type": "bool", "default": "true"},
+    "KERNEL_PURGE_DRY_RUN": {"type": "bool", "default": "false"},
+    "KERNEL_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900"}
   }
 }
 EOF
@@ -5128,14 +5135,14 @@ generate_dashboard() {
       </div>
 
       <details id="settings-drawer" style="margin-top: 16px;">
-        <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Settings (edit /etc/zypper-auto.conf)</summary>
+        <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Settings (edit / apply /etc/zypper-auto.conf)</summary>
         <div style="margin-top: 12px; color: var(--muted); font-size: 0.9rem;">
           This panel writes settings via a localhost API (<code>127.0.0.1:8766</code>). If a value is invalid, it will auto-heal back to safe defaults.
         </div>
         <div id="settings-banner" style="margin-top: 10px; display:none; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--text); font-weight: 900;"></div>
         <div id="settings-form" style="margin-top: 12px; display:grid; gap: 10px;"></div>
         <div style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;">
-          <button class="pill" type="button" id="settings-save">Save</button>
+          <button class="pill" type="button" id="settings-save">Save / Apply</button>
           <button class="pill" type="button" id="settings-reload">Reload</button>
           <button class="pill" type="button" id="settings-reset" title="Backup and regenerate defaults" style="border-color: rgba(239,68,68,0.30);">Factory reset</button>
         </div>
@@ -5336,6 +5343,7 @@ generate_dashboard() {
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
             <select id="snapper-cleanup-mode" style="padding:8px 10px; border-radius: 12px;">
               <option value="all">all</option>
+              <option value="force-prune">force-prune (keep newest)</option>
               <option value="empty-pre-post">empty-pre-post</option>
               <option value="timeline">timeline</option>
               <option value="number">number</option>
@@ -5343,7 +5351,8 @@ generate_dashboard() {
             <button class="pill" type="button" id="snapper-cleanup-btn" style="border-color: rgba(239,68,68,0.30);">Run cleanup</button>
           </div>
           <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
-            Warning: cleanup may delete snapshots.
+            Warning: cleanup may delete snapshots. Mode <code>force-prune</code> deletes older snapshots but keeps the newest snapshots per config.
+            Kernel cleanup runs when <code>KERNEL_PURGE_ENABLED=true</code>.
           </div>
         </div>
 
@@ -7134,10 +7143,10 @@ generate_dashboard() {
         var saveBtn = document.getElementById('settings-save');
         if (!saveBtn) return;
         if (_settingsDirty) {
-            saveBtn.textContent = 'Save (unsaved)';
+            saveBtn.textContent = 'Save / Apply (unsaved)';
             saveBtn.style.borderColor = 'rgba(250,204,21,0.55)';
         } else {
-            saveBtn.textContent = 'Save';
+            saveBtn.textContent = 'Save / Apply';
             saveBtn.style.borderColor = 'rgba(255,255,255,0.10)';
             _settingsDirtyToastShown = false;
             _settingsAutosavePendingToast = false;
@@ -7161,7 +7170,7 @@ generate_dashboard() {
         } else {
             if (!_settingsDirtyToastShown) {
                 _settingsDirtyToastShown = true;
-                toast('Unsaved changes', 'Click Save to apply', 'ok');
+                toast('Unsaved changes', 'Click Save / Apply to apply', 'ok');
             }
         }
     }
@@ -7189,20 +7198,27 @@ generate_dashboard() {
         { key: 'ZYPPER_TURBO_TUNER_ENABLED', type: 'bool', label: 'Zypper Turbo tuner (optimize /etc/zypp/zypp.conf)', advanced: true, help: 'Tweaks /etc/zypp/zypp.conf for performance.' },
         { key: 'VERIFY_JOURNAL_AUTO_VACUUM_ENABLED', type: 'bool', label: 'Auto vacuum system journal when huge (verification)' },
 
-        // Snapper safety (affects /etc/snapper/configs/* only when you run snapper tools)
-        { key: 'SNAP_RETENTION_OPTIMIZER_ENABLED', type: 'bool', label: 'Snapper retention optimizer (cap overly high limits)' },
-        { key: 'SNAP_RETENTION_MAX_NUMBER_LIMIT', type: 'int', label: 'Snapper cap: NUMBER_LIMIT (max upper bound)' },
-        { key: 'SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT', type: 'int', label: 'Snapper cap: NUMBER_LIMIT_IMPORTANT' },
-        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_HOURLY' },
-        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_DAILY' },
-        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_WEEKLY' },
-        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_MONTHLY' },
-        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY', type: 'int', label: 'Snapper cap: TIMELINE_LIMIT_YEARLY (0 disables yearly)' },
+        // Snapper safety (DANGEROUS: affects system config under /etc/snapper/configs/*)
+        { key: 'SNAP_RETENTION_OPTIMIZER_ENABLED', type: 'bool', label: 'DANGEROUS: Snapper retention optimizer (cap overly high limits)', danger: true, danger_phrase: 'SNAPPER', help: 'Advanced. Changes apply to /etc/snapper/configs/* when you run Snapper AUTO enable / cleanup tools.' },
+        { key: 'SNAP_RETENTION_MAX_NUMBER_LIMIT', type: 'int', label: 'DANGEROUS: Snapper cap: NUMBER_LIMIT (max upper bound)', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
+        { key: 'SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT', type: 'int', label: 'DANGEROUS: Snapper cap: NUMBER_LIMIT_IMPORTANT', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_HOURLY', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_DAILY', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_WEEKLY', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_MONTHLY', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
+        { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_YEARLY (0 disables yearly)', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
         { key: 'SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED', type: 'bool', label: 'Snapper cleanup concurrency guard' },
         { key: 'SNAP_CLEANUP_CRITICAL_FREE_MB', type: 'int', label: 'Snapper cleanup critical free space (MB)' },
+        { key: 'SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST', type: 'int', label: 'DANGEROUS: force-prune keep newest snapshots per config', danger: true, danger_phrase: 'CLEANUP', advanced: true, help: 'Only used by Snapper cleanup mode "force-prune". Deletes older snapshots and keeps this many newest per snapper config (root/home/etc.). Requires danger zone unlock.' },
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED', type: 'bool', label: 'Deep clean: broken snapshot hunter' },
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX', type: 'string', label: 'Deep clean: broken snapshot regex' },
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM', type: 'bool', label: 'Deep clean: confirm before delete' },
+
+        { key: 'KERNEL_PURGE_ENABLED', type: 'bool', label: 'DANGEROUS: kernel package purge (zypper purge-kernels)', danger: true, danger_phrase: 'KERNEL', advanced: true, help: 'Runs during Snapper Full Cleanup. Purges old kernel packages using zypper purge-kernels (respects /etc/zypp/zypp.conf:multiversion.kernels). Requires danger zone unlock.' },
+        { key: 'KERNEL_PURGE_MODE', type: 'enum', label: 'Kernel purge mode', advanced: true, help: 'auto (recommended), zypper (direct), systemd (purge-kernels.service if available).' },
+        { key: 'KERNEL_PURGE_CONFIRM', type: 'bool', label: 'Kernel purge: ask before purging (CLI only)', advanced: true, help: 'When running from WebUI / non-interactive, this is treated as already confirmed.' },
+        { key: 'KERNEL_PURGE_DRY_RUN', type: 'bool', label: 'Kernel purge: dry-run only (no changes)', advanced: true },
+        { key: 'KERNEL_PURGE_TIMEOUT_SECONDS', type: 'int', label: 'Kernel purge timeout (seconds)', advanced: true },
 
         { key: 'DL_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Downloader interval (min)' },
         { key: 'NT_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Notifier interval (min)' },
@@ -17979,7 +17995,9 @@ run_snapper_menu_only() {
     __znh_snapper_create_snapshot() {
         local desc="${1:-}"
         if [ -z "${desc}" ]; then
-            read -p "Snapshot description (blank = default): " -r desc
+            if [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+                read -p "Snapshot description (blank = default): " -r desc
+            fi
         fi
         desc="${desc:-Zypper Auto-Helper manual snapshot}"
 
@@ -18006,12 +18024,19 @@ run_snapper_menu_only() {
 
     __znh_snapper_cleanup_now() {
         # Usage:
-        #   __znh_snapper_cleanup_now            # default: all algorithms
-        #   __znh_snapper_cleanup_now all        # same as default
-        #   __znh_snapper_cleanup_now number     # single algorithm
+        #   __znh_snapper_cleanup_now                   # default: all algorithms
+        #   __znh_snapper_cleanup_now all               # same as default
+        #   __znh_snapper_cleanup_now force-prune       # run algorithms + then delete older snapshots (keep newest)
+        #   __znh_snapper_cleanup_now number            # single algorithm
         #   __znh_snapper_cleanup_now timeline
         #   __znh_snapper_cleanup_now empty-pre-post
-        local mode="${1:-all}"
+        local mode_arg="${1:-all}"
+        local mode="${mode_arg}"
+        local force_prune=0
+        if [ "${mode_arg}" = "force-prune" ]; then
+            force_prune=1
+            mode="all"
+        fi
 
         # --- Professional Edition: audit report (text + JSON) ---
         local report_enabled report_dir report_format report_max
@@ -18065,7 +18090,7 @@ run_snapper_menu_only() {
                 echo " SYSTEM CLEANUP AUDIT REPORT"
                 echo "=============================================="
                 echo "Start time: ${__audit_start_time}"
-                echo "Mode: ${mode}"
+                echo "Mode: ${mode_arg}"
                 echo "Report: ${report_format}"
                 echo "=============================================="
                 echo ""
@@ -18129,7 +18154,7 @@ run_snapper_menu_only() {
                     echo "{" 
                     echo "  \"start_time\": \"$(_json_escape "${__audit_start_time}")\","
                     echo "  \"end_time\": \"$(_json_escape "${__audit_end_time}")\","
-                    echo "  \"mode\": \"$(_json_escape "${mode}")\","
+                    echo "  \"mode\": \"$(_json_escape "${mode_arg}")\","
                     echo "  \"status\": \"$(_json_escape "${__audit_status}")\","
                     echo "  \"space_kb\": {\"start\": ${start_kb:-0}, \"end\": ${end_kb:-0}, \"freed\": ${freed_kb:-0}},"
                     echo "  \"removed_snapshots_count\": ${removed_count:-0},"
@@ -18204,7 +18229,11 @@ run_snapper_menu_only() {
         echo ""
 
         if [ "${mode}" = "all" ]; then
-            echo "Mode: ALL algorithms (empty-pre-post -> timeline -> number)"
+            if [ "${force_prune}" -eq 1 ] 2>/dev/null; then
+                echo "Mode: FORCE-PRUNE (runs ALL algorithms, then prunes older snapshots while keeping newest per config)"
+            else
+                echo "Mode: ALL algorithms (empty-pre-post -> timeline -> number)"
+            fi
         else
             echo "Mode: single algorithm '${mode}'"
         fi
@@ -18532,16 +18561,29 @@ run_snapper_menu_only() {
         fi
 
         echo ""
-        read -p "Proceed with cleanup now? [y/N]: " -r ans
-        if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
-            echo "Cleanup cancelled."
-            __audit_status="cancelled"
-            __znh_audit_record "cleanup:cancelled:user"
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+            # WebUI calls set ZNH_NON_INTERACTIVE=1 after typed confirmation.
+            echo "Non-interactive: proceeding with cleanup (confirmation handled by caller)."
+            __znh_audit_record "cleanup:confirmed:non-interactive:true"
+        elif [ ! -t 0 ]; then
+            log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY. (Set ZNH_NON_INTERACTIVE=1 to explicitly allow.)"
+            __audit_status="refused"
+            __znh_audit_record "cleanup:refused:no-tty"
             __znh_cleanup_snapshot_tmpfiles
             __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
-            return 0
+            return 1
+        else
+            read -p "Proceed with cleanup now? [y/N]: " -r ans
+            if [[ ! "${ans:-}" =~ ^[Yy]$ ]]; then
+                echo "Cleanup cancelled."
+                __audit_status="cancelled"
+                __znh_audit_record "cleanup:cancelled:user"
+                __znh_cleanup_snapshot_tmpfiles
+                __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
+                return 0
+            fi
+            __znh_audit_record "cleanup:confirmed:true"
         fi
-        __znh_audit_record "cleanup:confirmed:true"
 
         # Smart pre-step: keep snapper configs sane (same spirit as option 5).
         # We only do this when a TTY is available.
@@ -18599,6 +18641,77 @@ run_snapper_menu_only() {
                 __znh_audit_record "snapper:cleanup:${conf}:${alg}:done"
             done
         done
+
+        __znh_snapper_force_prune_old_snapshots() {
+            # Force mode: delete all older snapshots and keep the newest N snapshots per config.
+            # This ignores per-snapshot cleanup tags and is intended for emergency cleanup.
+            local keep_n
+            keep_n="${SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST:-3}"
+            if ! [[ "${keep_n}" =~ ^[0-9]+$ ]] || [ "${keep_n}" -lt 1 ] 2>/dev/null; then
+                keep_n=3
+            fi
+
+            echo ""
+            echo "== Force prune snapshots (keep newest) =="
+            echo "Will keep newest per config: ${keep_n}"
+
+            local snap_csv
+            snap_csv="$(mktemp)"
+            __znh_snapper_dump_snapshot_csv "${snap_csv}" || true
+
+            local conf
+            for conf in "${configs[@]}"; do
+                # IDs excluding current snapshot 0
+                local -a ids=()
+                mapfile -t ids < <(awk -F'\t' -v c="${conf}" '$1==c && $2 ~ /^[0-9]+$/ && $2 != "0" {print $2}' "${snap_csv}" 2>/dev/null | sort -n)
+
+                local total
+                total="${#ids[@]}"
+                if [ "${total}" -le "${keep_n}" ] 2>/dev/null; then
+                    echo "[force-prune] ${conf}: snapshots=${total} -> nothing to prune"
+                    __znh_audit_record "snapper:force-prune:${conf}:skip:total=${total}:keep=${keep_n}"
+                    continue
+                fi
+
+                local del_count
+                del_count=$((total - keep_n))
+                echo "[force-prune] ${conf}: snapshots=${total} -> deleting oldest ${del_count}, keeping newest ${keep_n}"
+                __znh_audit_record "snapper:force-prune:${conf}:delete=${del_count}:keep=${keep_n}"
+
+                local -a batch=()
+                local i id
+                for ((i=0; i<del_count; i++)); do
+                    id="${ids[$i]}"
+                    [ -n "${id:-}" ] || continue
+                    batch+=("${id}")
+                    if [ "${#batch[@]}" -ge 25 ] 2>/dev/null; then
+                        if command -v timeout >/dev/null 2>&1; then
+                            execute_guarded "Force prune snapshots (${conf})" timeout 900 "${SNAPPER_CMD[@]}" -c "${conf}" delete "${batch[@]}" || true
+                        else
+                            execute_guarded "Force prune snapshots (${conf})" "${SNAPPER_CMD[@]}" -c "${conf}" delete "${batch[@]}" || true
+                        fi
+                        batch=()
+                    fi
+                done
+
+                if [ "${#batch[@]}" -gt 0 ] 2>/dev/null; then
+                    if command -v timeout >/dev/null 2>&1; then
+                        execute_guarded "Force prune snapshots (${conf})" timeout 900 "${SNAPPER_CMD[@]}" -c "${conf}" delete "${batch[@]}" || true
+                    else
+                        execute_guarded "Force prune snapshots (${conf})" "${SNAPPER_CMD[@]}" -c "${conf}" delete "${batch[@]}" || true
+                    fi
+                fi
+            done
+
+            rm -f -- "${snap_csv}" 2>/dev/null || true
+            return 0
+        }
+
+        if [ "${force_prune}" -eq 1 ] 2>/dev/null; then
+            __znh_audit_record "snapper:force-prune:start"
+            __znh_snapper_force_prune_old_snapshots || true
+            __znh_audit_record "snapper:force-prune:done"
+        fi
 
         # Optional Deep Clean: hunt for obviously aborted/failed snapshots that may
         # not be removed by standard algorithms (best-effort emergency recovery).
@@ -19149,12 +19262,14 @@ run_snapper_menu_only() {
             fi
 
             if [ "${KERNEL_PURGE_CONFIRM:-true}" = "true" ]; then
-                if [ -t 0 ]; then
+                if [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
                     read -p "Purge old kernel packages now? [y/N]: " -r ans_kp
                     if [[ ! "${ans_kp:-}" =~ ^[Yy]$ ]]; then
                         echo "Skipping kernel package cleanup."
                         return 0
                     fi
+                elif [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+                    echo "[kernel-purge] Non-interactive: proceeding (confirmed by caller)."
                 else
                     log_warn "[kernel-purge] Refusing to purge kernels without a TTY while KERNEL_PURGE_CONFIRM=true"
                     return 0
@@ -19398,7 +19513,7 @@ run_snapper_menu_only() {
             fi
 
             if [ "${BOOT_ENTRY_CLEANUP_CONFIRM:-true}" = "true" ]; then
-                if [ -t 0 ]; then
+                if [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
                     echo ""
                     echo "Boot menu cleanup (BLS entries) will keep:"
                     echo "  - running kernel: ${running_kver:-unknown}"
@@ -19409,6 +19524,8 @@ run_snapper_menu_only() {
                         echo "Skipping boot menu cleanup."
                         return 0
                     fi
+                elif [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+                    echo "[boot-entry-clean] Non-interactive: proceeding (confirmed by caller)."
                 else
                     log_warn "[boot-entry-clean] Refusing to prune boot entries without a TTY while BOOT_ENTRY_CLEANUP_CONFIRM=true"
                     return 0
@@ -19926,7 +20043,7 @@ run_snapper_menu_only() {
     #   zypper-auto-helper snapper status
     #   zypper-auto-helper snapper list [N]
     #   zypper-auto-helper snapper create [DESCRIPTION]
-    #   zypper-auto-helper snapper cleanup [all|number|timeline|empty-pre-post]
+    #   zypper-auto-helper snapper cleanup [all|force-prune|number|timeline|empty-pre-post]
     #   zypper-auto-helper snapper auto   (enable timers)
     #   zypper-auto-helper snapper auto-off (disable timers)
     local sub="${1:-}"
@@ -32215,7 +32332,7 @@ class Handler(BaseHTTPRequestHandler):
                 timeout_s = 90
             elif action == "cleanup":
                 mode = str(params.get("mode", "all")).strip()
-                if mode not in ("all", "number", "timeline", "empty-pre-post"):
+                if mode not in ("all", "force-prune", "number", "timeline", "empty-pre-post"):
                     mode = "all"
                 cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "cleanup", mode]
                 timeout_s = 600
@@ -32234,7 +32351,13 @@ class Handler(BaseHTTPRequestHandler):
                 if rc_busy == 0:
                     return _json_response(self, 409, {"error": "snapper appears to be running already; try again later"}, origin)
 
-            rc, out = _run_cmd(cmd, timeout_s=timeout_s, log=getattr(self.server, "_znh_log", None))
+            extra_env = None
+            if needs_confirm:
+                # The WebUI already enforced a typed confirmation phrase.
+                # Make the helper non-interactive so it won't block on read(1) prompts.
+                extra_env = {"ZNH_NON_INTERACTIVE": "1"}
+
+            rc, out = _run_cmd(cmd, timeout_s=timeout_s, log=getattr(self.server, "_znh_log", None), extra_env=extra_env)
             # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
             return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out, "action": action}, origin)
 

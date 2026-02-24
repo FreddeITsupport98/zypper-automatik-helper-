@@ -1680,6 +1680,8 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🧰 **IMPROVED:** WebUI Settings button label now says **“Save / Apply”** to make it clearer that saving immediately applies changes to `/etc/zypper-auto.conf`.
+  - 🛡️ **IMPROVED:** Snapper system config tuning options (`SNAP_RETENTION_*`) are now treated as **Danger zone** settings in the WebUI (requires Advanced unlock + danger zone unlock + per-setting confirmation phrase).
   - 🐛 **FIXED:** Full install after WebUI self-update no longer logs a scary `cp: ... are the same file` error when the helper is already running from `/usr/local/bin/zypper-auto-helper` (the command install step now skips self-copy).
   - 🐛 **FIXED:** Rocket Update Wizard now writes the transient-unit script to disk before calling `systemd-run` (avoids potential argv/D-Bus size issues that can cause errors like "Failed to start transient service unit: Connection reset by peer" on some systems).
   - 🐛 **FIXED:** Rocket Update Wizard now **streams zypper output live** into the WebUI log (instead of buffering until the command finishes), so it no longer looks “stuck” at 0% during long runs.
@@ -1694,6 +1696,10 @@ systemctl status zypper-autodownload.service
   - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
   - 🧰 **IMPROVED:** WebUI job polling (Rocket + self-update overlays) now retries across transient fetch/API errors instead of aborting on the first failure.
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
+  - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots (runs cleanup now, then prunes snapshots) while keeping the newest snapshots per snapper config.
+    - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
+  - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
+  - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
   - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
