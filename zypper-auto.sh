@@ -5287,8 +5287,9 @@ generate_dashboard() {
           </div>
           <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <button class="pill" type="button" id="znh-debug-toggle-btn" title="Toggle verbose JS debug via Settings API">Verbose debug: (loading…)</button>
+            <button class="pill" type="button" id="znh-console-forward-toggle-btn" title="Forward browser console logs into dashboard-api.log (developer tool)">Console forward: (loading…)</button>
             <button class="pill" type="button" id="znh-js-health-copy-btn" onclick="__znhCopyBlockBootstrap('js-health-log', this)" title="Copy JS health log (debug breadcrumbs/errors)">Copy JS debug log</button>
-            <span style="font-size:0.82rem; color: var(--muted);">Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed).</span>
+            <span style="font-size:0.82rem; color: var(--muted);">Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed). Console forwarding is gated behind verbose debug.</span>
           </div>
         </div>
         <pre id="js-health-log" style="max-height: 180px; margin-top: 10px;">(booting…)</pre>
@@ -6408,6 +6409,11 @@ generate_dashboard() {
             try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('info', 'Verbose JS debug disabled (config: DASHBOARD_JS_VERBOSE_DEBUG=false)'); } catch (e1) {}
         }
 
+        // Console forwarding (developer tool) is gated behind ZNH_DEBUG.
+        // When debug flips, re-apply the console bridge state and update the toggle UI.
+        try { if (typeof znhConsoleForwardApplyFromState === 'function') znhConsoleForwardApplyFromState(); } catch (eCF0) {}
+        try { if (typeof znhConsoleForwardUpdateToggleUi === 'function') znhConsoleForwardUpdateToggleUi(); } catch (eCF1) {}
+
         return want;
     }
 
@@ -7316,72 +7322,258 @@ generate_dashboard() {
     }
 
     // Optional console -> backend bridge.
-    // Enable via URL: &console=1 (warn+error) or &console=all (log+warn+error)
-    // Only active when verbose debug is enabled (ZNH_DEBUG true) to avoid log spam.
-    (function() {
+    // Developer tool: forwards browser console messages into dashboard-api.log via /api/client-log.
+    // - Default OFF (to avoid log spam).
+    // - Gated behind verbose debug (ZNH_DEBUG true).
+    // - Persisted per-browser in localStorage.
+    // - URL override (per-load): &console=1 (warn+error) or &console=all (log+warn+error)
+    var ZNH_CONSOLE_FORWARD_KEY = 'znh_console_forward';
+    var __znh_console_state = { enabled: false, mode: 'off', orig: null };
+
+    function znhConsoleForwardModeFromRaw(raw) {
+        raw = String(raw || '').toLowerCase().trim();
+        if (!raw) return '';
+        if (raw === '0' || raw === 'off' || raw === 'false' || raw === 'no') return 'off';
+        if (raw === 'all' || raw === 'log') return 'all';
+        if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'warn' || raw === 'error' || raw === 'err') return 'warn';
+        return '';
+    }
+
+    function znhConsoleForwardGetWantedMode() {
+        // URL override (one-shot): allow forcing on/off without touching localStorage.
         try {
-            if (window.__znh_console_bridge_bound) return;
-            window.__znh_console_bridge_bound = true;
+            if (ZNH_URL && ZNH_URL.params) {
+                var raw = ZNH_URL.params.get('console') || ZNH_URL.params.get('znh_console') || '';
+                var m0 = znhConsoleForwardModeFromRaw(raw);
+                if (m0) return m0;
+            }
         } catch (e0) {}
 
         try {
-            if (!ZNH_URL || !ZNH_URL.params) return;
-            var raw = String(ZNH_URL.params.get('console') || ZNH_URL.params.get('znh_console') || '').toLowerCase();
-            if (!raw) return;
-
-            // Only on served dashboards (http/https). file:// has no API.
-            try {
-                if (!window.location || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) return;
-            } catch (eP) { return; }
-
-            if (!ZNH_DEBUG) return;
-
-            var allowLog = (raw === 'all' || raw === 'log');
-            var allowWarn = (raw === 'all' || raw === '1' || raw === 'true' || raw === 'yes' || raw === 'warn' || raw === 'log');
-            var allowErr = true; // always when enabled
-
-            if (!console) return;
-
-            var origLog = console.log;
-            var origWarn = console.warn;
-            var origErr = console.error;
-
-            function _joinArgs(args) {
-                try {
-                    var arr = Array.prototype.slice.call(args || []);
-                    var txt = arr.map(function(a) {
-                        if (a == null) return '';
-                        if (typeof a === 'string') return a;
-                        try { return JSON.stringify(a); } catch (eJ) { return String(a); }
-                    }).join(' ');
-                    txt = String(txt || '').replace(/\s+/g, ' ').trim();
-                    if (txt.length > 500) txt = txt.slice(0, 500) + '…';
-                    return txt;
-                } catch (e) {
-                    return '';
-                }
-            }
-
-            function wrap(fn, level, prefix, shouldForward) {
-                return function() {
-                    try {
-                        if (shouldForward) {
-                            var txt = _joinArgs(arguments);
-                            if (txt) _clientLogDirectMaybe(level, prefix, { text: txt });
-                        }
-                    } catch (e1) {}
-                    try { return fn && fn.apply ? fn.apply(console, arguments) : undefined; } catch (e2) { return undefined; }
-                };
-            }
-
-            if (allowLog) console.log = wrap(origLog, 'debug', '[CONSOLE LOG]', true);
-            if (allowWarn) console.warn = wrap(origWarn, 'warn', '[CONSOLE WARN]', true);
-            if (allowErr) console.error = wrap(origErr, 'error', '[CONSOLE ERR]', true);
-
-            _clientLogDirectMaybe('info', 'Console bridge enabled', { mode: raw });
-        } catch (e) {
-            // ignore
+            var v = localStorage.getItem(ZNH_CONSOLE_FORWARD_KEY) || '';
+            var m = znhConsoleForwardModeFromRaw(v);
+            return m || 'off';
+        } catch (e1) {
+            return 'off';
         }
+    }
+
+    function znhConsoleForwardSetWantedMode(mode) {
+        mode = String(mode || 'off').toLowerCase().trim();
+        if (mode !== 'off' && mode !== 'warn' && mode !== 'all') mode = 'off';
+        try { localStorage.setItem(ZNH_CONSOLE_FORWARD_KEY, mode); } catch (e) {}
+        return mode;
+    }
+
+    function znhConsoleForwardSupported() {
+        // Only on served dashboards (http/https). file:// has no API.
+        try {
+            if (!window.location) return false;
+            if (window.location.protocol !== 'http:' && window.location.protocol !== 'https:') return false;
+        } catch (eP) {
+            return false;
+        }
+        try { if (!SETTINGS_API_BASE) return false; } catch (eB) { return false; }
+        try { if (!window.fetch) return false; } catch (eF) { return false; }
+        return true;
+    }
+
+    function znhConsoleForwardEnable(mode) {
+        mode = String(mode || 'warn').toLowerCase().trim();
+        if (mode !== 'warn' && mode !== 'all') mode = 'warn';
+
+        if (!znhConsoleForwardSupported()) return false;
+        if (!ZNH_DEBUG) return false;
+        if (!window.console) return false;
+
+        if (__znh_console_state.enabled && __znh_console_state.mode === mode) return true;
+
+        // Capture originals once.
+        if (!__znh_console_state.orig) {
+            __znh_console_state.orig = {
+                log: window.console.log,
+                warn: window.console.warn,
+                error: window.console.error
+            };
+        }
+
+        // Always restore to originals before re-wrapping (avoids wrapper stacking).
+        try {
+            window.console.log = __znh_console_state.orig.log;
+            window.console.warn = __znh_console_state.orig.warn;
+            window.console.error = __znh_console_state.orig.error;
+        } catch (eR) {}
+
+        function _redact(s) {
+            s = String(s || '');
+            // Best-effort secret-ish redactions (avoid leaking tokens into logs).
+            try { s = s.replace(/znh_token=([^&#\s]+)/gi, 'znh_token=[REDACTED]'); } catch (e0) {}
+            try { s = s.replace(/X-ZNH-Token\s*[:=]\s*([^\s"',}]+)/gi, 'X-ZNH-Token=[REDACTED]'); } catch (e1) {}
+            return s;
+        }
+
+        function _joinArgs(args) {
+            try {
+                var arr = Array.prototype.slice.call(args || []);
+                var txt = arr.map(function(a) {
+                    if (a == null) return '';
+                    if (typeof a === 'string') return a;
+                    try { return JSON.stringify(a); } catch (eJ) { return String(a); }
+                }).join(' ');
+                txt = _redact(String(txt || '').replace(/\s+/g, ' ').trim());
+                if (txt.length > 500) txt = txt.slice(0, 500) + '…';
+                return txt;
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function wrap(fn, level, prefix, shouldForward) {
+            var w = function() {
+                try {
+                    if (shouldForward) {
+                        var txt = _joinArgs(arguments);
+                        if (txt) _clientLogDirectMaybe(level, prefix, { text: txt, mode: mode });
+                    }
+                } catch (e1) {}
+                try { return fn && fn.apply ? fn.apply(window.console, arguments) : undefined; } catch (e2) { return undefined; }
+            };
+            try { w.__znh_console_wrapped = true; } catch (eP) {}
+            return w;
+        }
+
+        var allowLog = (mode === 'all');
+        var allowWarn = true;
+        var allowErr = true;
+
+        try {
+            if (allowLog) window.console.log = wrap(__znh_console_state.orig.log, 'debug', '[CONSOLE LOG]', true);
+            window.console.warn = wrap(__znh_console_state.orig.warn, 'warn', '[CONSOLE WARN]', allowWarn);
+            window.console.error = wrap(__znh_console_state.orig.error, 'error', '[CONSOLE ERR]', allowErr);
+        } catch (eW) {
+            return false;
+        }
+
+        __znh_console_state.enabled = true;
+        __znh_console_state.mode = mode;
+
+        try { _clientLogDirectMaybe('info', 'Console bridge enabled', { mode: mode }); } catch (eL) {}
+        return true;
+    }
+
+    function znhConsoleForwardDisable(silent) {
+        if (!window.console) return;
+
+        if (__znh_console_state.orig) {
+            try { window.console.log = __znh_console_state.orig.log; } catch (e1) {}
+            try { window.console.warn = __znh_console_state.orig.warn; } catch (e2) {}
+            try { window.console.error = __znh_console_state.orig.error; } catch (e3) {}
+        }
+
+        var was = !!__znh_console_state.enabled;
+        __znh_console_state.enabled = false;
+        __znh_console_state.mode = 'off';
+
+        if (!silent && was) {
+            try { _clientLogDirectMaybe('info', 'Console bridge disabled', {}); } catch (eL) {}
+        }
+    }
+
+    function znhConsoleForwardApplyFromState() {
+        var want = znhConsoleForwardGetWantedMode();
+
+        if (!znhConsoleForwardSupported()) {
+            znhConsoleForwardDisable(true);
+            return;
+        }
+
+        if (!ZNH_DEBUG) {
+            // Gate: don't forward unless debug is enabled.
+            znhConsoleForwardDisable(true);
+            return;
+        }
+
+        if (want === 'off') {
+            znhConsoleForwardDisable(true);
+            return;
+        }
+
+        znhConsoleForwardEnable(want);
+    }
+
+    function znhConsoleForwardUpdateToggleUi() {
+        var btn = document.getElementById('znh-console-forward-toggle-btn');
+        if (!btn) return;
+
+        var supported = znhConsoleForwardSupported();
+        var want = znhConsoleForwardGetWantedMode();
+        var active = !!(__znh_console_state && __znh_console_state.enabled);
+        var debugOn = !!ZNH_DEBUG;
+
+        if (!supported) {
+            btn.textContent = 'Console forward: N/A (file://)';
+            btn.disabled = true;
+            try { btn.style.borderColor = 'rgba(255,255,255,0.14)'; } catch (e0) {}
+            return;
+        }
+
+        var label = 'Console forward: ';
+        if (want === 'all') label += 'ALL';
+        else if (want === 'warn') label += 'WARN+ERR';
+        else label += 'OFF';
+
+        if (want !== 'off' && !debugOn) {
+            label += ' (paused; enable verbose debug)';
+        }
+
+        btn.textContent = label;
+        btn.disabled = false;
+
+        try {
+            if (active) {
+                btn.style.borderColor = 'rgba(34,197,94,0.45)';
+            } else if (want !== 'off' && !debugOn) {
+                btn.style.borderColor = 'rgba(250,204,21,0.55)';
+            } else {
+                btn.style.borderColor = 'rgba(255,255,255,0.14)';
+            }
+        } catch (e1) {}
+    }
+
+    // Wire console forward toggle button + apply persisted state.
+    (function() {
+        try {
+            if (window.__znh_console_toggle_bound) return;
+            window.__znh_console_toggle_bound = true;
+        } catch (e0) {}
+
+        var btn = document.getElementById('znh-console-forward-toggle-btn');
+        if (btn) {
+            btn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+
+                var cur = znhConsoleForwardGetWantedMode();
+                var next = 'off';
+                if (cur === 'off') next = 'warn';
+                else if (cur === 'warn') next = 'all';
+                else next = 'off';
+
+                znhConsoleForwardSetWantedMode(next);
+
+                // Apply immediately if possible (else it will be paused until debug is enabled).
+                try { znhConsoleForwardApplyFromState(); } catch (eA) {}
+                try { znhConsoleForwardUpdateToggleUi(); } catch (eU) {}
+
+                try {
+                    var msg = (next === 'off') ? 'OFF' : (next === 'all') ? 'ALL (log+warn+err)' : 'WARN+ERR';
+                    toast('Console forwarding updated', msg, 'ok');
+                } catch (eT) {}
+            });
+        }
+
+        // Initial state (even before Settings loads).
+        try { znhConsoleForwardApplyFromState(); } catch (e1) {}
+        try { znhConsoleForwardUpdateToggleUi(); } catch (e2) {}
     })();
 
     // Forward JS runtime errors to backend log (errors only; low volume).

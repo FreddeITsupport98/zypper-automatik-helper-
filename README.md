@@ -1713,6 +1713,7 @@ systemctl status zypper-autodownload.service
     - Settings API request/response traces (method/path/status/duration)
     - JS runtime crashes (uncaught errors + unhandled promise rejections)
     - Optional: Console forwarding (URL: `&console=1` for warn+error, or `&console=all` for log+warn+error)
+      - UI toggle: **Recent Activity Log → “🧪 JS health (debug)” → “Console forward”** button (cycles **OFF → WARN+ERR → ALL**; persisted in `localStorage`; active only when verbose debug is enabled)
   - 🧪 **DEV (advanced):** Debug HUD overlay is available in the dashboard:
     - Toggle: `Ctrl+Alt+H` (or `Ctrl+Backquote`)
     - URL: `&hud=1` auto-opens it
