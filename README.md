@@ -1692,6 +1692,7 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
   - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
   - ⚡ **IMPROVED:** dashboard Live mode polling now uses non-overlapping `setTimeout` loops with in-flight guards to avoid fetch request pile-up on slow responses.
+  - 🐛 **FIXED:** dashboard Live mode no longer auto-reloads the entire page on repeated polling failures (prevents reload loops + losing visible log output); it pauses Live mode and shows a hint instead.
   - ⚡ **IMPROVED:** dashboard sync worker now prefers **inotify-driven** sync when available (instant updates on file changes; timeout fallback).
   - 🐛 **FIXED:** dashboard sync worker now includes an **inotify debounce** (prevents CPU spikes during rapid log writes).
   - 🐛 **FIXED:** stopping dashboard workers now also kills child watcher processes (prevents orphaned/zombie inotify processes).
@@ -1706,6 +1707,7 @@ systemctl status zypper-autodownload.service
   - 🔒 **FIXED:** local dashboard HTTP server no longer exposes `dashboard-token.txt` (token is now passed via URL fragment and stored in localStorage; server blocks token/pid/err/port files).
   - 🧯 **FIXED:** user-visible `dashboard-live.log` is now capped to the most recent ~2500 lines by the sync worker to prevent browser/resource blow-ups.
   - 🖱️ **IMPROVED:** Recent Activity log polling no longer fights the user’s scroll position (updates are staged while scrolled up).
+  - 🐛 **FIXED:** Recent Activity log polling no longer clears the visible log output when a log file is temporarily missing/empty (HTTP 404/416); it keeps the last visible text until the file is available again.
   - 🧿 **NEW:** when a Self-update or System Update job is running, the dashboard shows a bottom-right “background job bubble” (spinner + name like “Update system”) so accidental overlay closes don’t lose the running job view.
   - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
   - 🐛 **FIXED:** Rocket Update Wizard preview now syncs the dashboard pending count when zypper reports **"Nothing to do"** (it updates the cached dry-run output under `/var/log/zypper-auto/dry-run-last.txt` and applies a short-lived UI override in Live mode to avoid stale counts).

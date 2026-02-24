@@ -11704,8 +11704,25 @@ generate_dashboard() {
                 } catch (e2) {}
 
                 if (liveFailures >= 3) {
-                    // Fallback: full reload every 15s (still useful if some other process regenerates the file)
-                    setTimeout(function() { window.location.reload(); }, 15000);
+                    // BUGFIX: Do NOT auto-reload the whole page on repeated poll failures.
+                    // In some environments (notably when status.html is opened via file://),
+                    // fetch() can be blocked by the browser and a reload just creates an
+                    // infinite reload loop, wiping the user's visible log output.
+                    //
+                    // Instead, pause Live mode and ask the user to reload/re-open manually.
+                    try {
+                        if (!window.__znh_live_paused_due_to_errors) {
+                            window.__znh_live_paused_due_to_errors = true;
+                            toast('Live mode paused', 'Repeated polling failures. Try re-opening the dashboard via --dash-open or reload the page.', 'err');
+                        }
+                    } catch (e2) {}
+
+                    try {
+                        liveEnabled = false;
+                        try { localStorage.setItem('znh_live', '0'); } catch (eLS) {}
+                        var tgl = document.getElementById('live-toggle');
+                        if (tgl) tgl.checked = false;
+                    } catch (e3) {}
                 }
                 return null;
             })
@@ -12292,10 +12309,12 @@ generate_dashboard() {
             headers: headers
         })
             .then(function(r) {
-                // Accept 206 (partial content) and 200. If the file is empty and Range is used,
-                // some servers reply 416; treat that as empty content.
-                // If the file is missing (404), also treat as empty so the UI doesn't freeze.
-                if (r.status === 416 || r.status === 404) return '';
+                // Accept 206 (partial content) and 200.
+                // If the file is missing (404) or a Range request is unsatisfiable (416),
+                // do NOT wipe whatever the user is currently reading.
+                // These conditions are often transient (dash-open server starting, sync worker delay,
+                // log rotation), and clearing the panel looks like the UI "reset".
+                if (r.status === 416 || r.status === 404) return null;
                 if (!r.ok && r.status !== 206) {
                     var e = new Error('HTTP ' + r.status);
                     try { e.http_status = r.status; } catch (e2) {}
@@ -12304,6 +12323,7 @@ generate_dashboard() {
                 return r.text();
             })
             .then(function(txt) {
+                if (txt === null || txt === undefined) return;
                 var tailed = tailLines(txt, 220);
                 if (tailed === _lastLiveLog) return;
 
