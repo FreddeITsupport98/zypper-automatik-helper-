@@ -1700,6 +1700,17 @@ systemctl status zypper-autodownload.service
     - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
   - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
   - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
+  - 🧹 **NEW:** Boot entry scrubber tool **scrub-ghost** is now embedded into `zypper-auto.sh` and installed automatically:
+    - CLI: `sudo zypper-auto-helper scrub-ghost --dry-run`
+    - Installed binaries: `/usr/local/bin/zypper-scrub-ghost` and `/usr/local/bin/scrub-ghost`
+  - 🧰 **NEW:** WebUI Snapper Manager now includes **Boot Entry Scrub (scrub-ghost)** actions (scan/auto/apply/list/validate/restore) via new Dashboard API endpoints (`/api/scrub/*`).
+    - **AUTO (recommended)** preselects safe backup mode + common prune options.
+    - Apply supports safe **backup** mode (move ghosts to backup) or dangerous **delete** mode, plus extra prune options.
+    - WebUI exposes additional advanced toggles (maps to scrub-ghost flags like no-remount-rw, verify toggles, path overrides).
+  - 🧿 **NEW:** WebUI **Ghost-Scrub Wizard (overlay)** (Rocket-style):
+    - Minimizable overlay window (bottom-right task bubble) with **live log output**.
+    - Runs scrub-ghost in a background `systemd-run` job so it can **resume polling after browser reload/crash**.
+    - Wizard groups flags into **recommended / advanced / danger zone**, and supports extra restore/validate/complete options (full CLI flag coverage; interactive-only modes remain copy-only).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
   - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
