@@ -33,6 +33,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
   - Installation / upgrading
 - User guides
   - Self-update (CLI + WebUI)
+  - Boot Entry Scrub (scrub-ghost)
   - Configuration file (/etc/zypper-auto.conf)
   - Duplicate RPM cleanup
   - Usage
@@ -49,6 +50,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [How it works (architecture)](#architecture)
 - [Installation / upgrading](#installation-upgrading)
 - [Self-update (CLI + WebUI)](#self-update)
+- [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
 - [Duplicate RPM cleanup](#duplicate-rpm-cleanup)
 - [Usage](#usage)
@@ -307,6 +309,16 @@ zypper-auto-helper snapper auto     # Enable common snapper timers (timeline + c
 # It also shows a text suffix: (disabled|partial|enabled) so it’s readable even when colors are off.
 # snapper auto-off disables the same snapper timers and also disables optional option-5 maintenance timers (btrfsmaintenance + fstrim) when present.
 
+# Boot Entry Scrub (scrub-ghost)
+# NOTE: run --dry-run first. This tool touches boot menu entries (high-stakes).
+zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --force                      # safe mode (moves broken entries to backup)
+sudo zypper-auto-helper scrub-ghost --force --prune-stale-snapshots
+sudo zypper-auto-helper scrub-ghost --list-backups
+sudo zypper-auto-helper scrub-ghost --validate-latest
+sudo zypper-auto-helper scrub-ghost --restore-best
+
 # Diagnostics & debugging
 zypper-auto-helper debug            # Interactive debug/diagnostics tools menu
 zypper-auto-helper --logs           # Show tails of installer, service, and notifier logs
@@ -369,6 +381,121 @@ The installer installs best-effort **tab completion** for `zypper-auto-helper`:
 Restart your shell (or start a new terminal) after installing/upgrading.
 
 You normally run `zypper-auto-helper` **without** `sudo`; it will prompt for elevation internally when needed.
+
+<a id="scrub-ghost"></a>
+### 🥾 Boot Entry Scrub (scrub-ghost)
+
+`scrub-ghost` is a safety-focused boot-entry maintenance tool for **Boot Loader Specification (BLS)** entries on openSUSE (commonly `sd-boot` with entry files under `/boot/efi/loader/entries`).
+
+It detects and cleans up obvious boot-menu “junk” like:
+- **GHOST** entries (boot entries pointing at missing kernels/initrds)
+- **STALE snapshot** entries (Snapper snapshot IDs that no longer exist)
+- **Duplicates** (same payload repeated multiple times)
+- Optionally: entries for **uninstalled kernels** (more risky)
+
+High-stakes warning: bootloaders are high-stakes. Deleting/moving the wrong files can make a system unbootable. The workflow is designed to be conservative, but you should still:
+- Always run a **scan / dry-run** first
+- Keep at least one known-good entry
+- Know how to restore (see Backups & restore below)
+
+#### Supported / not supported
+- Supported: openSUSE Tumbleweed / Slowroll / immutable variants (Aeon/Kalpa/MicroOS)
+- Not supported: openSUSE Leap (the script/tool will refuse to run)
+
+#### Recommended workflow (safe)
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --force
+sudo zypper-auto-helper scrub-ghost --dry-run   # re-scan to verify counts dropped
+```
+
+#### What is a “ghost” entry?
+A BLS entry is treated as a *ghost* when it references a kernel/initrd path that does not exist on disk.
+
+#### Key safety guardrails (why it’s safer than “rm *.conf”)
+`scrub-ghost` includes multiple guardrails to avoid creating an unbootable state:
+- **Dry-run by default** (`--dry-run`)
+- **Backups by default** when applying changes (`--force`): it creates a filesystem backup of the current entries and then moves/quarantines entries instead of hard-deleting
+- **Optional Snapper snapshot** backup (best-effort)
+- Protects:
+  - the **running kernel** entry (`uname -r`)
+  - the **latest installed kernel** entry (detected under `/lib/modules` / `/usr/lib/modules`)
+  - GRUB “saved default” entry (when GRUB is in use)
+- Restore is **validated by default** (restore is blocked if validation fails unless you force it)
+
+#### CLI quick reference (common)
+Scan only:
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --dry-run --json
+```
+
+Apply in safe backup mode (recommended):
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --force
+sudo zypper-auto-helper scrub-ghost --force --prune-duplicates
+sudo zypper-auto-helper scrub-ghost --force --prune-stale-snapshots
+sudo zypper-auto-helper scrub-ghost --force --prune-uninstalled --confirm-uninstalled  # extra danger
+```
+
+Hard delete mode (danger):
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --delete --prune-stale-snapshots
+```
+
+Optional bootloader refresh actions:
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --force --rebuild-grub
+sudo zypper-auto-helper scrub-ghost --force --update-sdboot
+```
+
+Generate completion (no root required):
+```bash path=null start=null
+zypper-auto-helper scrub-ghost --completion zsh
+zypper-auto-helper scrub-ghost --completion bash
+```
+
+#### Backups & restore
+Backups are stored under:
+- `/var/backups/scrub-ghost/`
+
+Common restore flow:
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --list-backups
+sudo zypper-auto-helper scrub-ghost --validate-latest
+sudo zypper-auto-helper scrub-ghost --restore-best
+```
+
+Restore danger flags (use only when you understand the consequences):
+- `--clean-restore` deletes extra current entries not present in the backup
+- `--restore-anyway` bypasses failed validation
+
+#### WebUI: Ghost-Scrub Wizard (overlay) + crash-safe background jobs
+The dashboard WebUI includes a **Rocket-style overlay wizard** for scrub-ghost (minimizable overlay + bottom-right background-job bubble).
+
+Important behavior:
+- The WebUI runs scrub-ghost in a background `systemd-run` job so it can **resume after browser reload/crash**.
+- The overlay groups flags into **recommended / advanced / danger zone**, and interactive-only modes (like `--menu` / rescue flows) remain **copy-only** for safety.
+
+Where the WebUI job writes state/logs (useful for troubleshooting):
+- Full log: `/var/log/zypper-auto/service-logs/webui-scrub-<jobid>.log`
+- Status (key/value): `/var/lib/zypper-auto/webui-scrub-<jobid>.status`
+
+The WebUI log panel shows a **tail view** (latest output). If you need everything, open the file above.
+
+#### WebUI confirmation phrases (server-side enforced)
+Some actions require typing a phrase before the WebUI will run them:
+- `SCRUB` – normal apply in backup mode
+- `DELETE` – permanent delete mode
+- `KERNELS` – prune uninstalled-kernel entries
+- `NOBACKUP` – apply without filesystem backup copy (`--no-backup`)
+- `RESTORE` – restore flow
+- `CLEAN` – `--clean-restore`
+- `ANYWAY` – `--restore-anyway`
+
+#### Advanced notes
+- Pinning: entries listed in `ENTRIES_DIR/.scrub-ghost-pinned` are never moved/deleted.
+- Immutable/transactional systems: scrub-ghost can attempt temporary remount `rw` while applying changes; disable that behavior with `--no-remount-rw`.
 
 <a id="configuration"></a>
 ### Configuration File: `/etc/zypper-auto.conf`
@@ -1711,6 +1838,7 @@ systemctl status zypper-autodownload.service
     - Minimizable overlay window (bottom-right task bubble) with **live log output**.
     - Runs scrub-ghost in a background `systemd-run` job so it can **resume polling after browser reload/crash**.
     - Wizard groups flags into **recommended / advanced / danger zone**, and supports extra restore/validate/complete options (full CLI flag coverage; interactive-only modes remain copy-only).
+  - 📚 **DOCS:** README now includes a dedicated **Boot Entry Scrub (scrub-ghost)** user guide section (workflow, guardrails, WebUI wizard behavior, log locations, and confirmation phrases).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
   - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
