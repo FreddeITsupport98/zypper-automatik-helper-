@@ -1947,8 +1947,10 @@ EOF
 }
 
 # --- Boot entry scrubber (scrub-ghost) ---
-# Source of truth lives in this repo as scrub.sh, but we *install* it from
-# zypper-auto.sh so deployments only need the main installer.
+# scrub-ghost is embedded into zypper-auto.sh so deployments only need the main installer.
+# The installer writes the runnable command to:
+#   - /usr/local/bin/zypper-scrub-ghost
+#   - /usr/local/bin/scrub-ghost (symlink)
 __znh_write_scrub_ghost_script() {
     local out_path="/usr/local/bin/zypper-scrub-ghost"
     local link_path="/usr/local/bin/scrub-ghost"
@@ -1971,7 +1973,7 @@ fi
 _bash_argv0="${BASH_ARGV0:-}"
 _bash_bin_base="$(basename "${BASH:-}" 2>/dev/null || true)"
 if [ "$_bash_argv0" = "sh" ] || [ "$_bash_bin_base" = "sh" ] || [ "$_bash_bin_base" = "dash" ]; then
-  echo "ERROR: Do not run via 'sh'. Use: sudo bash ./scrub.sh --menu (or make it executable and run ./scrub.sh)." >&2
+  echo "ERROR: Do not run via 'sh'. Use: sudo scrub-ghost --menu (or: sudo bash $0 --menu)." >&2
   exit 2
 fi
 
@@ -2072,7 +2074,7 @@ SNAPPER_AVAILABLE=false
 
 usage() {
   cat <<'USAGE'
-Usage: scrub.sh [options]
+Usage: scrub-ghost [options]
 
 Scans Boot Loader Specification (BLS) entries under /boot/loader/entries and
 identifies "ghost" entries that reference a missing kernel image.
@@ -2135,13 +2137,13 @@ Verification / pruning (all safe by default; pruning requires --force):
   -h, --help             Show this help
 
 Examples:
-  sudo ./scrub.sh
-  sudo ./scrub.sh --force --prune-stale-snapshots
-  sudo ./scrub.sh --list-backups
-  sudo ./scrub.sh --validate-latest
-  sudo ./scrub.sh --restore-pick 2
-  sudo ./scrub.sh --restore-best
-  sudo ./scrub.sh --restore-from /var/backups/scrub-ghost/bls-entries-YYYYMMDD-HHMMSS
+  sudo scrub-ghost
+  sudo scrub-ghost --force --prune-stale-snapshots
+  sudo scrub-ghost --list-backups
+  sudo scrub-ghost --validate-latest
+  sudo scrub-ghost --restore-pick 2
+  sudo scrub-ghost --restore-best
+  sudo scrub-ghost --restore-from /var/backups/scrub-ghost/bls-entries-YYYYMMDD-HHMMSS
 USAGE
 }
 
@@ -2150,7 +2152,7 @@ print_completion() {
   case "$shell" in
     zsh)
       cat <<'EOF'
-#compdef scrub-ghost scrub.sh
+#compdef scrub-ghost zypper-scrub-ghost
 
 _arguments -s \
   '--help[show help]' \
@@ -2197,7 +2199,7 @@ EOF
       ;;
     bash)
       cat <<'EOF'
-# bash completion for scrub-ghost / scrub.sh
+# bash completion for scrub-ghost
 _scrub_ghost_complete() {
   local cur
   cur="${COMP_WORDS[COMP_CWORD]}"
@@ -2205,7 +2207,7 @@ _scrub_ghost_complete() {
   COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
 }
 
-complete -F _scrub_ghost_complete scrub-ghost scrub.sh
+complete -F _scrub_ghost_complete scrub-ghost zypper-scrub-ghost
 EOF
       ;;
     *)
