@@ -16269,7 +16269,17 @@ generate_dashboard() {
                 _lastPct = parseInt(j.progress || 0, 10) || 0;
                 _suUpdateProgress(j.stage || 'Running', _lastPct);
                 if (j.output != null) {
-                    _suSetLog(String(j.output));
+                    var outText = String(j.output);
+                    try {
+                        var lp = (j && j.log_path != null) ? String(j.log_path) : '';
+                        var trunc = !!(j && j.output_truncated);
+                        if (lp) {
+                            var hdr = '[webui] Full log: ' + lp + '\n';
+                            if (trunc) hdr += '[webui] NOTE: WebUI shows a tail view (latest output).\n\n';
+                            outText = hdr + outText;
+                        }
+                    } catch (eLP) {}
+                    _suSetLog(outText);
                 }
                 try { znhTaskUpdateFromJob('self-update', j); } catch (e_task2) {}
 
@@ -36938,6 +36948,17 @@ def _recover_self_update_job(job_id: str) -> dict | None:
         else:
             stage = "Failed"
 
+    # UX fix: the progress parser may hit 100% early (e.g. on "update complete") while
+    # the unit is still running post-actions (verify/install). Never show 100% until done.
+    if not done and progress >= 100:
+        progress = 99
+        try:
+            low = stage.lower()
+            if low in ("done", "dry-run done", "up-to-date"):
+                stage = "Finishing…"
+        except Exception:
+            stage = "Finishing…"
+
     post_action = str(status.get("post_action", "") or "").strip().lower()
     if post_action not in ("none", "verify", "install"):
         post_action = "none"
@@ -37468,20 +37489,35 @@ class Handler(BaseHTTPRequestHandler):
                         out = str(job.get("output", ""))
                         tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                         tail = _zypper_xml_pretty(tail_raw)
+                        stage = job.get("stage")
+                        progress = int(job.get("progress") or 0)
+                        running = bool(job.get("running"))
+                        done = bool(job.get("done"))
+                        if running and not done and progress >= 100:
+                            progress = 99
+                            try:
+                                low = str(stage or "").lower()
+                                if low in ("done", "dry-run done", "up-to-date"):
+                                    stage = "Finishing…"
+                            except Exception:
+                                stage = "Finishing…"
+
                         return _json_response(self, 200, {
                             "job_id": job_id,
                             "type": job.get("type"),
                             "channel": job.get("channel"),
                             "dry_run": bool(job.get("dry_run")),
                             "simulate": bool(job.get("simulate")),
-                            "running": bool(job.get("running")),
-                            "done": bool(job.get("done")),
+                            "running": running,
+                            "done": done,
                             "rc": job.get("rc"),
-                            "stage": job.get("stage"),
-                            "progress": int(job.get("progress") or 0),
+                            "stage": stage,
+                            "progress": int(progress),
                             "output": tail,
                             "output_truncated": bool(job.get("output_truncated")),
                             "restart_check_output": job.get("restart_check_output"),
+                            "log_path": job.get("log_path"),
+                            "status_path": job.get("status_path"),
                         }, origin)
                 else:
                     job = jobs.get(job_id)
@@ -37493,20 +37529,35 @@ class Handler(BaseHTTPRequestHandler):
                     out = str(job.get("output", ""))
                     tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                     tail = _zypper_xml_pretty(tail_raw)
+                    stage = job.get("stage")
+                    progress = int(job.get("progress") or 0)
+                    running = bool(job.get("running"))
+                    done = bool(job.get("done"))
+                    if running and not done and progress >= 100:
+                        progress = 99
+                        try:
+                            low = str(stage or "").lower()
+                            if low in ("done", "dry-run done", "up-to-date"):
+                                stage = "Finishing…"
+                        except Exception:
+                            stage = "Finishing…"
+
                     return _json_response(self, 200, {
                         "job_id": job_id,
                         "type": job.get("type"),
                         "channel": job.get("channel"),
                         "dry_run": bool(job.get("dry_run")),
                         "simulate": bool(job.get("simulate")),
-                        "running": bool(job.get("running")),
-                        "done": bool(job.get("done")),
+                        "running": running,
+                        "done": done,
                         "rc": job.get("rc"),
-                        "stage": job.get("stage"),
-                        "progress": int(job.get("progress") or 0),
+                        "stage": stage,
+                        "progress": int(progress),
                         "output": tail,
                         "output_truncated": bool(job.get("output_truncated")),
                         "restart_check_output": job.get("restart_check_output"),
+                        "log_path": job.get("log_path"),
+                        "status_path": job.get("status_path"),
                     }, origin)
             except Exception as e:
                 return _json_response(self, 500, {"error": f"job lookup failed: {e}"}, origin)
