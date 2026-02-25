@@ -11161,6 +11161,7 @@ generate_dashboard() {
             <button class="pill" type="button" id="znh-debug-toggle-btn" title="Toggle verbose JS debug via Settings API">Verbose debug: (loading…)</button>
             <button class="pill" type="button" id="znh-console-forward-toggle-btn" title="Forward browser console logs into dashboard-api.log (developer tool)">Console forward: (loading…)</button>
             <button class="pill" type="button" id="znh-js-health-copy-btn" onclick="__znhCopyBlockBootstrap('js-health-log', this)" title="Copy JS health log (debug breadcrumbs/errors)">Copy JS debug log</button>
+            <button class="pill" type="button" id="znh-js-crash-clear-btn" title="Clear the persistent crash log stored in your browser (localStorage)">Clear crash log</button>
             <span style="font-size:0.82rem; color: var(--muted);">Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed). Console forwarding is gated behind verbose debug.</span>
           </div>
         </div>
@@ -12363,6 +12364,17 @@ generate_dashboard() {
         try { if (typeof window.znhHudLog === 'function') window.znhHudLog('warn', Array.prototype.slice.call(arguments).join(' ')); } catch (e_dbgH2) {}
     }
 
+    // Warning logger that is user-visible (JS health + HUD), but does NOT persist into the
+    // crash log. Use this for transient conditions like polling/network glitches.
+    function znhUiWarn() {
+        try {
+            var args = Array.prototype.slice.call(arguments);
+            if (console && console.warn) console.warn.apply(console, ['[ZNH]'].concat(args));
+        } catch (e_w0) {}
+        try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('warn', Array.prototype.slice.call(arguments).join(' ')); } catch (e_w1) {}
+        try { if (typeof window.znhHudLog === 'function') window.znhHudLog('warn', Array.prototype.slice.call(arguments).join(' ')); } catch (e_w2) {}
+    }
+
     function znhDebugError() {
         // Always emit to JS health log (even when debug mode is off) so failures
         // surface in the UI without DevTools.
@@ -12447,6 +12459,81 @@ generate_dashboard() {
 
             throw e;
         });
+    }
+
+    // Best-effort JSON parser for polled artifacts.
+    // Some environments occasionally return a response with extra bytes appended
+    // (or non-JSON prefixes). In that case we try to "salvage" by trimming to the
+    // first JSON-looking bracket and the last closing bracket.
+    function znhParseJsonLenient(txt, label) {
+        var raw = '';
+        try { raw = (txt == null) ? '' : String(txt); } catch (e0) { raw = ''; }
+
+        // Remove UTF-8 BOM (some servers/proxies inject it).
+        try { raw = raw.replace(/^\uFEFF/, ''); } catch (e1) {}
+
+        // Preserve original for error snippets.
+        var rawTrim = '';
+        try { rawTrim = raw.trim(); } catch (e2) { rawTrim = raw; }
+
+        var out = { ok: false, value: null, recovered: false, error: '', snippet: '' };
+
+        function setErr(err) {
+            try {
+                out.error = String(err && err.message ? err.message : err || 'JSON parse failed');
+            } catch (eE) {
+                out.error = 'JSON parse failed';
+            }
+            try {
+                var s = rawTrim || raw || '';
+                if (s.length > 240) s = s.slice(0, 240) + '…';
+                out.snippet = s;
+            } catch (eS) {
+                out.snippet = '';
+            }
+        }
+
+        if (!rawTrim) {
+            setErr('empty response');
+            return out;
+        }
+
+        try {
+            out.value = JSON.parse(rawTrim);
+            out.ok = true;
+            return out;
+        } catch (e3) {
+            setErr(e3);
+        }
+
+        // Salvage attempt: keep only the "outer" JSON.
+        try {
+            var a = rawTrim;
+            var objStart = a.indexOf('{');
+            var arrStart = a.indexOf('[');
+            var start = -1;
+            if (objStart !== -1 && arrStart !== -1) start = Math.min(objStart, arrStart);
+            else start = (objStart !== -1) ? objStart : arrStart;
+
+            var objEnd = a.lastIndexOf('}');
+            var arrEnd = a.lastIndexOf(']');
+            var end = Math.max(objEnd, arrEnd);
+
+            if (start !== -1 && end !== -1 && end > start) {
+                var slice = a.slice(start, end + 1).trim();
+                out.value = JSON.parse(slice);
+                out.ok = true;
+                out.recovered = true;
+                return out;
+            }
+        } catch (e4) {
+            // keep original error
+        }
+
+        if (label) {
+            try { out.error = String(label) + ': ' + out.error; } catch (e5) {}
+        }
+        return out;
     }
 
     function znhVerboseDebugOptionEnabled() {
@@ -12543,6 +12630,43 @@ generate_dashboard() {
 
         // Initial state (until Settings loads).
         try { znhDebugUpdateToggleUi(); } catch (e1) {}
+    })();
+
+    // Wire "Clear crash log" button in JS health panel.
+    (function() {
+        var btn = document.getElementById('znh-js-crash-clear-btn');
+        if (!btn) return;
+
+        if (btn._znh_bound) return;
+        btn._znh_bound = true;
+
+        btn.addEventListener('click', function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+
+            var ok = false;
+            try {
+                if (typeof window.__znhCrashClear === 'function') {
+                    window.__znhCrashClear();
+                    ok = true;
+                } else {
+                    localStorage.removeItem('znh_js_crash_log_v1');
+                    ok = true;
+                }
+            } catch (e1) {
+                ok = false;
+            }
+
+            // Also reset the unusual-activity watcher signature so the next real crash triggers again.
+            try { localStorage.removeItem('znh_unusual_last_crash_sig_v1'); } catch (e2) {}
+            try { localStorage.removeItem('znh_unusual_last_notify_ts_v1'); } catch (e3) {}
+
+            if (ok) {
+                try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('info', 'Cleared persistent crash log'); } catch (e4) {}
+                toast('Crash log cleared', 'Persistent WebUI crash log cleared (browser storage)', 'ok');
+            } else {
+                toast('Crash log clear failed', 'Could not clear browser crash log', 'err');
+            }
+        });
     })();
 
     // Toast notifications (non-intrusive)
@@ -20596,14 +20720,35 @@ generate_dashboard() {
         if (_pollLiveInFlight) return Promise.resolve(null);
         _pollLiveInFlight = true;
 
-        return znhFetch('status-data.json?ts=' + Date.now(), { cache: 'no-store' })
+        var url = 'status-data.json?ts=' + Date.now();
+
+        return znhFetch(url, { cache: 'no-store' })
             .then(function(r) {
                 if (!r.ok) {
                     var e = new Error('HTTP ' + r.status);
                     try { e.http_status = r.status; } catch (e2) {}
                     throw e;
                 }
-                return r.json();
+                return r.text();
+            })
+            .then(function(txt) {
+                var p = null;
+                try { p = znhParseJsonLenient(txt, 'pollLive'); } catch (e0) { p = null; }
+
+                if (!p || !p.ok) {
+                    var snippet = '';
+                    try { snippet = p && p.snippet ? String(p.snippet) : ''; } catch (e1) { snippet = ''; }
+                    var emsg = (p && p.error) ? p.error : 'status-data.json JSON parse failed';
+                    if (snippet) emsg = emsg + ' (snippet: ' + snippet + ')';
+                    throw new Error(emsg);
+                }
+
+                if (p.recovered) {
+                    // Do not persist this as a crash; it's usually transient / harmless.
+                    try { znhUiWarn('pollLive recovered from invalid JSON in status-data.json (trimmed extra bytes)'); } catch (e2) {}
+                }
+
+                return p.value;
             })
             .then(function(d) {
                 liveFailures = 0;
@@ -20622,14 +20767,17 @@ generate_dashboard() {
                 // When opened as file://, many browsers block fetch().
                 liveFailures++;
                 var msg = (err && err.message) ? err.message : 'pollLive failed';
+
+                // Transient polling failures are not "crashes"; avoid the persistent crash log.
                 if (ZNH_DEBUG || liveFailures === 1 || liveFailures === 3) {
-                    try { znhDebugError('pollLive failed:', msg); } catch (e0) {}
+                    try { znhUiWarn('pollLive failed:', msg); } catch (e0) {}
                 }
 
                 // Broadcast errors so UI can react independently.
                 try {
                     znhDispatch('znh-network-error', {
                         source: 'pollLive',
+                        path: url,
                         error: msg,
                         failures: liveFailures
                     });
