@@ -10141,6 +10141,146 @@ generate_dashboard() {
         max-width: min(520px, calc(100vw - 36px));
     }
     .znh-task-bubble.hidden { display: none; }
+
+    /* Notification center (small bell icon + glow when new notifications exist) */
+    .znh-notify-btn {
+        position: fixed;
+        right: 18px;
+        top: 16px;
+        z-index: 14000; /* above content, below overlay */
+        width: 38px;
+        height: 38px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(17, 24, 39, 0.72);
+        color: #fff;
+        box-shadow: 0 14px 34px rgba(0,0,0,0.30);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        cursor: pointer;
+        user-select: none;
+    }
+    .znh-notify-btn:hover { transform: translateY(-1px); border-color: rgba(37,99,235,0.30); background: rgba(37,99,235,0.10); }
+    .znh-notify-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus), 0 14px 34px rgba(0,0,0,0.30); }
+
+    .znh-notify-badge {
+        position: absolute;
+        right: -3px;
+        top: -3px;
+        min-width: 18px;
+        height: 18px;
+        padding: 0 6px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.72rem;
+        font-weight: 950;
+        background: rgba(250, 204, 21, 0.95);
+        color: rgba(17, 24, 39, 1);
+        border: 1px solid rgba(0,0,0,0.12);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+    }
+    .znh-notify-badge.hidden { display: none; }
+
+    @keyframes znhNotifyGlow {
+        0% { box-shadow: 0 14px 34px rgba(0,0,0,0.30), 0 0 0 0 rgba(250, 204, 21, 0.0); }
+        100% { box-shadow: 0 14px 34px rgba(0,0,0,0.30), 0 0 0 6px rgba(250, 204, 21, 0.22); }
+    }
+    .znh-notify-btn.glow {
+        border-color: rgba(250, 204, 21, 0.55);
+        animation: znhNotifyGlow 900ms ease-in-out infinite alternate;
+    }
+
+    .znh-notify-panel {
+        position: fixed;
+        right: 18px;
+        top: 60px;
+        z-index: 14001;
+        width: min(420px, calc(100vw - 36px));
+        max-height: min(560px, calc(100vh - 90px));
+        overflow: auto;
+        border-radius: 16px;
+        background: rgba(17, 24, 39, 0.92);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.12);
+        box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        display: none;
+    }
+    .znh-notify-panel.open { display: block; }
+    .znh-notify-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.10);
+        background: rgba(255,255,255,0.04);
+    }
+    .znh-notify-title { font-weight: 950; font-size: 0.92rem; }
+    .znh-notify-list { display: grid; gap: 10px; padding: 10px 12px; }
+    .znh-notify-item {
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,0.03);
+    }
+    .znh-notify-item.unread { border-color: rgba(250, 204, 21, 0.40); background: rgba(250, 204, 21, 0.06); }
+    .znh-notify-item .t { font-weight: 950; margin-bottom: 4px; }
+    .znh-notify-item .b { font-weight: 800; opacity: 0.9; white-space: pre-wrap; }
+    .znh-notify-item .meta { margin-top: 8px; font-size: 0.78rem; font-weight: 800; opacity: 0.72; }
+
+    /* Managers bubble (minimized "Update manager / Rocket manager" overlay) */
+    #znh-mgr-bubble {
+        position: fixed;
+        right: 18px;
+        bottom: 86px; /* above toast area */
+        z-index: 14900;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.88);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.12);
+        box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        cursor: pointer;
+        user-select: none;
+        max-width: min(520px, calc(100vw - 36px));
+    }
+    body.task-active #znh-mgr-bubble { bottom: 154px; }
+    #znh-mgr-bubble.hidden { display: none; }
+    .znh-mgr-ico { width: 18px; height: 18px; display: inline-flex; align-items:center; justify-content:center; flex: 0 0 auto; }
+    .znh-mgr-text { display: grid; gap: 2px; min-width: 0; }
+    .znh-mgr-title { font-weight: 950; font-size: 0.92rem; line-height: 1.1; }
+    .znh-mgr-sub { font-weight: 800; font-size: 0.78rem; opacity: 0.85; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Managers overlay list */
+    .mgr-tabs { display: flex; gap: 10px; flex-wrap: wrap; }
+    .mgr-row {
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,0.03);
+        display: grid;
+        gap: 8px;
+    }
+    .mgr-row .hdr { display:flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .mgr-row .t { font-weight: 950; }
+    .mgr-row .m { font-weight: 850; opacity: 0.75; font-size: 0.82rem; }
+    .mgr-row .b { font-weight: 800; opacity: 0.92; white-space: pre-wrap; }
+    .mgr-row.ok { border-color: rgba(34,197,94,0.30); }
+    .mgr-row.err { border-color: rgba(239,68,68,0.30); }
+    .mgr-row.warn { border-color: rgba(250,204,21,0.30); }
+    .mgr-actions { display:flex; gap: 8px; flex-wrap: wrap; }
     .znh-task-spinner {
         width: 18px;
         height: 18px;
@@ -10319,6 +10459,28 @@ generate_dashboard() {
     .progress-track { height: 10px; background: rgba(0,0,0,0.06); border-radius: 999px; margin-top: 10px; overflow: hidden; border: 1px solid var(--border); }
     .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; width: 0%; transition: width 0.45s ease; }
 
+    /* Mini indeterminate progress (used for Update Manager preview + verification loading) */
+    .znh-mini-progress {
+        height: 8px;
+        background: rgba(0,0,0,0.10);
+        border-radius: 999px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+    }
+    .znh-mini-progress.hidden { display: none; }
+    .znh-mini-progress-bar {
+        height: 100%;
+        width: 35%;
+        background: linear-gradient(90deg, rgba(96,165,250,0.95), rgba(167,139,250,0.95), rgba(34,197,94,0.95));
+        border-radius: 999px;
+        animation: znhIndeterminate 1050ms ease-in-out infinite;
+    }
+    @keyframes znhIndeterminate {
+        0% { transform: translateX(-120%); opacity: 0.55; }
+        50% { opacity: 1; }
+        100% { transform: translateX(300%); opacity: 0.55; }
+    }
+
     /* Logs */
     .log-container { position: relative; }
 
@@ -10492,6 +10654,8 @@ generate_dashboard() {
     .overlay-progress-row { display:flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 0.85rem; font-weight: 800; }
 
     .footer { font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 28px; }
+    .footer a { color: var(--accent); text-decoration: none; font-weight: 950; }
+    .footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -11038,7 +11202,7 @@ generate_dashboard() {
       </div>
     </div>
 
-    <div class="footer">Generated by zypper-auto-helper | RUN: <code>${RUN_ID}</code></div>
+    <div class="footer">Generated by zypper-auto-helper | RUN: <code>${RUN_ID}</code> | <a href="https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues" target="_blank" rel="noopener noreferrer">GitHub Issues (Report a bug)</a></div>
   </div>
 
   <!-- Self-update overlay (blocks clicks; not dismissable by clicking outside) -->
@@ -11078,6 +11242,60 @@ generate_dashboard() {
     <div class="znh-task-text">
       <div class="znh-task-title" id="znh-task-title">Update</div>
       <div class="znh-task-sub" id="znh-task-sub">Running…</div>
+    </div>
+  </div>
+
+  <!-- Notification center (glows when new notifications exist) -->
+  <button id="znh-notify-btn" class="znh-notify-btn" type="button" aria-label="Notifications" title="Notifications">
+    <span aria-hidden="true">🔔</span>
+    <span id="znh-notify-badge" class="znh-notify-badge hidden" aria-hidden="true">0</span>
+  </button>
+  <div id="znh-notify-panel" class="znh-notify-panel" role="dialog" aria-modal="false" aria-label="Notifications">
+    <div class="znh-notify-head">
+      <div class="znh-notify-title">Notifications</div>
+      <div style="display:flex; gap:8px; flex-wrap: wrap; justify-content:flex-end;">
+        <button class="pill" type="button" id="znh-managers-open-btn" title="Open Update/Rocket managers">Managers</button>
+        <button class="pill" type="button" id="znh-issues-open-btn" title="Open GitHub Issues (report bug / request feature)">Post issue</button>
+        <button class="pill" type="button" id="znh-notify-clear-btn" title="Clear notifications">Clear</button>
+        <button class="pill" type="button" id="znh-notify-close-btn" title="Close">Close</button>
+      </div>
+    </div>
+    <div class="znh-notify-list" id="znh-notify-list">
+      <!-- filled by JS -->
+    </div>
+  </div>
+
+  <!-- Managers bubble (shown when the managers overlay is minimized) -->
+  <div id="znh-mgr-bubble" class="hidden" role="button" tabindex="0" aria-label="Open managers">
+    <div class="znh-mgr-ico" aria-hidden="true">🧰</div>
+    <div class="znh-mgr-text">
+      <div class="znh-mgr-title">Managers</div>
+      <div class="znh-mgr-sub" id="znh-mgr-sub">Update manager • Rocket manager</div>
+    </div>
+  </div>
+
+  <!-- Managers overlay (minimizable) -->
+  <div id="mgr-overlay" class="overlay hidden" aria-hidden="true">
+    <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="mgr-title">
+      <div class="overlay-head">
+        <div>
+          <div class="overlay-title" id="mgr-title">Managers</div>
+          <div class="overlay-step" id="mgr-step">Update manager • Rocket manager</div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+          <button class="pill" type="button" id="mgr-min-btn">Minimize</button>
+          <button class="pill" type="button" id="mgr-close-btn">Close</button>
+        </div>
+      </div>
+      <div class="overlay-body" id="mgr-body">
+        <!-- filled by JS -->
+      </div>
+      <div class="overlay-footer" id="mgr-footer">
+        <button class="pill" type="button" id="mgr-clear-history-btn">Clear history</button>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="pill" type="button" id="mgr-refresh-btn">Refresh</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -12359,6 +12577,1126 @@ generate_dashboard() {
         }
     }
 
+    // Notification center (persistent inbox + glow icon)
+    var ZNH_GITHUB_ISSUES_URL = 'https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues';
+
+    var _znhNotify = {
+        items: [],
+        max: 40,
+        storageKey: 'znh_notify_inbox_v1'
+    };
+
+    function _znhNotifyLoad() {
+        try {
+            var raw = localStorage.getItem(_znhNotify.storageKey) || '';
+            if (!raw) return [];
+            var j = JSON.parse(raw);
+            if (!Array.isArray(j)) return [];
+            return j;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function _znhNotifySave() {
+        try {
+            var arr = _znhNotify.items || [];
+            if (!Array.isArray(arr)) arr = [];
+            if (arr.length > _znhNotify.max) arr = arr.slice(0, _znhNotify.max);
+            localStorage.setItem(_znhNotify.storageKey, JSON.stringify(arr));
+        } catch (e) {}
+    }
+
+    function _znhNotifyUnreadCount() {
+        var n = 0;
+        try {
+            var arr = _znhNotify.items || [];
+            for (var i = 0; i < arr.length; i++) {
+                if (arr[i] && arr[i].unread) n++;
+            }
+        } catch (e) { n = 0; }
+        return n;
+    }
+
+    function _znhNotifyById(id) {
+        try {
+            var arr = _znhNotify.items || [];
+            for (var i = 0; i < arr.length; i++) {
+                var it = arr[i] || {};
+                if (String(it.id || '') === String(id || '')) return it;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function _znhNotifyRenderBadge() {
+        var btn = document.getElementById('znh-notify-btn');
+        var badge = document.getElementById('znh-notify-badge');
+        if (!btn || !badge) return;
+
+        var n = _znhNotifyUnreadCount();
+        badge.textContent = String(n);
+        if (n > 0) {
+            badge.classList.remove('hidden');
+            badge.setAttribute('aria-hidden', 'false');
+            btn.classList.add('glow');
+        } else {
+            badge.classList.add('hidden');
+            badge.setAttribute('aria-hidden', 'true');
+            btn.classList.remove('glow');
+        }
+    }
+
+    function znhNotifyRunAction(action) {
+        // action: { type, label?, ... }
+        action = action || null;
+        if (!action || !action.type) return;
+        var t = String(action.type || '').trim();
+
+        try {
+            // Self-update post-success view (release notes + log)
+            if (t === 'open-self-update-last-success') {
+                var raw = '';
+                try { raw = localStorage.getItem('znh_su_last_success_payload_v1') || ''; } catch (e0) { raw = ''; }
+                if (!raw) {
+                    toast('No data', 'No stored self-update success payload found', 'err');
+                    return;
+                }
+                var p = null;
+                try { p = JSON.parse(raw); } catch (e1) { p = null; }
+                if (!p) {
+                    toast('No data', 'Self-update payload parse failed', 'err');
+                    return;
+                }
+
+                var ch = String(p.channel || 'stable');
+                if (ch !== 'stable' && ch !== 'rolling') ch = 'stable';
+                var logText = String(p.log || '');
+                if (!String(logText || '').trim()) logText = '(no output captured)';
+
+                var subtitle = 'Self-update installed successfully.';
+                try {
+                    var verify = _suVerifyTextFromStatus(p.status || null, ch);
+                    if (verify) subtitle = subtitle + ' ' + verify;
+                } catch (eV) {}
+
+                _suReset();
+                _su.channel = ch;
+                _suShow(true);
+                _suUpdateProgress('Done', 100);
+                _suSetLog('');
+
+                var notesHdr = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+                var fetchNotes = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+                var verifyText = '';
+                try { verifyText = _suBuildVerificationDetailsFromStatus(p.status || null); } catch (eVV) { verifyText = ''; }
+
+                fetchNotes().then(function(notes) {
+                    _suRenderReleaseNotesOk('Update installed successfully', subtitle, logText, notes, notesHdr, verifyText);
+                }).catch(function(err) {
+                    var msg = (err && err.message) ? err.message : 'failed to fetch notes';
+                    _suRenderReleaseNotesOk('Update installed successfully', subtitle, logText, 'ERROR: ' + msg, notesHdr, verifyText);
+                });
+                return;
+            }
+
+            // Rocket job viewer (replays a job_id into the existing overlay)
+            if (t === 'open-system-update-job') {
+                var jid = String(action.job_id || '').trim();
+                if (!jid) return;
+                var sim = !!action.simulate;
+                try { _suReset(); } catch (e2) {}
+                try { _ruReset(); } catch (e3) {}
+                try { _ru.simulate = sim; } catch (e4) {}
+                try { _ru.auto_simulate = sim; } catch (e5) {}
+                try { _suShow(true); } catch (e6) {}
+                try { _ruPollJob(jid); } catch (e7) {}
+                return;
+            }
+
+            // Quick Action job viewer (replays a job_id into the existing overlay)
+            if (t === 'open-quick-action-job') {
+                var qjid = String(action.job_id || '').trim();
+                if (!qjid) return;
+                var qact = String(action.action || '');
+                var qtitle = String(action.title || 'Quick action');
+
+                try { _suReset(); } catch (e2qa) {}
+                try { _ruReset(); } catch (e3qa) {}
+                try { _qaReset(); } catch (e4qa) {}
+
+                try { _qa.action = qact; } catch (e5qa) {}
+                try { _qa.title = qtitle; } catch (e6qa) {}
+
+                try { _suShow(true); } catch (e7qa) {}
+                try { _qaRenderRunning({ type: 'quick-action', job_id: qjid, action: qact, title: qtitle }); } catch (e8qa) {}
+                try { _qaPollJob(qjid, qact, qtitle); } catch (e9qa) {}
+                return;
+            }
+
+            // scrub-ghost job viewer (replays a job_id into the existing overlay)
+            if (t === 'open-scrub-ghost-job') {
+                var sjid = String(action.job_id || '').trim();
+                if (!sjid) return;
+                var sact = String(action.action || '');
+                var stitle = String(action.title || 'scrub-ghost');
+
+                try { _suReset(); } catch (e2sg) {}
+                try { _ruReset(); } catch (e3sg) {}
+                try { if (typeof _qaReset === 'function') _qaReset(); } catch (e4sg) {}
+                try { _sgReset(); } catch (e5sg) {}
+
+                try { _suShow(true); } catch (e6sg) {}
+                try { _sgRenderRunning({ type: 'scrub-ghost', job_id: sjid, action: sact, title: stitle }); } catch (e7sg) {}
+                try { _sgPollJob(sjid, sact, stitle); } catch (e8sg) {}
+                return;
+            }
+
+            // Unusual activity helper: open JS health details panel
+            if (t === 'open-js-health') {
+                try {
+                    var d0 = document.getElementById('js-health-details');
+                    if (d0) {
+                        d0.open = true;
+                        try { d0.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (eS) { d0.scrollIntoView(true); }
+                    }
+                } catch (eJ0) {}
+                return;
+            }
+
+            // Unusual activity helper: open Debug HUD
+            if (t === 'open-debug-hud') {
+                try {
+                    if (typeof window.znhHudToggle === 'function') {
+                        window.znhHudToggle();
+                        return;
+                    }
+                } catch (eH0) {}
+                try {
+                    if (window.ZNH && window.ZNH.hud && typeof window.ZNH.hud.toggle === 'function') {
+                        window.ZNH.hud.toggle();
+                        return;
+                    }
+                } catch (eH1) {}
+                return;
+            }
+
+            // GitHub issues (report bugs / request features)
+            if (t === 'open-github-issues') {
+                try {
+                    var url0 = '';
+                    try { url0 = String(action.url || ZNH_GITHUB_ISSUES_URL || ''); } catch (eU0) { url0 = ''; }
+                    if (!url0) url0 = 'https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues';
+                    try {
+                        var w0 = window.open(url0, '_blank', 'noopener');
+                        if (w0) return;
+                    } catch (eO) {}
+                    try { window.location.href = url0; } catch (eL) {}
+                } catch (eU1) {}
+                return;
+            }
+
+            // Export UI diagnostics bundle (JSON download)
+            if (t === 'export-ui-diagnostics') {
+                try {
+                    if (window.ZNH && typeof window.ZNH.exportDiagnostics === 'function') {
+                        window.ZNH.exportDiagnostics();
+                        return;
+                    }
+                } catch (eD0) {}
+                try {
+                    if (typeof window.__znhExportDiagnosticsBootstrap === 'function') {
+                        window.__znhExportDiagnosticsBootstrap();
+                        return;
+                    }
+                } catch (eD1) {}
+                toast('Diagnostics not available', 'Dashboard exporter not loaded', 'err');
+                return;
+            }
+
+            if (t === 'open-managers') {
+                try {
+                    if (typeof window.znhManagersOpen === 'function') {
+                        window.znhManagersOpen();
+                        return;
+                    }
+                } catch (eM) {}
+                return;
+            }
+
+            // Self-update job viewer (view-only; no reload)
+            if (t === 'open-self-update-job') {
+                var jid2 = String(action.job_id || '').trim();
+                if (!jid2) return;
+                var ch2 = String(action.channel || 'stable');
+                if (ch2 !== 'stable' && ch2 !== 'rolling') ch2 = 'stable';
+                var dry2 = !!action.dry_run;
+
+                try { _suReset(); } catch (e8) {}
+                try { _su.channel = ch2; } catch (e9) {}
+                try { _suShow(true); } catch (e10) {}
+                try { if (typeof _suRenderRunning === 'function') _suRenderRunning({ type: 'self-update', job_id: jid2, channel: ch2, dry_run: dry2 }); } catch (e11) {}
+                try { _suPollJob(jid2, ch2, dry2, true); } catch (e12) {}
+                return;
+            }
+
+        } catch (e) {
+            var msg2 = (e && e.message) ? e.message : String(e || 'action failed');
+            toast('Notification action failed', msg2, 'err');
+        }
+    }
+
+    function _znhNotifyRenderList() {
+        var list = document.getElementById('znh-notify-list');
+        if (!list) return;
+        try { list.textContent = ''; } catch (e0) {}
+
+        var arr = _znhNotify.items || [];
+        if (!arr.length) {
+            var empty = document.createElement('div');
+            empty.className = 'znh-notify-item';
+            empty.innerHTML = '<div class="t">No notifications</div><div class="b">(You’re all caught up)</div>';
+            list.appendChild(empty);
+            return;
+        }
+
+        for (var i = 0; i < arr.length; i++) {
+            var it = arr[i] || {};
+            var row = document.createElement('div');
+            row.className = 'znh-notify-item' + (it.unread ? ' unread' : '');
+
+            var t = document.createElement('div');
+            t.className = 't';
+            t.textContent = String(it.title || 'Notification');
+
+            var b = document.createElement('div');
+            b.className = 'b';
+            b.textContent = String(it.body || '');
+
+            var meta = document.createElement('div');
+            meta.className = 'meta';
+            var ts = '';
+            try { ts = it.ts ? new Date(parseInt(it.ts, 10)).toISOString().slice(0, 19).replace('T', ' ') + 'Z' : ''; } catch (e1) { ts = ''; }
+            meta.textContent = (it.level ? String(it.level).toUpperCase() : 'INFO') + (ts ? (' • ' + ts) : '');
+
+            row.appendChild(t);
+            row.appendChild(b);
+            row.appendChild(meta);
+
+            // Optional action buttons
+            // Backward compatible:
+            //  - old: it.action
+            //  - new: it.actions (array)
+            try {
+                var acts = [];
+                if (it.actions && Array.isArray(it.actions)) {
+                    acts = it.actions.slice(0);
+                } else if (it.action && it.action.type) {
+                    acts = [it.action];
+                }
+
+                // Keep it bounded (avoid UI spam)
+                if (acts.length > 3) acts = acts.slice(0, 3);
+
+                if (acts.length) {
+                    var actWrap = document.createElement('div');
+                    actWrap.style.marginTop = '8px';
+                    actWrap.style.display = 'flex';
+                    actWrap.style.gap = '8px';
+                    actWrap.style.flexWrap = 'wrap';
+
+                    for (var ai = 0; ai < acts.length; ai++) {
+                        (function(act) {
+                            if (!act || !act.type) return;
+                            var btn = document.createElement('button');
+                            btn.type = 'button';
+                            btn.className = 'pill';
+                            btn.textContent = String(act.label ? act.label : 'Open');
+                            btn.addEventListener('click', function(ev) {
+                                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                                try { znhNotifyRunAction(this._znh_action || null); } catch (e2) {}
+                            });
+                            btn._znh_action = act;
+                            actWrap.appendChild(btn);
+                        })(acts[ai]);
+                    }
+
+                    row.appendChild(actWrap);
+                }
+            } catch (eA) {}
+
+            list.appendChild(row);
+        }
+    }
+
+    function znhNotifyAdd(meta) {
+        // meta: { id, title, body, level, once, action, actions }
+        meta = meta || {};
+        var id = String(meta.id || '').trim();
+        var title = String(meta.title || 'Notification');
+        var body = String(meta.body || '');
+        var level = String(meta.level || 'info');
+        var once = !!meta.once;
+        var action = (meta.action && typeof meta.action === 'object') ? meta.action : null;
+        var actions = [];
+        try {
+            if (meta.actions && Array.isArray(meta.actions)) {
+                actions = meta.actions.slice(0);
+            } else if (action && action.type) {
+                actions = [action];
+            }
+        } catch (eA0) { actions = action ? [action] : []; }
+
+        // Normalize: keep legacy "action" in sync with the first button.
+        try { if (!action && actions.length && actions[0] && actions[0].type) action = actions[0]; } catch (eA1) {}
+        if (actions.length > 3) actions = actions.slice(0, 3);
+
+        if (!id) {
+            // Not ideal, but keep it functional.
+            id = 'anon-' + String(Date.now());
+            once = false;
+        }
+
+        var existing = _znhNotifyById(id);
+        if (existing) {
+            // If it's a "once" notice and already read, don't re-add.
+            if (once && !existing.unread) {
+                return;
+            }
+            // If it exists but unread, keep it unread and refresh text.
+            existing.title = title;
+            existing.body = body;
+            existing.level = level;
+            existing.ts = Date.now();
+            existing.unread = true;
+            if (action) existing.action = action;
+            try { existing.actions = actions; } catch (eAX) {}
+        } else {
+            var it = {
+                id: id,
+                title: title,
+                body: body,
+                level: level,
+                ts: Date.now(),
+                unread: true,
+                once: once,
+                action: action,
+                actions: actions
+            };
+            _znhNotify.items.unshift(it);
+            if (_znhNotify.items.length > _znhNotify.max) _znhNotify.items = _znhNotify.items.slice(0, _znhNotify.max);
+        }
+
+        _znhNotifySave();
+        _znhNotifyRenderBadge();
+        _znhNotifyRenderList();
+    }
+
+    function _znhNotifyMarkAllRead() {
+        try {
+            var arr = _znhNotify.items || [];
+            for (var i = 0; i < arr.length; i++) {
+                if (arr[i]) arr[i].unread = false;
+            }
+        } catch (e) {}
+        _znhNotifySave();
+        _znhNotifyRenderBadge();
+        _znhNotifyRenderList();
+    }
+
+    function _znhNotifyClear() {
+        try { _znhNotify.items = []; } catch (e) {}
+        _znhNotifySave();
+        _znhNotifyRenderBadge();
+        _znhNotifyRenderList();
+    }
+
+    // Unusual activity watcher: emit a persistent notification when job polling gives up.
+    function znhWatcherNotifyJobPollingFailed(meta) {
+        meta = meta || {};
+        var type = String(meta.type || '').trim();
+        var jobId = String(meta.job_id || '').trim();
+        if (!type || !jobId) return;
+
+        var id = 'znh_pollfail_' + type + '_' + jobId;
+
+        var title = 'Job polling failed';
+        if (type === 'self-update') title = 'Self-update polling failed';
+        else if (type === 'system-update') title = 'System update polling failed';
+        else if (type === 'quick-action') title = 'Quick Action polling failed';
+        else if (type === 'scrub-ghost') title = 'scrub-ghost polling failed';
+
+        var body = ''
+            + 'The WebUI lost contact while polling a background job and gave up after many retries.\n\n'
+            + 'Type: ' + type + '\n'
+            + 'job_id: ' + jobId + '\n\n'
+            + 'Try: reload this page. If it keeps happening, attach UI diagnostics (Notification Center / Managers) and dashboard-api.log to a GitHub issue.';
+
+        var action = null;
+        try {
+            if (type === 'self-update') {
+                var ch = String(meta.channel || 'stable');
+                if (ch !== 'stable' && ch !== 'rolling') ch = 'stable';
+                action = { type: 'open-self-update-job', label: 'Open', job_id: jobId, channel: ch, dry_run: !!meta.dry_run };
+            } else if (type === 'system-update') {
+                action = { type: 'open-system-update-job', label: 'Open log', job_id: jobId, simulate: !!meta.simulate };
+            } else if (type === 'quick-action') {
+                action = { type: 'open-quick-action-job', label: 'Open', job_id: jobId, action: String(meta.action || ''), title: String(meta.title || 'Quick action') };
+            } else if (type === 'scrub-ghost') {
+                action = { type: 'open-scrub-ghost-job', label: 'Open', job_id: jobId, action: String(meta.action || ''), title: String(meta.title || 'scrub-ghost') };
+            } else {
+                action = null;
+            }
+        } catch (eA0) {
+            action = null;
+        }
+
+        try {
+            if (typeof window.znhNotifyAdd === 'function') {
+                window.znhNotifyAdd({
+                    id: id,
+                    title: title,
+                    body: body,
+                    level: 'error',
+                    once: true,
+                    actions: [
+                        action,
+                        { type: 'export-ui-diagnostics', label: 'Download diagnostics' },
+                        { type: 'open-github-issues', label: 'Post issue' }
+                    ]
+                });
+            }
+        } catch (eN0) {}
+    }
+
+    // Job history (for Managers overlay)
+    var _znhJobs = {
+        items: [],
+        max: 60,
+        storageKey: 'znh_job_history_v1'
+    };
+
+    function _znhJobsLoad() {
+        try {
+            var raw = localStorage.getItem(_znhJobs.storageKey) || '';
+            if (!raw) return [];
+            var j = JSON.parse(raw);
+            if (!Array.isArray(j)) return [];
+            return j;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function _znhJobsSave() {
+        try {
+            var arr = _znhJobs.items || [];
+            if (!Array.isArray(arr)) arr = [];
+            if (arr.length > _znhJobs.max) arr = arr.slice(0, _znhJobs.max);
+            localStorage.setItem(_znhJobs.storageKey, JSON.stringify(arr));
+        } catch (e) {}
+    }
+
+    function znhJobHistoryAdd(meta) {
+        // meta: { type, job_id, ok?, rc?, title?, summary?, channel?, dry_run?, simulate? }
+        meta = meta || {};
+        var type = String(meta.type || '').trim();
+        var jobId = String(meta.job_id || '').trim();
+        if (!type || !jobId) return;
+
+        var id = type + ':' + jobId;
+        var ok = (meta.ok === undefined) ? null : !!meta.ok;
+        var rc = (meta.rc != null) ? parseInt(meta.rc, 10) : null;
+        if (rc != null && isNaN(rc)) rc = null;
+
+        var it = {
+            id: id,
+            type: type,
+            job_id: jobId,
+            ts: Date.now(),
+            ok: ok,
+            rc: rc,
+            title: (meta.title != null) ? String(meta.title) : '',
+            summary: (meta.summary != null) ? String(meta.summary) : '',
+            channel: (meta.channel != null) ? String(meta.channel) : '',
+            dry_run: !!meta.dry_run,
+            simulate: !!meta.simulate
+        };
+
+        // Upsert
+        try {
+            var arr = _znhJobs.items || [];
+            var found = false;
+            for (var i = 0; i < arr.length; i++) {
+                if (arr[i] && String(arr[i].id || '') === id) {
+                    arr[i] = it;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                arr.unshift(it);
+            }
+            _znhJobs.items = arr;
+            if (_znhJobs.items.length > _znhJobs.max) _znhJobs.items = _znhJobs.items.slice(0, _znhJobs.max);
+        } catch (e0) {
+            _znhJobs.items = [it];
+        }
+
+        _znhJobsSave();
+    }
+
+    function znhJobHistoryClear() {
+        try { _znhJobs.items = []; } catch (e) {}
+        _znhJobsSave();
+    }
+
+    function znhManagersOpen() {
+        var ov = document.getElementById('mgr-overlay');
+        if (!ov) return;
+        try { ov.classList.remove('hidden'); ov.setAttribute('aria-hidden', 'false'); } catch (e) {}
+        try { document.getElementById('znh-mgr-bubble').classList.add('hidden'); } catch (e2) {}
+        try { localStorage.removeItem('znh_mgr_minimized'); } catch (e3) {}
+        try { znhManagersRender(); } catch (e4) {}
+    }
+
+    function znhManagersClose() {
+        var ov = document.getElementById('mgr-overlay');
+        if (!ov) return;
+        try { ov.classList.add('hidden'); ov.setAttribute('aria-hidden', 'true'); } catch (e) {}
+        try { localStorage.removeItem('znh_mgr_minimized'); } catch (e2) {}
+        try { document.getElementById('znh-mgr-bubble').classList.add('hidden'); } catch (e3) {}
+    }
+
+    function znhManagersMinimize() {
+        var ov = document.getElementById('mgr-overlay');
+        if (!ov) return;
+        try { ov.classList.add('hidden'); ov.setAttribute('aria-hidden', 'true'); } catch (e) {}
+        try { localStorage.setItem('znh_mgr_minimized', '1'); } catch (e2) {}
+        try { document.getElementById('znh-mgr-bubble').classList.remove('hidden'); } catch (e3) {}
+    }
+
+    function znhManagersRender(tab) {
+        var body = document.getElementById('mgr-body');
+        if (!body) return;
+
+        // Load job history lazily (in case localStorage changed).
+        try { _znhJobs.items = _znhJobsLoad() || []; } catch (e0) { _znhJobs.items = []; }
+
+        var curTab = String(tab || (localStorage.getItem('znh_mgr_tab') || 'all'));
+        if (curTab !== 'all' && curTab !== 'self-update' && curTab !== 'system-update') curTab = 'all';
+        try { localStorage.setItem('znh_mgr_tab', curTab); } catch (e1) {}
+
+        // Filters (persisted)
+        var q = '';
+        var onlyFailed = false;
+        var last24 = false;
+        try { q = String(localStorage.getItem('znh_mgr_q') || ''); } catch (eQ0) { q = ''; }
+        try { onlyFailed = (localStorage.getItem('znh_mgr_failed') || '') === '1'; } catch (eF0) { onlyFailed = false; }
+        try { last24 = (localStorage.getItem('znh_mgr_last24') || '') === '1'; } catch (eL0) { last24 = false; }
+
+        function _qMatch(it) {
+            if (!q) return true;
+            var needle = String(q || '').toLowerCase();
+            if (!needle) return true;
+            try {
+                var hay = '';
+                hay += String(it.type || '') + ' ';
+                hay += String(it.job_id || '') + ' ';
+                hay += String(it.title || '') + ' ';
+                hay += String(it.summary || '') + ' ';
+                hay += String(it.channel || '') + ' ';
+                return hay.toLowerCase().indexOf(needle) !== -1;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        var items = _znhJobs.items || [];
+        if (curTab !== 'all') {
+            items = items.filter(function(it) { return it && String(it.type || '') === curTab; });
+        }
+
+        // Only failed
+        if (onlyFailed) {
+            items = items.filter(function(it) { return it && it.ok === false; });
+        }
+
+        // Last 24h
+        if (last24) {
+            var cutoff = 0;
+            try { cutoff = Date.now() - (24 * 60 * 60 * 1000); } catch (eC) { cutoff = 0; }
+            items = items.filter(function(it) { return it && it.ts && parseInt(it.ts, 10) >= cutoff; });
+        }
+
+        // Query
+        if (q) {
+            items = items.filter(function(it) { return it && _qMatch(it); });
+        }
+
+        function pill(label, value) {
+            var cls = 'pill' + (curTab === value ? ' active' : '');
+            return '<button class="' + cls + '" type="button" data-mgr-tab="' + value + '">' + label + '</button>';
+        }
+
+        function safeHtml(s) {
+            return String(s || '').replace(/</g, '&lt;');
+        }
+
+        var html = [];
+        html.push('<div class="mgr-tabs">' + pill('All', 'all') + pill('Update manager', 'self-update') + pill('Rocket manager', 'system-update') + '</div>');
+        html.push('<div style="display:grid; gap: 10px; margin-top: 10px;">');
+        html.push('  <input id="mgr-q" type="text" placeholder="Search job history (job_id, rc, keywords)…" value="' + safeHtml(q) + '" style="width:100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />');
+        html.push('  <div style="display:flex; gap:10px; flex-wrap:wrap;">');
+        html.push('    <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="mgr-failed" ' + (onlyFailed ? 'checked' : '') + ' /> Failed only</label>');
+        html.push('    <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="mgr-last24" ' + (last24 ? 'checked' : '') + ' /> Last 24h</label>');
+        html.push('    <button class="pill" type="button" id="mgr-export-diag">Download UI diagnostics</button>');
+        html.push('  </div>');
+        html.push('</div>');
+        html.push('<div style="color: var(--muted); font-size:0.9rem; margin-top: 10px;">This is a local job history (stored in your browser). Use it to reopen logs after installs.</div>');
+        html.push('<div style="display:grid; gap: 10px; margin-top: 12px;">');
+
+        if (!items.length) {
+            html.push('<div class="mgr-row"><div class="t">No history yet</div><div class="b">Run Self-update or Rocket Update Wizard to populate history.</div></div>');
+        } else {
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i] || {};
+                var ok = (it.ok === null || it.ok === undefined) ? null : !!it.ok;
+                var level = (ok === null) ? 'warn' : (ok ? 'ok' : 'err');
+                var cls = 'mgr-row ' + (level === 'ok' ? 'ok' : (level === 'err' ? 'err' : 'warn'));
+
+                var title = '';
+                if (String(it.type || '') === 'self-update') title = 'Self-update';
+                else if (String(it.type || '') === 'system-update') title = 'System update';
+                else title = String(it.type || 'Job');
+
+                var when = '';
+                try { when = it.ts ? new Date(parseInt(it.ts, 10)).toISOString().slice(0, 19).replace('T', ' ') + 'Z' : ''; } catch (eT) { when = ''; }
+
+                var summary = '';
+                try { summary = String(it.summary || ''); } catch (eS) { summary = ''; }
+                if (!summary) {
+                    if (String(it.type || '') === 'self-update') summary = it.dry_run ? 'Dry-run OK' : (ok ? 'Installed' : 'Failed');
+                    if (String(it.type || '') === 'system-update') summary = it.simulate ? 'Dry-run OK' : (ok ? 'Installed' : 'Failed');
+                }
+
+                var act = null;
+                if (String(it.type || '') === 'self-update') {
+                    act = { type: 'open-self-update-job', label: 'Open', job_id: String(it.job_id || ''), channel: String(it.channel || 'stable'), dry_run: !!it.dry_run };
+                } else if (String(it.type || '') === 'system-update') {
+                    act = { type: 'open-system-update-job', label: 'Open log', job_id: String(it.job_id || ''), simulate: !!it.simulate };
+                }
+
+                html.push('<div class="' + cls + '">');
+                html.push('  <div class="hdr"><div class="t">' + title + '</div><div class="m">' + when + (it.rc != null ? (' • rc=' + String(it.rc)) : '') + '</div></div>');
+                html.push('  <div class="b">' + String(summary || '').replace(/</g,'&lt;') + '</div>');
+                html.push('  <div class="m">job_id=' + String(it.job_id || '').replace(/</g,'&lt;') + '</div>');
+                if (act) {
+                    if (act.type === 'open-self-update-job') {
+                        html.push(
+                            '  <div class="mgr-actions"><button class="pill" type="button" data-mgr-open="1"'
+                            + ' data-action-type="' + act.type + '"'
+                            + ' data-job-id="' + String(act.job_id || '') + '"'
+                            + ' data-channel="' + String(act.channel || 'stable') + '"'
+                            + ' data-dry-run="' + String(act.dry_run ? '1' : '0') + '"'
+                            + '>' + String(act.label || 'Open') + '</button></div>'
+                        );
+                    } else if (act.type === 'open-system-update-job') {
+                        html.push(
+                            '  <div class="mgr-actions"><button class="pill" type="button" data-mgr-open="1"'
+                            + ' data-action-type="' + act.type + '"'
+                            + ' data-job-id="' + String(act.job_id || '') + '"'
+                            + ' data-simulate="' + String(act.simulate ? '1' : '0') + '"'
+                            + '>' + String(act.label || 'Open') + '</button></div>'
+                        );
+                    } else {
+                        html.push('  <div class="mgr-actions"><button class="pill" type="button" data-mgr-open="1" data-action-type="' + act.type + '" data-job-id="' + String(act.job_id || '') + '">' + String(act.label || 'Open') + '</button></div>');
+                    }
+                }
+                html.push('</div>');
+            }
+        }
+
+        html.push('</div>');
+        body.innerHTML = html.join('\n');
+
+        // Wire tabs
+        try {
+            var tabs = body.querySelectorAll('[data-mgr-tab]');
+            tabs.forEach(function(b) {
+                b.addEventListener('click', function(ev) {
+                    try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                    var v = String(b.getAttribute('data-mgr-tab') || 'all');
+                    znhManagersRender(v);
+                });
+            });
+        } catch (e2) {}
+
+        // Wire filters
+        try {
+            var qEl = document.getElementById('mgr-q');
+            var fEl = document.getElementById('mgr-failed');
+            var lEl = document.getElementById('mgr-last24');
+            var exBtn = document.getElementById('mgr-export-diag');
+
+            var _qTimer = null;
+            if (qEl) {
+                qEl.addEventListener('input', function() {
+                    if (_qTimer) { try { clearTimeout(_qTimer); } catch (e) {} }
+                    _qTimer = setTimeout(function() {
+                        try { localStorage.setItem('znh_mgr_q', String(qEl.value || '')); } catch (e2) {}
+                        znhManagersRender(curTab);
+                    }, 180);
+                });
+            }
+            if (fEl) {
+                fEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_failed', fEl.checked ? '1' : '0'); } catch (e3) {}
+                    znhManagersRender(curTab);
+                });
+            }
+            if (lEl) {
+                lEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_last24', lEl.checked ? '1' : '0'); } catch (e4) {}
+                    znhManagersRender(curTab);
+                });
+            }
+            if (exBtn) {
+                exBtn.addEventListener('click', function(ev) {
+                    try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e5) {}
+                    try {
+                        if (typeof window.znhNotifyRunAction === 'function') {
+                            window.znhNotifyRunAction({ type: 'export-ui-diagnostics' });
+                        }
+                    } catch (e6) {}
+                });
+            }
+        } catch (eF) {}
+
+        // Wire open buttons
+        try {
+            var opens = body.querySelectorAll('[data-mgr-open]');
+            opens.forEach(function(btn) {
+                btn.addEventListener('click', function(ev) {
+                    try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                    var tp = String(btn.getAttribute('data-action-type') || '');
+                    var jid = String(btn.getAttribute('data-job-id') || '');
+                    if (!tp || !jid) return;
+
+                    if (typeof window.znhNotifyRunAction === 'function') {
+                        if (tp === 'open-self-update-job') {
+                            var ch = String(btn.getAttribute('data-channel') || 'stable');
+                            if (ch !== 'stable' && ch !== 'rolling') ch = 'stable';
+                            var dry = String(btn.getAttribute('data-dry-run') || '0') === '1';
+                            window.znhNotifyRunAction({ type: tp, job_id: jid, channel: ch, dry_run: dry });
+                        } else if (tp === 'open-system-update-job') {
+                            var sim = String(btn.getAttribute('data-simulate') || '0') === '1';
+                            window.znhNotifyRunAction({ type: tp, job_id: jid, simulate: sim });
+                        }
+                    }
+                });
+            });
+        } catch (e3) {}
+    }
+
+    function znhManagersInit() {
+        // Wire overlay + bubble
+        var openBtn = document.getElementById('znh-managers-open-btn');
+        var closeBtn = document.getElementById('mgr-close-btn');
+        var minBtn = document.getElementById('mgr-min-btn');
+        var refreshBtn = document.getElementById('mgr-refresh-btn');
+        var clearBtn = document.getElementById('mgr-clear-history-btn');
+        var bubble = document.getElementById('znh-mgr-bubble');
+
+        // Global error watcher -> notifications (helps users report issues)
+        // This listens to the existing znh-network-error event emitted by znhFetch().
+        try {
+            if (!window.__znh_notify_error_watch_bound) {
+                window.__znh_notify_error_watch_bound = true;
+
+                var _lastNetSig = '';
+                var _lastNetTs = 0;
+
+                document.addEventListener('znh-network-error', function(ev) {
+                    try {
+                        var d = (ev && ev.detail) ? ev.detail : {};
+                        var url = String(d.url || d.path || '');
+                        var err = String(d.error || 'network error');
+                        if (err.length > 260) err = err.slice(0, 260) + '…';
+
+                        var sig = url + '|' + err;
+                        var now = 0;
+                        try { now = Date.now(); } catch (eT) { now = 0; }
+                        if (sig && sig === _lastNetSig && now && _lastNetTs && (now - _lastNetTs) < 2500) return;
+                        _lastNetSig = sig;
+                        _lastNetTs = now;
+
+                        var body = ''
+                            + 'A WebUI request failed. This is usually temporary (API restart, token mismatch, network hiccup).\n\n'
+                            + 'Error: ' + err + '\n'
+                            + (url ? ('URL: ' + url + '\n\n') : '\n')
+                            + 'If it keeps happening, attach this to a GitHub issue:\n'
+                            + '1) Managers → open the relevant job log (copy log tail)\n'
+                            + '2) Download UI diagnostics (JSON)\n'
+                            + '3) Include dashboard-api.log + the WebUI job log path (shown in the overlay).';
+
+                        if (typeof window.znhNotifyAdd === 'function') {
+                            window.znhNotifyAdd({
+                                id: 'znh_neterr_last',
+                                title: 'WebUI network/API error',
+                                body: body,
+                                level: 'warn',
+                                actions: [
+                                    { type: 'export-ui-diagnostics', label: 'Download diagnostics' },
+                                    { type: 'open-github-issues', label: 'Post issue' },
+                                    { type: 'open-managers', label: 'Managers' }
+                                ]
+                            });
+                        }
+                    } catch (e2) {}
+                });
+            }
+        } catch (eW) {}
+
+        if (openBtn && !openBtn._znh_bound) {
+            openBtn._znh_bound = true;
+            openBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                znhManagersOpen();
+            });
+        }
+
+        if (closeBtn && !closeBtn._znh_bound) {
+            closeBtn._znh_bound = true;
+            closeBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                znhManagersClose();
+            });
+        }
+
+        if (minBtn && !minBtn._znh_bound) {
+            minBtn._znh_bound = true;
+            minBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                znhManagersMinimize();
+            });
+        }
+
+        if (refreshBtn && !refreshBtn._znh_bound) {
+            refreshBtn._znh_bound = true;
+            refreshBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                znhManagersRender();
+            });
+        }
+
+        if (clearBtn && !clearBtn._znh_bound) {
+            clearBtn._znh_bound = true;
+            clearBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                znhJobHistoryClear();
+                znhManagersRender();
+                toast('History cleared', 'Managers history cleared', 'ok');
+            });
+        }
+
+        if (bubble && !bubble._znh_bound) {
+            bubble._znh_bound = true;
+            bubble.addEventListener('click', function() { znhManagersOpen(); });
+            bubble.addEventListener('keydown', function(ev) {
+                if (!ev) return;
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                    try { ev.preventDefault(); } catch (e) {}
+                    znhManagersOpen();
+                }
+            });
+        }
+
+        // Restore minimized bubble on reload
+        try {
+            if ((localStorage.getItem('znh_mgr_minimized') || '') === '1') {
+                if (bubble) bubble.classList.remove('hidden');
+            }
+        } catch (e0) {}
+
+        // Export
+        try { window.znhJobHistoryAdd = znhJobHistoryAdd; } catch (e1) {}
+        try { window.znhManagersOpen = znhManagersOpen; } catch (e2) {}
+        try { window.znhManagersRender = znhManagersRender; } catch (e3) {}
+
+        // Load jobs initially
+        try { _znhJobs.items = _znhJobsLoad() || []; } catch (e4) { _znhJobs.items = []; }
+    }
+
+    function znhNotifyInit() {
+        // Load inbox
+        try { _znhNotify.items = _znhNotifyLoad() || []; } catch (e0) { _znhNotify.items = []; }
+
+        // Wire UI
+        var btn = document.getElementById('znh-notify-btn');
+        var panel = document.getElementById('znh-notify-panel');
+        var closeBtn = document.getElementById('znh-notify-close-btn');
+        var clearBtn = document.getElementById('znh-notify-clear-btn');
+        var issuesBtn = document.getElementById('znh-issues-open-btn');
+
+        if (!btn || !panel) return;
+
+        function openPanel() {
+            panel.classList.add('open');
+            _znhNotifyMarkAllRead();
+        }
+        function closePanel() {
+            panel.classList.remove('open');
+        }
+        function togglePanel() {
+            if (panel.classList.contains('open')) closePanel(); else openPanel();
+        }
+
+        if (!btn._znh_bound) {
+            btn._znh_bound = true;
+            btn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                togglePanel();
+            });
+        }
+
+        if (closeBtn && !closeBtn._znh_bound) {
+            closeBtn._znh_bound = true;
+            closeBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                closePanel();
+            });
+        }
+
+        if (clearBtn && !clearBtn._znh_bound) {
+            clearBtn._znh_bound = true;
+            clearBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                _znhNotifyClear();
+                closePanel();
+            });
+        }
+
+        if (issuesBtn && !issuesBtn._znh_bound) {
+            issuesBtn._znh_bound = true;
+            issuesBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                try { znhNotifyRunAction({ type: 'open-github-issues', url: ZNH_GITHUB_ISSUES_URL }); } catch (e2) {}
+            });
+        }
+
+        // Click-outside closes.
+        if (!document._znh_notify_bound) {
+            document._znh_notify_bound = true;
+            document.addEventListener('click', function() {
+                try { closePanel(); } catch (e) {}
+            });
+        }
+        panel.addEventListener('click', function(ev) {
+            try { if (ev) ev.stopPropagation(); } catch (e) {}
+        });
+
+        _znhNotifyRenderBadge();
+        _znhNotifyRenderList();
+
+        // Expose API
+        try { window.znhNotifyAdd = znhNotifyAdd; } catch (e1) {}
+        try { window.znhNotifyInit = znhNotifyInit; } catch (e2) {}
+        try { window.znhWatcherNotifyJobPollingFailed = znhWatcherNotifyJobPollingFailed; } catch (e3) {}
+    }
+
+    // Unusual activity watcher (JavaScript crashes / errors): converts new crash-log entries into a persistent notification.
+    function znhUnusualActivityWatchInit() {
+        try {
+            if (window.__znh_unusual_watch_init) return;
+            window.__znh_unusual_watch_init = true;
+        } catch (e0) {}
+
+        var _lastSig = '';
+        try { _lastSig = String(localStorage.getItem('znh_unusual_last_crash_sig_v1') || ''); } catch (e1) { _lastSig = ''; }
+
+        function sigOf(it) {
+            it = it || {};
+            var ts = '';
+            var kind = '';
+            var msg = '';
+            try { ts = String(it.ts || ''); } catch (eT) { ts = ''; }
+            try { kind = String(it.kind || ''); } catch (eK) { kind = ''; }
+            try { msg = String(it.msg || ''); } catch (eM) { msg = ''; }
+            return ts + '|' + kind + '|' + msg;
+        }
+
+        function notifyFromLatest(tag) {
+            try {
+                if (typeof window.__znhCrashRead !== 'function') return;
+                var arr = window.__znhCrashRead() || [];
+                if (!arr || !arr.length) return;
+                var last = arr[arr.length - 1] || {};
+                var sig = sigOf(last);
+                if (!sig || sig === _lastSig) return;
+
+                // Throttle: avoid spamming a notification storm on repeated errors.
+                var now = 0;
+                try { now = Date.now(); } catch (eN) { now = 0; }
+                var prevTs = 0;
+                try { prevTs = parseInt(localStorage.getItem('znh_unusual_last_notify_ts_v1') || '0', 10) || 0; } catch (eP) { prevTs = 0; }
+                if (now && prevTs && (now - prevTs) < 3000) return;
+
+                _lastSig = sig;
+                try { localStorage.setItem('znh_unusual_last_crash_sig_v1', _lastSig); } catch (eS) {}
+                try { localStorage.setItem('znh_unusual_last_notify_ts_v1', String(now || 0)); } catch (eS2) {}
+
+                var msg = '';
+                try { msg = String(last.msg || 'JavaScript error'); } catch (eM2) { msg = 'JavaScript error'; }
+                if (msg.length > 360) msg = msg.slice(0, 360) + '…';
+                var kind2 = '';
+                try { kind2 = String(last.kind || 'error'); } catch (eK2) { kind2 = 'error'; }
+                var ts2 = '';
+                try { ts2 = String(last.ts || ''); } catch (eT2) { ts2 = ''; }
+
+                var body = ''
+                    + 'A WebUI JavaScript error was recorded (persistent crash log).\n\n'
+                    + 'Kind: ' + kind2 + (ts2 ? ('\nTime: ' + ts2) : '') + '\n'
+                    + 'Message: ' + msg + '\n\n'
+                    + 'Next: open "🧪 JS health (debug)" for the log, then download UI diagnostics and attach them to a GitHub issue if needed.';
+
+                if (typeof window.znhNotifyAdd === 'function') {
+                    window.znhNotifyAdd({
+                        id: 'znh_js_crash_last',
+                        title: 'WebUI JavaScript error detected',
+                        body: body,
+                        level: 'warn',
+                        actions: [
+                            { type: 'open-js-health', label: 'Open JS health' },
+                            { type: 'export-ui-diagnostics', label: 'Download diagnostics' },
+                            { type: 'open-github-issues', label: 'Post issue' }
+                        ]
+                    });
+                }
+            } catch (e2) {}
+        }
+
+        // Initial check (covers errors that happened before Notification Center initialized).
+        notifyFromLatest('init');
+
+        // Wrap crash appender so we can detect new entries in real-time.
+        try {
+            if (typeof window.__znhCrashAppend === 'function' && !window.__znhCrashAppend_wrapped_unusual) {
+                window.__znhCrashAppend_wrapped_unusual = true;
+                var orig = window.__znhCrashAppend;
+                window.__znhCrashAppend = function(kind, msg, meta) {
+                    try { orig(kind, msg, meta); } catch (eO) {}
+                    try { notifyFromLatest('append'); } catch (eN2) {}
+                };
+            }
+        } catch (eW) {}
+    }
+
+    // Init notification center + managers overlay early.
+    try { znhNotifyInit(); } catch (eN0) {}
+    try { znhManagersInit(); } catch (eM0) {}
+    try { znhUnusualActivityWatchInit(); } catch (eW0) {}
+
     // --- Dashboard update notifications ("new features available" / reload guidance) ---
     var _znh_dash_update_key = '';
     var _znh_dash_update_state = {
@@ -12644,7 +13982,7 @@ generate_dashboard() {
             try { _su.channel = String(t.channel || 'stable'); } catch (e2) {}
             try { _suShow(false); } catch (e3) {}
             try { _suRenderRunning(t); } catch (e4) {}
-            try { _suPollJob(String(t.job_id), String(_su.channel || 'stable'), !!t.dry_run); } catch (e5) {}
+            try { _suPollJob(String(t.job_id), String(_su.channel || 'stable'), !!t.dry_run, false); } catch (e5) {}
         } else if (t.type === 'system-update') {
             try { _ru.simulate = !!t.simulate; } catch (e6) {}
             try { _ru.auto_simulate = !!t.simulate; } catch (e7) {}
@@ -14514,6 +15852,15 @@ generate_dashboard() {
                 _suSetLog('ERROR polling job (' + String(_pollFailures) + '/' + String(_pollMaxFailures) + '): ' + msg + '\nRetrying…');
 
                 if (_pollFailures >= _pollMaxFailures) {
+                    try {
+                        znhWatcherNotifyJobPollingFailed({
+                            type: 'scrub-ghost',
+                            job_id: String(job_id || ''),
+                            action: String(action || ''),
+                            title: String(title || 'scrub-ghost')
+                        });
+                    } catch (eW0) {}
+
                     toast('scrub-ghost polling failed', 'Too many errors. Please reload the page.', 'err');
                     if (_sg.poll_timer) {
                         try { clearTimeout(_sg.poll_timer); } catch (ee) {}
@@ -14645,12 +15992,31 @@ generate_dashboard() {
             if (_scrub_guided) return;
             if (action !== 'auto' && action !== 'apply') return;
             _scrub_guided = true;
-            alert(
-                'scrub-ghost will modify boot entries when you run AUTO/apply.\n\n'
+
+            var body = ''
+                + 'scrub-ghost will modify boot entries when you run AUTO/apply.\n\n'
                 + 'Before you click Run, review the toggles below (they map to TUI flags).\n'
                 + 'Recommended: AUTO (backup mode) + prune stale + prune duplicates.\n\n'
-                + 'Tip: run scan (dry-run) first if you want to preview.'
-            );
+                + 'Tip: run scan (dry-run) first if you want to preview.';
+
+            // Non-blocking: add to notification center (glowing bell), once.
+            try {
+                if (typeof window.znhNotifyAdd === 'function') {
+                    window.znhNotifyAdd({
+                        id: 'scrub_ghost_guidance_v1',
+                        title: 'scrub-ghost: review toggles before apply',
+                        body: body,
+                        level: 'warn',
+                        once: true
+                    });
+                    return;
+                }
+            } catch (e0) {}
+
+            // Fallback (should be rare): use a toast instead of alert().
+            try {
+                toast('scrub-ghost tip', 'Review toggles before apply (see notification)', 'ok');
+            } catch (e1) {}
         }
 
         // When AUTO is selected, auto-apply the recommended preset.
@@ -15361,6 +16727,171 @@ generate_dashboard() {
         };
     }
 
+    function _suGetDownloadUrlFromStatus(st) {
+        st = st || null;
+        var u = '';
+        try { u = String(((st && st.remote) ? st.remote.download_url : '') || ''); } catch (e0) { u = ''; }
+        if (!u) {
+            try { u = String((st && st.download_url) ? st.download_url : ''); } catch (e1) { u = ''; }
+        }
+        return String(u || '').trim();
+    }
+
+    function _suGetDownloadUrlsFromStatus(st) {
+        st = st || null;
+        try {
+            if (st && st.remote && Array.isArray(st.remote.download_urls)) return st.remote.download_urls.slice(0);
+        } catch (e0) {}
+        try {
+            if (st && Array.isArray(st.download_urls)) return st.download_urls.slice(0);
+        } catch (e1) {}
+        var u = _suGetDownloadUrlFromStatus(st);
+        return u ? [u] : [];
+    }
+
+    function _suGetDestinationPathFromStatus(st) {
+        st = st || null;
+        var p = '';
+        try { p = String(((st && st.installed) ? st.installed.destination_path : '') || ''); } catch (e0) { p = ''; }
+        if (!p) {
+            try { p = String((st && st.destination_path) ? st.destination_path : ((st && st.installed_helper_path) ? st.installed_helper_path : '')); } catch (e1) { p = ''; }
+        }
+        return String(p || '').trim();
+    }
+
+    function _suPreviewSet(text) {
+        var el = document.getElementById('su-preview-notes');
+        if (!el) return;
+        el.textContent = String(text || '');
+        highlightBlock('su-preview-notes');
+        try { el.scrollTop = 0; } catch (e) {}
+    }
+
+    function _suPreviewSetLoading(v) {
+        var p = document.getElementById('su-preview-progress');
+        if (!p) return;
+        try {
+            if (v) p.classList.remove('hidden');
+            else p.classList.add('hidden');
+        } catch (e) {}
+    }
+
+    function _suPreviewLoad(st) {
+        // Shows "what will change" before the user types the confirmation phrase.
+        st = st || null;
+        var ch = '';
+        try { ch = String(_su.channel || '').toLowerCase(); } catch (e0) { ch = ''; }
+        if (ch !== 'stable' && ch !== 'rolling') ch = 'stable';
+
+        var remoteRef = '';
+        try { remoteRef = String((st && st.remote && st.remote.ref) ? st.remote.ref : (st && st.remote_ref) ? st.remote_ref : ''); } catch (e1) { remoteRef = ''; }
+
+        var cacheKey = ch + '|' + String(remoteRef || '');
+        try {
+            if (window.__znh_su_preview_cache && window.__znh_su_preview_cache.key === cacheKey) {
+                _suPreviewSet(window.__znh_su_preview_cache.text || '');
+                return;
+            }
+        } catch (eC) {}
+
+        // Base preview text (download + destination transparency)
+        var dlUrls = _suGetDownloadUrlsFromStatus(st);
+        var dest = _suGetDestinationPathFromStatus(st);
+
+        var installedRef = '';
+        try { installedRef = String((st && st.installed && st.installed.ref) ? st.installed.ref : (st && st.installed_ref) ? st.installed_ref : ''); } catch (e2) { installedRef = ''; }
+
+        var act = '';
+        var msg = '';
+        try { act = String((st && st.evaluation && st.evaluation.action_type) ? st.evaluation.action_type : ''); } catch (e3) { act = ''; }
+        try { msg = String((st && st.evaluation && st.evaluation.message) ? st.evaluation.message : ''); } catch (e4) { msg = ''; }
+
+        var head = [];
+        head.push('Update preview (what will change)');
+        head.push('');
+        if (act) head.push('Action: ' + act + (msg ? (' (' + msg + ')') : ''));
+        if (installedRef) head.push('Installed: ' + installedRef);
+        if (remoteRef) head.push('Remote: ' + remoteRef);
+        if (dest) head.push('Destination: ' + dest);
+        if (dlUrls.length) {
+            head.push('Download URL(s):');
+            for (var i = 0; i < dlUrls.length; i++) {
+                head.push('- ' + String(dlUrls[i] || ''));
+            }
+        }
+        head.push('');
+
+        _suPreviewSetLoading(true);
+        _suPreviewSet(head.join('\n') + 'Loading release notes…');
+
+        var notesHdr = (ch === 'rolling') ? 'Rolling channel: latest commits on main' : 'Stable channel: latest GitHub release notes';
+        var fetchNotes = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+        fetchNotes().then(function(notes) {
+            var txt = head.join('\n') + notesHdr + '\n\n' + String(notes || '(no notes)');
+            try { window.__znh_su_preview_cache = { key: cacheKey, text: txt }; } catch (e5) {}
+            _suPreviewSet(txt);
+        }).catch(function(err) {
+            var em = (err && err.message) ? err.message : 'failed to fetch release notes';
+            var txt2 = head.join('\n') + notesHdr + '\n\nERROR: ' + em;
+            try { window.__znh_su_preview_cache = { key: cacheKey, text: txt2 }; } catch (e6) {}
+            _suPreviewSet(txt2);
+        }).finally(function() {
+            _suPreviewSetLoading(false);
+        });
+    }
+
+    function _suBuildVerificationDetailsFromStatus(st) {
+        st = st || null;
+
+        function sh(s, n) {
+            try {
+                s = String(s || '').trim();
+                if (!s) return '';
+                if (s.length <= n) return s;
+                return s.slice(0, n);
+            } catch (e) {
+                return '';
+            }
+        }
+
+        var lines = [];
+        lines.push('Verification (detailed)');
+        lines.push('');
+
+        var dest = _suGetDestinationPathFromStatus(st);
+        var dl = _suGetDownloadUrlFromStatus(st);
+
+        var instRef = '';
+        var remRef = '';
+        var instSha = '';
+        var remSha = '';
+        var pth = '';
+        try { instRef = String((st && st.installed && st.installed.ref) ? st.installed.ref : (st && st.installed_ref) ? st.installed_ref : ''); } catch (e0) { instRef = ''; }
+        try { remRef = String((st && st.remote && st.remote.ref) ? st.remote.ref : (st && st.remote_ref) ? st.remote_ref : ''); } catch (e1) { remRef = ''; }
+        try { instSha = String((st && st.installed && st.installed.script_sha256) ? st.installed.script_sha256 : ''); } catch (e2) { instSha = ''; }
+        try { remSha = String((st && st.remote && st.remote.script_sha256) ? st.remote.script_sha256 : ''); } catch (e3) { remSha = ''; }
+        try { pth = String((st && st.remote && st.remote.script_path) ? st.remote.script_path : ''); } catch (e4) { pth = ''; }
+
+        if (dest) lines.push('Destination: ' + dest);
+        if (dl) lines.push('Download: ' + dl);
+        if (remRef) lines.push('Remote ref: ' + remRef);
+        if (instRef) lines.push('Installed ref: ' + instRef);
+        if (pth) lines.push('Remote path: ' + pth);
+        if (instSha) lines.push('Installed sha256: ' + sh(instSha, 12));
+        if (remSha) lines.push('Remote sha256: ' + sh(remSha, 12));
+
+        var match = (instSha && remSha && instSha === remSha);
+        if (instSha && remSha) lines.push('Checksum match: ' + (match ? 'YES' : 'NO'));
+
+        try {
+            if (st && st.installed && st.installed.is_dirty) {
+                lines.push('NOTE: Local edits were detected (dirty install).');
+            }
+        } catch (e5) {}
+
+        return lines.join('\n');
+    }
+
     function _suRenderAgreement(status) {
         var e = _suEls();
         if (!e.body) return;
@@ -15377,6 +16908,8 @@ generate_dashboard() {
         var actionType = (st && st.evaluation && st.evaluation.action_type) ? st.evaluation.action_type : '';
         var actionMsg = (st && st.evaluation && st.evaluation.message) ? st.evaluation.message : '';
         var source = (st && st.install_source) ? st.install_source : '';
+        var dl = _suGetDownloadUrlFromStatus(st);
+        var destPath = _suGetDestinationPathFromStatus(st);
 
         info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Target channel: <strong>' + _znhEscapeHtml(ch) + '</strong></div>');
         if (installedCh) {
@@ -15384,6 +16917,12 @@ generate_dashboard() {
         }
         info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Installed ref: <strong>' + _znhEscapeHtml(installedRef) + '</strong></div>');
         info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Remote ref: <strong>' + _znhEscapeHtml(remoteRef) + '</strong></div>');
+        if (destPath) {
+            info.push('<div class="feat-badge"><span class="feat-dot" style="color: rgba(34,197,94,0.95);">●</span> Destination: <code style="font-size:0.85rem;">' + _znhEscapeHtml(destPath) + '</code></div>');
+        }
+        if (dl) {
+            info.push('<div class="feat-badge"><span class="feat-dot" style="color: rgba(34,197,94,0.95);">●</span> Download: <code style="font-size:0.85rem;">' + _znhEscapeHtml(dl) + '</code></div>');
+        }
         if (source) {
             info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Install source: <strong>' + _znhEscapeHtml(source) + '</strong></div>');
         }
@@ -15415,6 +16954,12 @@ generate_dashboard() {
         e.body.innerHTML = [
             info.join(''),
             warn,
+            '<details id="su-preview-details" open style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">',
+            '  <summary style="cursor:pointer; font-weight: 950; color: var(--text);">🔎 Update preview (what will change)</summary>',
+            '  <div style="margin-top:8px; color: var(--muted); font-size:0.88rem; font-weight:800;">Shows release notes / commits and where the update is downloaded from (URL) + installed to (destination path).</div>',
+            '  <div id="su-preview-progress" class="znh-mini-progress" style="margin-top:10px;"><div class="znh-mini-progress-bar"></div></div>',
+            '  <pre class="overlay-pre" id="su-preview-notes" style="max-height: 260px; margin-top: 10px;">(loading preview…)</pre>',
+            '</details>',
             '<div class="overlay-scroll">',
               d.html,
               '<hr style="border:0; border-top:1px solid rgba(255,255,255,0.10); margin: 12px 0;" />',
@@ -15425,6 +16970,9 @@ generate_dashboard() {
             dirtyExtra,
             '<div style="color: var(--muted); font-size:0.88rem;">Tip: you can scroll inside the box above to read everything. The background page is locked until you Cancel or finish.</div>'
         ].join('\n');
+
+        // Load preview notes asynchronously (release notes / commits)
+        try { _suPreviewLoad(st); } catch (eP0) {}
 
         try {
             if (e.step) e.step.textContent = 'Step 1/2';
@@ -15494,11 +17042,31 @@ generate_dashboard() {
         _su.confirm = confirmInfo || null;
         _su.required_phrase = (confirmInfo && confirmInfo.phrase) ? String(confirmInfo.phrase) : 'UPDATE';
 
+        // Show where the update will be downloaded from + installed to.
+        var st = null;
+        try { st = _self_update_ui.last_status || null; } catch (e0) { st = null; }
+        var dl = _suGetDownloadUrlFromStatus(st);
+        var destPath = _suGetDestinationPathFromStatus(st);
+
+        var srcHtml = '';
+        try {
+            if (dl || destPath) {
+                srcHtml = '<div style="margin-top:10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">'
+                    + '<div style="font-weight:950;">Download / destination</div>'
+                    + '<div style="margin-top:6px; font-size:0.88rem; color: var(--muted); font-weight:800;">'
+                    + (dl ? ('Download URL: <code>' + _znhEscapeHtml(dl) + '</code><br/>') : '')
+                    + (destPath ? ('Destination: <code>' + _znhEscapeHtml(destPath) + '</code>') : '')
+                    + '</div>'
+                    + '</div>';
+            }
+        } catch (eS) { srcHtml = ''; }
+
         e.body.innerHTML = [
             '<div class="overlay-kv">',
             '<div class="feat-badge"><span class="feat-dot" style="color: var(--warning);">●</span> Channel: <strong>' + String(ch) + '</strong></div>',
             '<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Confirmation phrase: <strong>' + String(_su.required_phrase) + '</strong></div>',
             '</div>',
+            srcHtml,
             '<div style="color: var(--muted); font-size:0.92rem;">To proceed, type the confirmation phrase exactly. This prevents accidental installs.</div>',
             '<div style="display:grid; gap:10px;">',
             '  <input id="su-phrase" type="text" placeholder="Type confirmation phrase…" style="width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />',
@@ -16039,6 +17607,15 @@ generate_dashboard() {
                 _suSetLog('ERROR polling job (' + String(_pollFailures) + '/' + String(_pollMaxFailures) + '): ' + msg + '\nRetrying…');
 
                 if (_pollFailures >= _pollMaxFailures) {
+                    try {
+                        znhWatcherNotifyJobPollingFailed({
+                            type: 'quick-action',
+                            job_id: String(job_id || ''),
+                            action: String(action || ''),
+                            title: String(title || 'Quick action')
+                        });
+                    } catch (eW0) {}
+
                     toast('Quick Action polling failed', 'Too many errors. Please reload the page.', 'err');
                     if (_qa.poll_timer) {
                         try { clearTimeout(_qa.poll_timer); } catch (ee) {}
@@ -16160,13 +17737,59 @@ generate_dashboard() {
         return '';
     }
 
-    function _suRenderReleaseNotesOk(title, subtitle, logText, notesText, notesHeader) {
+    function _suRenderReleaseNotesLoading(title, subtitle, logText, notesHeader) {
+        // Lightweight loading view used while we fetch verification/status + notes.
+        var e = _suEls();
+        if (!e.body) return;
+
+        function safe(s) { return String(s || '').replace(/</g, '&lt;'); }
+
+        var hdr = '';
+        try { hdr = String(notesHeader || ''); } catch (eH) { hdr = ''; }
+        if (!hdr) hdr = (_su && _su.channel === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+
+        if (e.step) e.step.textContent = 'Complete';
+        if (e.mode) e.mode.textContent = (_su && _su.channel === 'rolling') ? 'Rolling notes' : 'Release notes';
+        if (e.title) e.title.textContent = String(title || 'Working…');
+
+        e.body.innerHTML = [
+            '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
+            '<div class="overlay-scroll">',
+            '  <div style="font-weight:950; margin-bottom: 8px;">Verification (detailed)</div>',
+            '  <div class="znh-mini-progress" style="margin-bottom: 12px;"><div class="znh-mini-progress-bar"></div></div>',
+            '  <div style="display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin-bottom: 8px;">',
+            '    <div style="font-weight:950;">Live log</div>',
+            '    <button class="pill" type="button" onclick="copyBlock(\'su-done-log\', this)" title="Copy the post-update live log">Copy</button>',
+            '  </div>',
+            '  <pre class="overlay-pre" id="su-done-log" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
+            '  <div style="font-weight:950; margin-top: 14px; margin-bottom: 8px;">' + safe(hdr) + '</div>',
+            '  <div class="znh-mini-progress"><div class="znh-mini-progress-bar"></div></div>',
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.88rem;">Fetching verification + release notes…</div>'
+        ].join('\n');
+
+        if (e.close) e.close.textContent = 'OK';
+        _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: true, close_disabled: true, footer_center: true });
+    }
+
+    function _suRenderReleaseNotesOk(title, subtitle, logText, notesText, notesHeader, verifyText) {
         var e = _suEls();
         if (!e.body) return;
 
         var safe = function(s) {
             return String(s || '').replace(/</g, '&lt;');
         };
+
+        var verifyBlock = '';
+        try {
+            var vt = String(verifyText || '').trim();
+            if (vt) {
+                verifyBlock = [
+                    '<div style="font-weight:950; margin-bottom: 8px;">Verification (detailed)</div>',
+                    '<pre class="overlay-pre" style="max-height: 220px;">' + safe(vt) + '</pre>'
+                ].join('\n');
+            }
+        } catch (eV0) { verifyBlock = ''; }
 
         var hdr = '';
         try { hdr = String(notesHeader || ''); } catch (eH) { hdr = ''; }
@@ -16181,6 +17804,7 @@ generate_dashboard() {
         e.body.innerHTML = [
             '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
             '<div class="overlay-scroll">',
+              verifyBlock,
               '<div style="display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin-bottom: 8px;">',
               '  <div style="font-weight:950;">Live log</div>',
               '  <button class="pill" type="button" onclick="copyBlock(\'su-done-log\', this)" title="Copy the post-update live log">Copy</button>',
@@ -16211,7 +17835,8 @@ generate_dashboard() {
         };
     }
 
-    function _suPollJob(job_id, ch, dry_run) {
+    function _suPollJob(job_id, ch, dry_run, view_only) {
+        view_only = !!view_only;
         _su.job_id = job_id;
         _su.running = true;
         _suSetMinBtnVisible(true);
@@ -16333,8 +17958,51 @@ generate_dashboard() {
                             try { selfUpdateFetchStatus(false); } catch (e2) {}
                         }, 900);
 
-                        if (!dry_run) {
-                            // Persist details across reload for a more trustworthy confirmation view.
+                        // Record job into Managers history
+                        try {
+                            if (typeof window.znhJobHistoryAdd === 'function') {
+                                var ok0 = (rc === 0);
+                                var sum = '';
+                                if (dry_run) sum = 'Dry-run OK (no install).';
+                                else if (postAction !== 'none' && postRc !== 0) sum = 'Installed OK, but post step failed: ' + String(postAction) + ' rc=' + String(postRc) + '.';
+                                else sum = 'Installed successfully.';
+                                window.znhJobHistoryAdd({
+                                    type: 'self-update',
+                                    job_id: String(job_id || ''),
+                                    ok: ok0,
+                                    rc: rc,
+                                    channel: String(ch || 'stable'),
+                                    dry_run: !!dry_run,
+                                    summary: sum
+                                });
+                            }
+                        } catch (eJH0) {}
+
+                        // Add a persistent completion notification ("update manager")
+                        try {
+                            if (typeof window.znhNotifyAdd === 'function') {
+                                if (dry_run) {
+                                    window.znhNotifyAdd({
+                                        id: 'znh_su_job_done_' + String(job_id || ''),
+                                        title: 'Self-update dry-run complete',
+                                        body: 'Dry-run OK (no install). Open to view log + release notes.',
+                                        level: 'info',
+                                        action: { type: 'open-self-update-job', label: 'Open', job_id: String(job_id || ''), channel: String(ch || 'stable'), dry_run: true }
+                                    });
+                                } else {
+                                    window.znhNotifyAdd({
+                                        id: 'znh_su_job_done_' + String(job_id || ''),
+                                        title: 'Self-update installed',
+                                        body: 'Update installed successfully. Open to view log + release notes.',
+                                        level: (postAction !== 'none' && postRc !== 0) ? 'warn' : 'info',
+                                        action: { type: 'open-self-update-last-success', label: 'Release notes' }
+                                    });
+                                }
+                            }
+                        } catch (eN) {}
+
+                        if (!dry_run && !view_only) {
+                            // Persist details across reload so we can show release notes via the notification center.
                             try {
                                 localStorage.setItem('znh_su_post_success', '1');
                                 localStorage.setItem('znh_su_channel', String(ch || 'stable'));
@@ -16343,7 +18011,7 @@ generate_dashboard() {
                             } catch (e3) {}
 
                             // Best-effort verification snapshot: store status payload so we can show
-                            // "Verified: checksum match" after reload.
+                            // "Verified" after reload.
                             try {
                                 _api('/api/self-update/status?channel=' + encodeURIComponent(String(ch || 'stable')), { method: 'GET' }).then(function(st0) {
                                     try {
@@ -16359,6 +18027,30 @@ generate_dashboard() {
                             setTimeout(function() {
                                 try { window.location.reload(); } catch (e5) {}
                             }, 4200);
+                        } else if (!dry_run) {
+                            // View-only success: show release notes without reloading.
+                            var logText2 = '';
+                            try { logText2 = String(document.getElementById('su-live-log').textContent || ''); } catch (e6v) { logText2 = ''; }
+                            logText2 = _suBoundText(logText2, 120000);
+                            var notesHdrVO = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
+                            var fetchNotesVO = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+
+                            // Show a small progress bar while verifying/fetching.
+                            try { _suRenderReleaseNotesLoading('Self-update complete', 'Verifying installed build…', logText2, notesHdrVO); } catch (eL0) {}
+
+                            var verifyTextVO = '';
+                            _api('/api/self-update/status?channel=' + encodeURIComponent(String(ch || 'stable')), { method: 'GET' }).then(function(st1) {
+                                try { verifyTextVO = _suBuildVerificationDetailsFromStatus(st1 || null); } catch (eV0) { verifyTextVO = ''; }
+                            }).catch(function() {
+                                verifyTextVO = '';
+                            }).finally(function() {
+                                fetchNotesVO().then(function(notes) {
+                                    _suRenderReleaseNotesOk('Self-update complete', 'Update installed successfully (view-only).', logText2, notes, notesHdrVO, verifyTextVO);
+                                }).catch(function(err) {
+                                    var msg = (err && err.message) ? err.message : 'failed to fetch notes';
+                                    _suRenderReleaseNotesOk('Self-update complete', 'Update installed successfully (view-only).', logText2, 'ERROR: ' + msg, notesHdrVO, verifyTextVO);
+                                });
+                            });
                         } else {
                             // Dry-run finished: show release notes + OK button.
                             var logText = '';
@@ -16366,14 +18058,40 @@ generate_dashboard() {
                             logText = _suBoundText(logText, 120000);
                             var notesHdrDR = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
                             var fetchNotesDR = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
-                            fetchNotesDR().then(function(notes) {
-                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, notes, notesHdrDR);
-                            }).catch(function(err) {
-                                var msg = (err && err.message) ? err.message : 'failed to fetch notes';
-                                _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, 'ERROR: ' + msg, notesHdrDR);
+
+                            // Show a small progress bar while verifying/fetching.
+                            try { _suRenderReleaseNotesLoading('Dry-run simulation complete', 'Verifying (dry-run)…', logText, notesHdrDR); } catch (eL1) {}
+
+                            var verifyTextDR = '';
+                            _api('/api/self-update/status?channel=' + encodeURIComponent(String(ch || 'stable')), { method: 'GET' }).then(function(st2) {
+                                try { verifyTextDR = _suBuildVerificationDetailsFromStatus(st2 || null); } catch (eV1) { verifyTextDR = ''; }
+                            }).catch(function() {
+                                verifyTextDR = '';
+                            }).finally(function() {
+                                fetchNotesDR().then(function(notes) {
+                                    _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, notes, notesHdrDR, verifyTextDR);
+                                }).catch(function(err) {
+                                    var msg = (err && err.message) ? err.message : 'failed to fetch notes';
+                                    _suRenderReleaseNotesOk('Dry-run simulation complete', 'No changes were made (dry-run).', logText, 'ERROR: ' + msg, notesHdrDR, verifyTextDR);
+                                });
                             });
                         }
                     } else {
+                        // Record job into Managers history
+                        try {
+                            if (typeof window.znhJobHistoryAdd === 'function') {
+                                window.znhJobHistoryAdd({
+                                    type: 'self-update',
+                                    job_id: String(job_id || ''),
+                                    ok: false,
+                                    rc: rc,
+                                    channel: String(ch || 'stable'),
+                                    dry_run: !!dry_run,
+                                    summary: 'Self-update failed (rc=' + String(rc) + ').'
+                                });
+                            }
+                        } catch (eJH1) {}
+
                         toast('Self-update failed', 'rc=' + String(rc), 'err');
                         _suUpdateProgress('Failed', _lastPct);
                         try { znhTaskDone('self-update', false); } catch (e_task4) {}
@@ -16408,6 +18126,15 @@ generate_dashboard() {
 
                 // Only abort after too many consecutive failures.
                 if (_pollFailures >= _pollMaxFailures) {
+                    try {
+                        znhWatcherNotifyJobPollingFailed({
+                            type: 'self-update',
+                            job_id: String(job_id || ''),
+                            channel: String(ch || 'stable'),
+                            dry_run: !!dry_run
+                        });
+                    } catch (eW0) {}
+
                     toast('Self-update polling failed', 'Too many errors. Please reload the page.', 'err');
                     if (_su.poll_timer) {
                         try { clearTimeout(_su.poll_timer); } catch (ee) {}
@@ -16461,7 +18188,17 @@ generate_dashboard() {
             lastStatus = null;
         }
 
-        // Clear flags so this only runs once.
+        // Consolidate into a single payload so the notification center can open it later.
+        var payload = {
+            ts: Date.now(),
+            channel: ch,
+            log: lastLog,
+            job_id: lastJobId,
+            status: lastStatus
+        };
+        try { localStorage.setItem('znh_su_last_success_payload_v1', JSON.stringify(payload)); } catch (eP) {}
+
+        // Clear old one-shot flags so this doesn't re-trigger, but keep the consolidated payload.
         try {
             localStorage.removeItem('znh_su_post_success');
             localStorage.removeItem('znh_su_channel');
@@ -16480,80 +18217,18 @@ generate_dashboard() {
             try { _settingsConfig.SELF_UPDATE_CHANNEL = old; } catch (e5) {}
         });
 
-        // Post-reload trust UX:
-        // - show the actual log tail even if the in-page log capture failed
-        // - show a "Verified" message when checksums/tags match
-        var statusP = null;
+        // Instead of forcing a blocking modal on every browser start, surface it as a notification.
         try {
-            statusP = lastStatus ? Promise.resolve(lastStatus) : _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).catch(function() { return null; });
-        } catch (eSP) {
-            statusP = Promise.resolve(lastStatus);
-        }
-
-        var logP = null;
-        try {
-            if (String(lastLog || '').trim()) {
-                logP = Promise.resolve(lastLog);
-            } else if (String(lastJobId || '').trim()) {
-                logP = _api('/api/self-update/job?job_id=' + encodeURIComponent(lastJobId), { method: 'GET' }).then(function(j) {
-                    try { return _suBoundText(String((j && j.output) ? j.output : ''), 120000); } catch (e) { return ''; }
-                }).catch(function() { return ''; });
-            } else {
-                logP = Promise.resolve('');
+            if (typeof window.znhNotifyAdd === 'function') {
+                window.znhNotifyAdd({
+                    id: 'znh_su_post_success_latest',
+                    title: 'Self-update installed successfully',
+                    body: 'Open this notification to view the install log + release notes.',
+                    level: 'info',
+                    action: { type: 'open-self-update-last-success', label: 'Release notes' }
+                });
             }
-        } catch (eLP) {
-            logP = Promise.resolve(lastLog);
-        }
-
-        Promise.all([statusP, logP]).then(function(arr) {
-            var st = (arr && arr.length) ? arr[0] : null;
-            var live0 = (arr && arr.length > 1) ? arr[1] : '';
-
-            var verify = '';
-            try { verify = _suVerifyTextFromStatus(st, ch); } catch (eV0) { verify = ''; }
-            var subtitle = 'The helper is running normally.';
-            if (verify) subtitle = subtitle + ' ' + verify;
-
-            // Open a blocking OK dialog that shows the full latest stable release notes (or rolling commits).
-            _suReset();
-            _su.channel = ch;
-            _suShow(true);
-            _suUpdateProgress('Done', 100);
-            _suSetLog('');
-
-            // If there was no captured log, keep UX explicit.
-            var live = live0;
-            if (!String(live || '').trim()) live = '(no output captured)';
-
-            var notesHdr = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
-            var fetchNotes = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
-            fetchNotes().then(function(notes) {
-                _suRenderReleaseNotesOk('Update installed successfully', subtitle, live, notes, notesHdr);
-            }).catch(function(err) {
-                var msg = (err && err.message) ? err.message : 'failed to fetch notes';
-                _suRenderReleaseNotesOk('Update installed successfully', subtitle, live, 'ERROR: ' + msg, notesHdr);
-            });
-        }).catch(function() {
-            // If anything fails, fall back to the old behavior.
-            var subtitle2 = 'The helper is running normally.';
-            var live2 = lastLog;
-            if (!String(live2 || '').trim()) live2 = '(no output captured)';
-
-            _suReset();
-            _su.channel = ch;
-            _suShow(true);
-            _suUpdateProgress('Done', 100);
-            _suSetLog('');
-
-            var notesHdr2 = (ch === 'rolling') ? 'Latest rolling commits' : 'Latest stable release notes';
-            var fetchNotes2 = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
-            fetchNotes2().then(function(notes) {
-                _suRenderReleaseNotesOk('Update installed successfully', subtitle2, live2, notes, notesHdr2);
-            }).catch(function(err) {
-                var msg = (err && err.message) ? err.message : 'failed to fetch notes';
-                _suRenderReleaseNotesOk('Update installed successfully', subtitle2, live2, 'ERROR: ' + msg, notesHdr2);
-            });
-        });
+        } catch (eN) {}
     }
 
     function selfUpdateOpenOverlay(arg) {
@@ -16656,7 +18331,7 @@ generate_dashboard() {
                 if (!res || !res.job_id) {
                     throw new Error('missing job_id');
                 }
-                _suPollJob(String(res.job_id), ch, dry);
+                _suPollJob(String(res.job_id), ch, dry, false);
                 return res;
             }).catch(function(err) {
                 var msg = (err && err.message) ? err.message : 'failed';
@@ -17351,6 +19026,39 @@ generate_dashboard() {
                         toast('Update finished', noUpdates2 ? 'Nothing to do (already up to date)' : (_ru.simulate ? 'Dry-run OK (no install)' : 'Installed OK'), 'ok');
                         _suUpdateProgress(_ru.simulate ? 'Dry-run done' : 'Done', 100);
 
+                        // Record job into Managers history
+                        try {
+                            if (typeof window.znhJobHistoryAdd === 'function') {
+                                var sum2 = noUpdates2
+                                    ? 'No system updates were available (Nothing to do).'
+                                    : (_ru.simulate ? 'Dry-run OK (no install).' : 'System updates installed successfully.');
+                                window.znhJobHistoryAdd({
+                                    type: 'system-update',
+                                    job_id: String(job_id || ''),
+                                    ok: true,
+                                    rc: 0,
+                                    simulate: !!_ru.simulate,
+                                    summary: sum2
+                                });
+                            }
+                        } catch (eJH2) {}
+
+                        // Persistent notification (Rocket manager)
+                        try {
+                            if (typeof window.znhNotifyAdd === 'function') {
+                                var body = noUpdates2
+                                    ? 'No system updates were available (Nothing to do).'
+                                    : (_ru.simulate ? 'Dry-run finished successfully (no install).' : 'System updates installed successfully.');
+                                window.znhNotifyAdd({
+                                    id: 'znh_ru_job_done_' + String(job_id || ''),
+                                    title: noUpdates2 ? 'System up to date' : (_ru.simulate ? 'System update dry-run complete' : 'System update complete'),
+                                    body: body + ' Open to view the log.',
+                                    level: 'info',
+                                    action: { type: 'open-system-update-job', label: 'Open log', job_id: String(job_id || ''), simulate: !!_ru.simulate }
+                                });
+                            }
+                        } catch (eN) {}
+
                         // UX: immediately reflect that updates were installed.
                         // The authoritative source is the next dashboard regeneration,
                         // but setting this to 0 avoids confusing "stuck" pending count.
@@ -17385,6 +19093,34 @@ generate_dashboard() {
 
                     } else {
                         toast('Update failed', 'rc=' + String(rc), 'err');
+
+                        // Record job into Managers history
+                        try {
+                            if (typeof window.znhJobHistoryAdd === 'function') {
+                                window.znhJobHistoryAdd({
+                                    type: 'system-update',
+                                    job_id: String(job_id || ''),
+                                    ok: false,
+                                    rc: rc,
+                                    simulate: !!_ru.simulate,
+                                    summary: 'System update failed (rc=' + String(rc) + ').'
+                                });
+                            }
+                        } catch (eJH3) {}
+
+                        // Persistent notification (Rocket manager)
+                        try {
+                            if (typeof window.znhNotifyAdd === 'function') {
+                                window.znhNotifyAdd({
+                                    id: 'znh_ru_job_done_' + String(job_id || ''),
+                                    title: 'System update failed',
+                                    body: 'zypper dup returned a non-zero exit code (rc=' + String(rc) + '). Open to view the log.',
+                                    level: 'error',
+                                    action: { type: 'open-system-update-job', label: 'Open log', job_id: String(job_id || ''), simulate: !!_ru.simulate }
+                                });
+                            }
+                        } catch (eN) {}
+
                         try { znhTaskDone('system-update', false); } catch (e_task_ru4) {}
                         _ruRenderDone('Update failed', 'zypper dup returned a non-zero exit code (see log).', logText, j.restart_check_output || '');
                     }
@@ -17404,6 +19140,14 @@ generate_dashboard() {
                 _suSetLog('ERROR polling job (' + String(_pollFailures) + '/' + String(_pollMaxFailures) + '): ' + msg + '\nRetrying…');
 
                 if (_pollFailures >= _pollMaxFailures) {
+                    try {
+                        znhWatcherNotifyJobPollingFailed({
+                            type: 'system-update',
+                            job_id: String(job_id || ''),
+                            simulate: !!_ru.simulate
+                        });
+                    } catch (eW0) {}
+
                     toast('Update polling failed', 'Too many errors. Please reload the page.', 'err');
                     if (_ru.poll_timer) {
                         try { clearTimeout(_ru.poll_timer); } catch (ee) {}
@@ -37393,9 +39137,37 @@ class Handler(BaseHTTPRequestHandler):
 
             running_info = _self_update_any_running()
 
+            # Download source transparency (requested): show exactly where the helper would be fetched from.
+            # NOTE: stable prefers a release asset if it exists, but still exposes the raw-tag URL.
+            download_urls = []
+            download_url = ""
+            try:
+                if remote_ref:
+                    if ch == "stable":
+                        download_urls = [
+                            f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{remote_ref}/zypper-auto.sh",
+                            f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/zypper-auto.sh",
+                        ]
+                    else:
+                        pth = remote_script_path or "zypper-auto.sh"
+                        download_urls = [
+                            f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/{pth}",
+                        ]
+            except Exception:
+                download_urls = []
+
+            try:
+                if download_urls:
+                    download_url = str(download_urls[0] or "")
+            except Exception:
+                download_url = ""
+
             payload = {
                 # Legacy fields (keep UI backward compatible)
                 "channel": ch,
+                "download_url": download_url,
+                "download_urls": download_urls,
+                "destination_path": helper_real,
                 "active_channel": active_channel,
                 "active_ref": active_ref,
                 "channel_switch": channel_switch,
@@ -37431,6 +39203,7 @@ class Handler(BaseHTTPRequestHandler):
                     "is_externally_managed": is_externally_managed,
                     "script_sha256": installed_sha_current,
                     "rolling_checksum_used": bool(rolling_checksum_used),
+                    "destination_path": helper_real,
                 },
                 "remote": {
                     "ref": remote_ref,
@@ -37438,6 +39211,8 @@ class Handler(BaseHTTPRequestHandler):
                     "rolling_sha": remote_ref if ch == "rolling" else "",
                     "script_sha256": remote_script_sha256,
                     "script_path": remote_script_path,
+                    "download_url": download_url,
+                    "download_urls": download_urls,
                 },
                 "configured_target_channel": ch,
                 "evaluation": {

@@ -1822,6 +1822,12 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
   - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
   - 🧰 **IMPROVED:** WebUI job polling (Rocket + self-update overlays) now retries across transient fetch/API errors instead of aborting on the first failure.
+  - 🛡️ **NEW:** WebUI **Unusual Activity Watchers** now create persistent Notification Center alerts when:
+    - job polling gives up after too many reconnect attempts (Self-update / Rocket / Quick Actions / scrub-ghost)
+    - WebUI JavaScript errors are recorded in the persistent crash log
+    - (already existing) WebUI network/API errors occur (with issue-report guidance + diagnostics exporter)
+    - Includes quick link buttons: **Post issue** (GitHub Issues) and **Download diagnostics**.
+  - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
   - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots (runs cleanup now, then prunes snapshots) while keeping the newest snapshots per snapper config.
     - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
@@ -1838,6 +1844,9 @@ systemctl status zypper-autodownload.service
     - Minimizable overlay window (bottom-right task bubble) with **live log output**.
     - Runs scrub-ghost in a background `systemd-run` job so it can **resume polling after browser reload/crash**.
     - Wizard groups flags into **recommended / advanced / danger zone**, and supports extra restore/validate/complete options (full CLI flag coverage; interactive-only modes remain copy-only).
+  - 🧰 **NEW:** WebUI **Managers** overlay (minimizable) for **Update manager + Rocket manager**:
+    - Replaces “every load” browser popups with a persistent **notification bell** + job history.
+    - Stores recent job IDs in the browser so you can reopen logs after installs.
   - 📚 **DOCS:** README now includes a dedicated **Boot Entry Scrub (scrub-ghost)** user guide section (workflow, guardrails, WebUI wizard behavior, log locations, and confirmation phrases).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
