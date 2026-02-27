@@ -10471,6 +10471,19 @@ generate_dashboard() {
         border-color: rgba(37,99,235,0.30);
         box-shadow: 0 18px 40px rgba(15,23,42,0.12);
     }
+
+    /* Stateful button styles (used for Diag Logs ON/OFF) */
+    .cmd-btn.state-on {
+        border-color: rgba(34,197,94,0.42);
+        background: linear-gradient(180deg, rgba(34,197,94,0.10), rgba(255,255,255,0.00)), var(--subtle);
+        box-shadow: 0 22px 52px rgba(34,197,94,0.08);
+    }
+    .cmd-btn.state-off {
+        border-color: rgba(245,158,11,0.42);
+        background: linear-gradient(180deg, rgba(245,158,11,0.10), rgba(255,255,255,0.00)), var(--subtle);
+        box-shadow: 0 22px 52px rgba(245,158,11,0.08);
+    }
+
     .cmd-btn:active { transform: translateY(-1px) scale(0.99); }
     .cmd-btn:focus { outline: none; box-shadow: 0 0 0 4px var(--focus); }
     .cmd-label { display: block; font-weight: 950; font-size: 0.95rem; margin-bottom: 5px; letter-spacing: 0.15px; }
@@ -10916,55 +10929,55 @@ generate_dashboard() {
             <span class="cmd-desc">Recreate defaults (with backup) (confirmation required)</span>
             <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --dashboard', this)">
-            <span class="cmd-label">Copy: Refresh Dashboard</span>
-            <span class="cmd-desc">Regenerate this page (root)</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+        <button class="cmd-btn" id="dash-refresh-run-btn2" type="button" title="Regenerate the dashboard artifacts (root) via localhost API">
+            <span class="cmd-label">Run: Refresh Dashboard (Root)</span>
+            <span class="cmd-desc">Regenerate this page (via localhost API) • reloads after refresh</span>
+            <div class="cmd-copy-feedback">Refreshing…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --dash-open', this)">
+        <button class="cmd-btn" data-qa="dash-open" data-qa-copy="zypper-auto-helper --dash-open">
             <span class="cmd-label">Open Dashboard</span>
-            <span class="cmd-desc">Generate + open in your browser</span>
-            <div class="cmd-copy-feedback">Copied!</div>
+            <span class="cmd-desc">Generate + open in your browser (runs via localhost API)</span>
+            <div class="cmd-copy-feedback">Running…</div>
         </button>
       </div>
 
       <details style="margin-top: 14px;">
         <summary style="cursor:pointer; color: var(--muted); font-weight: 800;">More actions…</summary>
         <div class="action-grid" style="margin-top: 12px;">
-          <button class="cmd-btn" onclick="copyCmd('python3 -m http.server --directory ~/.local/share/zypper-notify 8765', this)">
+          <button class="cmd-btn" data-qa="dash-open" data-qa-copy="zypper-auto-helper --dash-open">
               <span class="cmd-label">Serve Live Dashboard</span>
-              <span class="cmd-desc">Start local server for realtime polling</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Recommended: runs --dash-open (starts server + sync worker + opens browser)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('python3 -c "import functools,sys; from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler; d=sys.argv[1]; p=int(sys.argv[2]); Handler=functools.partial(SimpleHTTPRequestHandler, directory=d); httpd=ThreadingHTTPServer((\\"127.0.0.1\\", p), Handler); httpd.daemon_threads=True; httpd.serve_forever()" ~/.local/share/zypper-notify 8765', this)">
+          <button class="cmd-btn" data-qa="dash-open" data-qa-copy="zypper-auto-helper --dash-open">
               <span class="cmd-label">Serve Live Dashboard (Threaded)</span>
-              <span class="cmd-desc">ThreadingHTTPServer: better parallel fetches</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Recommended: runs --dash-open (ThreadingHTTPServer is preferred automatically)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('xdg-open http://127.0.0.1:8765/status.html?live=1', this)">
+          <button class="cmd-btn" type="button" onclick="znhOpenUrl('http://127.0.0.1:8765/status.html?live=1', this)">
               <span class="cmd-label">Open Live URL</span>
               <span class="cmd-desc">Open served dashboard in browser</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <div class="cmd-copy-feedback">Opening…</div>
           </button>
           <button class="cmd-btn" data-qa="live-logs" data-qa-copy="zypper-auto-helper --live-logs" data-qa-interactive="1">
               <span class="cmd-label">Live Logs</span>
               <span class="cmd-desc">Interactive (requires terminal) • copy-only in WebUI</span>
               <div class="cmd-copy-feedback">Open</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --rm-conflict', this)">
+          <button class="cmd-btn" data-qa="rm-conflict" data-qa-copy="zypper-auto-helper --rm-conflict" data-qa-danger="1">
               <span class="cmd-label">Fix RPM Conflicts</span>
-              <span class="cmd-desc">Clean safe duplicate RPM versions</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Clean safe duplicate RPM versions (confirmation required)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
           <button class="cmd-btn" data-qa="self-check" data-qa-copy="zypper-auto-helper --check">
               <span class="cmd-label">Run: Self Check</span>
               <span class="cmd-desc">Syntax checks only</span>
               <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --test-notify', this)">
+          <button class="cmd-btn" data-qa="test-notify" data-qa-copy="zypper-auto-helper --test-notify">
               <span class="cmd-label">Test Notification</span>
-              <span class="cmd-desc">Verify GUI/DBus wiring</span>
-              <div class="cmd-copy-feedback">Copied!</div>
+              <span class="cmd-desc">Verify GUI/DBus wiring (sends a test desktop notification)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
           <button class="cmd-btn" data-qa="snapshot-state" data-qa-copy="zypper-auto-helper --snapshot-state">
               <span class="cmd-label">Run: Snapshot State</span>
@@ -15268,10 +15281,19 @@ generate_dashboard() {
     }
 
     function _wireDashboardRefreshUI() {
-        var btn = document.getElementById('dash-refresh-run-btn');
-        if (!btn) return;
-        btn.addEventListener('click', function() {
-            dashboardRefreshRun(btn);
+        var btns = [];
+        try {
+            btns = Array.prototype.slice.call(document.querySelectorAll('#dash-refresh-run-btn, #dash-refresh-run-btn2, #znh-dashboard-update-refresh-btn') || []);
+        } catch (e) {
+            btns = [];
+        }
+        if (!btns || btns.length === 0) return;
+
+        btns.forEach(function(btn) {
+            if (!btn) return;
+            btn.addEventListener('click', function() {
+                dashboardRefreshRun(btn);
+            });
         });
     }
 
@@ -15306,7 +15328,58 @@ generate_dashboard() {
                 toast('Not available', 'Quick Action runner not available', 'err');
             });
         });
+
+        // Reflect diag-logs ON/OFF state in the button UI (glow + disable)
+        try { if (typeof znhDiagLogsRefreshUI === 'function') znhDiagLogsRefreshUI(); } catch (e3) {}
     }
+
+    function znhDiagLogsRefreshUI() {
+        // Best-effort: query current diag-logs service state and highlight ON/OFF.
+        var btnOn = null;
+        var btnOff = null;
+        try { btnOn = document.querySelector('button.cmd-btn[data-qa="diag-logs-on"]'); } catch (e0) { btnOn = null; }
+        try { btnOff = document.querySelector('button.cmd-btn[data-qa="diag-logs-off"]'); } catch (e1) { btnOff = null; }
+        if (!btnOn && !btnOff) return Promise.resolve(null);
+
+        function _setDesc(btn, extra) {
+            if (!btn) return;
+            var d = null;
+            try { d = btn.querySelector('.cmd-desc'); } catch (e2) { d = null; }
+            if (!d) return;
+            try {
+                if (!btn.dataset.znhOrigDesc) btn.dataset.znhOrigDesc = String(d.textContent || '');
+                var base = String(btn.dataset.znhOrigDesc || '');
+                d.textContent = base + (extra ? (' • ' + extra) : '');
+            } catch (e3) {}
+        }
+
+        return _api('/api/diag-logs/status', { method: 'GET' }).then(function(r) {
+            var on = false;
+            try { on = !!(r && (r.active || r.enabled)); } catch (e4) { on = false; }
+
+            // Highlight the current state.
+            try {
+                if (btnOn) {
+                    btnOn.classList.remove('state-on', 'state-off');
+                    if (on) btnOn.classList.add('state-on');
+                    btnOn.disabled = !!on;
+                    _setDesc(btnOn, on ? 'State: ON' : 'State: OFF');
+                }
+                if (btnOff) {
+                    btnOff.classList.remove('state-on', 'state-off');
+                    if (!on) btnOff.classList.add('state-off');
+                    btnOff.disabled = !on;
+                    _setDesc(btnOff, on ? 'State: ON' : 'State: OFF');
+                }
+            } catch (e5) {}
+
+            return r;
+        }).catch(function(_e) {
+            // If API is down, do nothing.
+            return null;
+        });
+    }
+    window.znhDiagLogsRefreshUI = znhDiagLogsRefreshUI;
 
     // --- Snapper Manager (dashboard -> root API) ---
     function _snapperSetOut(text) {
@@ -15315,6 +15388,438 @@ generate_dashboard() {
         el.textContent = String(text || '');
         highlightBlock('snapper-output');
         try { el.scrollTop = el.scrollHeight; } catch (e) {}
+    }
+
+    // Snapper confirmation modal (Rocket/Update-wizard style; avoids native browser prompt())
+    var _sn = {
+        open: false,
+        running: false,
+        action: '',
+        params: {},
+        confirm_action: '',
+        confirm: null,
+        doRun: null,
+        resolve: null
+    };
+
+    function _snEscapeHtml(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function _snEnsureOverlay() {
+        var ex = document.getElementById('sn-overlay');
+        if (ex) return ex;
+
+        var d = document.createElement('div');
+        d.className = 'overlay hidden';
+        d.id = 'sn-overlay';
+        d.setAttribute('aria-hidden', 'true');
+        d.innerHTML = [
+            '<div class="overlay-card">',
+            '  <div class="overlay-head">',
+            '    <div>',
+            '      <div class="overlay-title" id="sn-title">Snapper</div>',
+            '      <div class="overlay-step" id="sn-step"></div>',
+            '    </div>',
+            '    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">',
+            '      <div class="overlay-step" id="sn-mode"></div>',
+            '    </div>',
+            '  </div>',
+            '  <div class="overlay-body" id="sn-body"></div>',
+            '  <div class="overlay-footer center" id="sn-footer">',
+            '    <button class="pill" type="button" id="sn-cancel-btn">Cancel</button>',
+            '    <button class="pill active" type="button" id="sn-run-btn">Run</button>',
+            '    <button class="pill active" type="button" id="sn-close-btn">OK</button>',
+            '  </div>',
+            '</div>'
+        ].join('\n');
+
+        document.body.appendChild(d);
+
+        // Click outside card to cancel (if not running)
+        d.addEventListener('click', function(ev) {
+            try {
+                if (_sn.running) return;
+                if (ev && ev.target === d) {
+                    _snClose(null);
+                }
+            } catch (e) {}
+        });
+
+        // Escape to cancel (if not running)
+        document.addEventListener('keydown', function(ev) {
+            try {
+                if (!_sn.open || _sn.running) return;
+                if (ev && ev.key === 'Escape') {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    _snClose(null);
+                }
+            } catch (e) {}
+        });
+
+        return d;
+    }
+
+    function _snEls() {
+        return {
+            overlay: document.getElementById('sn-overlay'),
+            body: document.getElementById('sn-body'),
+            title: document.getElementById('sn-title'),
+            step: document.getElementById('sn-step'),
+            mode: document.getElementById('sn-mode'),
+            cancel: document.getElementById('sn-cancel-btn'),
+            run: document.getElementById('sn-run-btn'),
+            close: document.getElementById('sn-close-btn'),
+            footer: document.getElementById('sn-footer')
+        };
+    }
+
+    function _snIsSuOverlayOpen() {
+        try {
+            var su = document.getElementById('su-overlay');
+            return !!(su && !su.classList.contains('hidden'));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _snShow(v) {
+        _snEnsureOverlay();
+        var e = _snEls();
+        if (!e.overlay) return;
+
+        _sn.open = !!v;
+        if (_sn.open) {
+            e.overlay.classList.remove('hidden');
+            e.overlay.setAttribute('aria-hidden', 'false');
+            try { document.body.classList.add('overlay-open'); } catch (ee) {}
+        } else {
+            e.overlay.classList.add('hidden');
+            e.overlay.setAttribute('aria-hidden', 'true');
+            // Only remove body lock if the main overlay is not visible.
+            try {
+                if (!_snIsSuOverlayOpen()) document.body.classList.remove('overlay-open');
+            } catch (ee2) {}
+        }
+    }
+
+    function _snSetHeader(mode, stepText, title) {
+        var e = _snEls();
+        if (e.title) e.title.textContent = String(title || 'Snapper');
+        if (e.mode) e.mode.textContent = String(mode || 'Confirm');
+        if (e.step) e.step.textContent = String(stepText || '');
+    }
+
+    function _snSetButtons(opts) {
+        opts = opts || {};
+        var e = _snEls();
+        if (!e.footer) return;
+
+        function sd(btn, show) {
+            if (!btn) return;
+            btn.style.display = show ? '' : 'none';
+        }
+
+        sd(e.cancel, !!opts.show_cancel);
+        sd(e.run, !!opts.show_run);
+        sd(e.close, !!opts.show_close);
+
+        if (e.cancel) e.cancel.disabled = !!opts.cancel_disabled;
+        if (e.run) e.run.disabled = !!opts.run_disabled;
+        if (e.close) e.close.disabled = !!opts.close_disabled;
+    }
+
+    function _snBuildCopyCmd(action, params) {
+        action = String(action || '').trim();
+        params = params || {};
+
+        var args = ['zypper-auto-helper', 'snapper'];
+        if (!action) return args.join(' ');
+        args.push(action);
+
+        if (action === 'cleanup') {
+            var mode = '';
+            try { mode = String(params.mode || 'all'); } catch (e) { mode = 'all'; }
+            mode = String(mode || 'all').trim();
+            if (mode) args.push(mode);
+        }
+
+        if (action === 'create') {
+            var desc = '';
+            try { desc = String(params.desc || ''); } catch (e2) { desc = ''; }
+            desc = String(desc || '').trim();
+            if (desc) args.push(desc);
+        }
+
+        if (action === 'auto-enable') {
+            // helper uses: snapper auto
+        }
+
+        if (action === 'auto-disable') {
+            // helper uses: snapper auto-off
+        }
+
+        return args.join(' ');
+    }
+
+    function _snClose(result) {
+        try { _snShow(false); } catch (e0) {}
+
+        // Resolve promise (if any)
+        try {
+            if (typeof _sn.resolve === 'function') {
+                _sn.resolve(result);
+            }
+        } catch (e1) {}
+
+        // Reset state (keep overlay DOM)
+        _sn.open = false;
+        _sn.running = false;
+        _sn.action = '';
+        _sn.params = {};
+        _sn.confirm_action = '';
+        _sn.confirm = null;
+        _sn.doRun = null;
+        _sn.resolve = null;
+    }
+
+    function _snOpenConfirmAndRun(opts) {
+        opts = opts || {};
+        _snEnsureOverlay();
+
+        return new Promise(function(resolve) {
+            // If already open, cancel previous.
+            try {
+                if (_sn.open && typeof _sn.resolve === 'function') {
+                    _sn.resolve(null);
+                }
+            } catch (e0) {}
+
+            _sn.open = true;
+            _sn.running = false;
+            _sn.action = String(opts.action || '').trim();
+            _sn.params = opts.params || {};
+            _sn.confirm_action = String(opts.confirm_action || '').trim();
+            _sn.confirm = opts.confirm || null;
+            _sn.doRun = opts.doRun || null;
+            _sn.resolve = resolve;
+
+            var phrase = '';
+            var hint = '';
+            var confirmToken = '';
+            try { phrase = String((_sn.confirm && _sn.confirm.phrase) ? _sn.confirm.phrase : '').trim(); } catch (e1) { phrase = ''; }
+            try { hint = String((_sn.confirm && _sn.confirm.hint) ? _sn.confirm.hint : '').trim(); } catch (e2) { hint = ''; }
+            try { confirmToken = String((_sn.confirm && _sn.confirm.confirm_token) ? _sn.confirm.confirm_token : '').trim(); } catch (e3) { confirmToken = ''; }
+
+            var title = 'Snapper: ' + (_sn.confirm_action || _sn.action || 'action');
+            _snSetHeader('Confirm', 'Type phrase to proceed', title);
+
+            var cmd = _snBuildCopyCmd(_sn.action, _sn.params);
+
+            var e = _snEls();
+            if (e.body) {
+                e.body.innerHTML = [
+                    '<div class="overlay-alert overlay-alert-warn">',
+                    '  <div style="font-weight:950;">Snapper confirmation required</div>',
+                    '  <div style="margin-top:6px; font-weight:800;">This runs a root Snapper action via the localhost API. ' + _snEscapeHtml(hint || '') + '</div>',
+                    '</div>',
+                    '<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command (root): <code style="font-size:0.85rem;">' + _snEscapeHtml(cmd) + '</code></div>',
+                    '<div style="margin-top: 8px;" class="overlay-kv">',
+                    '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Confirmation phrase: <strong>' + _snEscapeHtml(phrase || 'CONFIRM') + '</strong></div>',
+                    '</div>',
+                    '<div style="color: var(--muted); font-size:0.92rem;">Type the phrase exactly (case-insensitive) to enable the Run button.</div>',
+                    '<input id="sn-phrase" type="text" placeholder="Type confirmation phrase…" style="width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />',
+                    '<div class="overlay-progress" style="margin-top: 12px;">',
+                    '  <div class="overlay-progress-row"><span id="sn-stage">Waiting</span><span id="sn-percent">0%</span></div>',
+                    '  <div class="progress-track"><div class="progress-fill" id="sn-progress-bar" style="width:0%;"></div></div>',
+                    '</div>',
+                    '<pre class="overlay-pre" id="sn-log" style="max-height: 320px;">(output will appear here)</pre>',
+                    '<div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">',
+                    '  <button class="pill" type="button" id="sn-copy-out-btn" title="Copy Snapper output to clipboard">Copy output</button>',
+                    '</div>'
+                ].join('\n');
+            }
+
+            function setProg(stage, pct) {
+                try {
+                    var st = document.getElementById('sn-stage');
+                    var pc = document.getElementById('sn-percent');
+                    var bar = document.getElementById('sn-progress-bar');
+                    if (st) st.textContent = String(stage || '');
+                    if (pc) pc.textContent = String(pct) + '%';
+                    if (bar) bar.style.width = String(pct) + '%';
+                } catch (eP) {}
+            }
+
+            function setLog(text) {
+                var pre = document.getElementById('sn-log');
+                if (!pre) return;
+                pre.textContent = String(text || '');
+                try { pre.scrollTop = pre.scrollHeight; } catch (eS) {}
+                highlightBlock('sn-log');
+            }
+
+            function _wireCopyOutput() {
+                var b = document.getElementById('sn-copy-out-btn');
+                if (!b) return;
+                b.onclick = function() {
+                    var txt = '';
+                    try { txt = String((document.getElementById('sn-log') || {}).textContent || ''); } catch (eT) { txt = ''; }
+                    if (!String(txt || '').trim()) {
+                        toast('Nothing to copy', 'No output yet', 'err');
+                        return;
+                    }
+                    try { copyCmd(txt, b); } catch (eC) {
+                        try {
+                            if (navigator.clipboard && navigator.clipboard.writeText) {
+                                navigator.clipboard.writeText(txt).then(function() {
+                                    toast('Copied output', 'Snapper log copied', 'ok');
+                                }, function() {
+                                    toast('Copy failed', 'Clipboard permission denied', 'err');
+                                });
+                                return;
+                            }
+                        } catch (eC2) {}
+                        toast('Copy failed', 'Clipboard not available', 'err');
+                    }
+                };
+            }
+
+            setProg('Waiting', 0);
+            setLog('');
+            _wireCopyOutput();
+
+            _snSetButtons({ show_cancel: true, show_run: true, show_close: false, run_disabled: true, footer_center: true });
+
+            if (e.cancel) e.cancel.onclick = function() {
+                if (_sn.running) return;
+                _snClose(null);
+            };
+
+            function updateRunEnabled() {
+                var ok = false;
+                try {
+                    var inp = document.getElementById('sn-phrase');
+                    var got = inp ? String(inp.value || '').trim().toUpperCase() : '';
+                    ok = (got === String(phrase || '').trim().toUpperCase());
+                } catch (eR0) { ok = false; }
+                _snSetButtons({ show_cancel: true, show_run: true, show_close: false, run_disabled: !ok });
+            }
+
+            var inp2 = document.getElementById('sn-phrase');
+            if (inp2) {
+                inp2.addEventListener('input', updateRunEnabled);
+                inp2.addEventListener('keydown', function(ev) {
+                    try {
+                        if (!ev) return;
+                        if (ev.key === 'Enter') {
+                            updateRunEnabled();
+                            var rb = null;
+                            try { rb = _snEls().run; } catch (eRb) { rb = null; }
+                            if (rb && !rb.disabled) {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                try { rb.click(); } catch (eClick) {}
+                            }
+                        }
+                    } catch (eK) {}
+                });
+                try { inp2.focus(); } catch (eF) {}
+            }
+            updateRunEnabled();
+
+            if (e.run) e.run.onclick = function() {
+                if (_sn.running) return;
+                if (!confirmToken) {
+                    toast('Error', 'Missing confirm token (try again)', 'err');
+                    return;
+                }
+
+                var got2 = '';
+                try { got2 = String((document.getElementById('sn-phrase') || {}).value || '').trim(); } catch (eG) { got2 = ''; }
+
+                _sn.running = true;
+                _snSetButtons({ show_cancel: true, show_run: true, show_close: false, cancel_disabled: true, run_disabled: true });
+                setProg('Running', 10);
+                setLog('Running: ' + String(_sn.action || '') + ' ...');
+
+                var runner = _sn.doRun;
+                if (typeof runner !== 'function') {
+                    toast('Error', 'Missing runner function', 'err');
+                    _sn.running = false;
+                    setProg('Failed', 100);
+                    _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+                    if (e.close) e.close.onclick = function() { _snClose(null); };
+                    return;
+                }
+
+                runner(confirmToken, got2).then(function(r) {
+                    var out = '';
+                    var rc = -1;
+                    try { out = String((r && r.output != null) ? r.output : ''); } catch (eO) { out = ''; }
+                    try { rc = (r && r.rc != null) ? parseInt(r.rc, 10) : -1; } catch (eRc) { rc = -1; }
+
+                    if (out) setLog(out);
+                    else setLog('(no output)');
+
+                    if (rc === 0) {
+                        setProg('Done', 100);
+                    } else {
+                        setProg('Failed', 100);
+                    }
+
+                    _sn.running = false;
+                    _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+
+                    // Resolve the snapperRun() promise now (action completed). The modal can remain open.
+                    try {
+                        if (typeof _sn.resolve === 'function') {
+                            _sn.resolve(r || null);
+                            _sn.resolve = null;
+                        }
+                    } catch (eRes) {}
+
+                    if (e.close) {
+                        e.close.textContent = 'OK';
+                        e.close.onclick = function() { _snClose(null); };
+                    }
+
+                    return r;
+                }).catch(function(err) {
+                    var msg = (err && err.message) ? err.message : 'failed';
+                    _sn.running = false;
+                    toast('Snapper failed', msg, 'err');
+                    setProg('Failed', 100);
+                    setLog('ERROR: ' + msg);
+                    _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+
+                    // Resolve the snapperRun() promise now (action completed with failure).
+                    try {
+                        if (typeof _sn.resolve === 'function') {
+                            _sn.resolve(null);
+                            _sn.resolve = null;
+                        }
+                    } catch (eRes2) {}
+
+                    if (e.close) {
+                        e.close.textContent = 'OK';
+                        e.close.onclick = function() { _snClose(null); };
+                    }
+                });
+            };
+
+            // Hide OK until done.
+            if (e.close) {
+                e.close.textContent = 'OK';
+                e.close.onclick = function() {
+                    if (_sn.running) return;
+                    _snClose(null);
+                };
+            }
+
+            _snShow(true);
+        });
     }
 
     function snapperRun(action, params, confirmAction) {
@@ -15348,14 +15853,13 @@ generate_dashboard() {
 
         // Confirm flow: request token + require typed phrase.
         return _api('/api/snapper/confirm', { method: 'POST', body: JSON.stringify({ action: confirmAction, params: params }) }).then(function(r) {
-            var phrase = r.phrase || '';
-            var hint = r.hint || ('Type ' + phrase + ' to confirm');
-            var got = prompt(hint + "\n\nEnter confirmation phrase:", "");
-            if (!got) {
-                toast('Cancelled', 'No confirmation entered', 'err');
-                return null;
-            }
-            return doRun(r.confirm_token, got);
+            return _snOpenConfirmAndRun({
+                action: action,
+                params: params,
+                confirm_action: confirmAction,
+                confirm: r || {},
+                doRun: doRun
+            });
         }).catch(function(e) {
             var msg = (e && e.message) ? e.message : 'confirm failed';
             toast('Confirm failed', msg, 'err');
@@ -17612,6 +18116,7 @@ generate_dashboard() {
     var _qa = {
         action: '',
         title: '',
+        desc: '',
         copy_cmd: '',
         danger: false,
         interactive: false,
@@ -17625,6 +18130,7 @@ generate_dashboard() {
     function _qaReset() {
         _qa.action = '';
         _qa.title = '';
+        _qa.desc = '';
         _qa.copy_cmd = '';
         _qa.danger = false;
         _qa.interactive = false;
@@ -17659,13 +18165,18 @@ generate_dashboard() {
         var interactive = String(btn.getAttribute('data-qa-interactive') || '') === '1';
 
         var title = action;
+        var desc = '';
         try {
             var lab = btn.querySelector('.cmd-label');
             if (lab && String(lab.textContent || '').trim()) title = String(lab.textContent || '').trim();
         } catch (e) {}
+        try {
+            var d = btn.querySelector('.cmd-desc');
+            if (d && String(d.textContent || '').trim()) desc = String(d.textContent || '').trim();
+        } catch (e2) {}
         title = title.replace(/^Run:\s*/i, '').replace(/^Open:\s*/i, '').trim();
 
-        return quickActionOpen({ action: action, title: title, copy_cmd: copyCmdText, danger: danger, interactive: interactive });
+        return quickActionOpen({ action: action, title: title, desc: desc, copy_cmd: copyCmdText, danger: danger, interactive: interactive });
     }
 
     function _qaTaskIsActive() {
@@ -17687,6 +18198,7 @@ generate_dashboard() {
 
         _qa.action = String(opts.action || '').trim();
         _qa.title = String(opts.title || opts.action || 'Quick action').trim();
+        _qa.desc = String(opts.desc || '').trim();
         _qa.copy_cmd = String(opts.copy_cmd || '').trim();
         _qa.danger = !!opts.danger;
         _qa.interactive = !!opts.interactive;
@@ -17760,15 +18272,48 @@ generate_dashboard() {
 
     function _qaRenderInteractiveOnly() {
         _qaSetHeader('Interactive', 'Copy only', _qa.title);
-        return _qaRenderCopyOnly('This action is interactive and requires a real terminal (WebUI cannot provide stdin safely).');
+        var extra = _qa.danger ? ' This action may also change system state.' : '';
+        return _qaRenderCopyOnly('This action is interactive and requires a real terminal (WebUI cannot provide stdin safely).' + extra);
     }
 
     function _qaRenderForm() {
         var e = _suEls();
         if (!e.body) return;
 
+        var safe = function(s) { return _qaEscapeHtml(String(s || '')); };
+        function nl2br(s) {
+            try { return safe(String(s || '')).replace(/\n/g, '<br/>'); } catch (e0) { return safe(String(s || '')); }
+        }
+
         var needsConfirm = !!_qa.danger;
         var phrase = String(_qa.required_phrase || '').trim();
+
+        var confirmExplain = '';
+        var confirmWarn = '';
+        try {
+            confirmExplain = String((_qa.confirm && (_qa.confirm.explain || _qa.confirm.description || _qa.confirm.details)) || '').trim();
+        } catch (e1) { confirmExplain = ''; }
+        try {
+            confirmWarn = String((_qa.confirm && (_qa.confirm.warning || _qa.confirm.warn)) || '').trim();
+        } catch (e2) { confirmWarn = ''; }
+
+        var aboutLine = _qa.desc ? ('<div style="margin-top:6px; font-weight:800;">' + safe(_qa.desc) + '</div>') : '';
+        var genericLine = '<div style="margin-top:6px; color: var(--muted); font-size:0.88rem; font-weight: 800;">Runs via the localhost API and shows output here (minimize/close supported).</div>';
+
+        var explainHtml = '';
+        if (needsConfirm && confirmExplain) {
+            explainHtml = '<div style="margin-top:10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">'
+                + '<div style="font-weight:950;">What this will do</div>'
+                + '<div style="margin-top:6px; color: var(--muted); font-weight:800; line-height:1.35;">' + nl2br(confirmExplain) + '</div>'
+                + '</div>';
+        }
+        var warnHtml = '';
+        if (needsConfirm && confirmWarn) {
+            warnHtml = '<div style="margin-top:10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08);">'
+                + '<div style="font-weight:950; color: var(--text);">⚠ Warning</div>'
+                + '<div style="margin-top:6px; color: var(--text); font-weight:850; line-height:1.35;">' + nl2br(confirmWarn) + '</div>'
+                + '</div>';
+        }
 
         var confirmBlock = '';
         if (needsConfirm) {
@@ -17786,10 +18331,13 @@ generate_dashboard() {
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
             '  <div style="font-weight:950;">Quick Action</div>',
-            '  <div style="margin-top:6px; font-weight:800;">Runs an allowlisted helper command via the localhost API and shows output here.</div>',
+            (aboutLine || ''),
+            genericLine,
             '</div>',
             cmdHtml,
             (_qa.copy_cmd ? '<div style="margin-top:10px;"><button class="pill" type="button" id="qa-copy-btn">Copy command</button></div>' : ''),
+            (needsConfirm ? warnHtml : ''),
+            (needsConfirm ? explainHtml : ''),
             (needsConfirm ? '<div style="margin-top:12px;">' + confirmBlock + '</div>' : ''),
             '<div class="overlay-progress" style="margin-top: 12px;">',
             '  <div class="overlay-progress-row"><span id="su-stage">Waiting</span><span id="su-percent">0%</span></div>',
@@ -17919,6 +18467,16 @@ generate_dashboard() {
         if (e.close) e.close.onclick = function() { _suShow(false); };
 
         try { znhTaskDone('quick-action', !!ok); } catch (e0) {}
+
+        // If this action changes a visible dashboard state, refresh it now.
+        try {
+            var a = String(_qa.action || '').trim();
+            if (a === 'diag-logs-on' || a === 'diag-logs-off') {
+                setTimeout(function() {
+                    try { if (typeof znhDiagLogsRefreshUI === 'function') znhDiagLogsRefreshUI(); } catch (e2) {}
+                }, 650);
+            }
+        } catch (e1) {}
     }
 
     function _qaPollJob(job_id, action, title) {
@@ -20713,6 +21271,39 @@ generate_dashboard() {
         }
     }
     window.copyCmd = copyCmd;
+
+    // Open URL (used by Quick Actions: Open Live URL)
+    function znhOpenUrl(url, btn) {
+        var u = String(url || '').trim();
+        if (!u) return;
+
+        function feedback(ok) {
+            if (btn) {
+                try { btn.classList.add('copied'); } catch (e0) {}
+                setTimeout(function() {
+                    try { btn.classList.remove('copied'); } catch (e1) {}
+                }, 900);
+            }
+            if (ok) toast('Opened', u, 'ok');
+            else toast('Open failed', u, 'err');
+        }
+
+        try {
+            var w = window.open(u, '_blank', 'noopener');
+            if (w) {
+                feedback(true);
+                return;
+            }
+        } catch (e2) {}
+
+        try {
+            window.location.href = u;
+            feedback(true);
+        } catch (e3) {
+            feedback(false);
+        }
+    }
+    window.znhOpenUrl = znhOpenUrl;
 
     // Settings drawer wired above.
 
@@ -26099,6 +26690,11 @@ PY
     {
         echo "DASH_API_MIRROR_FILE=${mirror_file}"
         echo "DASH_API_LOG_LEVEL=${ZYPPER_AUTO_DASH_API_LOG_LEVEL:-info}"
+        # Store the desktop user identity so the Dashboard API can run a few
+        # allowlisted actions that require SUDO_USER (e.g. --test-notify).
+        echo "DASH_API_USER=${SUDO_USER:-}"
+        echo "DASH_API_USER_HOME=${user_home:-}"
+        echo "DASH_API_USER_UID=$(id -u "${SUDO_USER:-root}" 2>/dev/null || echo 0)"
     } >"${env_file}" 2>/dev/null || true
     chmod 600 "${env_file}" 2>/dev/null || true
 
@@ -38794,6 +39390,24 @@ def _quick_action_table() -> dict:
             "phrase": "",
         },
 
+        # Helper utilities
+        "test-notify": {
+            "title": "Test Notification",
+            "cmd": [HELPER_BIN, "--test-notify"],
+            "timeout_s": 30,
+            "needs_confirm": False,
+            "phrase": "",
+            "needs_dash_user_env": True,
+        },
+        "dash-open": {
+            "title": "Open Dashboard",
+            "cmd": [HELPER_BIN, "--dash-open"],
+            "timeout_s": 180,
+            "needs_confirm": False,
+            "phrase": "",
+            "needs_dash_user_env": True,
+        },
+
         # State-changing (confirmation required)
         "reset-downloads": {
             "title": "Reset Downloads",
@@ -38801,6 +39415,8 @@ def _quick_action_table() -> dict:
             "timeout_s": 120,
             "needs_confirm": True,
             "phrase": "RESET",
+            "explain": "Clears cached downloader/notifier state and restarts timers so the helper can rebuild its state cleanly. Use this if downloads are stuck or the dashboard shows inconsistent cached status.",
+            "warning": "This does not remove installed packages, but you may need to re-download cached RPMs afterwards.",
         },
         "reset-config": {
             "title": "Reset Config",
@@ -38808,6 +39424,17 @@ def _quick_action_table() -> dict:
             "timeout_s": 120,
             "needs_confirm": True,
             "phrase": "RESETCONF",
+            "explain": "Backs up your current /etc/zypper-auto.conf and regenerates a default config template. Useful if config keys became invalid or you want to return to safe defaults.",
+            "warning": "Your settings will change. A backup is created, but review the output before continuing.",
+        },
+        "rm-conflict": {
+            "title": "Fix RPM Conflicts",
+            "cmd": [HELPER_BIN, "--rm-conflict"],
+            "timeout_s": 15 * 60,
+            "needs_confirm": True,
+            "phrase": "RPMFIX",
+            "explain": "Scans installed RPMs for known-safe duplicate version conflicts and removes the older/duplicate packages when it is safe to do so. This helps unblock zypper dup when it fails with 'conflicting' duplicate RPM versions.",
+            "warning": "Package removal is involved. It only targets duplicates, but you should still read the output to confirm what was removed.",
         },
         "diag-logs-on": {
             "title": "Diag Logs ON",
@@ -38815,6 +39442,8 @@ def _quick_action_table() -> dict:
             "timeout_s": 60,
             "needs_confirm": True,
             "phrase": "DIAGLOGS",
+            "explain": "Enables the aggregated diagnostics log follower (systemd unit: zypper-auto-diag-logs.service). It writes a combined log view under /var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log which is useful for debugging.",
+            "warning": "Extra logging can use a small amount of disk space over time. Disable it when you no longer need deep diagnostics.",
         },
         "diag-logs-off": {
             "title": "Diag Logs OFF",
@@ -38822,6 +39451,8 @@ def _quick_action_table() -> dict:
             "timeout_s": 60,
             "needs_confirm": True,
             "phrase": "DIAGLOGS",
+            "explain": "Disables the aggregated diagnostics log follower (systemd unit: zypper-auto-diag-logs.service). Existing diag log files are kept; this just stops collecting new combined output.",
+            "warning": "After disabling, you may lose useful context for debugging future failures. You can re-enable it at any time.",
         },
     }
 
@@ -39551,8 +40182,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper, self-update, system-update, scrub-ghost, and quick-action endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/"):
+        # Snapper, self-update, system-update, scrub-ghost, quick-action, and diag-logs endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -40264,8 +40895,29 @@ class Handler(BaseHTTPRequestHandler):
                 return _json_response(self, 200, recovered, origin)
             return _json_response(self, 404, {"error": "job not found"}, origin)
 
+        # --- Diagnostics log follower status (dashboard) ---
+        if path == "/api/diag-logs/status":
+            unit = "zypper-auto-diag-logs.service"
+            active = False
+            enabled = False
+            try:
+                rc, _out = _run_cmd(["systemctl", "is-active", unit], timeout_s=2, log=None)
+                active = (rc == 0)
+            except Exception:
+                active = False
+            try:
+                rc2, _out2 = _run_cmd(["systemctl", "is-enabled", unit], timeout_s=2, log=None)
+                enabled = (rc2 == 0)
+            except Exception:
+                enabled = False
+            return _json_response(self, 200, {
+                "unit": unit,
+                "active": bool(active),
+                "enabled": bool(enabled),
+            }, origin)
+
         # If we got here and the path is under an auth-required prefix, it's not implemented.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/"):
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/"):
             return _json_response(self, 404, {"error": "not found"}, origin)
 
         if path == "/api/ping":
@@ -40371,11 +41023,31 @@ class Handler(BaseHTTPRequestHandler):
             title = str(meta.get("title", action) or action)
             hint = f"Type {phrase} to confirm: {title}"
 
+            explain = str(meta.get("explain", "") or meta.get("description", "") or "").strip()
+            warn = str(meta.get("warning", "") or meta.get("warn", "") or "").strip()
+
+            cmd_preview = ""
+            try:
+                cmd_preview = " ".join(shlex.quote(str(x)) for x in (meta.get("cmd") or []))
+            except Exception:
+                cmd_preview = ""
+
+            timeout_s = 0
+            try:
+                timeout_s = int(meta.get("timeout_s", 0) or 0)
+            except Exception:
+                timeout_s = 0
+
             return _json_response(self, 200, {
                 "confirm_token": token,
                 "expires_in_seconds": 120,
                 "phrase": phrase,
                 "hint": hint,
+                "title": title,
+                "explain": explain,
+                "warning": warn,
+                "timeout_s": timeout_s,
+                "cmd_preview": cmd_preview,
             }, origin)
 
         if path == "/api/quick/start":
@@ -40405,6 +41077,14 @@ class Handler(BaseHTTPRequestHandler):
             cmd = meta.get("cmd")
             if not isinstance(cmd, list) or not cmd:
                 return _json_response(self, 500, {"error": "invalid action command"}, origin)
+
+            # Some helper actions expect to be invoked via sudo and use SUDO_USER.
+            # The API service can store the desktop user identity via its EnvironmentFile.
+            dash_user = str(os.environ.get("DASH_API_USER", "") or "").strip()
+            dash_home = str(os.environ.get("DASH_API_USER_HOME", "") or "").strip()
+            needs_dash_user_env = bool(meta.get("needs_dash_user_env"))
+            if needs_dash_user_env and not dash_user:
+                return _json_response(self, 400, {"error": "dashboard API missing DASH_API_USER; re-open dashboard via --dash-open"}, origin)
 
             title = str(meta.get("title", action) or action)
 
@@ -40472,6 +41152,18 @@ class Handler(BaseHTTPRequestHandler):
             # Compose a shell script for the transient unit.
             cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
 
+            inject_user = ""
+            try:
+                if needs_dash_user_env and dash_user:
+                    # Inject SUDO_USER so helper subcommands that expect sudo still work.
+                    # SUDO_USER_HOME is optional but improves behavior for a few paths.
+                    inject_user = "\n".join([
+                        f'export SUDO_USER={shlex.quote(dash_user)}',
+                        f'export SUDO_USER_HOME={shlex.quote(dash_home)}' if dash_home else 'true',
+                    ])
+            except Exception:
+                inject_user = ""
+
             script_text = "\n".join([
                 'set -euo pipefail',
                 f'LOG={shlex.quote(log_path)}',
@@ -40507,6 +41199,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
                 'echo "" >>"$LOG" || true',
                 'export ZNH_NON_INTERACTIVE=1',
+                inject_user if inject_user else 'true',
                 'write_status 0 0 running',
                 'set +e',
                 f'( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',

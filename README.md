@@ -1824,8 +1824,12 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Dashboard API systemd unit now includes `/run` and `/var/run` in `ReadWritePaths` (helps `systemd-run` reliability under hardening).
   - 🧿 **NEW:** WebUI **Quick Actions** can now run allowlisted helper commands directly from the dashboard in a terminal-like overlay (with **minimize/close** and live log output), instead of only copying commands.
     - Dangerous state-changing actions require a typed confirmation phrase (server-side enforced).
+    - Confirmation dialogs now include a Rocket-style explanation block (**What this will do** + **Warning**) for state-changing actions.
     - Interactive actions that need stdin (menus, live tails, etc.) remain copy-only for safety.
+    - **Diag Logs ON/OFF** buttons now show the current service state (glow/disable) and auto-refresh after toggling so it’s obvious whether diagnostics logging is enabled.
   - 🐛 **FIXED:** Snapper Manager / cleanup now returns HTTP 200 with `rc` + output so the WebUI shows the full report even when Snapper returns non-zero (instead of a generic `HTTP 500`).
+  - 🧿 **IMPROVED:** Snapper Manager confirmations (like Cleanup) now use an in-page wizard-style modal (typed phrase → Run button unlock) instead of a browser popup prompt.
+    - Includes a **Copy output** button so the Snapper console log is easy to attach to bug reports.
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
   - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
   - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
