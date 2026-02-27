@@ -9981,8 +9981,9 @@ generate_dashboard() {
         position: absolute;
         width: 11px;
         height: 14px;
-        left: 36%;
-        top: 20px;
+        /* Flame anchor: tweak these two values if emoji/font rendering differs */
+        left: 46%;
+        top: 21px;
         transform: translateX(-50%) rotate(-40deg);
         transform-origin: 50% 0%;
         border-radius: 999px;
