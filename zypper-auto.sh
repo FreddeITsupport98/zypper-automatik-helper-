@@ -23215,6 +23215,7 @@ generate_dashboard() {
             }
             try { console && console.warn && console.warn('settingsLoad failed', e); } catch (ee) {}
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
+            try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
             // Can't log via API if the API is unreachable.
             return null;
         });
@@ -23435,11 +23436,70 @@ generate_dashboard() {
         if (saveBtn) saveBtn.addEventListener('click', function() { settingsSave(); });
         if (reloadBtn) reloadBtn.addEventListener('click', function() { settingsLoad(true); });
 
+        function _settingsPassiveRefresh(reason) {
+            // Goal: keep small status indicators (like Kernel purge badge) in sync even
+            // when config changes happen outside the WebUI (e.g. user runs --reset-config).
+            // Safety: never clobber user edits.
+            try {
+                if (_settingsResetInProgress || _settingsAutosaveInFlight) return Promise.resolve(null);
+                if (_settingsDirty) return Promise.resolve(null);
+            } catch (e0) {
+                return Promise.resolve(null);
+            }
+
+            // If schema isn't loaded yet, do a full settingsLoad (schema+config).
+            if (!_settingsSchema) {
+                try { return settingsLoad(false); } catch (e1) { return Promise.resolve(null); }
+            }
+
+            return _api('/api/config', { method: 'GET' }).then(function(c) {
+                try {
+                    if (c && c.config) {
+                        _settingsConfig = c.config;
+                        try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
+                        try { znhDebugUpdateToggleUi(); } catch (eDU) {}
+
+                        // Only re-render the full form when the drawer is actually open.
+                        try {
+                            if (drawer && drawer.open) {
+                                _renderSettingsForm(_settingsSchema, _settingsConfig);
+                            }
+                        } catch (eR) {}
+
+                        try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
+                        try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(false); } catch (eBS) {}
+                    }
+                } catch (e2) {}
+                return c;
+            }).catch(function(_e) {
+                // If API is down, avoid spamming warnings.
+                return null;
+            });
+        }
+
         // Auto-load on page open so users immediately see success/failure.
         // (Drawer toggle handler below still refreshes when opened.)
         try {
             settingsLoad(true);
         } catch (e) {}
+
+        // Passive refresh when user returns to the tab/window.
+        // This fixes the "UI still shows old value after CLI reset" confusion.
+        try {
+            window.addEventListener('focus', function() {
+                try { _settingsPassiveRefresh('focus'); } catch (e) {}
+            });
+        } catch (eF) {}
+        try {
+            document.addEventListener('visibilitychange', function() {
+                try {
+                    if (document.visibilityState === 'visible') {
+                        _settingsPassiveRefresh('visible');
+                    }
+                } catch (e) {}
+            });
+        } catch (eV) {}
+
         if (resetBtn) resetBtn.addEventListener('click', function() {
             if (confirm('Factory reset /etc/zypper-auto.conf to defaults?\n\nThis runs: zypper-auto-helper --reset-config\n\n(A backup will be created)')) {
                 settingsReset();
