@@ -1853,6 +1853,8 @@ systemctl status zypper-autodownload.service
     - BLS entry file counts (total + snapper subset)
     - GRUB entry counts (detects **GRUB BLS/blscfg mode** and shows effective entry count)
     - After Snapper cleanup or scrub-ghost apply, it shows a best-effort **Δ affected by prune** (counts + percent change + approx freed space).
+    - Note: on systemd-boot installs (no `grub.cfg` present), GRUB stats will show **n/a** — you do *not* need to switch bootloaders just for this.
+    - Tip: click the **GRUB menu entries** tile for an explanation popup (what it means + why switching bootloaders is not recommended just to satisfy this stat).
   - 🧹 **NEW:** Boot entry scrubber tool **scrub-ghost** is now embedded into `zypper-auto.sh` and installed automatically:
     - CLI: `sudo zypper-auto-helper scrub-ghost --dry-run`
     - Installed binaries: `/usr/local/bin/zypper-scrub-ghost` and `/usr/local/bin/scrub-ghost`

@@ -11065,7 +11065,7 @@ generate_dashboard() {
           <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-bls-detail"></div>
           <div style="margin-top:6px; font-size:0.82rem; color: rgba(148,163,184,0.92);" id="boot-bls-delta"></div>
         </div>
-        <div class="stat-box">
+        <div class="stat-box" id="boot-grub-stat" role="button" tabindex="0" title="Click for explanation" style="cursor:pointer;">
           <span class="stat-label">GRUB menu entries</span>
           <span class="stat-value" id="boot-grub-count">(loading)</span>
           <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-grub-detail"></div>
@@ -15535,16 +15535,31 @@ generate_dashboard() {
                 return parseInt(g.menuentries || 0, 10) || 0;
             }
 
-            if (grubCountEl) grubCountEl.textContent = grub && grub.ok ? String(_grubEffectiveCount(grub)) : '(unknown)';
+            if (grubCountEl) {
+                if (grub && grub.present === false) grubCountEl.textContent = 'n/a';
+                else grubCountEl.textContent = grub && grub.ok ? String(_grubEffectiveCount(grub)) : '(unknown)';
+            }
             if (grubDetailEl) {
-                if (grub && grub.ok) {
+                if (grub && grub.present === false) {
+                    var r = '';
+                    try { r = String(grub.reason || '').trim(); } catch (eR) { r = ''; }
+                    var extra = '';
+                    try {
+                        if (bls && bls.ok) {
+                            extra = ' Tip: Boot entries (BLS) above are your real boot menu entries.';
+                        }
+                    } catch (eX) { extra = ''; }
+                    grubDetailEl.textContent = (r ? r : 'GRUB not detected') + extra;
+                } else if (grub && grub.ok) {
                     if (grub.bls_mode) {
                         grubDetailEl.textContent = String(grub.cfg_path || '') + ' • mode=BLS • entries=' + String(_grubEffectiveCount(grub));
                     } else {
                         grubDetailEl.textContent = String(grub.cfg_path || '') + ' • mode=classic • menuentry=' + String(grub.menuentries) + ' submenu=' + String(grub.submenus);
                     }
                 } else {
-                    grubDetailEl.textContent = 'grub.cfg not readable';
+                    var r2 = '';
+                    try { r2 = String(grub.reason || '').trim(); } catch (eR2) { r2 = ''; }
+                    grubDetailEl.textContent = r2 ? r2 : 'grub.cfg not readable';
                 }
             }
 
@@ -15620,6 +15635,184 @@ generate_dashboard() {
         });
     }
     window.znhBootStatsRefreshUI = znhBootStatsRefreshUI;
+
+    function _znhEscapeHtml(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function _znhOverlayVisible(id) {
+        try {
+            var el = document.getElementById(id);
+            if (!el) return false;
+            return !el.classList.contains('hidden');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _znhBootHelpEnsureOverlay() {
+        var ex = document.getElementById('znh-boot-help-overlay');
+        if (ex) return ex;
+
+        var d = document.createElement('div');
+        d.className = 'overlay hidden';
+        d.id = 'znh-boot-help-overlay';
+        d.setAttribute('aria-hidden', 'true');
+        d.innerHTML = [
+            '<div class="overlay-card">',
+            '  <div class="overlay-head">',
+            '    <div>',
+            '      <div class="overlay-title" id="znh-boot-help-title">Bootloader info</div>',
+            '      <div class="overlay-step" id="znh-boot-help-step">Help</div>',
+            '    </div>',
+            '    <button class="pill" type="button" id="znh-boot-help-x" style="border-color: rgba(255,255,255,0.14);">Close</button>',
+            '  </div>',
+            '  <div class="overlay-body" id="znh-boot-help-body"></div>',
+            '  <div class="overlay-footer center" id="znh-boot-help-footer">',
+            '    <button class="pill active" type="button" id="znh-boot-help-ok">OK</button>',
+            '  </div>',
+            '</div>'
+        ].join('\n');
+
+        document.body.appendChild(d);
+
+        // Click outside card to close
+        d.addEventListener('click', function(ev) {
+            try {
+                if (ev && ev.target === d) {
+                    znhBootHelpHide();
+                }
+            } catch (e) {}
+        });
+
+        // Escape to close
+        document.addEventListener('keydown', function(ev) {
+            try {
+                if (!_znhOverlayVisible('znh-boot-help-overlay')) return;
+                if (ev && ev.key === 'Escape') {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    znhBootHelpHide();
+                }
+            } catch (e) {}
+        });
+
+        // Buttons
+        try {
+            var ok = document.getElementById('znh-boot-help-ok');
+            if (ok) ok.addEventListener('click', function() { znhBootHelpHide(); });
+            var x = document.getElementById('znh-boot-help-x');
+            if (x) x.addEventListener('click', function() { znhBootHelpHide(); });
+        } catch (e2) {}
+
+        return d;
+    }
+
+    function znhBootHelpHide() {
+        var d = document.getElementById('znh-boot-help-overlay');
+        if (!d) return;
+        d.classList.add('hidden');
+        d.setAttribute('aria-hidden', 'true');
+        try {
+            // Only remove body lock if other overlays are not visible.
+            if (!_znhOverlayVisible('su-overlay') && !_znhOverlayVisible('sn-overlay')) {
+                document.body.classList.remove('overlay-open');
+            }
+        } catch (e) {}
+    }
+    window.znhBootHelpHide = znhBootHelpHide;
+
+    function znhBootHelpShow(title, htmlBody) {
+        _znhBootHelpEnsureOverlay();
+        var d = document.getElementById('znh-boot-help-overlay');
+        var t = document.getElementById('znh-boot-help-title');
+        var b = document.getElementById('znh-boot-help-body');
+        if (!d || !b) return;
+
+        if (t) t.textContent = String(title || 'Bootloader info');
+        b.innerHTML = String(htmlBody || '');
+
+        d.classList.remove('hidden');
+        d.setAttribute('aria-hidden', 'false');
+        try { document.body.classList.add('overlay-open'); } catch (e) {}
+    }
+    window.znhBootHelpShow = znhBootHelpShow;
+
+    function znhBootGrubExplainOpen() {
+        var s = _znh_boot_stats.last || null;
+        var bls = (s && s.bls_entries) ? s.bls_entries : null;
+        var grub = (s && s.grub) ? s.grub : null;
+
+        var blsDir = (bls && bls.dir) ? String(bls.dir) : '(unknown)';
+        var blsTotal = (bls && bls.ok) ? String(bls.total_conf) : '?';
+        var blsSnap = (bls && bls.ok) ? String(bls.snapper_conf) : '?';
+        var blsOther = (bls && bls.ok) ? String(bls.other_conf) : '?';
+
+        var grubPresent = (grub && grub.present === false) ? false : true;
+        var grubReason = '';
+        try { grubReason = String((grub && grub.reason) ? grub.reason : '').trim(); } catch (eR) { grubReason = ''; }
+
+        var modeLine = '';
+        if (grub && grub.ok) {
+            modeLine = grub.bls_mode ? 'Detected GRUB mode: BLS (blscfg)' : 'Detected GRUB mode: classic grub.cfg menuentry';
+        } else if (!grubPresent) {
+            modeLine = 'Detected bootloader: systemd-boot / BLS (GRUB not detected)';
+        } else {
+            modeLine = 'GRUB status: unknown';
+        }
+
+        var body = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">GRUB menu entries: explanation</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This tile is informational only. It is not required for Snapper cleanup or scrub-ghost.</div>',
+            '</div>',
+            '<div class="overlay-scroll">',
+            '  <div style="font-weight:950; margin-bottom:8px;">What this tile measures</div>',
+            '  <ul>',
+            '    <li>If your bootloader is <strong>GRUB</strong>, we estimate entry count by scanning <code>grub.cfg</code>.</li>',
+            '    <li>If your bootloader is <strong>systemd-boot</strong>, GRUB may not be installed and there is no <code>grub.cfg</code> — so this tile can show <strong>n/a</strong>.</li>',
+            '  </ul>',
+            '  <div style="font-weight:950; margin:12px 0 8px 0;">Detected state</div>',
+            '  <ul>',
+            '    <li>' + _znhEscapeHtml(modeLine) + '</li>',
+            '    <li>BLS entries: <code>' + _znhEscapeHtml(blsDir) + '</code> • total=' + _znhEscapeHtml(blsTotal) + ' • snapper=' + _znhEscapeHtml(blsSnap) + ' • other=' + _znhEscapeHtml(blsOther) + '</li>',
+            (grub && grub.ok) ? ('    <li>GRUB cfg: <code>' + _znhEscapeHtml(String(grub.cfg_path || '')) + '</code></li>') : '',
+            (grubReason ? ('    <li>GRUB note: ' + _znhEscapeHtml(grubReason) + '</li>') : ''),
+            '  </ul>',
+            '  <div style="font-weight:950; margin:12px 0 8px 0;">Why switching bootloaders is not recommended (for this tool)</div>',
+            '  <ul>',
+            '    <li>Switching bootloaders is an <strong>advanced</strong> system change and can lead to an unbootable system if misconfigured.</li>',
+            '    <li>This dashboard manages <strong>BLS entry hygiene</strong> (the <code>loader/entries</code> files). That works regardless of GRUB vs systemd-boot.</li>',
+            '    <li>If you only want to reduce Snapper boot menu clutter, focus on the <strong>Boot entries (BLS)</strong> count above.</li>',
+            '  </ul>',
+            '  <div style="margin-top:10px; color: var(--muted); font-size:0.88rem; font-weight:800;">Tip: if you already use GRUB and this shows unknown, it usually means <code>grub.cfg</code> is missing or unreadable by the Dashboard API.</div>',
+            '</div>'
+        ].join('\n');
+
+        znhBootHelpShow('GRUB menu entries', body);
+    }
+    window.znhBootGrubExplainOpen = znhBootGrubExplainOpen;
+
+    function _wireBootStatsHelpUI() {
+        var box = document.getElementById('boot-grub-stat');
+        if (!box) return;
+        if (box._znh_bound) return;
+        box._znh_bound = true;
+
+        function openHelp(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+            try { if (typeof znhBootGrubExplainOpen === 'function') znhBootGrubExplainOpen(); } catch (e2) {}
+        }
+
+        box.addEventListener('click', openHelp);
+        box.addEventListener('keydown', function(ev) {
+            if (!ev) return;
+            if (ev.key === 'Enter' || ev.key === ' ') {
+                openHelp(ev);
+            }
+        });
+    }
+    window._wireBootStatsHelpUI = _wireBootStatsHelpUI;
 
     // --- Snapper Manager (dashboard -> root API) ---
     function _snapperSetOut(text) {
@@ -21506,6 +21699,8 @@ generate_dashboard() {
     _wireSelfUpdateUI();
     // Wire Snapper manager UI.
     _wireSnapperUI();
+    // Wire boot/EFI stats help popups.
+    try { if (typeof _wireBootStatsHelpUI === 'function') _wireBootStatsHelpUI(); } catch (e) {}
     // Wire scrub-ghost manager UI.
     _wireScrubUI();
     // Wire rocket button (system update wizard).
@@ -40653,17 +40848,42 @@ class Handler(BaseHTTPRequestHandler):
             return out
 
         def _grub_stats() -> dict:
-            cfg = "/boot/grub2/grub.cfg"
+            # GRUB config location varies by distro/setup.
+            candidates = [
+                "/boot/grub2/grub.cfg",  # openSUSE/Fedora
+                "/boot/grub/grub.cfg",   # Debian-like
+            ]
+            try:
+                # Some EFI installs place a minimal cfg under the ESP.
+                candidates.extend(sorted(glob.glob("/boot/efi/EFI/*/grub*.cfg")))
+                candidates.extend(sorted(glob.glob("/boot/efi/EFI/*/*grub*.cfg")))
+            except Exception:
+                pass
+
+            cfg = ""
+            for c in candidates:
+                try:
+                    if c and os.path.exists(c) and os.path.isfile(c):
+                        cfg = c
+                        break
+                except Exception:
+                    continue
+
             out = {
                 "ok": False,
-                "cfg_path": cfg,
+                "present": bool(cfg),
+                "reason": "",
+                "cfg_path": cfg or (candidates[0] if candidates else ""),
                 "menuentries": 0,
                 "submenus": 0,
                 "bls_mode": False,
             }
+
+            if not cfg:
+                out["reason"] = "grub.cfg not found (systemd-boot/BLS likely active). This is normal on many newer openSUSE installs. If you switch your bootloader to GRUB later, this stat will appear — but switching bootloaders is an advanced change and not required for scrub-ghost/BLS hygiene."
+                return out
+
             try:
-                if not os.path.exists(cfg):
-                    return out
                 # grub.cfg can be large; stream line-by-line.
                 me = 0
                 sm = 0
@@ -40682,12 +40902,14 @@ class Handler(BaseHTTPRequestHandler):
                             sm += 1
                 out.update({
                     "ok": True,
+                    "reason": "",
                     "menuentries": int(me),
                     "submenus": int(sm),
                     "bls_mode": bool(bls_mode),
                 })
                 return out
-            except Exception:
+            except Exception as e:
+                out["reason"] = f"failed to read grub cfg: {e}"
                 return out
 
         if path == "/api/boot/stats":
