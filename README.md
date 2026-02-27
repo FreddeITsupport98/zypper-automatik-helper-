@@ -1918,6 +1918,8 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Rocket Update Wizard now exits early when there are no updates ("Nothing to do"), instead of asking for confirmation.
   - 🧰 **IMPROVED:** Rocket Update Wizard now waits for the zypp/zypper lock (e.g. YaST, packagekit, background refresh) instead of failing instantly.
   - 🧰 **IMPROVED:** Rocket preview now detects common solver-conflict patterns and shows a dedicated "Conflict detected" warning in the WebUI.
+  - 🎛️ **NEW (advanced):** Rocket Wizard setting `ROCKET_WIZARD_ALLOW_VENDOR_CHANGE` adds `--allow-vendor-change` to Rocket preview + install runs (useful for vendor-switch conflicts).
+  - 🧾 **IMPROVED:** When Rocket install fails due to solver conflicts, the Result view now shows an interactive fallback command (copyable) so you can run `zypper-run-install` (recommended) or `sudo zypper dup` and choose a solution.
   - 🧰 **IMPROVED:** Rocket Update Wizard now supports real progress percentages via zypper `--xmlout` (WebUI still shows readable logs via best-effort XML text extraction).
   - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:
     - `ROCKET_WIZARD_DEFAULT_SIMULATE` (opens with Simulation mode pre-selected by default)

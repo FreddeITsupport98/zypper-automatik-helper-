@@ -323,109 +323,112 @@ __znh_start_dashboard_sync_worker() {
         rm -f "${pid_file}" 2>/dev/null || true
     fi
 
-    local run_cmd
-    run_cmd=$(cat <<'SYNC'
-exec -a znh-dashboard-sync bash -lc '
-  dash_dir="$1";
-  src_root="/var/log/zypper-auto";
+    # Write a real worker script into the dashboard directory.
+    # This avoids brittle multi-line quoting when we launch it via bash -lc.
+    local worker_script tmp_script
+    worker_script="${dash_dir}/dashboard-sync-worker.sh"
+    tmp_script="${worker_script}.tmp.$$"
 
-  # Ensure child processes die when this worker is stopped.
-  cleanup_children() {
-    trap - EXIT INT TERM
-    if command -v pkill >/dev/null 2>&1; then
-      pkill -TERM -P $$ >/dev/null 2>&1 || true
-    fi
-  }
-  trap cleanup_children EXIT
-  trap "cleanup_children; exit 0" INT TERM
+    cat >"${tmp_script}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
 
-  # Sync interval (seconds). Default lowered to improve WebUI responsiveness.
-  # You can override it via: ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS=10 zypper-auto-helper --dash-open
-  interval="${ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS:-2}";
-  case "$interval" in
-    ''|*[!0-9]*) interval=2 ;;
-  esac
-  if [ "$interval" -lt 1 ] 2>/dev/null; then interval=1; fi
+dash_dir="$1"
+src_root="/var/log/zypper-auto"
 
-  # Best-effort background priority: idle IO + nice(19).
-  # Use -p $$ so we keep the custom argv0 (znh-dashboard-sync) intact.
-  if command -v ionice >/dev/null 2>&1; then
-    ionice -c3 -p $$ >/dev/null 2>&1 || true
+# Ensure child processes die when this worker is stopped.
+cleanup_children() {
+  trap - EXIT INT TERM
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -P $$ >/dev/null 2>&1 || true
   fi
-  if command -v renice >/dev/null 2>&1; then
-    renice -n 19 -p $$ >/dev/null 2>&1 || true
-  fi
+}
+trap cleanup_children EXIT
+trap "cleanup_children; exit 0" INT TERM
 
-  sync_one() {
-    # Atomic "update if newer" copy: avoids partial reads by the browser.
-    local src="$1" dst="$2" tmp
-    [ -f "${src}" ] || return 0
+# Sync interval (seconds). Default lowered to improve WebUI responsiveness.
+# You can override it via: ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS=10 zypper-auto-helper --dash-open
+interval="${ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS:-2}"
+case "$interval" in
+  ''|*[!0-9]*) interval=2 ;;
+ esac
+if [ "$interval" -lt 1 ] 2>/dev/null; then interval=1; fi
 
-    if [ ! -f "${dst}" ] || [ "${src}" -nt "${dst}" ]; then
-      tmp="${dst}.tmp.$$"
-      if cp -f "${src}" "${tmp}" 2>/dev/null; then
-        if mv -f "${tmp}" "${dst}" 2>/dev/null; then
-          chmod 644 "${dst}" 2>/dev/null || true
-        else
-          rm -f "${tmp}" 2>/dev/null || true
-        fi
+sync_one() {
+  # Atomic "update if newer" copy: avoids partial reads by the browser.
+  local src="$1" dst="$2" tmp
+  [ -f "${src}" ] || return 0
+
+  if [ ! -f "${dst}" ] || [ "${src}" -nt "${dst}" ]; then
+    tmp="${dst}.tmp.$$"
+    if cp -f "${src}" "${tmp}" 2>/dev/null; then
+      if mv -f "${tmp}" "${dst}" 2>/dev/null; then
+        chmod 644 "${dst}" 2>/dev/null || true
       else
         rm -f "${tmp}" 2>/dev/null || true
-      fi
-    fi
-    return 0
-  }
-
-  while true; do
-    sync_one "${src_root}/status-data.json" "${dash_dir}/status-data.json"
-    sync_one "${src_root}/dashboard-install-tail.log" "${dash_dir}/dashboard-install-tail.log"
-    sync_one "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log"
-    sync_one "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log"
-    sync_one "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log"
-    sync_one "${src_root}/dashboard-verify-tail.log" "${dash_dir}/dashboard-verify-tail.log"
-
-    # Live mode polls download-status.txt; keep it synced too.
-    sync_one "${src_root}/download-status.txt" "${dash_dir}/download-status.txt"
-
-    # Live log: cap size so long-lived tabs can't blow up the browser (or disk).
-    # We only need recent context.
-    if [ -f "${src_root}/dashboard-live.log" ]; then
-      tmp="${dash_dir}/dashboard-live.log.tmp.$$"
-      tail -n 2500 "${src_root}/dashboard-live.log" >"${tmp}" 2>/dev/null || true
-      if mv -f "${tmp}" "${dash_dir}/dashboard-live.log" 2>/dev/null; then
-        chmod 644 "${dash_dir}/dashboard-live.log" 2>/dev/null || true
-      else
-        rm -f "${tmp}" 2>/dev/null || true
-      fi
-    fi
-
-    # status.html is larger; only update if it changed.
-    sync_one "${src_root}/status.html" "${dash_dir}/status.html"
-
-    # Prefer event-driven sync when available so Live mode feels instant.
-    # Wait for changes OR time out after ${interval}s.
-    if command -v inotifywait >/dev/null 2>&1; then
-      # Debounce: if logs are being written rapidly, inotify can fire extremely
-      # often. Sleep briefly after an event so we group bursts into one sync.
-      inotifywait -qq -t "${interval}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null
-      rc=$?
-      if [ "${rc}" -eq 0 ] 2>/dev/null; then
-        sleep 0.5
       fi
     else
-      sleep "$interval"
+      rm -f "${tmp}" 2>/dev/null || true
     fi
-  done
-' _ "${dash_dir}"
-SYNC
-)
+  fi
+  return 0
+}
+
+while true; do
+  sync_one "${src_root}/status-data.json" "${dash_dir}/status-data.json"
+  sync_one "${src_root}/dashboard-install-tail.log" "${dash_dir}/dashboard-install-tail.log"
+  sync_one "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log"
+  sync_one "${src_root}/dashboard-journal-tail.log" "${dash_dir}/dashboard-journal-tail.log"
+  sync_one "${src_root}/dashboard-api.log" "${dash_dir}/dashboard-api.log"
+  sync_one "${src_root}/dashboard-verify-tail.log" "${dash_dir}/dashboard-verify-tail.log"
+
+  # Live mode polls download-status.txt; keep it synced too.
+  sync_one "${src_root}/download-status.txt" "${dash_dir}/download-status.txt"
+
+  # Live log: cap size so long-lived tabs can't blow up the browser (or disk).
+  # We only need recent context.
+  if [ -f "${src_root}/dashboard-live.log" ]; then
+    tmp="${dash_dir}/dashboard-live.log.tmp.$$"
+    tail -n 2500 "${src_root}/dashboard-live.log" >"${tmp}" 2>/dev/null || true
+    if mv -f "${tmp}" "${dash_dir}/dashboard-live.log" 2>/dev/null; then
+      chmod 644 "${dash_dir}/dashboard-live.log" 2>/dev/null || true
+    else
+      rm -f "${tmp}" 2>/dev/null || true
+    fi
+  fi
+
+  # status.html is larger; only update if it changed.
+  sync_one "${src_root}/status.html" "${dash_dir}/status.html"
+
+  # Prefer event-driven sync when available so Live mode feels instant.
+  # Wait for changes OR time out after ${interval}s.
+  if command -v inotifywait >/dev/null 2>&1; then
+    # Debounce: if logs are being written rapidly, inotify can fire extremely
+    # often. Sleep briefly after an event so we group bursts into one sync.
+    inotifywait -qq -t "${interval}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null
+    rc=$?
+    if [ "${rc}" -eq 0 ] 2>/dev/null; then
+      sleep 0.5
+    fi
+  else
+    sleep "$interval"
+  fi
+ done
+EOF
+
+    mv -f "${tmp_script}" "${worker_script}" 2>/dev/null || rm -f "${tmp_script}" 2>/dev/null || true
+    chmod 755 "${worker_script}" 2>/dev/null || true
+    if [ -n "${user_name}" ]; then
+        chown "${user_name}:${user_name}" "${worker_script}" 2>/dev/null || true
+    fi
 
     # Launch worker detached as the desktop user if known.
+    # Use a simple argv-only launch command so quoting can't break.
     if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
-        sudo -u "${user_name}" bash -lc "nohup ${run_cmd} >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash \"\$@\"' _ \"${worker_script}\" \"${dash_dir}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
     else
-        # Fallback: run as current user (non-sudo fast path already runs as desktop user).
-        bash -lc "nohup ${run_cmd} >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash "$@"' _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
+        echo $! >"${pid_file}" 2>/dev/null || true
     fi
 
     chmod 600 "${pid_file}" 2>/dev/null || true
@@ -1901,6 +1904,7 @@ __znh_write_dashboard_schema_json() {
     "ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 600, "step": 30, "default": "180"},
     "ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 7200, "step": 60, "default": "1800"},
     "ROCKET_WIZARD_USE_XMLOUT": {"type": "bool", "default": "true"},
+    "ROCKET_WIZARD_ALLOW_VENDOR_CHANGE": {"type": "bool", "default": "false"},
     "ROCKET_WIZARD_FORCE_RESOLUTION": {"type": "bool", "default": "false"},
 
     "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
@@ -7602,6 +7606,16 @@ ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS=1800
 # real progress percentages.
 # Default: true
 ROCKET_WIZARD_USE_XMLOUT=true
+
+# ROCKET_WIZARD_ALLOW_VENDOR_CHANGE
+# Advanced. When true, Rocket Update Wizard adds "--allow-vendor-change" to its zypper dup
+# preview + install runs.
+#
+# This is useful when the solver proposes vendor switches (common with OBS repos) and you
+# want Rocket to allow those changes in non-interactive mode.
+#
+# Default: false
+ROCKET_WIZARD_ALLOW_VENDOR_CHANGE=false
 
 # ROCKET_WIZARD_FORCE_RESOLUTION
 # DANGEROUS / advanced. When true, Rocket install adds "--force-resolution" to zypper dup.
@@ -14225,6 +14239,7 @@ generate_dashboard() {
         { key: 'ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS', type: 'int', label: 'Rocket Wizard: preview lock-wait timeout (seconds)', help: 'How long preview waits if YaST/zypper lock is active.' },
         { key: 'ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS', type: 'int', label: 'Rocket Wizard: install lock-wait timeout (seconds)', help: 'How long install waits if YaST/zypper lock is active.' },
         { key: 'ROCKET_WIZARD_USE_XMLOUT', type: 'bool', label: 'Rocket Wizard: use zypper --xmlout for real progress %', advanced: true, help: 'Recommended ON. Turning off may reduce progress accuracy.' },
+        { key: 'ROCKET_WIZARD_ALLOW_VENDOR_CHANGE', type: 'bool', label: 'Rocket Wizard: allow vendor change (--allow-vendor-change)', advanced: true, help: 'When enabled, Rocket adds --allow-vendor-change to its zypper dup preview+install runs.' },
         { key: 'ROCKET_WIZARD_FORCE_RESOLUTION', type: 'bool', label: 'DANGEROUS: Rocket Wizard add --force-resolution to zypper dup', danger: true, danger_phrase: 'FORCE', advanced: true, help: 'Not recommended. Requires unlocking danger zone + typing FORCE on change.' },
 
         { key: 'ZYPPER_TURBO_TUNER_ENABLED', type: 'bool', label: 'Zypper Turbo tuner (optimize /etc/zypp/zypp.conf)', advanced: true, help: 'Tweaks /etc/zypp/zypp.conf for performance.' },
@@ -18769,6 +18784,11 @@ generate_dashboard() {
             conflictDetected = false;
             conflictSummary = '';
         }
+
+        // Rocket vendor-change toggle (advanced)
+        var allowVendor = false;
+        try { allowVendor = String((_settingsConfig || {}).ROCKET_WIZARD_ALLOW_VENDOR_CHANGE || '').toLowerCase() === 'true'; } catch (e_av0) { allowVendor = false; }
+
         _ru.conflict_override = false;
 
         // If there are no system updates, exit early (no need for confirmation step).
@@ -18829,6 +18849,8 @@ generate_dashboard() {
                 '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
                 '  <div style="font-weight:950;">Conflict detected</div>',
                 '  <div style="margin-top:6px; font-weight:800;">The preview suggests solver conflicts / manual decisions. Non-interactive <code>zypper dup</code> may abort. Recommended: run the update in a terminal.</div>',
+                '  <div style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Rocket setting: <code>ROCKET_WIZARD_ALLOW_VENDOR_CHANGE</code> = <strong>' + (allowVendor ? 'true' : 'false') + '</strong></div>',
+                (!allowVendor ? '  <button class="pill" type="button" id="ru-enable-vendor-change" style="margin-top:10px;">Enable allow-vendor-change (Rocket)</button>' : ''),
                 (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + conflictSummary.replace(/</g,'&lt;') + '</pre>') : ''),
                 '</div>',
             ].join('\n');
@@ -18914,6 +18936,35 @@ generate_dashboard() {
         if (rb) rb.addEventListener('click', function(ev) {
             try { addRipple(rb, ev.clientX, ev.clientY); } catch (e2) {}
             rocketUpdateWizardOpen({ auto_simulate: !!_ru.auto_simulate });
+        });
+
+        // Conflict helper: one-click enable vendor change for Rocket (best-effort)
+        var evc = document.getElementById('ru-enable-vendor-change');
+        if (evc) evc.addEventListener('click', function(ev) {
+            try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+            try { addRipple(evc, ev.clientX, ev.clientY); } catch (e1) {}
+            try { evc.disabled = true; } catch (e2) {}
+            toast('Applying setting…', 'Enabling ROCKET_WIZARD_ALLOW_VENDOR_CHANGE', 'ok');
+
+            _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: { ROCKET_WIZARD_ALLOW_VENDOR_CHANGE: 'true' } }) }).then(function(r) {
+                _settingsConfig = (r && r.config) ? r.config : _settingsConfig;
+
+                // Best-effort: update settings drawer checkbox if it is visible.
+                try {
+                    var form = document.getElementById('settings-form');
+                    var cb = form ? form.querySelector('input[type="checkbox"][data-key="ROCKET_WIZARD_ALLOW_VENDOR_CHANGE"]') : null;
+                    if (cb) cb.checked = true;
+                } catch (e3) {}
+
+                toast('Updated', 'Vendor change enabled for Rocket. Refreshing preview…', 'ok');
+                rocketUpdateWizardOpen({ auto_simulate: !!_ru.auto_simulate });
+                return r;
+            }).catch(function(err) {
+                var msg = (err && err.message) ? err.message : 'failed';
+                toast('Setting failed', msg, 'err');
+            }).finally(function() {
+                try { evc.disabled = false; } catch (e4) {}
+            });
         });
 
         try { highlightBlock('ru-preview-out'); } catch (e3) {}
@@ -19031,9 +19082,11 @@ generate_dashboard() {
         _suSetLog('');
     }
 
-    function _ruRenderDone(title, subtitle, logText, restartText) {
+    function _ruRenderDone(title, subtitle, logText, restartText, opts) {
         var e = _suEls();
         if (!e.body) return;
+
+        opts = opts || {};
 
         var safe = function(s) { return String(s || '').replace(/</g, '&lt;'); };
 
@@ -19050,8 +19103,39 @@ generate_dashboard() {
             restartBlock = '<div style="color: var(--muted); font-size:0.9rem; margin-top: 12px;">No restart-check output captured.</div>';
         }
 
+        var conflictDetected = false;
+        var conflictSummary = '';
+        try {
+            conflictDetected = !!(opts && opts.conflict_detected);
+            conflictSummary = (opts && opts.conflict_summary != null) ? String(opts.conflict_summary) : '';
+        } catch (e_cf_done) {
+            conflictDetected = false;
+            conflictSummary = '';
+        }
+
+        var interactiveCmd = '';
+        try { interactiveCmd = String(opts && opts.interactive_cmd ? opts.interactive_cmd : '').trim(); } catch (e_cmd0) { interactiveCmd = ''; }
+        if (!interactiveCmd) interactiveCmd = 'zypper-run-install';
+
+        var hintBlock = '';
+        if (conflictDetected) {
+            hintBlock = [
+                '<div class="overlay-alert overlay-alert-warn" style="margin-top: 12px; border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
+                '  <div style="font-weight:950;">Manual solver decision required</div>',
+                '  <div style="margin-top:6px; font-weight:800;">The WebUI runs <code>zypper dup</code> non-interactively. If zypper prompts for a solution (vendor switch / obsolete / dependency break), run an interactive update in a terminal.</div>',
+                (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 180px; margin-top: 10px;">' + safe(conflictSummary) + '</pre>') : ''),
+                '  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+                '    <button class="pill" type="button" id="ru-copy-interactive">Copy command</button>',
+                '    <code style="font-size:0.90rem;">' + safe(interactiveCmd) + '</code>',
+                '  </div>',
+                '  <div style="color: var(--muted); font-size:0.88rem; margin-top:8px;">Alternative: run <code>sudo zypper dup</code> directly and choose a solution.</div>',
+                '</div>'
+            ].join('\n');
+        }
+
         e.body.innerHTML = [
             '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
+            hintBlock,
             '<div class="overlay-scroll">',
             '  <div style="font-weight:950; margin-bottom: 8px;">Install log (tail)</div>',
             '  <pre class="overlay-pre" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
@@ -19059,6 +19143,40 @@ generate_dashboard() {
             '</div>',
             '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
         ].join('\n');
+
+        // Wire copy button (best-effort)
+        var cbtn = document.getElementById('ru-copy-interactive');
+        if (cbtn) cbtn.addEventListener('click', function() {
+            try {
+                if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(interactiveCmd, cbtn);
+                    return;
+                }
+            } catch (e0) {}
+
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(interactiveCmd).then(function() {
+                        toast('Copied command', interactiveCmd, 'ok');
+                    }, function() {
+                        toast('Copy failed', interactiveCmd, 'err');
+                    });
+                    return;
+                }
+            } catch (e1) {}
+
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = interactiveCmd;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                toast('Copied command', interactiveCmd, 'ok');
+            } catch (e2) {
+                toast('Copy failed', interactiveCmd, 'err');
+            }
+        });
 
         if (e.close) e.close.textContent = 'OK';
         _suSetButtons({
@@ -19245,8 +19363,35 @@ generate_dashboard() {
                             }
                         } catch (eN) {}
 
+                        var cfDet3 = false;
+                        var cfSum3 = '';
+                        try {
+                            cfDet3 = !!(j && j.conflict_detected);
+                            cfSum3 = (j && j.conflict_summary != null) ? String(j.conflict_summary) : '';
+                        } catch (eCFJ) {
+                            cfDet3 = false;
+                            cfSum3 = '';
+                        }
+
+                        // Local fallback detection (in case API is older or conflict info was missed)
+                        if (!cfDet3) {
+                            try {
+                                var low3 = String(logText || '').toLowerCase();
+                                if (low3.indexOf('problem:') !== -1 || low3.indexOf('choose from above solutions') !== -1 || low3.indexOf('solverrun solutions') !== -1) {
+                                    cfDet3 = true;
+                                }
+                            } catch (eCFJ2) {}
+                        }
+
+                        var doneOpts = {};
+                        if (cfDet3) {
+                            doneOpts.conflict_detected = true;
+                            doneOpts.conflict_summary = cfSum3;
+                            doneOpts.interactive_cmd = 'zypper-run-install';
+                        }
+
                         try { znhTaskDone('system-update', false); } catch (e_task_ru4) {}
-                        _ruRenderDone('Update failed', 'zypper dup returned a non-zero exit code (see log).', logText, j.restart_check_output || '');
+                        _ruRenderDone('Update failed', 'zypper dup returned a non-zero exit code (see log).', logText, j.restart_check_output || '', doneOpts);
                     }
                 }
 
@@ -37870,6 +38015,8 @@ def _detect_solver_conflict(text: str, rc: int) -> tuple[bool, str]:
     markers = [
         "problem:",
         "solverrun solutions:",
+        "choose from above solutions",
+        "choose from above solutions by number",
         "nothing provides",
         "conflict",
         "package requires",
@@ -38627,6 +38774,14 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
 
     tail_pretty = _zypper_xml_pretty(tail)
 
+    conflict_detected = False
+    conflict_summary = ""
+    try:
+        if rc is not None:
+            conflict_detected, conflict_summary = _detect_solver_conflict(tail_pretty, int(rc))
+    except Exception:
+        conflict_detected, conflict_summary = False, ""
+
     return {
         "job_id": jid,
         "type": "system-dup",
@@ -38639,6 +38794,8 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
         "output": tail_pretty,
         "output_truncated": bool(truncated),
         "restart_check_output": restart_out,
+        "conflict_detected": bool(conflict_detected),
+        "conflict_summary": str(conflict_summary or ""),
         "resumed": True,
         "unit": unit,
         "log_path": log_path,
@@ -39492,6 +39649,15 @@ class Handler(BaseHTTPRequestHandler):
             eff, _warnings, _invalid = _read_conf(self.server.conf_path)
             extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
 
+            # Rocket-specific vendor policy (does not affect background downloader/notifier).
+            allow_vendor_change = False
+            try:
+                allow_vendor_change = str(eff.get("ROCKET_WIZARD_ALLOW_VENDOR_CHANGE", "false") or "false").strip().lower() == "true"
+            except Exception:
+                allow_vendor_change = False
+            if allow_vendor_change and "--allow-vendor-change" not in extra_flags:
+                extra_flags = ["--allow-vendor-change"] + list(extra_flags)
+
             # Better lock handling: if zypper/YaST is running, wait a bit instead of failing instantly.
             # Controlled via /etc/zypper-auto.conf (and WebUI Settings).
             lock_wait_s = 180
@@ -39667,6 +39833,8 @@ class Handler(BaseHTTPRequestHandler):
                             "output": tail,
                             "output_truncated": bool(job.get("output_truncated")),
                             "restart_check_output": job.get("restart_check_output"),
+                            "conflict_detected": bool(job.get("conflict_detected")),
+                            "conflict_summary": str(job.get("conflict_summary") or ""),
                         }, origin)
                 else:
                     job = jobs.get(job_id)
@@ -39690,6 +39858,8 @@ class Handler(BaseHTTPRequestHandler):
                         "output": tail,
                         "output_truncated": bool(job.get("output_truncated")),
                         "restart_check_output": job.get("restart_check_output"),
+                        "conflict_detected": bool(job.get("conflict_detected")),
+                        "conflict_summary": str(job.get("conflict_summary") or ""),
                     }, origin)
             except Exception as e:
                 return _json_response(self, 500, {"error": f"job lookup failed: {e}"}, origin)
@@ -40433,6 +40603,15 @@ class Handler(BaseHTTPRequestHandler):
             if force_resolution and "--force-resolution" not in extra_flags:
                 extra_flags = ["--force-resolution"] + list(extra_flags)
 
+            # Rocket-specific vendor policy (does not affect background downloader/notifier).
+            allow_vendor_change = False
+            try:
+                allow_vendor_change = str(eff.get("ROCKET_WIZARD_ALLOW_VENDOR_CHANGE", "false") or "false").strip().lower() == "true"
+            except Exception:
+                allow_vendor_change = False
+            if allow_vendor_change and "--allow-vendor-change" not in extra_flags:
+                extra_flags = ["--allow-vendor-change"] + list(extra_flags)
+
             job_id = secrets.token_urlsafe(18)
             unit = f"znh-webui-dup-{job_id[:8]}"
             log_path = f"/var/log/zypper-auto/service-logs/webui-dup-{job_id[:10]}.log"
@@ -40469,6 +40648,8 @@ class Handler(BaseHTTPRequestHandler):
                 "log_path": log_path,
                 "status_path": status_path,
                 "restart_check_output": "",
+                "conflict_detected": False,
+                "conflict_summary": "",
             }
 
             lock = getattr(self.server, "jobs_lock", None)
@@ -40935,6 +41116,17 @@ class Handler(BaseHTTPRequestHandler):
                         j["done"] = True
                         j["finished_at"] = time.time()
                         j["restart_check_output"] = restart_out
+
+                        # Best-effort: surface solver conflicts in the job payload so the WebUI
+                        # can show actionable guidance.
+                        try:
+                            cd, cs = _detect_solver_conflict(str(j.get("output", "")), int(j["rc"]))
+                            j["conflict_detected"] = bool(cd)
+                            j["conflict_summary"] = str(cs or "")
+                        except Exception:
+                            j["conflict_detected"] = False
+                            j["conflict_summary"] = ""
+
                         if j["rc"] == 0:
                             j["progress"] = 100
                             j["stage"] = "Done" if not simulate else "Dry-run done"
