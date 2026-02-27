@@ -9982,7 +9982,7 @@ generate_dashboard() {
         width: 11px;
         height: 14px;
         /* Flame anchor: tweak these two values if emoji/font rendering differs */
-        left: 46%;
+        left: 16%;
         top: 21px;
         transform: translateX(-50%) rotate(-40deg);
         transform-origin: 50% 0%;
@@ -13932,7 +13932,7 @@ generate_dashboard() {
 
         if (btnRefresh) btnRefresh.addEventListener('click', function(ev) {
             try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e2) {}
-            try { dashboardRefreshRun(null); } catch (e3) {
+            try { dashboardRefreshRun(btnRefresh); } catch (e3) {
                 toast('Refresh failed', (e3 && e3.message) ? e3.message : 'failed', 'err');
             }
         });
@@ -15044,46 +15044,134 @@ generate_dashboard() {
     })();
 
     // --- Dashboard refresh (dashboard -> root API) ---
+    var _znh_dash_refresh_reload_timer = null;
+
+    function _znhDashRefreshBannerTextSet(msg) {
+        try {
+            var t = document.getElementById('znh-dashboard-update-text');
+            if (t) t.textContent = String(msg || '');
+        } catch (e) {}
+    }
+
+    function _znhDashRefreshSetBtnText(btn, fb, text) {
+        try {
+            if (fb) {
+                fb.textContent = String(text || '');
+                return;
+            }
+        } catch (e0) {}
+        try {
+            if (btn) btn.textContent = String(text || '');
+        } catch (e1) {}
+    }
+
+    function _znhDashRefreshReloadNow() {
+        // Cache-busting reload (more reliable than plain reload when the browser keeps
+        // an old in-memory copy of status.html around).
+        try {
+            if (window.location && window.location.href && typeof URL === 'function') {
+                var u = new URL(String(window.location.href));
+                u.searchParams.set('znh_reload_ts', String(Date.now()));
+                window.location.replace(u.toString());
+                return;
+            }
+        } catch (e0) {}
+        try { window.location.reload(); } catch (e1) {}
+    }
+
+    function _znhDashRefreshStartReloadCountdown(seconds, btn, fb) {
+        var n = parseInt(seconds || 0, 10) || 0;
+        if (n < 1) n = 1;
+        if (n > 60) n = 60;
+
+        if (_znh_dash_refresh_reload_timer) {
+            try { clearInterval(_znh_dash_refresh_reload_timer); } catch (e0) {}
+            _znh_dash_refresh_reload_timer = null;
+        }
+
+        function render() {
+            var msg = 'Dashboard refreshed. Auto-reload in ' + String(n) + 's…';
+            _znhDashRefreshBannerTextSet(msg);
+            _znhDashRefreshSetBtnText(btn, fb, 'Reloading in ' + String(n) + '…');
+        }
+
+        render();
+        _znh_dash_refresh_reload_timer = setInterval(function() {
+            n = n - 1;
+            if (n <= 0) {
+                try { clearInterval(_znh_dash_refresh_reload_timer); } catch (e2) {}
+                _znh_dash_refresh_reload_timer = null;
+                _znhDashRefreshBannerTextSet('Reloading now…');
+                _znhDashRefreshSetBtnText(btn, fb, 'Reloading…');
+                _znhDashRefreshReloadNow();
+                return;
+            }
+            render();
+        }, 1000);
+    }
+
     function dashboardRefreshRun(btnEl) {
-        var btn = btnEl || document.getElementById('dash-refresh-run-btn');
+        var btn = btnEl || document.getElementById('dash-refresh-run-btn') || document.getElementById('znh-dashboard-update-refresh-btn');
         var fb = null;
         try { fb = btn ? btn.querySelector('.cmd-copy-feedback') : null; } catch (e) { fb = null; }
 
-        if (btn) {
-            btn.disabled = true;
-            btn.classList.add('copied');
-        }
-        if (fb) fb.textContent = 'Refreshing…';
+        // Preserve original label (so we can restore it after auto-reload is cancelled/fails).
+        try {
+            if (btn && !btn.dataset.znhOrigText) {
+                btn.dataset.znhOrigText = fb ? String(fb.textContent || '') : String(btn.textContent || '');
+            }
+        } catch (eO) {}
 
-        toast('Refreshing dashboard…', 'Running sudo-free refresh via localhost API', 'ok');
+        if (btn) {
+            try { btn.disabled = true; } catch (e0) {}
+            try { btn.classList.add('copied'); } catch (e1) {}
+        }
+        _znhDashRefreshSetBtnText(btn, fb, 'Refreshing…');
+
+        // Make the banner show a deterministic message (even if it was previously hidden).
+        _znhDashRefreshBannerTextSet('Refreshing dashboard via localhost API…');
+
+        toast('Refreshing dashboard…', 'Regenerating status.html via localhost API', 'ok');
         _settingsClientLog('info', 'dashboard refresh requested', {});
 
         return _api('/api/dashboard/refresh', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
-            toast('Dashboard refreshed', (r && r.rc === 0) ? 'OK (reloading soon)' : ('rc=' + String(r.rc || '?')), (r && r.rc === 0) ? 'ok' : 'err');
-            _settingsClientLog((r && r.rc === 0) ? 'info' : 'warn', 'dashboard refresh result', { rc: r.rc });
+            var ok = !!(r && r.rc === 0);
+            toast('Dashboard refreshed', ok ? 'OK (auto-reload scheduled)' : ('rc=' + String(r && r.rc != null ? r.rc : '?')), ok ? 'ok' : 'err');
+            _settingsClientLog(ok ? 'info' : 'warn', 'dashboard refresh result', { rc: r ? r.rc : null });
 
-            if (fb) fb.textContent = (r && r.rc === 0) ? 'OK ✓' : 'Done';
+            if (!ok) {
+                _znhDashRefreshSetBtnText(btn, fb, 'Refresh failed');
+                _znhDashRefreshBannerTextSet('Dashboard refresh returned non-zero rc. Please check the API log and try again.');
+                return r;
+            }
 
             // The dashboard sync worker keeps /var/log/zypper-auto/status.html -> ~/.local/share/zypper-notify/status.html in sync.
-            // It prefers inotify (instant) with a short interval fallback (default ~2s).
-            // Reload after a short delay so most users see the refreshed HTML.
-            setTimeout(function() {
-                try { window.location.reload(); } catch (e) {}
-            }, 12000);
-
+            // It prefers inotify (instant) with a short interval fallback.
+            // UX: show a countdown so users KNOW the reload is pending.
+            _znhDashRefreshStartReloadCountdown(10, btn, fb);
             return r;
+
         }).catch(function(e) {
             var msg = (e && e.message) ? e.message : 'API not reachable';
             toast('Refresh failed', msg, 'err');
             _settingsClientLog('warn', 'dashboard refresh failed', { error: msg });
-            if (fb) fb.textContent = 'Failed';
+            _znhDashRefreshSetBtnText(btn, fb, 'Failed');
+            _znhDashRefreshBannerTextSet('Refresh failed: ' + String(msg) + ' (API may be restarting)');
             return null;
+
         }).finally(function() {
             if (btn) {
                 setTimeout(function() {
-                    try { btn.disabled = false; } catch (e) {}
-                    try { btn.classList.remove('copied'); } catch (e) {}
-                    if (fb) fb.textContent = 'Refreshing…';
+                    try { btn.disabled = false; } catch (e0) {}
+                    try { btn.classList.remove('copied'); } catch (e1) {}
+
+                    // Restore original text unless a reload countdown is active.
+                    if (!_znh_dash_refresh_reload_timer) {
+                        try {
+                            var orig = btn.dataset ? String(btn.dataset.znhOrigText || '') : '';
+                            if (orig) _znhDashRefreshSetBtnText(btn, fb, orig);
+                        } catch (e2) {}
+                    }
                 }, 900);
             }
         });

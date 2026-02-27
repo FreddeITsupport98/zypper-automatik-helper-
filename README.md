@@ -1922,6 +1922,7 @@ systemctl status zypper-autodownload.service
   - 🛡️ **IMPROVED:** In Rocket preview, enabling vendor change is now gated behind the **manual-intervention acknowledgement** checkbox (so you must explicitly confirm you understand solver conflicts before turning it on).
   - 🧪 **IMPROVED:** Rocket **Simulation mode** is now labeled as a **dry-run test** (clearer button label + a short note explaining what it tests).
   - 🎨 **IMPROVED:** Dashboard header Rocket button flame effect is now aligned diagonally with the rocket icon (clearer “thrust” look during downloads/refresh).
+  - 🔁 **IMPROVED:** "Run: Refresh Dashboard" now schedules an **auto-reload** with a visible **countdown** (so it’s clear when the refreshed dashboard will load).
   - 🧾 **IMPROVED:** When Rocket install fails due to solver conflicts, the Result view now shows an interactive fallback command (copyable) so you can run `zypper-run-install` (recommended) or `sudo zypper dup` and choose a solution.
   - 🧰 **IMPROVED:** Rocket Update Wizard now supports real progress percentages via zypper `--xmlout` (WebUI still shows readable logs via best-effort XML text extraction).
   - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:
