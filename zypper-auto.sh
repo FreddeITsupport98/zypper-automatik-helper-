@@ -14536,7 +14536,7 @@ generate_dashboard() {
     }
 
     function znhTaskSet(taskObj) {
-        // taskObj: {type:'self-update'|'system-update'|'quick-action'|'scrub-ghost', job_id, channel?, dry_run?, simulate?, action?, title?, started_iso?}
+        // taskObj: {type:'self-update'|'system-update'|'quick-action'|'scrub-ghost'|'snapper-cleanup', job_id, channel?, dry_run?, simulate?, action?, title?, started_iso?}
         if (!taskObj || !taskObj.type || !taskObj.job_id) return;
         if (!taskObj.started_iso) {
             try { taskObj.started_iso = new Date().toISOString(); } catch (e) {}
@@ -14551,6 +14551,9 @@ generate_dashboard() {
         } else if (taskObj.type === 'scrub-ghost') {
             title = 'scrub-ghost';
             try { title = String(taskObj.title || taskObj.action || 'scrub-ghost'); } catch (e) { title = 'scrub-ghost'; }
+        } else if (taskObj.type === 'snapper-cleanup') {
+            title = 'Snapper cleanup';
+            try { title = String(taskObj.title || 'Snapper cleanup'); } catch (e) { title = 'Snapper cleanup'; }
         }
 
         _znhTaskBubbleSetText(title, 'Running…');
@@ -14566,6 +14569,8 @@ generate_dashboard() {
             try { title = String(job.title || job.action || 'Quick action'); } catch (e) { title = 'Quick action'; }
         } else if (taskType === 'scrub-ghost') {
             try { title = String(job.title || job.action || 'scrub-ghost'); } catch (e) { title = 'scrub-ghost'; }
+        } else if (taskType === 'snapper-cleanup') {
+            try { title = String(job.title || 'Snapper cleanup'); } catch (e) { title = 'Snapper cleanup'; }
         }
 
         var st = '';
@@ -14590,6 +14595,7 @@ generate_dashboard() {
         else if (taskType === 'system-update') title = 'Update system';
         else if (taskType === 'quick-action') title = 'Quick action';
         else if (taskType === 'scrub-ghost') title = 'scrub-ghost';
+        else if (taskType === 'snapper-cleanup') title = 'Snapper cleanup';
 
         _znhTaskBubbleSetText(title, ok ? 'Done' : 'Failed');
         _znhTaskBubbleSetVisible(true);
@@ -14617,6 +14623,17 @@ generate_dashboard() {
             try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'overlay reopen blocked (guard active)'); } catch (e1) {}
             return;
         }
+
+        // Route to the correct overlay based on task type.
+        if (t.type === 'snapper-cleanup') {
+            try {
+                if (typeof snapperTaskOpenOverlay === 'function') {
+                    snapperTaskOpenOverlay(t);
+                    return;
+                }
+            } catch (eS0) {}
+        }
+
         try { _suShow(true); } catch (e) {}
     }
 
@@ -14668,6 +14685,12 @@ generate_dashboard() {
                     _sgPollJob(String(t.job_id), String(t.action || ''), String(t.title || 'scrub-ghost'));
                 }
             } catch (e14) {}
+        } else if (t.type === 'snapper-cleanup') {
+            try {
+                if (typeof snapperTaskResumeInit === 'function') {
+                    snapperTaskResumeInit(t);
+                }
+            } catch (e15) {}
         }
     }
 
@@ -16219,7 +16242,12 @@ generate_dashboard() {
         confirm_action: '',
         confirm: null,
         doRun: null,
-        resolve: null
+        resolve: null,
+
+        // Background job state (Snapper cleanup uses /api/snapper/start + /api/snapper/job)
+        job_id: '',
+        poll_timer: null,
+        last_job: null
     };
 
     function _snEscapeHtml(s) {
@@ -16241,8 +16269,11 @@ generate_dashboard() {
             '      <div class="overlay-title" id="sn-title">Snapper</div>',
             '      <div class="overlay-step" id="sn-step"></div>',
             '    </div>',
-            '    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">',
-            '      <div class="overlay-step" id="sn-mode"></div>',
+            '    <div style="display:flex; align-items:flex-start; justify-content:flex-end; gap:10px; flex-wrap:wrap;">',
+            '      <button class="pill" type="button" id="sn-min-btn" style="display:none;">Minimize</button>',
+            '      <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">',
+            '        <div class="overlay-step" id="sn-mode"></div>',
+            '      </div>',
             '    </div>',
             '  </div>',
             '  <div class="overlay-body" id="sn-body"></div>',
@@ -16288,6 +16319,7 @@ generate_dashboard() {
             title: document.getElementById('sn-title'),
             step: document.getElementById('sn-step'),
             mode: document.getElementById('sn-mode'),
+            min: document.getElementById('sn-min-btn'),
             cancel: document.getElementById('sn-cancel-btn'),
             run: document.getElementById('sn-run-btn'),
             close: document.getElementById('sn-close-btn'),
@@ -16350,6 +16382,250 @@ generate_dashboard() {
         if (e.close) e.close.disabled = !!opts.close_disabled;
     }
 
+    function _snSetMinBtnVisible(v) {
+        var e = _snEls();
+        if (!e.min) return;
+        e.min.style.display = v ? '' : 'none';
+    }
+
+    function _snUpdateProgress(stage, pct) {
+        try {
+            var st = document.getElementById('sn-stage');
+            var pc = document.getElementById('sn-percent');
+            var bar = document.getElementById('sn-progress-bar');
+            if (st) st.textContent = String(stage || '');
+            if (pc) pc.textContent = String(parseInt(pct || 0, 10) || 0) + '%';
+            if (bar) bar.style.width = String(parseInt(pct || 0, 10) || 0) + '%';
+        } catch (e) {}
+    }
+
+    function _snSetLog(text) {
+        var pre = document.getElementById('sn-log');
+        if (!pre) return;
+        var t = String(text || '');
+        pre.textContent = t;
+        try { pre.scrollTop = pre.scrollHeight; } catch (eS) {}
+        try {
+            if (typeof highlightBlock === 'function' && t.length <= 12000) {
+                highlightBlock('sn-log');
+            }
+        } catch (eH) {}
+    }
+
+    function _snRenderRunning(taskInfo) {
+        taskInfo = taskInfo || {};
+        var e = _snEls();
+        if (!e.body) return;
+
+        var title = 'Snapper cleanup';
+        try { title = String(taskInfo.title || 'Snapper cleanup'); } catch (e0) { title = 'Snapper cleanup'; }
+
+        _snSetHeader('Running', 'In progress', title);
+        _snSetMinBtnVisible(true);
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Snapper cleanup running</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This job runs in the background. You can minimize and reopen from the bottom-right bubble.</div>',
+            '</div>',
+            '<div class="overlay-progress">',
+            '  <div class="overlay-progress-row"><span id="sn-stage">Running</span><span id="sn-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="sn-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="sn-log" style="max-height: 340px;">(resuming logs…)</pre>',
+            '<div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">',
+            '  <button class="pill" type="button" id="sn-copy-out-btn" title="Copy Snapper output to clipboard">Copy output</button>',
+            '</div>'
+        ].join('\n');
+
+        // Copy output
+        try {
+            var cb = document.getElementById('sn-copy-out-btn');
+            if (cb) cb.onclick = function() {
+                var txt = '';
+                try { txt = String((document.getElementById('sn-log') || {}).textContent || ''); } catch (eT) { txt = ''; }
+                if (!String(txt || '').trim()) { toast('Nothing to copy', 'No output yet', 'err'); return; }
+                try { copyCmd(txt, cb); } catch (eC) {
+                    try {
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(txt).then(function() { toast('Copied output', 'Snapper log copied', 'ok'); }, function() { toast('Copy failed', 'Clipboard permission denied', 'err'); });
+                            return;
+                        }
+                    } catch (eC2) {}
+                    toast('Copy failed', 'Clipboard not available', 'err');
+                }
+            };
+        } catch (eCB) {}
+
+        _snUpdateProgress('Running', 0);
+        _snSetLog('');
+
+        // Buttons while running: no Cancel/Run; OK is blocked until done.
+        _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: true, footer_center: true });
+        if (e.close) {
+            e.close.textContent = 'OK';
+            e.close.onclick = function() {
+                if (_sn.running) return;
+                _snClose(null);
+            };
+        }
+    }
+
+    function _snStopPoll() {
+        if (_sn.poll_timer) {
+            try { clearTimeout(_sn.poll_timer); } catch (e0) {}
+            _sn.poll_timer = null;
+        }
+    }
+
+    function _snPollJob(jobId, title) {
+        jobId = String(jobId || '').trim();
+        if (!jobId) return;
+
+        _sn.job_id = jobId;
+        _sn.running = true;
+
+        // Ensure persistent task bubble is visible + resume-safe.
+        try { znhTaskSet({ type: 'snapper-cleanup', job_id: jobId, action: 'cleanup', title: String(title || 'Snapper cleanup') }); } catch (eT) {}
+
+        var pollFailures = 0;
+        var pollMaxFailures = 10;
+        var pollInFlight = false;
+        var lastPct = 0;
+
+        function tick() {
+            if (pollInFlight) return;
+            pollInFlight = true;
+
+            return _api('/api/snapper/job?job_id=' + encodeURIComponent(jobId), { method: 'GET' }).then(function(j) {
+                if (!j) return null;
+                _sn.last_job = j;
+
+                pollFailures = 0;
+
+                var pct = 0;
+                try { pct = parseInt(j.progress || 0, 10) || 0; } catch (eP0) { pct = 0; }
+                lastPct = pct;
+
+                _snUpdateProgress(j.stage || 'Running', pct);
+                if (j.output != null) {
+                    _snSetLog(String(j.output || ''));
+                    // Mirror into main Snapper panel (best-effort)
+                    try { if (typeof _snapperSetOut === 'function') _snapperSetOut(String(j.output || '')); } catch (eM) {}
+                }
+                try { znhTaskUpdateFromJob('snapper-cleanup', j); } catch (eT2) {}
+
+                if (j.done) {
+                    _snStopPoll();
+                    _sn.running = false;
+
+                    var rc = (j && j.rc != null) ? parseInt(j.rc, 10) : -1;
+                    var out = '';
+                    try { out = String((j.output != null) ? j.output : ''); } catch (eO) { out = ''; }
+                    if (!out) out = '(no output)';
+
+                    // Keep overlay in sync
+                    _snSetLog(out);
+                    _snUpdateProgress((rc === 0) ? 'Done' : 'Failed', 100);
+
+                    // Mirror output into Snapper panel (final)
+                    try { if (typeof _snapperSetOut === 'function') _snapperSetOut(out); } catch (eP) {}
+
+                    // Enable OK
+                    try {
+                        var e = _snEls();
+                        _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+                        if (e.close) {
+                            e.close.textContent = 'OK';
+                            e.close.onclick = function() { _snClose(null); };
+                        }
+                    } catch (eB) {}
+
+                    // Resolve promise (if any)
+                    try {
+                        if (typeof _sn.resolve === 'function') {
+                            _sn.resolve({ rc: rc, output: out });
+                            _sn.resolve = null;
+                        }
+                    } catch (eRes) {}
+
+                    try { toast('Snapper cleanup', (rc === 0) ? 'OK' : ('rc=' + String(rc)), (rc === 0) ? 'ok' : 'err'); } catch (eToast) {}
+                    try { znhTaskDone('snapper-cleanup', rc === 0); } catch (eTD) {}
+                }
+
+                return j;
+            }).catch(function(err) {
+                pollFailures++;
+                var msg = (err && err.message) ? err.message : 'job poll failed';
+
+                _snUpdateProgress('Reconnecting…', lastPct);
+                _snSetLog('ERROR polling job (' + String(pollFailures) + '/' + String(pollMaxFailures) + '): ' + msg + '\nRetrying…');
+
+                if (pollFailures >= pollMaxFailures) {
+                    _snStopPoll();
+                    _sn.running = false;
+                    toast('Snapper polling failed', 'Too many errors. Please reload the page.', 'err');
+                    _snUpdateProgress('Failed', 100);
+
+                    try {
+                        var e2 = _snEls();
+                        _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+                        if (e2.close) e2.close.onclick = function() { _snClose(null); };
+                    } catch (eB2) {}
+
+                    try {
+                        if (typeof _sn.resolve === 'function') {
+                            _sn.resolve(null);
+                            _sn.resolve = null;
+                        }
+                    } catch (eRes2) {}
+
+                    try { znhTaskDone('snapper-cleanup', false); } catch (eTD2) {}
+                }
+
+                return null;
+            }).finally(function() {
+                pollInFlight = false;
+                if (_sn.running && jobId) {
+                    _sn.poll_timer = setTimeout(tick, 900);
+                }
+            });
+        }
+
+        tick();
+    }
+
+    function snapperTaskOpenOverlay(t) {
+        // Called from the bottom-right task bubble.
+        t = t || {};
+        var jid = String(t.job_id || '').trim();
+        if (!jid) return;
+
+        _snEnsureOverlay();
+        _snRenderRunning({ title: String(t.title || 'Snapper cleanup'), job_id: jid });
+        _snShow(true);
+
+        // Ensure polling is active.
+        if (!_sn.running || String(_sn.job_id || '') !== jid) {
+            _snPollJob(jid, String(t.title || 'Snapper cleanup'));
+        }
+    }
+
+    function snapperTaskResumeInit(t) {
+        // Called from znhTaskResumeInit() after page reload.
+        t = t || {};
+        var jid = String(t.job_id || '').trim();
+        if (!jid) return;
+
+        _snEnsureOverlay();
+        _snRenderRunning({ title: String(t.title || 'Snapper cleanup'), job_id: jid });
+        _snShow(false);
+
+        if (!_sn.running || String(_sn.job_id || '') !== jid) {
+            _snPollJob(jid, String(t.title || 'Snapper cleanup'));
+        }
+    }
+
     function _snBuildCopyCmd(action, params) {
         action = String(action || '').trim();
         params = params || {};
@@ -16402,6 +16678,12 @@ generate_dashboard() {
         _sn.confirm = null;
         _sn.doRun = null;
         _sn.resolve = null;
+
+        _sn.job_id = '';
+        _sn.last_job = null;
+        try { _snStopPoll(); } catch (e2) {}
+
+        try { _snSetMinBtnVisible(false); } catch (e3) {}
     }
 
     function _snOpenConfirmAndRun(opts) {
@@ -16520,6 +16802,19 @@ generate_dashboard() {
             _wireCopyOutput();
             try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP0) {}
 
+            // Minimize button (only meaningful once a job starts)
+            try {
+                _snSetMinBtnVisible(false);
+                if (e.min && !e.min._znh_bound) {
+                    e.min._znh_bound = true;
+                    e.min.addEventListener('click', function(ev) {
+                        try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+                        // Hide overlay but keep job running + bubble visible.
+                        _snShow(false);
+                    });
+                }
+            } catch (eMin0) {}
+
             _snSetButtons({ show_cancel: true, show_run: true, show_close: false, run_disabled: true, footer_center: true });
 
             if (e.cancel) e.cancel.onclick = function() {
@@ -16627,6 +16922,17 @@ generate_dashboard() {
                 }
 
                 if (useJob) {
+                    // Safety: only allow one background task at a time (reuse the task bubble).
+                    try {
+                        var t0 = _znhTaskLoad();
+                        if (t0 && t0.type && t0.job_id) {
+                            toast('Task running', 'A background job is already running. Use the bottom-right bubble.', 'err');
+                            _sn.running = false;
+                            _snSetButtons({ show_cancel: true, show_run: true, show_close: false, cancel_disabled: false, run_disabled: false });
+                            return;
+                        }
+                    } catch (eBusy0) {}
+
                     setProg('Starting', 5);
                     setLog('Starting Snapper job...');
 
@@ -16634,91 +16940,18 @@ generate_dashboard() {
                     bodyJob.confirm_token = confirmToken;
                     bodyJob.confirm_phrase = got2;
 
-                    var jobId = '';
-                    var pollFailures = 0;
-                    var pollMaxFailures = 10;
-                    var pollInFlight = false;
-                    var pollTimer = null;
-                    var lastPct = 5;
-
-                    function stopPoll() {
-                        if (pollTimer) {
-                            try { clearTimeout(pollTimer); } catch (e0) {}
-                            pollTimer = null;
-                        }
-                    }
-
-                    function pollTick() {
-                        if (pollInFlight) return;
-                        pollInFlight = true;
-
-                        return _api('/api/snapper/job?job_id=' + encodeURIComponent(jobId), { method: 'GET' }).then(function(j) {
-                            if (!j) return null;
-
-                            pollFailures = 0;
-
-                            var pct = 0;
-                            try { pct = parseInt(j.progress || 0, 10) || 0; } catch (eP0) { pct = 0; }
-                            lastPct = pct;
-
-                            setProg(j.stage || 'Running', pct);
-                            if (j.output != null) setLog(String(j.output || ''));
-
-                            if (j.done) {
-                                stopPoll();
-                                try {
-                                    var rcc = (j && j.rc != null) ? parseInt(j.rc, 10) : -1;
-                                    toast('Snapper: cleanup', (rcc === 0) ? 'OK' : ('rc=' + String(rcc)), (rcc === 0) ? 'ok' : 'err');
-                                } catch (eTD) {}
-                                finalizeResult({ rc: j.rc, output: j.output || '' });
-                            }
-
-                            return j;
-                        }).catch(function(err) {
-                            pollFailures++;
-                            var msg = (err && err.message) ? err.message : 'job poll failed';
-
-                            setProg('Reconnecting…', lastPct);
-                            setLog('ERROR polling job (' + String(pollFailures) + '/' + String(pollMaxFailures) + '): ' + msg + '\nRetrying…');
-
-                            if (pollFailures >= pollMaxFailures) {
-                                stopPoll();
-                                _sn.running = false;
-                                toast('Snapper polling failed', 'Too many errors. Please reload the page.', 'err');
-                                setProg('Failed', 100);
-                                _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
-
-                                try {
-                                    if (typeof _sn.resolve === 'function') {
-                                        _sn.resolve(null);
-                                        _sn.resolve = null;
-                                    }
-                                } catch (eRes2) {}
-
-                                if (e.close) {
-                                    e.close.textContent = 'OK';
-                                    e.close.onclick = function() { _snClose(null); };
-                                }
-                            }
-
-                            return null;
-                        }).finally(function() {
-                            pollInFlight = false;
-                            if (_sn.running && jobId) {
-                                pollTimer = setTimeout(pollTick, 900);
-                            }
-                        });
-                    }
-
                     _api('/api/snapper/start', { method: 'POST', body: JSON.stringify(bodyJob) }).then(function(r0) {
                         if (!r0 || !r0.job_id) throw new Error('missing job_id');
-                        jobId = String(r0.job_id);
-                        setProg('Running', 10);
-                        setLog('Job started: ' + jobId + '\nPolling output...');
-                        pollTick();
+                        var jobId = String(r0.job_id);
+
+                        // Switch UI into a resumable, minimizable running view.
+                        _snRenderRunning({ title: 'Snapper cleanup', job_id: jobId });
+                        _snShow(true);
+
+                        // Begin polling + bubble support.
+                        _snPollJob(jobId, 'Snapper cleanup');
                         return r0;
                     }).catch(function(err0) {
-                        stopPoll();
                         var msg0 = (err0 && err0.message) ? err0.message : 'start failed';
                         _sn.running = false;
                         toast('Snapper failed to start', msg0, 'err');
@@ -16914,8 +17147,14 @@ generate_dashboard() {
     function _scrubSetOut(text) {
         var el = document.getElementById('scrub-output');
         if (!el) return;
-        el.textContent = String(text || '');
-        highlightBlock('scrub-output');
+        var t = String(text || '');
+        el.textContent = t;
+        // Avoid expensive highlighting on huge logs.
+        try {
+            if (typeof highlightBlock === 'function' && t.length <= 12000) {
+                highlightBlock('scrub-output');
+            }
+        } catch (eH) {}
         try { el.scrollTop = el.scrollHeight; } catch (e) {}
     }
 
@@ -16943,6 +17182,47 @@ generate_dashboard() {
             });
         }
 
+        function doStartJob(confirm_token, confirm_phrase) {
+            var body = { action: action, params: params };
+            if (confirm_token) body.confirm_token = confirm_token;
+            if (confirm_phrase) body.confirm_phrase = confirm_phrase;
+
+            // Safety: only allow one background task at a time (reuse the shared bubble).
+            try {
+                var t0 = _znhTaskLoad();
+                if (t0 && t0.type && t0.job_id) {
+                    toast('Task running', 'A background job is already running. Use the bottom-right bubble.', 'err');
+                    return Promise.resolve(null);
+                }
+            } catch (eBusy0) {}
+
+            _scrubSetOut('Starting background job: ' + action + ' ...');
+            toast('Starting…', 'scrub-ghost', 'ok');
+
+            return _api('/api/scrub/start', { method: 'POST', body: JSON.stringify(body) }).then(function(r0) {
+                if (!r0 || !r0.job_id) throw new Error('missing job_id');
+                var jobId = String(r0.job_id);
+                _scrubSetOut('Job started: ' + jobId + '\n(You can minimize the overlay via the bottom-right bubble)');
+
+                // Open a minimizable overlay viewer (same as the wizard running view).
+                try { _suReset(); } catch (e0) {}
+                try { _ruReset(); } catch (e1) {}
+                try { if (typeof _qaReset === 'function') _qaReset(); } catch (e2) {}
+                try { _sgReset(); } catch (e3) {}
+
+                try { _suShow(true); } catch (e4) {}
+                try { _sgRenderRunning({ type: 'scrub-ghost', job_id: jobId, action: action, title: 'scrub-ghost' }); } catch (e5) {}
+                try { _sgPollJob(jobId, action, 'scrub-ghost'); } catch (e6) {}
+
+                return r0;
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'start failed';
+                _scrubSetOut('ERROR: ' + msg);
+                toast('scrub-ghost failed to start', msg, 'err');
+                return null;
+            });
+        }
+
         // Read-only actions: no confirm.
         if (!confirmAction) {
             return doRun('', '');
@@ -16957,7 +17237,9 @@ generate_dashboard() {
                 toast('Cancelled', 'No confirmation entered', 'err');
                 return null;
             }
-            return doRun(r.confirm_token, got);
+
+            // Use background job + minimizable overlay for confirmed actions.
+            return doStartJob(r.confirm_token, got);
         }).catch(function(e) {
             var msg = (e && e.message) ? e.message : 'confirm failed';
             toast('Confirm failed', msg, 'err');
