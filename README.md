@@ -613,6 +613,13 @@ Key options include:
 - **Snapper cleanup safety**
   - `SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED` – when `true` (default), Snapper cleanup
     warns if background cleanup appears to already be running.
+  - `SNAP_CLEANUP_BUSY_WAIT_SECONDS` – WebUI/non-interactive Snapper cleanup will wait
+    up to N seconds for Snapper to become idle (instead of failing immediately when
+    `snapper-cleanup.service` is active).
+  - `SNAP_CLEANUP_BUSY_POLL_SECONDS` – polling interval (seconds) used while waiting.
+  - `SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE` – **dangerous**: if `true`, and
+    Snapper is still busy after waiting, WebUI cleanup proceeds anyway (risk:
+    overlapping cleanup runs).
   - `SNAP_CLEANUP_CRITICAL_FREE_MB` – if free space on `/` is below this threshold,
     the helper will warn and require confirmation before running Snapper cleanup.
   - **Smart behavior:** when you run Snapper cleanup from the helper menu, it also
@@ -1846,6 +1853,9 @@ systemctl status zypper-autodownload.service
     - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
     - Force-prune now respects the keep-newest preference (it does **not** depend on Snapper `TIMELINE_LIMIT_*` / `NUMBER_LIMIT` rules).
   - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
+  - 🐛 **FIXED:** WebUI Snapper cleanup no longer fails just because Snapper is busy (e.g. `snapper-cleanup.service` active).
+    - It now waits up to `SNAP_CLEANUP_BUSY_WAIT_SECONDS` (poll: `SNAP_CLEANUP_BUSY_POLL_SECONDS`) before refusing.
+    - Optional (danger): `SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE=true` can override and run anyway.
   - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
     - WebUI now shows a small **Kernel purge: true/false** status indicator (green/red) so it’s obvious whether the setting is enabled.
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:

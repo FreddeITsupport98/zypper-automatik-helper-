@@ -1978,6 +1978,9 @@ __znh_write_dashboard_schema_json() {
     "SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY": {"type": "int", "min": 0, "max": 20, "step": 1, "default": "0"},
 
     "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED": {"type": "bool", "default": "true"},
+    "SNAP_CLEANUP_BUSY_WAIT_SECONDS": {"type": "int", "min": 0, "max": 1800, "step": 10, "default": "180"},
+    "SNAP_CLEANUP_BUSY_POLL_SECONDS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "2"},
+    "SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE": {"type": "bool", "default": "false"},
     "SNAP_CLEANUP_CRITICAL_FREE_MB": {"type": "int", "min": 0, "max": 5000, "step": 50, "default": "300"},
     "SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST": {"type": "int", "min": 1, "max": 50, "step": 1, "default": "3"},
 
@@ -7772,6 +7775,25 @@ SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0
 # starting another cleanup.
 SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED=true
 
+# SNAP_CLEANUP_BUSY_WAIT_SECONDS
+# WebUI/non-interactive behavior: if Snapper appears busy (e.g. snapper-cleanup.service
+# is active), the helper can wait up to this many seconds before giving up.
+#
+# - 0 disables waiting (fails fast when snapper is busy)
+# - Default: 180
+SNAP_CLEANUP_BUSY_WAIT_SECONDS=180
+
+# SNAP_CLEANUP_BUSY_POLL_SECONDS
+# Polling interval (seconds) used while waiting for Snapper to become idle.
+# Range: 1..30. Default: 2
+SNAP_CLEANUP_BUSY_POLL_SECONDS=2
+
+# SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE
+# DANGEROUS. If true, and Snapper is still busy after waiting, the WebUI-triggered
+# cleanup will proceed anyway (risk: overlapping snapper cleanup runs).
+# Default: false
+SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE=false
+
 # SNAP_CLEANUP_CRITICAL_FREE_MB
 # If free space on / is below this threshold, Snapper cleanup may be risky on
 # btrfs because deleting snapshots requires metadata updates.
@@ -8366,6 +8388,9 @@ EOF
     validate_nonneg_int_bounded_optional SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY 0 0 20
 
     validate_bool_flag SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED true
+    validate_nonneg_int_bounded_optional SNAP_CLEANUP_BUSY_WAIT_SECONDS 180 0 1800
+    validate_nonneg_int_bounded_optional SNAP_CLEANUP_BUSY_POLL_SECONDS 2 1 30
+    validate_bool_flag SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE false
     validate_nonneg_int_bounded_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300 0 5000
 
     validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED false
@@ -8465,6 +8490,9 @@ EOF
 
     # Snapper cleanup safety
     validate_bool_flag SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED true
+    validate_nonneg_int_optional SNAP_CLEANUP_BUSY_WAIT_SECONDS 180
+    validate_nonneg_int_optional SNAP_CLEANUP_BUSY_POLL_SECONDS 2
+    validate_bool_flag SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE false
     validate_nonneg_int_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300
 
     # Snapper cleanup Deep Clean (broken snapshot hunter)
@@ -8673,6 +8701,9 @@ EOF
 
     # Snapper cleanup safety knobs
     _mark_missing_key "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED"
+    _mark_missing_key "SNAP_CLEANUP_BUSY_WAIT_SECONDS"
+    _mark_missing_key "SNAP_CLEANUP_BUSY_POLL_SECONDS"
+    _mark_missing_key "SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE"
     _mark_missing_key "SNAP_CLEANUP_CRITICAL_FREE_MB"
 
     # Snapper cleanup Deep Clean (broken snapshot hunter)
@@ -8809,6 +8840,15 @@ EOF
                     ;;
                 SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED)
                     log_info "  - SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED: when true, snapper cleanup warns if background cleanup appears to already be running (timer/service/process)."
+                    ;;
+                SNAP_CLEANUP_BUSY_WAIT_SECONDS)
+                    log_info "  - SNAP_CLEANUP_BUSY_WAIT_SECONDS: WebUI/non-interactive snapper cleanup will wait up to N seconds for snapper-cleanup.service / snapper cleanup to finish instead of failing immediately when snapper is busy."
+                    ;;
+                SNAP_CLEANUP_BUSY_POLL_SECONDS)
+                    log_info "  - SNAP_CLEANUP_BUSY_POLL_SECONDS: polling interval (seconds) used while waiting for snapper to become idle."
+                    ;;
+                SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE)
+                    log_info "  - SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE: DANGEROUS override; if true, WebUI cleanup may proceed even when snapper is still busy after waiting (risk: overlapping cleanup runs)."
                     ;;
                 SNAP_CLEANUP_CRITICAL_FREE_MB)
                     log_info "  - SNAP_CLEANUP_CRITICAL_FREE_MB: minimum recommended free space on / before running snapper cleanup (btrfs metadata safety)."
@@ -9008,6 +9048,15 @@ EOF
                     ;;
                 SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED)
                     SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED="true"
+                    ;;
+                SNAP_CLEANUP_BUSY_WAIT_SECONDS)
+                    SNAP_CLEANUP_BUSY_WAIT_SECONDS=180
+                    ;;
+                SNAP_CLEANUP_BUSY_POLL_SECONDS)
+                    SNAP_CLEANUP_BUSY_POLL_SECONDS=2
+                    ;;
+                SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE)
+                    SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE="false"
                     ;;
                 SNAP_CLEANUP_CRITICAL_FREE_MB)
                     SNAP_CLEANUP_CRITICAL_FREE_MB=300
@@ -14391,6 +14440,9 @@ generate_dashboard() {
         { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_MONTHLY', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
         { key: 'SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY', type: 'int', label: 'DANGEROUS: Snapper cap: TIMELINE_LIMIT_YEARLY (0 disables yearly)', danger: true, danger_phrase: 'SNAPPER', help: 'Upper bound cap written into /etc/snapper/configs/* (never increases values; only lowers). Requires danger zone unlock.' },
         { key: 'SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED', type: 'bool', label: 'Snapper cleanup concurrency guard' },
+        { key: 'SNAP_CLEANUP_BUSY_WAIT_SECONDS', type: 'int', label: 'Snapper cleanup: busy wait timeout (seconds, WebUI)', advanced: true, help: 'When Snapper appears busy (e.g. snapper-cleanup.service running), WebUI-triggered cleanup waits up to this many seconds instead of failing immediately.' },
+        { key: 'SNAP_CLEANUP_BUSY_POLL_SECONDS', type: 'int', label: 'Snapper cleanup: busy poll interval (seconds)', advanced: true, help: 'Polling interval used while waiting for Snapper to become idle.' },
+        { key: 'SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE', type: 'bool', label: 'DANGEROUS: allow WebUI cleanup to run even if Snapper is still busy', danger: true, danger_phrase: 'BUSY', advanced: true, help: 'Not recommended. If Snapper is still busy after waiting, proceed anyway (risk: overlapping snapper cleanup runs). Requires danger zone unlock + typing BUSY on change.' },
         { key: 'SNAP_CLEANUP_CRITICAL_FREE_MB', type: 'int', label: 'Snapper cleanup critical free space (MB)' },
         { key: 'SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST', type: 'int', label: 'DANGEROUS: force-prune keep newest snapshots per config', danger: true, danger_phrase: 'CLEANUP', advanced: true, help: 'Only used by Snapper cleanup mode "force-prune". Deletes older snapshots and keeps this many newest per snapper config (root/home/etc.). Requires danger zone unlock.' },
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED', type: 'bool', label: 'Deep clean: broken snapshot hunter' },
@@ -17048,22 +17100,68 @@ generate_dashboard() {
     function _sgRenderDone(ok, title, subtitle, logText) {
         var e = _suEls();
         if (!e.body) return;
-        var safe = function(s) { return _sgEscapeHtml(String(s || '')); };
 
         _ruSetHeader('Result', 'Complete', String(title || 'Done'));
 
+        // Render without embedding large log text into innerHTML (can freeze the UI).
         e.body.innerHTML = [
-            '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
+            '<div style="font-weight:950;" id="sg-done-subtitle"></div>',
             '<div class="overlay-scroll">',
-            '  <div style="font-weight:950; margin-bottom: 8px;">Output (tail)</div>',
-            '  <pre class="overlay-pre" style="max-height: 320px;">' + safe(logText || '(no output)') + '</pre>',
+            '  <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:space-between;">',
+            '    <div style="font-weight:950; margin-bottom: 8px;">Output (tail)</div>',
+            '    <button class="pill" type="button" id="sg-done-copy" style="margin-bottom:8px;">Copy output</button>',
+            '  </div>',
+            '  <pre class="overlay-pre" id="sg-done-log" style="max-height: 320px;">(no output)</pre>',
             '</div>',
-            '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
+            '<div style="color: var(--muted); font-size:0.88rem;">Tip: use <strong>Run again</strong> to repeat, or <strong>OK</strong> to close.</div>'
         ].join('\n');
 
-        _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
+        try {
+            var sub = document.getElementById('sg-done-subtitle');
+            if (sub) sub.textContent = String(subtitle || '');
+        } catch (eSub) {}
+
+        // Keep the UI responsive by limiting the displayed tail.
+        var tail = '';
+        try { tail = String(logText || ''); } catch (eT0) { tail = ''; }
+        try {
+            var maxChars = 20000;
+            if (tail.length > maxChars) {
+                tail = tail.slice(tail.length - maxChars);
+                tail = '(output truncated; showing last ' + String(maxChars) + ' chars)\n' + tail;
+            }
+        } catch (eT1) {}
+
+        try {
+            var pre = document.getElementById('sg-done-log');
+            if (pre) pre.textContent = tail || '(no output)';
+        } catch (ePre) {}
+
+        // Copy output
+        try {
+            var cb = document.getElementById('sg-done-copy');
+            if (cb) cb.addEventListener('click', function() {
+                try { copyTextToClipboard(tail || ''); toast('Copied', 'Output copied to clipboard', 'ok'); } catch (eC) {}
+            });
+        } catch (eCB) {}
+
+        // Buttons: allow running again without reopening the wizard.
+        _suSetButtons({ show_cancel: false, show_back: true, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
+
+        if (e.back) {
+            e.back.textContent = 'Run again';
+            e.back.onclick = function() {
+                if (_sg.running) return;
+                try { _sgRenderConfirm(_sg.action || 'auto', _sg.params || {}); } catch (eR) { try { _sgRenderConfig(); } catch (eR2) {} }
+            };
+        }
+
         if (e.close) e.close.textContent = 'OK';
-        if (e.close) e.close.onclick = function() { _suShow(false); };
+        if (e.close) e.close.onclick = function() {
+            if (_sg.running) return;
+            try { _sgReset(); } catch (eR0) {}
+            _suShow(false);
+        };
 
         try { znhTaskDone('scrub-ghost', !!ok); } catch (e0) {}
 
@@ -17129,7 +17227,16 @@ generate_dashboard() {
                     _sg.running = false;
                     var rc = (j.rc != null) ? parseInt(j.rc, 10) : -1;
                     var logText = '';
-                    try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e2) { logText = ''; }
+                    // Prefer the server-provided tail (already bounded). Fallback to DOM.
+                    try {
+                        if (j.output != null) logText = String(j.output || '');
+                        else logText = '';
+                    } catch (e2a) {
+                        logText = '';
+                    }
+                    if (!logText) {
+                        try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e2) { logText = ''; }
+                    }
 
                     if (rc === 0) {
                         toast('scrub-ghost complete', String(title || ''), 'ok');
@@ -28601,29 +28708,147 @@ run_snapper_menu_only() {
             return 0
         }
 
-        # Capture BEFORE snapshot state
-        __znh_snapper_dump_snapshot_csv "${before_csv}" || true
-        __znh_print_snapper_snapshot_list "Snapshots BEFORE cleanup (showing last 20 per config)" "${before_csv}" "BEFORE" "${C_CYAN}" || true
-
-        __znh_snapper_preview_candidates || true
-
         # --- SAFETY 1: Concurrency guard ---
         # Avoid fighting an already-running timer/service/process.
-        local cleanup_busy=0
-        if [ "${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}" = "true" ]; then
+        #
+        # IMPORTANT for WebUI: WebUI runs with ZNH_NON_INTERACTIVE=1 and no TTY.
+        # In that mode we prefer to WAIT (configurable) instead of failing immediately.
+        __znh_snapper_cleanup_busy_reason() {
+            local r=""
             if systemctl is-active --quiet snapper-cleanup.service 2>/dev/null; then
-                cleanup_busy=1
-            elif pgrep -a -f 'snapper[[:space:]].*cleanup' >/dev/null 2>&1; then
-                cleanup_busy=1
-            elif pgrep -x snapper >/dev/null 2>&1; then
+                r="${r:+${r}; }snapper-cleanup.service active"
+            fi
+            if pgrep -a -f 'snapper[[:space:]].*cleanup' >/dev/null 2>&1; then
+                r="${r:+${r}; }snapper cleanup process running"
+            fi
+            if pgrep -x snapper >/dev/null 2>&1; then
                 # Broader guard: snapper running at all (could be timeline or manual)
-                cleanup_busy=1
+                r="${r:+${r}; }snapper command running"
+            fi
+            printf '%s' "${r}"
+            return 0
+        }
+
+        __znh_busy_wait_last_reason=""
+        __znh_snapper_cleanup_wait_for_free() {
+            local wait_s poll_s start_ts now_ts elapsed reason next_msg
+            __znh_busy_wait_last_reason=""
+
+            wait_s="${SNAP_CLEANUP_BUSY_WAIT_SECONDS:-180}"
+            poll_s="${SNAP_CLEANUP_BUSY_POLL_SECONDS:-2}"
+
+            if ! [[ "${wait_s}" =~ ^[0-9]+$ ]]; then
+                wait_s=180
+            fi
+            if ! [[ "${poll_s}" =~ ^[0-9]+$ ]] || [ "${poll_s}" -lt 1 ] 2>/dev/null; then
+                poll_s=2
+            fi
+            if [ "${poll_s}" -gt 30 ] 2>/dev/null; then
+                poll_s=30
             fi
 
-            if [ "${cleanup_busy}" -eq 1 ] 2>/dev/null; then
-                echo "WARNING: Snapper appears to be busy (background cleanup/timer or another snapper command)."
-                __znh_audit_record "snapper:busy-detected"
-                if [ -t 0 ]; then
+            reason="$(__znh_snapper_cleanup_busy_reason)"
+            if [ -z "${reason}" ]; then
+                return 0
+            fi
+
+            __znh_busy_wait_last_reason="${reason}"
+
+            if [ "${wait_s}" -le 0 ] 2>/dev/null; then
+                return 1
+            fi
+
+            start_ts=$(date +%s 2>/dev/null || echo 0)
+            next_msg=0
+
+            while true; do
+                reason="$(__znh_snapper_cleanup_busy_reason)"
+                if [ -z "${reason}" ]; then
+                    __znh_busy_wait_last_reason=""
+                    return 0
+                fi
+                __znh_busy_wait_last_reason="${reason}"
+
+                now_ts=$(date +%s 2>/dev/null || echo 0)
+                if [[ "${start_ts}" =~ ^[0-9]+$ ]] && [[ "${now_ts}" =~ ^[0-9]+$ ]] && [ "${now_ts}" -ge "${start_ts}" ] 2>/dev/null; then
+                    elapsed=$((now_ts - start_ts))
+                else
+                    elapsed=0
+                fi
+
+                if [ "${elapsed}" -ge "${wait_s}" ] 2>/dev/null; then
+                    return 1
+                fi
+
+                # Avoid log spam: print once every ~10 seconds.
+                if [ "${elapsed}" -ge "${next_msg}" ] 2>/dev/null; then
+                    echo "[snapper][cleanup] Busy: ${reason} • waiting… (${elapsed}s/${wait_s}s)"
+                    next_msg=$((elapsed + 10))
+                fi
+
+                sleep "${poll_s}" 2>/dev/null || sleep 2
+            done
+        }
+
+        local cleanup_busy_reason=""
+        if [ "${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}" = "true" ]; then
+            cleanup_busy_reason="$(__znh_snapper_cleanup_busy_reason)"
+
+            if [ -n "${cleanup_busy_reason}" ]; then
+                echo "WARNING: Snapper appears to be busy (${cleanup_busy_reason})."
+                __znh_audit_record "snapper:busy-detected:${cleanup_busy_reason}"
+
+                # WebUI path: wait (configurable), then either proceed or refuse.
+                if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+                    local wait_s
+                    wait_s="${SNAP_CLEANUP_BUSY_WAIT_SECONDS:-180}"
+                    if ! [[ "${wait_s}" =~ ^[0-9]+$ ]]; then
+                        wait_s=180
+                    fi
+
+                    if [ "${wait_s}" -gt 0 ] 2>/dev/null; then
+                        echo "[snapper][cleanup] Non-interactive: waiting up to ${wait_s}s for snapper to become idle…"
+                        __znh_audit_record "snapper:busy-wait:start:${wait_s}s"
+
+                        if __znh_snapper_cleanup_wait_for_free; then
+                            echo "[snapper][cleanup] Snapper is idle now; continuing."
+                            __znh_audit_record "snapper:busy-wait:done"
+                        else
+                            local still
+                            still="${__znh_busy_wait_last_reason:-${cleanup_busy_reason}}"
+                            __znh_audit_record "snapper:busy-wait:timeout:${still}"
+
+                            if [ "${SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE:-false}" = "true" ]; then
+                                echo "WARNING: Snapper still busy after waiting; proceeding anyway (override enabled)."
+                                __znh_audit_record "snapper:busy-override:non-interactive:true"
+                            else
+                                log_warn "[snapper][cleanup] Snapper still busy after waiting ${wait_s}s; refusing non-interactive cleanup"
+                                echo "Cleanup refused: snapper still busy after waiting ${wait_s}s. Try again later." 
+                                __audit_status="refused"
+                                __znh_audit_record "cleanup:refused:non-interactive:snapper-busy"
+                                __znh_cleanup_snapshot_tmpfiles
+                                __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
+                                return 1
+                            fi
+                        fi
+                    else
+                        # No-wait mode: allow dangerous override or refuse.
+                        if [ "${SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE:-false}" = "true" ]; then
+                            echo "WARNING: Snapper appears busy and waiting is disabled; proceeding anyway (override enabled)."
+                            __znh_audit_record "snapper:busy-override:no-wait:non-interactive:true"
+                        else
+                            log_warn "[snapper][cleanup] Refusing non-interactive cleanup while snapper appears busy (waiting disabled)"
+                            echo "Cleanup refused: snapper busy and waiting disabled (SNAP_CLEANUP_BUSY_WAIT_SECONDS=0)." 
+                            __audit_status="refused"
+                            __znh_audit_record "cleanup:refused:non-interactive:snapper-busy:no-wait"
+                            __znh_cleanup_snapshot_tmpfiles
+                            __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
+                            return 1
+                        fi
+                    fi
+
+                # Interactive path: ask whether to override.
+                elif [ -t 0 ]; then
                     read -p "Force another cleanup run anyway? [y/N]: " -r ans_busy
                     if [[ ! "${ans_busy:-}" =~ ^[Yy]$ ]]; then
                         echo "Cleanup cancelled (snapper busy)."
@@ -28634,6 +28859,8 @@ run_snapper_menu_only() {
                         return 0
                     fi
                     __znh_audit_record "snapper:busy-override:true"
+
+                # No-tty + not explicitly non-interactive.
                 else
                     log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while snapper appears busy"
                     __audit_status="refused"
@@ -28644,6 +28871,12 @@ run_snapper_menu_only() {
                 fi
             fi
         fi
+
+        # Capture BEFORE snapshot state (after any waiting)
+        __znh_snapper_dump_snapshot_csv "${before_csv}" || true
+        __znh_print_snapper_snapshot_list "Snapshots BEFORE cleanup (showing last 20 per config)" "${before_csv}" "BEFORE" "${C_CYAN}" || true
+
+        __znh_snapper_preview_candidates || true
 
         # If critically low, ask once more before proceeding.
         if [ "${critical_low}" -eq 1 ] 2>/dev/null; then
@@ -43090,11 +43323,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 
-            # Best-effort "busy" guard: avoid running snapper actions if snapper is active.
-            if action in ("cleanup", "create"):
-                rc_busy, out_busy = _run_cmd(["/usr/bin/pgrep", "-x", "snapper"], timeout_s=2, log=None)
-                if rc_busy == 0:
-                    return _json_response(self, 409, {"error": "snapper appears to be running already; try again later"}, origin)
+            # NOTE: Snapper concurrency/busy handling is enforced inside the helper itself
+            # (including WebUI-friendly wait/retry). Do not hard-block here.
 
             extra_env = None
             if needs_confirm:
