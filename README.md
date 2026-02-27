@@ -1898,7 +1898,7 @@ systemctl status zypper-autodownload.service
   - ⚡ **IMPROVED:** Live log view now prefers **append rendering** when possible (reduces DOM churn / scroll jank).
   - 🐛 **FIXED:** dashboard now applies stored theme in the `<head>` (prevents “flash of wrong theme” on load).
   - 🐛 **FIXED:** Dashboard API confirm-token cache is now protected by a lock to prevent crashes under concurrent clicks / multiple tabs.
-  - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and shows a safety banner: **“Close other tabs (same WebUI). If you close them, reload this tab.”**
+  - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and **hard-blocks** the page with a warning until you close the other tab(s) and reload.
   - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
   - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).
   - 🧰 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).

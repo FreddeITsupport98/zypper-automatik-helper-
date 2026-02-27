@@ -10811,6 +10811,22 @@ generate_dashboard() {
   </style>
 </head>
 <body>
+  <!-- Multi-instance hard-block page (shown when dashboard is open in multiple tabs/windows) -->
+  <div id="znh-multi-instance-page" style="display:none;">
+    <div class="container">
+      <div class="card" style="border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.06);">
+        <h1 style="margin:0 0 10px 0;">⚠ Multiple WebUI tabs detected</h1>
+        <div id="znh-multi-instance-text" style="margin-top:4px; font-size:0.98rem; color: var(--muted); font-weight: 850; line-height: 1.5;">
+          Close other tabs (same WebUI). Then reload this tab.
+        </div>
+        <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+          <button class="pill" type="button" id="znh-multi-instance-reload-btn">Reload tab</button>
+          <button class="pill" type="button" id="znh-multi-instance-recheck-btn" style="border-color: rgba(255,255,255,0.14);">Re-check (auto reload)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="container" id="main-content">
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
@@ -10861,20 +10877,6 @@ generate_dashboard() {
             <button class="pill" type="button" id="znh-dashboard-update-refresh-btn" title="Regenerate dashboard via localhost API (same as Quick Actions → Run: Refresh Dashboard)">Run: Refresh Dashboard</button>
             <button class="pill" type="button" id="znh-dashboard-update-reload-btn" style="border-color: rgba(255,255,255,0.14);">Reload tab</button>
             <button class="pill" type="button" id="znh-dashboard-update-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Multi-tab safety banner (shown when the dashboard is open in multiple tabs/windows) -->
-      <div id="znh-multi-instance-banner" style="display:none; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--text);">
-        <div style="display:flex; gap:12px; justify-content: space-between; flex-wrap: wrap; align-items: center;">
-          <div>
-            <div style="font-weight: 950;">⚠ Multiple WebUI tabs detected</div>
-            <div id="znh-multi-instance-text" style="margin-top:4px; font-size:0.9rem; color: var(--muted); font-weight: 800;">Close other tabs (same WebUI). If you close them, reload this tab.</div>
-          </div>
-          <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
-            <button class="pill" type="button" id="znh-multi-instance-reload-btn">Reload tab</button>
-            <button class="pill" type="button" id="znh-multi-instance-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
           </div>
         </div>
       </div>
@@ -14186,7 +14188,6 @@ generate_dashboard() {
         conflict: false,
         otherCount: 0,
         toastShown: false,
-        dismissUntil: 0,
         ch: null
     };
 
@@ -14257,23 +14258,33 @@ generate_dashboard() {
         return out;
     }
 
-    function _znhMiBannerShow(msg) {
-        var b = document.getElementById('znh-multi-instance-banner');
+    function _znhMiHardBlockShow(msg) {
+        var page = document.getElementById('znh-multi-instance-page');
+        var main = document.getElementById('main-content');
         var t = document.getElementById('znh-multi-instance-text');
-        if (!b) return;
 
-        // Allow a short "dismiss" grace period.
-        var now = _znhMiNow();
-        if (_znhMi.dismissUntil && now < _znhMi.dismissUntil) return;
+        if (msg && t) {
+            try { t.textContent = String(msg || ''); } catch (e0) {}
+        }
 
-        try { if (msg && t) t.textContent = String(msg); } catch (e0) {}
-        b.style.display = 'block';
+        if (main) {
+            try { main.style.display = 'none'; } catch (e1) {}
+        }
+        if (page) {
+            try { page.style.display = 'block'; } catch (e2) {}
+        }
     }
 
-    function _znhMiBannerHide() {
-        var b = document.getElementById('znh-multi-instance-banner');
-        if (!b) return;
-        b.style.display = 'none';
+    function _znhMiHardBlockHide() {
+        var page = document.getElementById('znh-multi-instance-page');
+        var main = document.getElementById('main-content');
+
+        if (page) {
+            try { page.style.display = 'none'; } catch (e0) {}
+        }
+        if (main) {
+            try { main.style.display = 'block'; } catch (e1) {}
+        }
     }
 
     function _znhMiSetButtonsDisabled(sel, disabled) {
@@ -14330,9 +14341,9 @@ generate_dashboard() {
         try { window.ZNH_MULTI_INSTANCE_CONFLICT = on; } catch (e0) {}
 
         if (on) {
-            var msg = 'Close other tabs (same WebUI). If you close them, reload this tab.';
-            if (count > 0) msg = 'Detected ' + String(count + 1) + ' WebUI tabs. Close other tabs (same WebUI). If you close them, reload this tab.';
-            _znhMiBannerShow(msg);
+            var msg = 'Close other tabs (same WebUI). Then reload this tab.';
+            if (count > 0) msg = 'Detected ' + String(count + 1) + ' WebUI tabs. Close other tabs (same WebUI). Then reload this tab.';
+            _znhMiHardBlockShow(msg);
             _znhMiApplyReadOnly(true);
 
             if (!_znhMi.toastShown) {
@@ -14341,7 +14352,7 @@ generate_dashboard() {
                 try { if (typeof window.znhUiWarn === 'function') window.znhUiWarn('multi-tab detected (' + String(count + 1) + ' tabs)'); } catch (e2) {}
             }
         } else {
-            _znhMiBannerHide();
+            _znhMiHardBlockHide();
             _znhMiApplyReadOnly(false);
             _znhMi.toastShown = false;
         }
@@ -14395,20 +14406,21 @@ generate_dashboard() {
     function znhMultiInstanceInit() {
         _znhMi.tabId = _znhMiGetTabId();
 
-        // Banner buttons
+        // Hard-block page buttons
         (function() {
             var btnReload = document.getElementById('znh-multi-instance-reload-btn');
-            var btnDismiss = document.getElementById('znh-multi-instance-dismiss-btn');
+            var btnRecheck = document.getElementById('znh-multi-instance-recheck-btn');
 
             if (btnReload) btnReload.addEventListener('click', function(ev) {
                 try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
                 try { window.location.reload(); } catch (e1) {}
             });
 
-            if (btnDismiss) btnDismiss.addEventListener('click', function(ev) {
+            if (btnRecheck) btnRecheck.addEventListener('click', function(ev) {
                 try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e2) {}
-                try { _znhMi.dismissUntil = _znhMiNow() + 20000; } catch (e3) { _znhMi.dismissUntil = 0; }
-                _znhMiBannerHide();
+                try { _znhMiEval(); } catch (e3) {}
+                // If the other tab is gone, reload to restore the full UI.
+                try { if (!_znhMi.conflict) window.location.reload(); } catch (e4) {}
             });
         })();
 
@@ -14430,6 +14442,16 @@ generate_dashboard() {
                             var bid = String(data.id || '');
                             if (bid) {
                                 try { delete _znhMi.peers[bid]; } catch (eB) {}
+
+                                // Also try to remove from localStorage peer map so other tabs update immediately.
+                                try {
+                                    var peers2 = _znhMiReadPeers();
+                                    try { delete peers2[bid]; } catch (eB2) {}
+                                    _znhMiWritePeers(peers2);
+                                } catch (eB3) {}
+
+                                // Re-evaluate immediately (no need to wait for stale timeout).
+                                try { _znhMiEval(); } catch (eB4) {}
                             }
                         }
                     } catch (e4) {}
@@ -14447,17 +14469,19 @@ generate_dashboard() {
             });
         } catch (e6) {}
 
-        // Best-effort cleanup on close.
-        try {
-            window.addEventListener('beforeunload', function() {
-                try {
-                    var peers = _znhMiReadPeers();
-                    try { delete peers[_znhMi.tabId]; } catch (e1) {}
-                    _znhMiWritePeers(peers);
-                } catch (e2) {}
-                try { if (_znhMi.ch) _znhMi.ch.postMessage({ type: 'bye', id: _znhMi.tabId, ts: _znhMiNow() }); } catch (e3) {}
-            });
-        } catch (e7) {}
+        function _znhMiBye() {
+            try {
+                var peers = _znhMiReadPeers();
+                try { delete peers[_znhMi.tabId]; } catch (e1) {}
+                _znhMiWritePeers(peers);
+            } catch (e2) {}
+            try { if (_znhMi.ch) _znhMi.ch.postMessage({ type: 'bye', id: _znhMi.tabId, ts: _znhMiNow() }); } catch (e3) {}
+        }
+
+        // Best-effort cleanup on close (use multiple events; some browsers skip beforeunload).
+        try { window.addEventListener('beforeunload', function() { _znhMiBye(); }); } catch (e7) {}
+        try { window.addEventListener('pagehide', function() { _znhMiBye(); }); } catch (e8) {}
+        try { window.addEventListener('unload', function() { _znhMiBye(); }); } catch (e9) {}
 
         // Start loop
         _znhMiTick();
