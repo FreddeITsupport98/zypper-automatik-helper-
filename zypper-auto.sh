@@ -18789,6 +18789,16 @@ generate_dashboard() {
         var allowVendor = false;
         try { allowVendor = String((_settingsConfig || {}).ROCKET_WIZARD_ALLOW_VENDOR_CHANGE || '').toLowerCase() === 'true'; } catch (e_av0) { allowVendor = false; }
 
+        // Best-effort: detect whether the conflict looks like a vendor-switch scenario.
+        // If so, Rocket should strongly guide the user to enable allow-vendor-change (or use terminal mode).
+        var vendorConflict = false;
+        try {
+            var t0 = (conflictSummary || out || '');
+            var low0 = String(t0 || '').toLowerCase();
+            if (low0.indexOf('vendor') !== -1 && (low0.indexOf('from vendor') !== -1 || low0.indexOf('replacing') !== -1)) vendorConflict = true;
+            if (low0.indexOf('allow-vendor-change') !== -1) vendorConflict = true;
+        } catch (e_vc0) { vendorConflict = false; }
+
         _ru.conflict_override = false;
 
         // If there are no system updates, exit early (no need for confirmation step).
@@ -18850,7 +18860,9 @@ generate_dashboard() {
                 '  <div style="font-weight:950;">Conflict detected</div>',
                 '  <div style="margin-top:6px; font-weight:800;">The preview suggests solver conflicts / manual decisions. Non-interactive <code>zypper dup</code> may abort. Recommended: run the update in a terminal.</div>',
                 '  <div style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Rocket setting: <code>ROCKET_WIZARD_ALLOW_VENDOR_CHANGE</code> = <strong>' + (allowVendor ? 'true' : 'false') + '</strong></div>',
-                (!allowVendor ? '  <button class="pill" type="button" id="ru-enable-vendor-change" style="margin-top:10px;">Enable allow-vendor-change (Rocket)</button>' : ''),
+                (vendorConflict && !allowVendor ? '  <div style="margin-top:8px; font-weight:800;">This looks like a <strong>vendor switch</strong> conflict. To try non-interactively, enable <code>--allow-vendor-change</code> (or run the update in a terminal).</div>' : ''),
+                (!allowVendor ? '  <button class="pill" type="button" id="ru-enable-vendor-change" style="margin-top:10px;" disabled>Enable allow-vendor-change (Rocket)</button>' : ''),
+                (!allowVendor ? '  <div style="margin-top:6px; color: var(--muted); font-size:0.88rem;">Tip: first check the manual-intervention box below, then enable vendor change.</div>' : ''),
                 (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + conflictSummary.replace(/</g,'&lt;') + '</pre>') : ''),
                 '</div>',
             ].join('\n');
@@ -18893,7 +18905,23 @@ generate_dashboard() {
             var ok = !!_ru.accepted;
             if (conflictDetected) {
                 ok = ok && !!_ru.conflict_override;
+
+                // If this looks like a vendor-switch conflict and vendor-change is OFF,
+                // do not allow proceeding into a non-interactive run that will likely abort.
+                if (vendorConflict && !allowVendor) {
+                    ok = false;
+                }
             }
+
+            // Vendor-change enable button is intentionally gated behind the manual-intervention checkbox.
+            // This makes the user explicitly acknowledge that the solver may do risky things.
+            try {
+                var evcBtn = document.getElementById('ru-enable-vendor-change');
+                if (evcBtn) {
+                    evcBtn.disabled = !(_ru.conflict_override);
+                }
+            } catch (e_evc_gate) {}
+
             _suSetButtons({
                 show_cancel: true,
                 show_back: false,
@@ -18908,12 +18936,16 @@ generate_dashboard() {
         var acc = document.getElementById('ru-accept');
         var cfok = document.getElementById('ru-conflict-ok');
         if (acc) {
+            // Keep UI in sync when preview is re-rendered (e.g. Back button).
+            try { acc.checked = !!_ru.accepted; } catch (e0) {}
             acc.addEventListener('change', function() {
                 _ru.accepted = !!acc.checked;
                 _ruPreviewUpdateNextEnabled();
             });
         }
         if (cfok) {
+            // Conflict override is intentionally reset on each preview render for safety.
+            try { cfok.checked = !!_ru.conflict_override; } catch (e1) {}
             cfok.addEventListener('change', function() {
                 _ru.conflict_override = !!cfok.checked;
                 _ruPreviewUpdateNextEnabled();
@@ -18938,23 +18970,32 @@ generate_dashboard() {
             rocketUpdateWizardOpen({ auto_simulate: !!_ru.auto_simulate });
         });
 
-        // Conflict helper: one-click enable vendor change for Rocket (best-effort)
+        // Conflict helper: enable vendor change for Rocket (best-effort)
+        // IMPORTANT: gated behind the manual-intervention checkbox.
         var evc = document.getElementById('ru-enable-vendor-change');
         if (evc) evc.addEventListener('click', function(ev) {
             try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
-            try { addRipple(evc, ev.clientX, ev.clientY); } catch (e1) {}
-            try { evc.disabled = true; } catch (e2) {}
+
+            if (!_ru.conflict_override) {
+                toast('Manual intervention required', 'Check the manual-intervention box first.', 'err');
+                try { _ruPreviewUpdateNextEnabled(); } catch (e1) {}
+                return;
+            }
+
+            try { addRipple(evc, ev.clientX, ev.clientY); } catch (e2) {}
+            try { evc.disabled = true; } catch (e3) {}
             toast('Applying setting…', 'Enabling ROCKET_WIZARD_ALLOW_VENDOR_CHANGE', 'ok');
 
             _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: { ROCKET_WIZARD_ALLOW_VENDOR_CHANGE: 'true' } }) }).then(function(r) {
                 _settingsConfig = (r && r.config) ? r.config : _settingsConfig;
+                allowVendor = true;
 
                 // Best-effort: update settings drawer checkbox if it is visible.
                 try {
                     var form = document.getElementById('settings-form');
                     var cb = form ? form.querySelector('input[type="checkbox"][data-key="ROCKET_WIZARD_ALLOW_VENDOR_CHANGE"]') : null;
                     if (cb) cb.checked = true;
-                } catch (e3) {}
+                } catch (e4) {}
 
                 toast('Updated', 'Vendor change enabled for Rocket. Refreshing preview…', 'ok');
                 rocketUpdateWizardOpen({ auto_simulate: !!_ru.auto_simulate });
@@ -18963,7 +19004,8 @@ generate_dashboard() {
                 var msg = (err && err.message) ? err.message : 'failed';
                 toast('Setting failed', msg, 'err');
             }).finally(function() {
-                try { evc.disabled = false; } catch (e4) {}
+                try { evc.disabled = false; } catch (e5) {}
+                try { _ruPreviewUpdateNextEnabled(); } catch (e6) {}
             });
         });
 
@@ -18995,8 +19037,11 @@ generate_dashboard() {
             '<div style="display:grid; gap:10px;">',
             '  <input id="ru-phrase" type="text" placeholder="Type confirmation phrase…" style="width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />',
             '  <label class="pill" style="gap:10px; justify-content:flex-start;">',
-            '    <input id="ru-simulate" type="checkbox" /> Simulation mode (dry-run only; does NOT install packages)',
+            '    <input id="ru-simulate" type="checkbox" /> Simulation mode (dry-run test; does NOT install packages)',
             '  </label>',
+            '  <div id="ru-sim-note" class="znh-hidden" style="color: var(--muted); font-size:0.88rem;">',
+            '    <strong>Dry-run test:</strong> runs <code>zypper dup --dry-run</code> to check solver resolution and show what would change (no packages installed).',
+            '  </div>',
             '</div>',
 
             // Danger zone typed confirmation (only required for real installs, not simulation)
@@ -19029,10 +19074,30 @@ generate_dashboard() {
         var inp = document.getElementById('ru-phrase');
         var sim = document.getElementById('ru-simulate');
 
-        // When opened in simulation mode, pre-select simulate for safety.
-        if (sim && _ru.auto_simulate) {
-            try { sim.checked = true; } catch (e) {}
-            _ru.simulate = true;
+        // Keep simulation checkbox in sync with internal state.
+        // NOTE: _ru.simulate is the authoritative value used when starting the job.
+        if (sim) {
+            // When opened in simulation mode, pre-select simulate for safety.
+            if (_ru.auto_simulate && !_ru.simulate) {
+                _ru.simulate = true;
+            }
+            try { sim.checked = !!_ru.simulate; } catch (e0) {}
+        }
+
+        function _ruUpdateSimNoteAndButtonLabel() {
+            try {
+                var note = document.getElementById('ru-sim-note');
+                if (note) {
+                    if (_ru.simulate) note.classList.remove('znh-hidden');
+                    else note.classList.add('znh-hidden');
+                }
+            } catch (e1) {}
+
+            // Ensure the footer button label matches the selected mode.
+            try {
+                var btn = _suEls().install;
+                if (btn) btn.textContent = _ru.simulate ? 'Test (dry-run)' : 'Install';
+            } catch (e2) {}
         }
 
         function updateInstallEnabled() {
@@ -19066,16 +19131,20 @@ generate_dashboard() {
                 install_disabled: !ok,
                 footer_center: true
             });
+
+            _ruUpdateSimNoteAndButtonLabel();
         }
 
         if (inp) inp.addEventListener('input', updateInstallEnabled);
         if (sim) sim.addEventListener('change', function() {
             _ru.simulate = !!sim.checked;
             _ru.auto_simulate = _ru.simulate;
+            _ruUpdateSimNoteAndButtonLabel();
             updateInstallEnabled();
         });
         var dzInp2 = document.getElementById('ru-danger-confirm');
         if (dzInp2) dzInp2.addEventListener('input', updateInstallEnabled);
+        _ruUpdateSimNoteAndButtonLabel();
         updateInstallEnabled();
 
         _suUpdateProgress('Waiting', 0);
@@ -19215,7 +19284,10 @@ generate_dashboard() {
         });
 
         var installBtn = _suEls().install;
-        if (installBtn) installBtn.textContent = _ru.simulate ? 'Testing…' : 'Installing…';
+        if (installBtn) installBtn.textContent = _ru.simulate ? 'Dry-run…' : 'Installing…';
+
+        // Show immediate feedback before the first poll response arrives.
+        try { _suUpdateProgress(_ru.simulate ? 'Dry-run starting' : 'Starting', 1); } catch (e0) {}
 
         // Polling robustness (same idea as self-update): keep polling across transient errors.
         var _pollFailures = 0;
