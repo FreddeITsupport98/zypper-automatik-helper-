@@ -1932,6 +1932,7 @@ systemctl status zypper-autodownload.service
   - 🎨 **IMPROVED:** Dashboard header Rocket button flame effect is now aligned diagonally with the rocket icon (clearer “thrust” look during downloads/refresh).
   - 🔁 **IMPROVED:** "Run: Refresh Dashboard" now schedules an **auto-reload** with a visible **countdown** (so it’s clear when the refreshed dashboard will load).
   - 🧠 **IMPROVED:** The "Dashboard update available" banner now only triggers for **newer helper/UI builds** (not for normal timer-based dashboard regenerations).
+  - 🧰 **IMPROVED:** WebUI self-update status polling is now more resilient to brief localhost API restarts/outages (auto-retries "Failed to fetch" a couple of times and shows clearer guidance for file:// or non-localhost origins).
   - 🧾 **IMPROVED:** When Rocket install fails due to solver conflicts, the Result view now shows an interactive fallback command (copyable) so you can run `zypper-run-install` (recommended) or `sudo zypper dup` and choose a solution.
   - 🧰 **IMPROVED:** Rocket Update Wizard now supports real progress percentages via zypper `--xmlout` (WebUI still shows readable logs via best-effort XML text extraction).
   - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:

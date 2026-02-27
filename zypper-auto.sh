@@ -13649,6 +13649,10 @@ generate_dashboard() {
                             + 'A WebUI request failed. This is usually temporary (API restart, token mismatch, network hiccup).\n\n'
                             + 'Error: ' + err + '\n'
                             + (url ? ('URL: ' + url + '\n\n') : '\n')
+                            + 'Common fixes:\n'
+                            + '  - Ensure the dashboard is opened via http:// (recommended: zypper-auto-helper --dash-open)\n'
+                            + '  - Ensure the address bar is a localhost URL like: http://127.0.0.1:8765/status.html?live=1\n'
+                            + '  - If you opened status.html via file://, API features (Settings/Self-update/Snapper) will not work\n\n'
                             + 'If it keeps happening, attach this to a GitHub issue:\n'
                             + '1) Managers → open the relevant job log (copy log tail)\n'
                             + '2) Download UI diagnostics (JSON)\n'
@@ -16632,22 +16636,36 @@ generate_dashboard() {
         btn.disabled = !enabled;
     }
 
-    function selfUpdateFetchStatus(showToast) {
+    function selfUpdateFetchStatus(showToast, _attempt, _reqId) {
         var ch = _selfUpdateGetChannel(_settingsConfig || {});
 
+        var attempt = 0;
+        try { attempt = parseInt(_attempt || 0, 10) || 0; } catch (eA0) { attempt = 0; }
+        if (attempt < 0) attempt = 0;
+        if (attempt > 5) attempt = 5;
+
         // Request-id guarding: if the user clicks fast (or toggles channel), ignore stale responses.
+        // For retries, preserve the original request-id so a background retry can't clobber a newer user request.
         var reqId = 0;
         try {
-            _self_update_ui.status_req_id = (_self_update_ui.status_req_id || 0) + 1;
-            reqId = _self_update_ui.status_req_id;
-        } catch (e0) {
+            reqId = parseInt(_reqId || 0, 10) || 0;
+        } catch (eR0) {
             reqId = 0;
         }
 
+        if (!reqId) {
+            try {
+                _self_update_ui.status_req_id = (_self_update_ui.status_req_id || 0) + 1;
+                reqId = _self_update_ui.status_req_id;
+            } catch (e0) {
+                reqId = 0;
+            }
+        }
+
         try { _self_update_ui.checking = true; } catch (e1) {}
-        _selfUpdateSetStatus('Checking…');
+        _selfUpdateSetStatus(attempt > 0 ? ('Reconnecting… (' + String(attempt + 1) + '/3)') : 'Checking…');
         _selfUpdateSetDetail('');
-        _selfUpdateSetRunBtn(false, 'Checking…');
+        _selfUpdateSetRunBtn(false, attempt > 0 ? 'Reconnecting…' : 'Checking…');
         try { _selfUpdateUiApplyLocks(); } catch (e2) {}
 
         return _api('/api/self-update/status?channel=' + encodeURIComponent(ch), { method: 'GET' }).then(function(r) {
@@ -16788,6 +16806,68 @@ generate_dashboard() {
             } catch (eStale2) {}
 
             var msg = (e && e.message) ? e.message : 'API not reachable';
+
+            // Most common non-obvious cause: dashboard opened via file:// (or via a non-localhost hostname) -> CORS.
+            // If we can detect that, show a much more actionable message.
+            try {
+                if (window.location && window.location.protocol === 'file:') {
+                    msg = 'Dashboard opened via file://. API features require http://. Fix: re-open with zypper-auto-helper --dash-open';
+                    _selfUpdateSetStatus('Open via --dash-open');
+                    _selfUpdateSetDetail(msg);
+                    _selfUpdateSetRunBtn(false, 'file:// mode');
+                    if (showToast) toast('Open via --dash-open', 'API requires http://', 'err');
+                    return null;
+                }
+            } catch (eP) {}
+
+            try {
+                if (window.location && (window.location.protocol === 'http:' || window.location.protocol === 'https:')) {
+                    var host = String(window.location.hostname || '').toLowerCase();
+                    if (host && host !== '127.0.0.1' && host !== 'localhost') {
+                        msg = 'Dashboard opened from host ' + host + '. The API allows only localhost origins. Fix: open via http://127.0.0.1:8765/status.html?live=1 (or use --dash-open).';
+                        _selfUpdateSetStatus('Open via localhost');
+                        _selfUpdateSetDetail(msg);
+                        _selfUpdateSetRunBtn(false, 'Origin blocked');
+                        if (showToast) toast('Origin blocked', host, 'err');
+                        return null;
+                    }
+                }
+            } catch (eHost) {}
+
+            var low = '';
+            try { low = String(msg || '').toLowerCase(); } catch (eL) { low = ''; }
+
+            // Retry transient fetch errors (API restart / brief outage).
+            if (attempt < 2 && (low.indexOf('failed to fetch') !== -1 || low.indexOf('networkerror') !== -1 || low.indexOf('load failed') !== -1)) {
+                var delayMs = (attempt === 0) ? 700 : 1400;
+                _selfUpdateSetStatus('Reconnecting…');
+                _selfUpdateSetDetail('API temporarily unreachable; retrying in ' + String(delayMs) + 'ms…');
+                _selfUpdateSetRunBtn(false, 'Retrying…');
+
+                var myReqId = reqId;
+                return new Promise(function(resolve) {
+                    setTimeout(function() {
+                        // If a newer request has started since we scheduled this retry, do nothing.
+                        try {
+                            if (myReqId && _self_update_ui && myReqId !== _self_update_ui.status_req_id) {
+                                resolve(null);
+                                return;
+                            }
+                        } catch (eStaleRetry) {}
+
+                        try {
+                            selfUpdateFetchStatus(showToast, attempt + 1, myReqId).then(function(v) {
+                                resolve(v);
+                            }).catch(function() {
+                                resolve(null);
+                            });
+                        } catch (eR) {
+                            resolve(null);
+                        }
+                    }, delayMs);
+                });
+            }
+
             _selfUpdateSetStatus('API not reachable');
             _selfUpdateSetDetail(msg);
             _selfUpdateSetRunBtn(false, 'API down');
