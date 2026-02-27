@@ -1824,6 +1824,7 @@ systemctl status zypper-autodownload.service
 - **Unreleased (next build):**
   - 🧰 **IMPROVED:** WebUI Settings button label now says **“Save / Apply”** to make it clearer that saving immediately applies changes to `/etc/zypper-auto.conf`.
   - 🐛 **FIXED:** WebUI **Factory Reset** now immediately applies the reset config response (so toggles like `KERNEL_PURGE_ENABLED` flip back to defaults instantly) and forces `no-store` caching on Settings API GETs to prevent stale UI values.
+  - 🐛 **FIXED:** WebUI Settings auto-save no longer fails with `Read-only file system: /etc/zypper-auto.conf` after a config reset (dashboard API unit now allows `/etc` writes so the Settings API can safely rewrite config + create backups).
   - 🧰 **IMPROVED:** CLI completions now include `scrub-ghost` and its flags for `zypper-auto-helper` (bash/zsh/fish). Standalone completions for `scrub-ghost`/`zypper-scrub-ghost` are also installed.
   - 🧰 **IMPROVED:** WebUI Settings now does a passive refresh on tab focus/visibility (when there are no unsaved edits), so if you reset config from CLI the dashboard updates indicators like `KERNEL_PURGE_ENABLED` automatically.
   - 🛡️ **IMPROVED:** Snapper system config tuning options (`SNAP_RETENTION_*`) are now treated as **Danger zone** settings in the WebUI (requires Advanced unlock + danger zone unlock + per-setting confirmation phrase).

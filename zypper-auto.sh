@@ -46402,7 +46402,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${CONFIG_FILE} ${DASH_API_TOKEN_DIR} /var/log/zypper-auto /var/log/zypper-auto/service-logs /run /var/run
+# NOTE: allow /etc so Settings writes keep working even if ${CONFIG_FILE} is replaced
+# (e.g. --reset-config recreates the file, which can otherwise break per-file bind mounts).
+# Also allows Factory Reset to create a backup alongside the config.
+ReadWritePaths=${CONFIG_FILE} /etc ${DASH_API_TOKEN_DIR} /var/log/zypper-auto /var/log/zypper-auto/service-logs /run /var/run
 
 [Install]
 WantedBy=multi-user.target
