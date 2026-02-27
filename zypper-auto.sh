@@ -12911,10 +12911,30 @@ generate_dashboard() {
         shown_ts: 0,
         last_reason: '',
         last_meta: null,
+
+        // Persist the last panic report so after a reload the user sees:
+        // "The WebUI crashed earlier — here is the log".
+        storage_key: 'znh_panic_last_v1',
+
+        // Freeze / stall watchdog
         watchdog_timer: null,
         watchdog_last: 0,
         watchdog_interval_ms: 2000,
+
+        // Hard stall threshold (drift in ms beyond the interval)
         watchdog_threshold_ms: 7000,
+
+        // Soft stall threshold: "almost freeze" detection.
+        // If we see repeated soft stalls while a job is running, show the panic screen too.
+        stall_warn_threshold_ms: 2500,
+        stall_burst_window_ms: 30000,
+        stall_burst_count: 0,
+        stall_burst_ts: 0,
+        stall_history: [],
+        stall_history_max: 12,
+        stall_last_toast_ts: 0,
+
+        // Error burst detector
         error_count: 0,
         error_window_ts: 0
     };
@@ -12941,24 +12961,34 @@ generate_dashboard() {
         d.innerHTML = [
             '<div class="container" style="padding-top: 26px; padding-bottom: 26px;">',
             '  <div class="card" style="border-color: rgba(59,130,246,0.35); background: rgba(2,132,199,0.10);">',
-            '    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap: 10px; flex-wrap: wrap;">',
-            '      <div>',
+            '    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; flex-wrap: wrap;">',
+            '      <div style="min-width: 260px;">',
             '        <div style="font-weight: 950; font-size: 1.45rem;">WebUI freeze/crash detected</div>',
             '        <div id="znh-panic-sub" style="margin-top:6px; color: rgba(226,232,240,0.92); font-weight: 850;">Close other tabs, then reload. If this happened during Snapper/scrub, attach the report below to a GitHub issue.</div>',
+            '        <div id="znh-panic-meta" style="margin-top:10px; color: rgba(226,232,240,0.82); font-weight: 800; font-size: 0.92rem;"></div>',
             '      </div>',
-            '      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+            '      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">',
             '        <button class="pill" type="button" id="znh-panic-reload">Reload tab</button>',
+            '        <button class="pill" type="button" id="znh-panic-download">Download diagnostics (JSON)</button>',
+            '        <button class="pill" type="button" id="znh-panic-download-txt" style="border-color: rgba(255,255,255,0.14);">Download report (.txt)</button>',
             '        <button class="pill" type="button" id="znh-panic-close" style="border-color: rgba(255,255,255,0.14);">Close</button>',
             '      </div>',
             '    </div>',
             '    <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
-            '      <button class="pill" type="button" id="znh-panic-download">Download diagnostics (JSON)</button>',
-            '      <button class="pill" type="button" id="znh-panic-copy">Copy issue report</button>',
+            '      <button class="pill" type="button" id="znh-panic-copy-min">Copy quick report</button>',
+            '      <button class="pill" type="button" id="znh-panic-copy">Copy full report</button>',
             '      <button class="pill" type="button" id="znh-panic-issues">Open GitHub issues</button>',
+            '      <button class="pill" type="button" id="znh-panic-clear-last" style="border-color: rgba(255,255,255,0.14);">Clear saved report</button>',
             '    </div>',
             '    <div style="margin-top: 14px; color: rgba(226,232,240,0.92); font-weight: 850;">',
-            '      <div style="font-weight:950; margin-bottom: 8px;">Issue report (copy/paste)</div>',
-            '      <pre id="znh-panic-report" style="max-height: 420px;">(collecting…)</pre>',
+            '      <details open style="border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; background: rgba(255,255,255,0.03); padding: 10px 12px;">',
+            '        <summary style="cursor:pointer; font-weight: 950; color: rgba(226,232,240,0.98);">Quick report (recommended)</summary>',
+            '        <pre id="znh-panic-report-min" style="max-height: 260px; margin-top: 10px;">(collecting…)</pre>',
+            '      </details>',
+            '      <details style="margin-top: 10px; border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; background: rgba(255,255,255,0.03); padding: 10px 12px;">',
+            '        <summary style="cursor:pointer; font-weight: 950; color: rgba(226,232,240,0.98);">Full report (logs)</summary>',
+            '        <pre id="znh-panic-report" style="max-height: 420px; margin-top: 10px;">(collecting…)</pre>',
+            '      </details>',
             '      <div style="margin-top:10px; color: rgba(226,232,240,0.82); font-weight: 800; font-size: 0.90rem;">Tip: also attach the downloaded JSON diagnostics file to your issue.</div>',
             '    </div>',
             '  </div>',
@@ -12966,6 +12996,71 @@ generate_dashboard() {
         ].join('\n');
 
         document.body.appendChild(d);
+
+        function _znhPanicCopyText(text, btn, labelOk) {
+            var txt = '';
+            try { txt = String(text || ''); } catch (e0) { txt = ''; }
+            if (!String(txt || '').trim()) {
+                toast('Nothing to copy', '', 'err');
+                return;
+            }
+
+            function okToast() {
+                try {
+                    if (btn) {
+                        var old = String(btn.textContent || 'Copy');
+                        btn.textContent = (labelOk || 'Copied');
+                        setTimeout(function() { try { btn.textContent = old; } catch (e) {} }, 1200);
+                    }
+                } catch (e1) {}
+                toast('Copied', 'Copied to clipboard', 'ok');
+            }
+
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(txt).then(function() {
+                        okToast();
+                    }, function() {
+                        throw new Error('clipboard blocked');
+                    });
+                    return;
+                }
+            } catch (e2) {}
+
+            // Fallback: textarea + execCommand
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = txt;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                okToast();
+                return;
+            } catch (e3) {}
+
+            toast('Copy failed', 'Clipboard not available', 'err');
+        }
+
+        function _znhPanicDownloadTextFile(filename, text) {
+            try {
+                var data = String(text || '');
+                var blob = new Blob([data], { type: 'text/plain; charset=utf-8' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = String(filename || ('znh-webui-report-' + String(Date.now()) + '.txt'));
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(function() {
+                    try { document.body.removeChild(a); } catch (e0) {}
+                    try { URL.revokeObjectURL(url); } catch (e1) {}
+                }, 0);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
 
         // Buttons
         try {
@@ -12982,7 +13077,8 @@ generate_dashboard() {
             });
 
             var btnDl = document.getElementById('znh-panic-download');
-            if (btnDl) btnDl.addEventListener('click', function() {
+            if (btnDl) btnDl.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0a) {}
                 try {
                     if (window.ZNH && typeof window.ZNH.exportDiagnostics === 'function') {
                         window.ZNH.exportDiagnostics({ includeDom: true, domMaxChars: 200000 });
@@ -12993,27 +13089,50 @@ generate_dashboard() {
                 toast('Diagnostics not available', 'Exporter not loaded', 'err');
             });
 
+            var btnTxt = document.getElementById('znh-panic-download-txt');
+            if (btnTxt) btnTxt.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0b) {}
+                var txt = '';
+                try { txt = String((document.getElementById('znh-panic-report') || {}).textContent || ''); } catch (e1b) { txt = ''; }
+                if (!txt) {
+                    toast('Report empty', 'Nothing to download', 'err');
+                    return;
+                }
+                var ok = _znhPanicDownloadTextFile('znh-webui-report-' + String(Date.now()) + '.txt', txt);
+                if (ok) toast('Report downloaded', 'Saved .txt file', 'ok');
+                else toast('Download failed', 'Could not save file', 'err');
+            });
+
+            var btnCopyMin = document.getElementById('znh-panic-copy-min');
+            if (btnCopyMin) btnCopyMin.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0c) {}
+                var txt = '';
+                try { txt = String((document.getElementById('znh-panic-report-min') || {}).textContent || ''); } catch (e1c) { txt = ''; }
+                _znhPanicCopyText(txt, btnCopyMin, 'Copied quick');
+            });
+
             var btnCopy = document.getElementById('znh-panic-copy');
-            if (btnCopy) btnCopy.addEventListener('click', function() {
+            if (btnCopy) btnCopy.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0d) {}
                 var txt = '';
                 try { txt = String((document.getElementById('znh-panic-report') || {}).textContent || ''); } catch (e5) { txt = ''; }
+                _znhPanicCopyText(txt, btnCopy, 'Copied full');
+            });
+
+            var btnClear = document.getElementById('znh-panic-clear-last');
+            if (btnClear) btnClear.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0e) {}
                 try {
-                    if (typeof copyCmd === 'function') {
-                        copyCmd(txt, btnCopy);
-                        return;
-                    }
-                } catch (e6) {}
-                try {
-                    if (navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(txt || '').then(function() { toast('Copied', 'Issue report copied', 'ok'); }, function() { toast('Copy failed', 'Clipboard permission denied', 'err'); });
-                        return;
-                    }
-                } catch (e7) {}
-                toast('Copy failed', 'Clipboard not available', 'err');
+                    localStorage.removeItem(_znhPanic.storage_key);
+                    toast('Saved report cleared', '', 'ok');
+                } catch (e1e) {
+                    toast('Clear failed', 'Could not clear saved report', 'err');
+                }
             });
 
             var btnIssues = document.getElementById('znh-panic-issues');
-            if (btnIssues) btnIssues.addEventListener('click', function() {
+            if (btnIssues) btnIssues.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0f) {}
                 try {
                     var url = String((window.ZNH_GITHUB_ISSUES_URL || 'https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues'));
                     var w = window.open(url, '_blank', 'noopener');
@@ -13024,6 +13143,60 @@ generate_dashboard() {
         } catch (e10) {}
 
         return d;
+    }
+
+    function znhPanicBuildReportTextMinimal(reason, meta) {
+        var lines = [];
+        function add(s) { lines.push(String(s || '')); }
+
+        var now = '';
+        try { now = new Date().toISOString(); } catch (e0) { now = ''; }
+
+        add('== ZNH WebUI Panic Report (quick) ==');
+        add('time: ' + now);
+        add('reason: ' + String(reason || 'unknown'));
+
+        try { add('url: ' + String(window.location && window.location.href ? window.location.href : '')); } catch (e1) {}
+        try { add('multi-tab: ' + (window.ZNH_MULTI_INSTANCE_CONFLICT ? 'YES' : 'no')); } catch (e2) {}
+
+        // Running task bubble state
+        try {
+            var t = null;
+            try { t = _znhTaskLoad(); } catch (e3) { t = null; }
+            if (t && t.type && t.job_id) {
+                add('task.type: ' + String(t.type));
+                add('task.job_id: ' + String(t.job_id));
+                if (t.action) add('task.action: ' + String(t.action));
+                if (t.title) add('task.title: ' + String(t.title));
+            } else {
+                add('task: (none)');
+            }
+        } catch (e4) {}
+
+        // Stall history (tail)
+        try {
+            var sh = _znhPanic.stall_history || [];
+            if (sh && sh.length) {
+                var tail = sh.slice(Math.max(0, sh.length - 4));
+                add('stall.tail: ' + tail.map(function(it) { return String(it.drift_ms || 0) + 'ms'; }).join(', '));
+            }
+        } catch (e5) {}
+
+        add('');
+        add('Next steps:');
+        add('  1) Download diagnostics (JSON) from this screen.');
+        add('  2) Post a GitHub issue and paste this report + attach the JSON.');
+        add('  3) If multiple dashboard tabs are open: close other tabs and reload.');
+
+        // Meta (optional)
+        try {
+            if (meta && typeof meta === 'object') {
+                add('');
+                add('meta: ' + JSON.stringify(meta));
+            }
+        } catch (eJ) {}
+
+        return lines.join('\n');
     }
 
     function znhPanicBuildReportText(reason, meta) {
@@ -13037,13 +13210,20 @@ generate_dashboard() {
         add('time: ' + now);
         add('reason: ' + String(reason || 'unknown'));
 
-        // Multi-tab state
-        try { add('multi-tab: ' + (window.ZNH_MULTI_INSTANCE_CONFLICT ? 'YES' : 'no')); } catch (e1) {}
+        // Environment
+        try { add('url: ' + String(window.location && window.location.href ? window.location.href : '')); } catch (e1) {}
+        try { add('ua: ' + String(navigator && navigator.userAgent ? navigator.userAgent : '')); } catch (e2) {}
+        try { add('multi-tab: ' + (window.ZNH_MULTI_INSTANCE_CONFLICT ? 'YES' : 'no')); } catch (e3) {}
+        try {
+            if (typeof ZNH_HELPER_VERSION_AT_GEN !== 'undefined') add('helper_version_at_gen: ' + String(ZNH_HELPER_VERSION_AT_GEN));
+            if (typeof ZNH_DASHBOARD_GEN_ID !== 'undefined') add('dashboard_gen_id: ' + String(ZNH_DASHBOARD_GEN_ID));
+        } catch (e4) {}
+        try { if (typeof liveEnabled !== 'undefined') add('liveEnabled: ' + (liveEnabled ? 'true' : 'false')); } catch (e5) {}
 
         // Running task bubble state
         try {
             var t = null;
-            try { t = _znhTaskLoad(); } catch (e2) { t = null; }
+            try { t = _znhTaskLoad(); } catch (e6) { t = null; }
             if (t && t.type && t.job_id) {
                 add('task.type: ' + String(t.type));
                 add('task.job_id: ' + String(t.job_id));
@@ -13052,7 +13232,21 @@ generate_dashboard() {
             } else {
                 add('task: (none)');
             }
-        } catch (e3) {}
+        } catch (e7) {}
+
+        // Recent stalls
+        try {
+            var sh = _znhPanic.stall_history || [];
+            if (sh && sh.length) {
+                add('');
+                add('--- stall history (tail) ---');
+                var tail2 = sh.slice(Math.max(0, sh.length - 8));
+                for (var si = 0; si < tail2.length; si++) {
+                    var it2 = tail2[si] || {};
+                    add(String(it2.ts || '') + ' drift_ms=' + String(it2.drift_ms || 0));
+                }
+            }
+        } catch (e8) {}
 
         // Last visible logs (best-effort)
         function addBlock(label, id, maxChars) {
@@ -13084,14 +13278,14 @@ generate_dashboard() {
                 if (arr && arr.length) {
                     add('');
                     add('--- crash log (tail) ---');
-                    var tail = arr.slice(Math.max(0, arr.length - 8));
-                    for (var i = 0; i < tail.length; i++) {
-                        var it = tail[i] || {};
-                        add(String(it.ts || '') + ' ' + String(it.kind || '') + ' ' + String(it.msg || ''));
+                    var tail3 = arr.slice(Math.max(0, arr.length - 8));
+                    for (var i = 0; i < tail3.length; i++) {
+                        var it3 = tail3[i] || {};
+                        add(String(it3.ts || '') + ' ' + String(it3.kind || '') + ' ' + String(it3.msg || ''));
                     }
                 }
             }
-        } catch (e4) {}
+        } catch (e9) {}
 
         // Meta (optional)
         try {
@@ -13100,10 +13294,158 @@ generate_dashboard() {
                 add('--- meta ---');
                 try { add(JSON.stringify(meta)); } catch (eJ) {}
             }
-        } catch (e5) {}
+        } catch (e10) {}
 
         return lines.join('\n');
     }
+
+    function _znhPanicSaveLast(reason, meta, reportMin, reportFull) {
+        // Store a bounded snapshot so after a reload we can show an aftermath report.
+        try {
+            var obj = {
+                ts: Date.now(),
+                reason: String(reason || 'unknown'),
+                url: (function() { try { return String(window.location && window.location.href ? window.location.href : ''); } catch (e) { return ''; } })(),
+                report_min: String(reportMin || ''),
+                report_full: String(reportFull || ''),
+                meta: (meta && typeof meta === 'object') ? meta : null
+            };
+
+            var raw = '';
+            try { raw = JSON.stringify(obj); } catch (e0) { raw = ''; }
+            if (!raw) return;
+
+            // Cap to keep localStorage safe.
+            if (raw.length > 280000) {
+                // Trim the full report first.
+                try {
+                    var full = String(obj.report_full || '');
+                    if (full.length > 200000) obj.report_full = full.slice(full.length - 200000);
+                } catch (e1) {}
+                try { raw = JSON.stringify(obj); } catch (e2) { raw = ''; }
+                if (raw.length > 280000) {
+                    // Last resort: drop full report.
+                    obj.report_full = '';
+                    try { raw = JSON.stringify(obj); } catch (e3) { raw = ''; }
+                }
+            }
+
+            localStorage.setItem(_znhPanic.storage_key, raw);
+        } catch (e) {}
+    }
+
+    function _znhPanicLoadLast() {
+        try {
+            var raw = localStorage.getItem(_znhPanic.storage_key) || '';
+            if (!raw) return null;
+            var obj = JSON.parse(raw);
+            if (!obj || typeof obj !== 'object') return null;
+            if (!obj.ts) return null;
+            return obj;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function znhPanicClearLast() {
+        try { localStorage.removeItem(_znhPanic.storage_key); } catch (e) {}
+    }
+
+    function znhPanicShowLast() {
+        var last = _znhPanicLoadLast();
+        if (!last) {
+            toast('No saved report', 'No previous crash report found', 'err');
+            return;
+        }
+
+        try { _znhPanicEnsure(); } catch (e0) {}
+        var d = document.getElementById('znh-panic');
+        if (!d) return;
+
+        _znhPanic.active = true;
+        _znhPanic.shown_ts = (function() { try { return Date.now(); } catch (e) { return 0; } })();
+        _znhPanic.last_reason = String(last.reason || 'previous crash');
+        _znhPanic.last_meta = last.meta || null;
+
+        var when = '';
+        try { when = new Date(parseInt(last.ts, 10)).toISOString(); } catch (e1) { when = ''; }
+
+        var sub = document.getElementById('znh-panic-sub');
+        if (sub) {
+            sub.textContent = 'Previous WebUI crash/freeze detected' + (when ? (' at ' + when) : '') + '. Reason: ' + String(last.reason || 'unknown') + '.';
+        }
+
+        var metaEl = document.getElementById('znh-panic-meta');
+        if (metaEl) {
+            metaEl.textContent = 'This report was saved locally in your browser (after-reload aftermath report).';
+        }
+
+        var preMin = document.getElementById('znh-panic-report-min');
+        if (preMin) preMin.textContent = String(last.report_min || '(no quick report stored)');
+
+        var pre = document.getElementById('znh-panic-report');
+        if (pre) pre.textContent = String(last.report_full || '(no full report stored)');
+
+        d.style.display = 'block';
+        try { document.body.classList.add('overlay-open'); } catch (e2) {}
+    }
+
+    function znhPanicAftermathInit() {
+        // If a previous panic was saved, show a persistent notification with a one-click "Open report".
+        var tries = 0;
+        function attempt() {
+            tries++;
+
+            if (typeof window.znhNotifyAdd !== 'function') {
+                if (tries < 30) setTimeout(attempt, 250);
+                return;
+            }
+
+            var last = _znhPanicLoadLast();
+            if (!last) return;
+
+            // Auto-expire after ~7 days.
+            try {
+                var age = Date.now() - (parseInt(last.ts, 10) || 0);
+                if (age > (7 * 24 * 60 * 60 * 1000)) {
+                    znhPanicClearLast();
+                    return;
+                }
+            } catch (eA) {}
+
+            var when = '';
+            try { when = new Date(parseInt(last.ts, 10)).toISOString().slice(0, 19).replace('T', ' ') + 'Z'; } catch (eT) { when = ''; }
+
+            var body = ''
+                + 'The dashboard previously detected a WebUI freeze/crash and saved an aftermath report locally.\n\n'
+                + (when ? ('Time: ' + when + '\n') : '')
+                + 'Reason: ' + String(last.reason || 'unknown') + '\n\n'
+                + 'Next: Open report → Copy/Paste into a GitHub issue + attach JSON diagnostics.';
+
+            try {
+                window.znhNotifyAdd({
+                    id: 'znh_panic_last',
+                    title: 'Previous WebUI crash/freeze detected',
+                    body: body,
+                    level: 'error',
+                    once: false,
+                    actions: [
+                        { type: 'open-panic-last', label: 'Open report' },
+                        { type: 'export-ui-diagnostics', label: 'Download diagnostics' },
+                        { type: 'open-github-issues', label: 'Post issue' },
+                        { type: 'clear-panic-last', label: 'Clear' }
+                    ]
+                });
+            } catch (eN) {}
+        }
+        attempt();
+    }
+
+    try { setTimeout(function() { try { znhPanicAftermathInit(); } catch (e) {} }, 1000); } catch (e0) {}
+
+    // Export for Notification Center actions
+    try { window.znhPanicShowLast = znhPanicShowLast; } catch (e1) {}
+    try { window.znhPanicClearLast = znhPanicClearLast; } catch (e2) {}
 
     function znhPanicShow(reason, meta) {
         if (_znhPanic.active) return;
@@ -13122,10 +13464,32 @@ generate_dashboard() {
             sub.textContent = 'Reason: ' + String(_znhPanic.last_reason || 'unknown') + '. Close other tabs, then reload. If this happened during Snapper/scrub, attach the report below to a GitHub issue.';
         }
 
-        var pre = document.getElementById('znh-panic-report');
-        if (pre) {
-            pre.textContent = znhPanicBuildReportText(_znhPanic.last_reason, _znhPanic.last_meta);
+        var metaEl = document.getElementById('znh-panic-meta');
+        if (metaEl) {
+            var bits = [];
+            try {
+                var t = _znhTaskLoad();
+                if (t && t.type && t.job_id) bits.push('task=' + String(t.type) + ' job_id=' + String(t.job_id));
+            } catch (e0) {}
+            try {
+                var sh = _znhPanic.stall_history || [];
+                if (sh && sh.length) bits.push('stalls=' + String(sh.length));
+            } catch (e1) {}
+            metaEl.textContent = bits.length ? bits.join(' • ') : '';
         }
+
+        var rMin = '';
+        var rFull = '';
+        try { rMin = znhPanicBuildReportTextMinimal(_znhPanic.last_reason, _znhPanic.last_meta); } catch (e2) { rMin = ''; }
+        try { rFull = znhPanicBuildReportText(_znhPanic.last_reason, _znhPanic.last_meta); } catch (e3) { rFull = rMin || ''; }
+
+        var preMin = document.getElementById('znh-panic-report-min');
+        if (preMin) preMin.textContent = rMin || '(collecting…)';
+
+        var pre = document.getElementById('znh-panic-report');
+        if (pre) pre.textContent = rFull || rMin || '(collecting…)';
+
+        try { _znhPanicSaveLast(_znhPanic.last_reason, _znhPanic.last_meta, rMin, rFull); } catch (e4) {}
 
         d.style.display = 'block';
         try { document.body.classList.add('overlay-open'); } catch (e1) {}
@@ -13219,8 +13583,62 @@ generate_dashboard() {
                     var drift = now - expected;
                     _znhPanic.watchdog_last = now;
 
-                    if (drift > _znhPanic.watchdog_threshold_ms) {
-                        znhPanicMaybe('UI stall detected (main thread blocked ~' + String(Math.round(drift)) + 'ms)', { drift_ms: Math.round(drift) });
+                    // Only consider stalls when a long-running task is active.
+                    var taskActive = false;
+                    try {
+                        var tt = _znhTaskLoad();
+                        taskActive = !!(tt && tt.type && tt.job_id);
+                    } catch (eT) { taskActive = false; }
+
+                    if (taskActive) {
+                        // Record stall history for the report (only when drift is meaningful).
+                        if (drift > 500) {
+                            try {
+                                _znhPanic.stall_history.push({
+                                    ts: (function() { try { return new Date().toISOString(); } catch (e) { return ''; } })(),
+                                    drift_ms: Math.round(drift)
+                                });
+                                if (_znhPanic.stall_history.length > _znhPanic.stall_history_max) {
+                                    _znhPanic.stall_history = _znhPanic.stall_history.slice(_znhPanic.stall_history.length - _znhPanic.stall_history_max);
+                                }
+                            } catch (eH) {}
+                        }
+
+                        // Soft stall burst detector: "almost freeze".
+                        if (drift > _znhPanic.stall_warn_threshold_ms) {
+                            var nowTs = 0;
+                            try { nowTs = Date.now(); } catch (eN) { nowTs = 0; }
+
+                            if (!_znhPanic.stall_burst_ts || (nowTs - _znhPanic.stall_burst_ts) > _znhPanic.stall_burst_window_ms) {
+                                _znhPanic.stall_burst_ts = nowTs;
+                                _znhPanic.stall_burst_count = 0;
+                            }
+                            _znhPanic.stall_burst_count++;
+
+                            // Light UX: log + toast (throttled)
+                            try {
+                                if (typeof window.znhJsHealthLog === 'function') {
+                                    window.znhJsHealthLog('warn', 'UI stall warning during running job (~' + String(Math.round(drift)) + 'ms drift)');
+                                }
+                            } catch (eL) {}
+
+                            try {
+                                if (!_znhPanic.stall_last_toast_ts || (nowTs - _znhPanic.stall_last_toast_ts) > 12000) {
+                                    _znhPanic.stall_last_toast_ts = nowTs;
+                                    toast('Performance warning', 'UI stall detected (~' + String(Math.round(drift)) + 'ms). If it gets worse, a panic report will appear.', 'err');
+                                }
+                            } catch (eToast) {}
+
+                            // Escalation rules:
+                            // - any huge stall triggers immediately
+                            // - repeated "almost freeze" stalls trigger panic too
+                            if (drift > _znhPanic.watchdog_threshold_ms || _znhPanic.stall_burst_count >= 3 || (drift > 3500 && _znhPanic.stall_burst_count >= 2)) {
+                                znhPanicMaybe('UI stall detected (main thread blocked ~' + String(Math.round(drift)) + 'ms)', {
+                                    drift_ms: Math.round(drift),
+                                    burst_count: _znhPanic.stall_burst_count
+                                });
+                            }
+                        }
                     }
                 } catch (eW) {}
             }, _znhPanic.watchdog_interval_ms);
@@ -13445,6 +13863,31 @@ generate_dashboard() {
                     } catch (eO) {}
                     try { window.location.href = url0; } catch (eL) {}
                 } catch (eU1) {}
+                return;
+            }
+
+            // Open the saved panic/crash aftermath report (if any)
+            if (t === 'open-panic-last') {
+                try {
+                    if (typeof window.znhPanicShowLast === 'function') {
+                        window.znhPanicShowLast();
+                        return;
+                    }
+                } catch (eP0) {}
+                toast('Not available', 'Panic report viewer not loaded', 'err');
+                return;
+            }
+
+            // Clear the saved panic/crash aftermath report
+            if (t === 'clear-panic-last') {
+                try {
+                    if (typeof window.znhPanicClearLast === 'function') {
+                        window.znhPanicClearLast();
+                        toast('Cleared', 'Saved panic report cleared', 'ok');
+                        return;
+                    }
+                } catch (eP1) {}
+                toast('Clear failed', 'Could not clear saved panic report', 'err');
                 return;
             }
 

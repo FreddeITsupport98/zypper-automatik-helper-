@@ -1904,6 +1904,9 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Snapper cleanup now supports **minimize + resume** via the bottom-right job bubble (useful for long cleanups).
   - 🧰 **IMPROVED:** scrub-ghost (in-page Run button) now runs confirmed actions as a **background job** and opens a minimizable overlay viewer (same bubble/resume behavior as the wizard).
   - 🧯 **NEW:** WebUI panic screen (blue-screen style): if the UI freezes/crashes during long-running jobs, it shows a full-page warning with **Copy issue report** + **Download diagnostics (JSON)** + **Open GitHub issues**.
+  - 🧯 **IMPROVED:** Panic screen now also catches **“almost freeze”** stalls during running jobs and saves an **aftermath report** locally.
+    - After you reload, Notification Center will show: **“Previous WebUI crash/freeze detected”** with a one-click **Open report** button.
+    - Panic screen now includes **Quick report** vs **Full report** + **Download report (.txt)**.
   - 🐛 **FIXED:** reduced UI freezes during huge Snapper/scrub output by bounding log rendering and skipping redundant updates.
   - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
   - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).
