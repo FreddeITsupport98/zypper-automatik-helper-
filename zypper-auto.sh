@@ -29926,16 +29926,26 @@ run_snapper_menu_only() {
         # In that mode we prefer to WAIT (configurable) instead of failing immediately.
         __znh_snapper_cleanup_busy_reason() {
             local r=""
+
             if systemctl is-active --quiet snapper-cleanup.service 2>/dev/null; then
                 r="${r:+${r}; }snapper-cleanup.service active"
             fi
-            if pgrep -a -f 'snapper[[:space:]].*cleanup' >/dev/null 2>&1; then
-                r="${r:+${r}; }snapper cleanup process running"
+
+            # Detect running snapper processes.
+            # IMPORTANT: do NOT pgrep "-f snapper ... cleanup" because that can match
+            # *this* helper invocation (argv contains: "snapper cleanup ...") and cause
+            # a false busy state that never clears in WebUI/non-interactive mode.
+            local snapper_lines
+            snapper_lines="$(pgrep -a -x snapper 2>/dev/null || true)"
+            if [ -n "${snapper_lines}" ]; then
+                if printf '%s\n' "${snapper_lines}" | grep -qE '(^|[[:space:]])cleanup([[:space:]]|$)'; then
+                    r="${r:+${r}; }snapper cleanup process running"
+                else
+                    # Broader guard: snapper running at all (could be timeline or manual)
+                    r="${r:+${r}; }snapper command running"
+                fi
             fi
-            if pgrep -x snapper >/dev/null 2>&1; then
-                # Broader guard: snapper running at all (could be timeline or manual)
-                r="${r:+${r}; }snapper command running"
-            fi
+
             printf '%s' "${r}"
             return 0
         }

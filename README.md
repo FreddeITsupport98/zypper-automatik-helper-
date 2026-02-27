@@ -1860,6 +1860,8 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** WebUI Snapper cleanup no longer fails just because Snapper is busy (e.g. `snapper-cleanup.service` active).
     - It now waits up to `SNAP_CLEANUP_BUSY_WAIT_SECONDS` (poll: `SNAP_CLEANUP_BUSY_POLL_SECONDS`) before refusing.
     - Optional (danger): `SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE=true` can override and run anyway.
+  - 🐛 **FIXED:** Snapper cleanup busy detection no longer false-matches the helper’s own argv (`zypper-auto-helper snapper cleanup ...`).
+    - This prevented a bug where WebUI cleanup could get stuck in “busy wait” for the full timeout and then refuse, even when no other Snapper cleanup was actually running.
   - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
     - WebUI now shows a small **Kernel purge: true/false** status indicator (green/red) so it’s obvious whether the setting is enabled.
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:
