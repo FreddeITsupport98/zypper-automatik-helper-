@@ -1848,6 +1848,11 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
   - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
     - WebUI now shows a small **Kernel purge: true/false** status indicator (green/red) so it’s obvious whether the setting is enabled.
+  - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:
+    - EFI/Boot usage: used% + (used/total) + a progress bar
+    - BLS entry file counts (total + snapper subset)
+    - GRUB entry counts (detects **GRUB BLS/blscfg mode** and shows effective entry count)
+    - After Snapper cleanup or scrub-ghost apply, it shows a best-effort **Δ affected by prune** (counts + percent change + approx freed space).
   - 🧹 **NEW:** Boot entry scrubber tool **scrub-ghost** is now embedded into `zypper-auto.sh` and installed automatically:
     - CLI: `sudo zypper-auto-helper scrub-ghost --dry-run`
     - Installed binaries: `/usr/local/bin/zypper-scrub-ghost` and `/usr/local/bin/scrub-ghost`

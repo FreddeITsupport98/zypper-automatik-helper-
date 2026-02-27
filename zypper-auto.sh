@@ -11049,6 +11049,30 @@ generate_dashboard() {
         </div>
       </div>
 
+      <div class="grid" style="margin-bottom: 12px;">
+        <div class="stat-box">
+          <span class="stat-label">EFI/Boot usage</span>
+          <span class="stat-value" id="boot-efi-usage">(loading)</span>
+          <div class="progress-track" style="margin-top:10px;">
+            <div class="progress-fill" id="boot-efi-bar" data-percent="0"></div>
+          </div>
+          <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-efi-detail"></div>
+          <div style="margin-top:6px; font-size:0.82rem; color: rgba(148,163,184,0.92);" id="boot-efi-delta"></div>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Boot entries (BLS)</span>
+          <span class="stat-value" id="boot-bls-count">(loading)</span>
+          <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-bls-detail"></div>
+          <div style="margin-top:6px; font-size:0.82rem; color: rgba(148,163,184,0.92);" id="boot-bls-delta"></div>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">GRUB menu entries</span>
+          <span class="stat-value" id="boot-grub-count">(loading)</span>
+          <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-grub-detail"></div>
+          <div style="margin-top:6px; font-size:0.82rem; color: rgba(148,163,184,0.92);" id="boot-grub-delta"></div>
+        </div>
+      </div>
+
       <div class="grid">
         <div class="stat-box">
           <span class="stat-label">Status (Option 1)</span>
@@ -15419,6 +15443,184 @@ generate_dashboard() {
     }
     window.znhKernelPurgeRefreshUI = znhKernelPurgeRefreshUI;
 
+    function _fmtKb(kb) {
+        var n = 0;
+        try { n = parseInt(kb || 0, 10) || 0; } catch (e) { n = 0; }
+        if (n < 0) n = 0;
+        var mb = n / 1024.0;
+        var gb = mb / 1024.0;
+        if (gb >= 1.0) return (gb.toFixed(gb >= 10 ? 0 : 1)) + ' GiB';
+        if (mb >= 1.0) return (mb.toFixed(mb >= 10 ? 0 : 1)) + ' MiB';
+        return String(n) + ' KiB';
+    }
+
+    var _znh_boot_stats = {
+        last: null,
+        baseline: null,
+        baseline_reason: '',
+        baseline_ts: 0
+    };
+
+    function znhBootStatsCaptureBaseline(reason) {
+        // Capture a before-state so the UI can show how much a prune changed.
+        var r = String(reason || '').trim();
+        _znh_boot_stats.baseline_reason = r;
+        _znh_boot_stats.baseline_ts = Date.now();
+        return _api('/api/boot/stats', { method: 'GET' }).then(function(s) {
+            _znh_boot_stats.baseline = s || null;
+            return s;
+        }).catch(function() {
+            _znh_boot_stats.baseline = null;
+            return null;
+        });
+    }
+    window.znhBootStatsCaptureBaseline = znhBootStatsCaptureBaseline;
+
+    function znhBootStatsRefreshUI(showDelta) {
+        // Updates Snapper Manager boot/EFI stats. If showDelta is true and a baseline exists,
+        // also shows a best-effort "affected by prune" delta.
+        return _api('/api/boot/stats', { method: 'GET' }).then(function(s) {
+            _znh_boot_stats.last = s || null;
+
+            var efi = (s && s.efi) ? s.efi : null;
+            var boot = (s && s.boot) ? s.boot : null;
+            var chosen = (efi && efi.ok) ? efi : (boot && boot.ok ? boot : (efi || boot));
+
+            var usageEl = document.getElementById('boot-efi-usage');
+            var detailEl = document.getElementById('boot-efi-detail');
+            var deltaEl = document.getElementById('boot-efi-delta');
+            var bar = document.getElementById('boot-efi-bar');
+
+            if (usageEl) usageEl.textContent = chosen && chosen.ok ? (String(chosen.used_pct) + '%') : '(unknown)';
+            if (bar) {
+                var pct = 0;
+                try { pct = (chosen && chosen.ok) ? parseInt(chosen.used_pct || 0, 10) : 0; } catch (eP) { pct = 0; }
+                if (pct < 0) pct = 0;
+                if (pct > 100) pct = 100;
+                try { bar.style.width = String(pct) + '%'; } catch (eW) {}
+            }
+
+            if (detailEl) {
+                if (chosen && chosen.ok) {
+                    detailEl.textContent = String(chosen.path || '') + ' • used ' + _fmtKb(chosen.used_kb) + ' / ' + _fmtKb(chosen.total_kb);
+                } else {
+                    detailEl.textContent = 'boot partition not detected';
+                }
+            }
+
+            // BLS entries stats
+            var bls = (s && s.bls_entries) ? s.bls_entries : null;
+            var blsCountEl = document.getElementById('boot-bls-count');
+            var blsDetailEl = document.getElementById('boot-bls-detail');
+            var blsDeltaEl = document.getElementById('boot-bls-delta');
+
+            if (blsCountEl) blsCountEl.textContent = bls && bls.ok ? String(bls.total_conf) : '(unknown)';
+            if (blsDetailEl) {
+                if (bls && bls.ok) {
+                    blsDetailEl.textContent = String(bls.dir || '') + ' • snapper=' + String(bls.snapper_conf) + ' other=' + String(bls.other_conf);
+                } else {
+                    blsDetailEl.textContent = 'BLS entry directory not detected';
+                }
+            }
+
+            // GRUB stats
+            var grub = (s && s.grub) ? s.grub : null;
+            var grubCountEl = document.getElementById('boot-grub-count');
+            var grubDetailEl = document.getElementById('boot-grub-detail');
+            var grubDeltaEl = document.getElementById('boot-grub-delta');
+
+            function _grubEffectiveCount(g) {
+                if (!g || !g.ok) return null;
+                if (g.bls_mode && (g.effective_entries != null)) return parseInt(g.effective_entries || 0, 10) || 0;
+                return parseInt(g.menuentries || 0, 10) || 0;
+            }
+
+            if (grubCountEl) grubCountEl.textContent = grub && grub.ok ? String(_grubEffectiveCount(grub)) : '(unknown)';
+            if (grubDetailEl) {
+                if (grub && grub.ok) {
+                    if (grub.bls_mode) {
+                        grubDetailEl.textContent = String(grub.cfg_path || '') + ' • mode=BLS • entries=' + String(_grubEffectiveCount(grub));
+                    } else {
+                        grubDetailEl.textContent = String(grub.cfg_path || '') + ' • mode=classic • menuentry=' + String(grub.menuentries) + ' submenu=' + String(grub.submenus);
+                    }
+                } else {
+                    grubDetailEl.textContent = 'grub.cfg not readable';
+                }
+            }
+
+            function _setDelta(el, text, kind) {
+                if (!el) return;
+                el.textContent = String(text || '');
+                try {
+                    if (kind === 'ok') el.style.color = 'rgba(34,197,94,0.92)';
+                    else if (kind === 'bad') el.style.color = 'rgba(239,68,68,0.92)';
+                    else el.style.color = 'rgba(148,163,184,0.92)';
+                } catch (eC) {}
+            }
+
+            // Delta rendering
+            if (deltaEl) _setDelta(deltaEl, '', '');
+            if (blsDeltaEl) _setDelta(blsDeltaEl, '', '');
+            if (grubDeltaEl) _setDelta(grubDeltaEl, '', '');
+
+            if (showDelta && _znh_boot_stats.baseline) {
+                var b = _znh_boot_stats.baseline;
+
+                // Used% delta (chosen path may differ, so compare like-for-like if possible)
+                var bChosen = null;
+                try {
+                    var bEfi = b.efi || null;
+                    var bBoot = b.boot || null;
+                    bChosen = (efi && efi.ok && bEfi && bEfi.ok) ? bEfi : ((boot && boot.ok && bBoot && bBoot.ok) ? bBoot : (bEfi || bBoot));
+                } catch (eBC) { bChosen = null; }
+
+                if (chosen && chosen.ok && bChosen && bChosen.ok) {
+                    var dUsed = (parseInt(bChosen.used_pct || 0, 10) || 0) - (parseInt(chosen.used_pct || 0, 10) || 0);
+                    var dKb = (parseInt(bChosen.used_kb || 0, 10) || 0) - (parseInt(chosen.used_kb || 0, 10) || 0);
+                    var freed = dKb > 0;
+                    _setDelta(deltaEl, 'Δ used ' + String(dUsed > 0 ? ('-' + dUsed) : ('+' + Math.abs(dUsed))) + '% • ' + (freed ? ('freed ~' + _fmtKb(dKb)) : ('changed ~' + _fmtKb(Math.abs(dKb)))), freed ? 'ok' : '');
+                }
+
+                // BLS delta
+                var bBls = b.bls_entries || null;
+                if (bls && bls.ok && bBls && bBls.ok) {
+                    var beforeN = parseInt(bBls.total_conf || 0, 10) || 0;
+                    var afterN = parseInt(bls.total_conf || 0, 10) || 0;
+                    var removedN = beforeN - afterN;
+                    var pct = beforeN > 0 ? Math.round((removedN * 100.0) / beforeN) : 0;
+                    if (removedN !== 0) {
+                        _setDelta(blsDeltaEl, 'Δ entries ' + (removedN > 0 ? ('-' + removedN) : ('+' + Math.abs(removedN))) + ' (' + String(pct >= 0 ? ('-' + pct) : ('+' + Math.abs(pct))) + '%)', removedN > 0 ? 'ok' : '');
+                    }
+                }
+
+                // GRUB delta
+                var bGrub = b.grub || null;
+                if (grub && grub.ok && bGrub && bGrub.ok) {
+                    var bg = _grubEffectiveCount(bGrub);
+                    var ag = _grubEffectiveCount(grub);
+                    if (bg == null) bg = 0;
+                    if (ag == null) ag = 0;
+                    var dg = (parseInt(bg || 0, 10) || 0) - (parseInt(ag || 0, 10) || 0);
+                    if (dg !== 0) {
+                        var gpct = bg > 0 ? Math.round((dg * 100.0) / bg) : 0;
+                        var label = grub.bls_mode ? 'entries' : 'menuentries';
+                        _setDelta(grubDeltaEl, 'Δ ' + label + ' ' + (dg > 0 ? ('-' + dg) : ('+' + Math.abs(dg))) + ' (' + String(gpct >= 0 ? ('-' + gpct) : ('+' + Math.abs(gpct))) + '%)', dg > 0 ? 'ok' : '');
+                    }
+                }
+
+                // One-shot baseline
+                _znh_boot_stats.baseline = null;
+                _znh_boot_stats.baseline_reason = '';
+                _znh_boot_stats.baseline_ts = 0;
+            }
+
+            return s;
+        }).catch(function() {
+            return null;
+        });
+    }
+    window.znhBootStatsRefreshUI = znhBootStatsRefreshUI;
+
     // --- Snapper Manager (dashboard -> root API) ---
     function _snapperSetOut(text) {
         var el = document.getElementById('snapper-output');
@@ -15958,7 +16160,30 @@ generate_dashboard() {
         if (b4) b4.addEventListener('click', function() {
             var mode = 'all';
             try { mode = String((document.getElementById('snapper-cleanup-mode') || {}).value || 'all'); } catch (e) { mode = 'all'; }
-            snapperRun('cleanup', { mode: mode }, 'cleanup');
+
+            function doRunCleanup() {
+                var p = null;
+                try { p = snapperRun('cleanup', { mode: mode }, 'cleanup'); } catch (e2) { p = null; }
+
+                // Refresh stats AFTER.
+                try {
+                    Promise.resolve(p).then(function() {
+                        try { if (typeof znhBootStatsRefreshUI === 'function') return znhBootStatsRefreshUI(true); } catch (e3) {}
+                        return null;
+                    });
+                } catch (e4) {}
+            }
+
+            // Capture BEFORE so we can show "affected by prune" deltas after cleanup completes.
+            try {
+                if (typeof znhBootStatsCaptureBaseline === 'function') {
+                    znhBootStatsCaptureBaseline('snapper-cleanup').then(doRunCleanup).catch(doRunCleanup);
+                } else {
+                    doRunCleanup();
+                }
+            } catch (eB) {
+                doRunCleanup();
+            }
         });
 
         if (b5) b5.addEventListener('click', function() {
@@ -16577,15 +16802,28 @@ generate_dashboard() {
                 body.confirm_phrase = got2;
             }
 
-            toast('Starting…', 'scrub-ghost', 'ok');
-            _api('/api/scrub/start', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
-                if (!r || !r.job_id) throw new Error('missing job_id');
-                _sgPollJob(String(r.job_id), action, 'scrub-ghost');
-            }).catch(function(err) {
-                var msg = (err && err.message) ? err.message : 'start failed';
-                toast('scrub-ghost failed to start', msg, 'err');
-                try { _settingsClientLog('warn', 'scrub start failed', { action: action, error: msg }); } catch (e3) {}
-            });
+            function doStartJob() {
+                toast('Starting…', 'scrub-ghost', 'ok');
+                _api('/api/scrub/start', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
+                    if (!r || !r.job_id) throw new Error('missing job_id');
+                    _sgPollJob(String(r.job_id), action, 'scrub-ghost');
+                }).catch(function(err) {
+                    var msg = (err && err.message) ? err.message : 'start failed';
+                    toast('scrub-ghost failed to start', msg, 'err');
+                    try { _settingsClientLog('warn', 'scrub start failed', { action: action, error: msg }); } catch (e3) {}
+                });
+            }
+
+            var mayChange = (action === 'apply' || action === 'auto' || (String(action || '').indexOf('restore-') === 0));
+            try {
+                if (mayChange && typeof znhBootStatsCaptureBaseline === 'function') {
+                    znhBootStatsCaptureBaseline('scrub-ghost').then(doStartJob).catch(doStartJob);
+                } else {
+                    doStartJob();
+                }
+            } catch (eB) {
+                doStartJob();
+            }
         };
 
         _suUpdateProgress('Waiting', 0);
@@ -16635,6 +16873,13 @@ generate_dashboard() {
         if (e.close) e.close.onclick = function() { _suShow(false); };
 
         try { znhTaskDone('scrub-ghost', !!ok); } catch (e0) {}
+
+        // Refresh boot/EFI stats after scrub completes (it may prune boot entries).
+        try {
+            setTimeout(function() {
+                try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(true); } catch (e1) {}
+            }, 650);
+        } catch (e2) {}
     }
 
     function _sgPollJob(job_id, action, title) {
@@ -16958,7 +17203,32 @@ generate_dashboard() {
             if (effectiveAction === 'apply') confirmAction = 'apply';
             if (effectiveAction === 'restore-latest') confirmAction = 'restore-latest';
 
-            scrubRun(effectiveAction, params, confirmAction);
+            // Capture BEFORE so we can show "affected by prune" deltas after apply.
+            var mayChange = (effectiveAction === 'apply' || effectiveAction === 'auto' || (String(effectiveAction || '').indexOf('restore-') === 0));
+
+            function doRunScrub() {
+                var p = null;
+                try { p = scrubRun(effectiveAction, params, confirmAction); } catch (eP) { p = null; }
+
+                // Refresh stats AFTER (only meaningful for apply/auto/restore).
+                try {
+                    Promise.resolve(p).then(function() {
+                        if (!mayChange) return null;
+                        try { if (typeof znhBootStatsRefreshUI === 'function') return znhBootStatsRefreshUI(true); } catch (e3) {}
+                        return null;
+                    });
+                } catch (e4) {}
+            }
+
+            try {
+                if (mayChange && typeof znhBootStatsCaptureBaseline === 'function') {
+                    znhBootStatsCaptureBaseline('scrub-ghost').then(doRunScrub).catch(doRunScrub);
+                } else {
+                    doRunScrub();
+                }
+            } catch (eB) {
+                doRunScrub();
+            }
         });
     }
 
@@ -21021,6 +21291,7 @@ generate_dashboard() {
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
+            try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(false); } catch (eBS) {}
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
             try { selfUpdateAutoQueryInit(); } catch (e) {}
@@ -40277,13 +40548,172 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
         # Snapper, self-update, system-update, scrub-ghost, quick-action, and diag-logs endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/"):
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
                 except Exception:
                     pass
                 return _json_response(self, 401, {"error": "unauthorized"}, origin)
+
+        def _statvfs_usage(path0: str) -> dict:
+            p = str(path0 or "").strip()
+            out = {
+                "ok": False,
+                "path": p,
+                "total_kb": 0,
+                "used_kb": 0,
+                "avail_kb": 0,
+                "used_pct": 0,
+            }
+            if not p:
+                return out
+            try:
+                st = os.statvfs(p)
+                fr = int(getattr(st, "f_frsize", 0) or getattr(st, "f_bsize", 0) or 0)
+                if fr <= 0:
+                    fr = int(getattr(st, "f_bsize", 4096) or 4096)
+                blocks = int(getattr(st, "f_blocks", 0) or 0)
+                bavail = int(getattr(st, "f_bavail", 0) or 0)
+                bfree = int(getattr(st, "f_bfree", 0) or 0)
+                total = blocks * fr
+                avail = bavail * fr
+                used = (blocks - bfree) * fr
+                if total <= 0:
+                    return out
+                total_kb = int(total / 1024)
+                used_kb = int(used / 1024)
+                avail_kb = int(avail / 1024)
+                used_pct = int(round((used / total) * 100.0))
+                if used_pct < 0:
+                    used_pct = 0
+                if used_pct > 100:
+                    used_pct = 100
+                out.update({
+                    "ok": True,
+                    "total_kb": total_kb,
+                    "used_kb": used_kb,
+                    "avail_kb": avail_kb,
+                    "used_pct": used_pct,
+                })
+                return out
+            except Exception:
+                return out
+
+        def _bls_entries_stats() -> dict:
+            out = {
+                "ok": False,
+                "dir": "",
+                "total_conf": 0,
+                "snapper_conf": 0,
+                "other_conf": 0,
+                "total_bytes": 0,
+            }
+
+            entries_dir = ""
+            try:
+                for d in ("/boot/efi/loader/entries", "/boot/loader/entries", "/efi/loader/entries"):
+                    if os.path.isdir(d):
+                        entries_dir = d
+                        break
+            except Exception:
+                entries_dir = ""
+
+            if not entries_dir:
+                return out
+
+            try:
+                files = glob.glob(os.path.join(entries_dir, "*.conf"))
+            except Exception:
+                files = []
+
+            total = 0
+            snapper = 0
+            size = 0
+            for f in files or []:
+                bn = os.path.basename(f)
+                if not bn.endswith(".conf"):
+                    continue
+                total += 1
+                if bn.startswith("snapper-"):
+                    snapper += 1
+                try:
+                    size += int(os.path.getsize(f) or 0)
+                except Exception:
+                    pass
+
+            out.update({
+                "ok": True,
+                "dir": entries_dir,
+                "total_conf": int(total),
+                "snapper_conf": int(snapper),
+                "other_conf": int(total - snapper),
+                "total_bytes": int(size),
+            })
+            return out
+
+        def _grub_stats() -> dict:
+            cfg = "/boot/grub2/grub.cfg"
+            out = {
+                "ok": False,
+                "cfg_path": cfg,
+                "menuentries": 0,
+                "submenus": 0,
+                "bls_mode": False,
+            }
+            try:
+                if not os.path.exists(cfg):
+                    return out
+                # grub.cfg can be large; stream line-by-line.
+                me = 0
+                sm = 0
+                bls_mode = False
+                with open(cfg, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        l0 = (line or "")
+                        l = l0.lstrip().lower()
+                        if not bls_mode:
+                            # GRUB BLS integration typically uses: insmod blscfg + blscfg
+                            if "blscfg" in l:
+                                bls_mode = True
+                        if l.startswith("menuentry "):
+                            me += 1
+                        elif l.startswith("submenu "):
+                            sm += 1
+                out.update({
+                    "ok": True,
+                    "menuentries": int(me),
+                    "submenus": int(sm),
+                    "bls_mode": bool(bls_mode),
+                })
+                return out
+            except Exception:
+                return out
+
+        if path == "/api/boot/stats":
+            efi = _statvfs_usage("/boot/efi")
+            boot = _statvfs_usage("/boot")
+            bls = _bls_entries_stats()
+            grub = _grub_stats()
+
+            # If GRUB is configured for BLS (blscfg), the actual boot menu entries are
+            # effectively the BLS entry files (not the literal menuentry lines in grub.cfg).
+            try:
+                if grub.get("ok") and grub.get("bls_mode") and bls.get("ok"):
+                    grub["effective_entries"] = int(bls.get("total_conf") or 0)
+                    grub["effective_snapper_entries"] = int(bls.get("snapper_conf") or 0)
+                    grub["effective_other_entries"] = int(bls.get("other_conf") or 0)
+            except Exception:
+                pass
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "ts": time.time(),
+                "efi": efi,
+                "boot": boot,
+                "bls_entries": bls,
+                "grub": grub,
+            }, origin)
 
         # --- Snapper (dashboard) ---
         if path == "/api/snapper/status":
