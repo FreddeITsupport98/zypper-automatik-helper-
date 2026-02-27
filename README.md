@@ -1842,10 +1842,12 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** the **“🧪 JS health (debug)”** panel now includes a **Clear crash log** button to reset the persistent crash log stored in your browser.
   - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
-  - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots (runs cleanup now, then prunes snapshots) while keeping the newest snapshots per snapper config.
+  - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots while keeping the newest snapshots per snapper config.
     - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
+    - Force-prune now respects the keep-newest preference (it does **not** depend on Snapper `TIMELINE_LIMIT_*` / `NUMBER_LIMIT` rules).
   - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
   - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
+    - WebUI now shows a small **Kernel purge: true/false** status indicator (green/red) so it’s obvious whether the setting is enabled.
   - 🧹 **NEW:** Boot entry scrubber tool **scrub-ghost** is now embedded into `zypper-auto.sh` and installed automatically:
     - CLI: `sudo zypper-auto-helper scrub-ghost --dry-run`
     - Installed binaries: `/usr/local/bin/zypper-scrub-ghost` and `/usr/local/bin/scrub-ghost`

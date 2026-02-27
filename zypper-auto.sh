@@ -11087,6 +11087,12 @@ generate_dashboard() {
             Warning: cleanup may delete snapshots. Mode <code>force-prune</code> deletes older snapshots but keeps the newest snapshots per config.
             Kernel cleanup runs when <code>KERNEL_PURGE_ENABLED=true</code>.
           </div>
+          <div style="margin-top:10px;">
+            <div class="feat-badge" id="kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">
+              <span class="feat-dot" id="kernel-purge-dot" style="color: rgba(148,163,184,0.9);">●</span>
+              Kernel purge: <strong id="kernel-purge-val">(loading)</strong>
+            </div>
+          </div>
         </div>
 
         <div class="stat-box">
@@ -15381,6 +15387,38 @@ generate_dashboard() {
     }
     window.znhDiagLogsRefreshUI = znhDiagLogsRefreshUI;
 
+    function znhKernelPurgeRefreshUI() {
+        // Reflect Settings -> Snapper UI state.
+        // Requested UX: show green "true" / red "false".
+        var raw = '';
+        try {
+            raw = (_settingsConfig && _settingsConfig.KERNEL_PURGE_ENABLED != null) ? String(_settingsConfig.KERNEL_PURGE_ENABLED) : '';
+        } catch (e0) {
+            raw = '';
+        }
+        var on = String(raw || '').trim().toLowerCase() === 'true';
+        var label = raw ? (on ? 'true' : 'false') : '(Settings not loaded)';
+        var dot = on ? 'rgba(34,197,94,0.90)' : (raw ? 'rgba(239,68,68,0.90)' : 'rgba(148,163,184,0.90)');
+
+        function apply(dotId, valId) {
+            var d = null;
+            var v = null;
+            try { d = document.getElementById(dotId); } catch (e1) { d = null; }
+            try { v = document.getElementById(valId); } catch (e2) { v = null; }
+            if (d) {
+                try { d.style.color = dot; } catch (e3) {}
+            }
+            if (v) {
+                try { v.textContent = String(label); } catch (e4) {}
+                try { v.style.color = on ? 'rgba(34,197,94,0.92)' : (raw ? 'rgba(239,68,68,0.92)' : 'rgba(148,163,184,0.92)'); } catch (e5) {}
+            }
+        }
+
+        apply('kernel-purge-dot', 'kernel-purge-val');
+        apply('sn-kernel-purge-dot', 'sn-kernel-purge-val');
+    }
+    window.znhKernelPurgeRefreshUI = znhKernelPurgeRefreshUI;
+
     // --- Snapper Manager (dashboard -> root API) ---
     function _snapperSetOut(text) {
         var el = document.getElementById('snapper-output');
@@ -15625,6 +15663,9 @@ generate_dashboard() {
                     '  <div style="margin-top:6px; font-weight:800;">This runs a root Snapper action via the localhost API. ' + _snEscapeHtml(hint || '') + '</div>',
                     '</div>',
                     '<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command (root): <code style="font-size:0.85rem;">' + _snEscapeHtml(cmd) + '</code></div>',
+                    '<div class="feat-badge" id="sn-kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">',
+                    '  <span class="feat-dot" id="sn-kernel-purge-dot" style="color: rgba(148,163,184,0.9);">●</span> Kernel purge: <strong id="sn-kernel-purge-val">(loading)</strong>',
+                    '</div>',
                     '<div style="margin-top: 8px;" class="overlay-kv">',
                     '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Confirmation phrase: <strong>' + _snEscapeHtml(phrase || 'CONFIRM') + '</strong></div>',
                     '</div>',
@@ -15689,6 +15730,7 @@ generate_dashboard() {
             setProg('Waiting', 0);
             setLog('');
             _wireCopyOutput();
+            try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP0) {}
 
             _snSetButtons({ show_cancel: true, show_run: true, show_close: false, run_disabled: true, footer_center: true });
 
@@ -20978,6 +21020,7 @@ generate_dashboard() {
             try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
+            try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
             try { selfUpdateAutoQueryInit(); } catch (e) {}
@@ -27575,7 +27618,7 @@ run_snapper_menu_only() {
         # Usage:
         #   __znh_snapper_cleanup_now                   # default: all algorithms
         #   __znh_snapper_cleanup_now all               # same as default
-        #   __znh_snapper_cleanup_now force-prune       # run algorithms + then delete older snapshots (keep newest)
+        #   __znh_snapper_cleanup_now force-prune       # keep newest snapshots per config (ignores timeline limits)
         #   __znh_snapper_cleanup_now number            # single algorithm
         #   __znh_snapper_cleanup_now timeline
         #   __znh_snapper_cleanup_now empty-pre-post
@@ -27585,6 +27628,13 @@ run_snapper_menu_only() {
         if [ "${mode_arg}" = "force-prune" ]; then
             force_prune=1
             mode="all"
+        fi
+
+        # In force-prune mode, we keep newest snapshots per config regardless of snapper timeline limits.
+        local __keep_n
+        __keep_n="${SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST:-3}"
+        if ! [[ "${__keep_n}" =~ ^[0-9]+$ ]] || [ "${__keep_n}" -lt 1 ] 2>/dev/null; then
+            __keep_n=3
         fi
 
         # --- Professional Edition: audit report (text + JSON) ---
@@ -27763,11 +27813,18 @@ run_snapper_menu_only() {
         echo "=============================================="
 
         echo "About to run Snapper cleanup (best-effort)."
-        echo "This uses your Snapper retention rules (and any caps you configured in /etc/zypper-auto.conf)."
-        echo "Algorithms:"
-        echo "  1) empty-pre-post (orphaned pre snapshots)"
-        echo "  2) timeline       (expired hourly/daily snapshots)"
-        echo "  3) number         (enforce numeric limits)"
+        if [ "${force_prune}" -eq 1 ] 2>/dev/null; then
+            echo "FORCE-PRUNE mode: ignores TIMELINE_LIMIT/NUMBER_LIMIT and keeps newest per config: ${__keep_n}"
+            echo "Algorithms:"
+            echo "  1) empty-pre-post (orphaned pre snapshots)"
+            echo "  2) force-prune    (delete older snapshots; keep newest per config)"
+        else
+            echo "This uses your Snapper retention rules (and any caps you configured in /etc/zypper-auto.conf)."
+            echo "Algorithms:"
+            echo "  1) empty-pre-post (orphaned pre snapshots)"
+            echo "  2) timeline       (expired hourly/daily snapshots)"
+            echo "  3) number         (enforce numeric limits)"
+        fi
         echo ""
         echo "Optional extras (if enabled in /etc/zypper-auto.conf):"
         echo "  - Flatpak unused runtimes prune"
@@ -27779,7 +27836,7 @@ run_snapper_menu_only() {
 
         if [ "${mode}" = "all" ]; then
             if [ "${force_prune}" -eq 1 ] 2>/dev/null; then
-                echo "Mode: FORCE-PRUNE (runs ALL algorithms, then prunes older snapshots while keeping newest per config)"
+                echo "Mode: FORCE-PRUNE (keep newest per config: ${__keep_n}; ignores snapper timeline limits)"
             else
                 echo "Mode: ALL algorithms (empty-pre-post -> timeline -> number)"
             fi
@@ -27787,10 +27844,14 @@ run_snapper_menu_only() {
             echo "Mode: single algorithm '${mode}'"
         fi
 
-        # Priority order (safest first): empty-pre-post -> timeline -> number
+        # In force-prune mode, we intentionally do NOT run timeline/number algorithms
+        # because they depend on snapper's TIMELINE_LIMIT_*/NUMBER_LIMIT rules.
+        # The force-prune step (keep newest N) is the user's explicit preference.
         local algs=(empty-pre-post timeline number)
         if [ "${mode}" != "all" ]; then
             algs=("${mode}")
+        elif [ "${force_prune}" -eq 1 ] 2>/dev/null; then
+            algs=(empty-pre-post)
         fi
 
         # Prefer to run cleanup for every configured snapper config (root/home/etc.).
@@ -27955,45 +28016,78 @@ run_snapper_menu_only() {
                     echo "  [deep-clean] no obvious aborted/failed snapshots detected by regex."
                 fi
 
-                # 3) Number cleanup candidates (very rough)
-                local limit
-                limit=$(__znh_get_number_limit_max "${conf}" 2>/dev/null || true)
-                if [[ "${limit:-}" =~ ^[0-9]+$ ]] && [ "${limit}" -gt 0 ] 2>/dev/null; then
-                    local num_lines num_count remove_n
-                    num_lines=$(printf '%s\n' "${out}" | awk -F'\t' '$4=="number" && $1 ~ /^[0-9]+$/ && $1 != "0" {print $1"\t"$2"\t"$5"\t"$6}' | sort -t $'\t' -k1,1n)
-                    num_count=$(printf '%s\n' "${num_lines}" | awk 'NF{n++} END{print n+0}')
-                    if [ "${num_count}" -gt "${limit}" ] 2>/dev/null; then
-                        remove_n=$((num_count - limit))
-                        if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
-                            printf "  %b[number]%b snapshots with cleanup=number: %s (limit max=%s)\n" "${C_CYAN}" "${C_RESET}" "${num_count}" "${limit}"
-                            printf "    %b[CANDIDATE number]%b oldest %s snapshot(s) may be removed:\n" "${C_YELLOW}" "${C_RESET}" "${remove_n}"
-                        else
-                            echo "  [number] snapshots with cleanup=number: ${num_count} (limit max=${limit})"
-                            echo "    [CANDIDATE number] oldest ${remove_n} snapshot(s) may be removed:"
-                        fi
+                if [ "${force_prune}" -eq 1 ] 2>/dev/null; then
+                    # FORCE-PRUNE preview: ignore snapper timeline limits, show keep-newest plan.
+                    local keep_n total del_count
+                    keep_n="${__keep_n:-3}"
+                    if ! [[ "${keep_n}" =~ ^[0-9]+$ ]] || [ "${keep_n}" -lt 1 ] 2>/dev/null; then
+                        keep_n=3
+                    fi
 
-                        printf '%s\n' "${num_lines}" | head -n "${remove_n}" | head -n 20 | while IFS=$'\t' read -r n t dt d; do
-                            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
-                                printf "      %b[REMOVE?]%b #%s [%s] %s %s\n" "${C_RED}" "${C_RESET}" "${n}" "${t}" "${dt}" "${d}"
-                            else
-                                printf "      [REMOVE?] #%s [%s] %s %s\n" "${n}" "${t}" "${dt}" "${d}"
+                    total=$(printf '%s\n' "${out}" | awk -F'\t' '$1 ~ /^[0-9]+$/ && $1 != "0" {n++} END{print n+0}')
+                    if [ "${total}" -le "${keep_n}" ] 2>/dev/null; then
+                        echo "  [force-prune] keep newest: ${keep_n} (snapshots=${total} -> nothing to prune)"
+                    else
+                        del_count=$((total - keep_n))
+                        echo "  [force-prune] keep newest: ${keep_n} (snapshots=${total} -> delete oldest ${del_count})"
+
+                        # List oldest candidates (IDs) to be deleted (best-effort).
+                        local ids
+                        ids=$(printf '%s\n' "${out}" | awk -F'\t' '$1 ~ /^[0-9]+$/ && $1 != "0" {print $1}' | sort -n)
+                        if [ -n "${ids:-}" ]; then
+                            echo "    [CANDIDATE force-prune] oldest snapshot IDs that will be deleted (preview):"
+                            printf '%s\n' "${ids}" | head -n "${del_count}" | head -n 24 | while read -r n; do
+                                [ -n "${n:-}" ] || continue
+                                printf "      [REMOVE?] #%s\n" "${n}"
+                            done
+                            if [ "${del_count}" -gt 24 ] 2>/dev/null; then
+                                echo "      ... (truncated preview)"
                             fi
-                        done
+                        fi
+                    fi
 
-                        if [ "${num_count}" -gt $((limit + 20)) ] 2>/dev/null; then
-                            echo "      ... (truncated preview)"
+                    echo "  NOTE: force-prune ignores TIMELINE_LIMIT_* and NUMBER_LIMIT; it only keeps the newest ${keep_n} snapshots per config."
+                else
+                    # 3) Number cleanup candidates (very rough)
+                    local limit
+                    limit=$(__znh_get_number_limit_max "${conf}" 2>/dev/null || true)
+                    if [[ "${limit:-}" =~ ^[0-9]+$ ]] && [ "${limit}" -gt 0 ] 2>/dev/null; then
+                        local num_lines num_count remove_n
+                        num_lines=$(printf '%s\n' "${out}" | awk -F'\t' '$4=="number" && $1 ~ /^[0-9]+$/ && $1 != "0" {print $1"\t"$2"\t"$5"\t"$6}' | sort -t $'\t' -k1,1n)
+                        num_count=$(printf '%s\n' "${num_lines}" | awk 'NF{n++} END{print n+0}')
+                        if [ "${num_count}" -gt "${limit}" ] 2>/dev/null; then
+                            remove_n=$((num_count - limit))
+                            if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                                printf "  %b[number]%b snapshots with cleanup=number: %s (limit max=%s)\n" "${C_CYAN}" "${C_RESET}" "${num_count}" "${limit}"
+                                printf "    %b[CANDIDATE number]%b oldest %s snapshot(s) may be removed:\n" "${C_YELLOW}" "${C_RESET}" "${remove_n}"
+                            else
+                                echo "  [number] snapshots with cleanup=number: ${num_count} (limit max=${limit})"
+                                echo "    [CANDIDATE number] oldest ${remove_n} snapshot(s) may be removed:"
+                            fi
+
+                            printf '%s\n' "${num_lines}" | head -n "${remove_n}" | head -n 20 | while IFS=$'\t' read -r n t dt d; do
+                                if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
+                                    printf "      %b[REMOVE?]%b #%s [%s] %s %s\n" "${C_RED}" "${C_RESET}" "${n}" "${t}" "${dt}" "${d}"
+                                else
+                                    printf "      [REMOVE?] #%s [%s] %s %s\n" "${n}" "${t}" "${dt}" "${d}"
+                                fi
+                            done
+
+                            if [ "${num_count}" -gt $((limit + 20)) ] 2>/dev/null; then
+                                echo "      ... (truncated preview)"
+                            fi
+                        else
+                            echo "  [number] cleanup=number snapshots (${num_count}) are within NUMBER_LIMIT max (${limit})."
                         fi
                     else
-                        echo "  [number] cleanup=number snapshots (${num_count}) are within NUMBER_LIMIT max (${limit})."
+                        echo "  [number] could not read NUMBER_LIMIT for config ${conf}; skipping number preview."
                     fi
-                else
-                    echo "  [number] could not read NUMBER_LIMIT for config ${conf}; skipping number preview."
-                fi
 
-                # Timeline cleanup preview (informational)
-                local tl_count
-                tl_count=$(printf '%s\n' "${out}" | awk -F'\t' '$4=="timeline" && $1 ~ /^[0-9]+$/ && $1 != "0" {n++} END{print n+0}')
-                echo "  [timeline] snapshots with cleanup=timeline: ${tl_count} (Snapper will prune per TIMELINE_LIMIT_* rules)."
+                    # Timeline cleanup preview (informational)
+                    local tl_count
+                    tl_count=$(printf '%s\n' "${out}" | awk -F'\t' '$4=="timeline" && $1 ~ /^[0-9]+$/ && $1 != "0" {n++} END{print n+0}')
+                    echo "  [timeline] snapshots with cleanup=timeline: ${tl_count} (Snapper will prune per TIMELINE_LIMIT_* rules)."
+                fi
             done
 
             return 0
