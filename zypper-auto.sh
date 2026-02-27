@@ -9981,7 +9981,7 @@ generate_dashboard() {
         position: absolute;
         width: 11px;
         height: 14px;
-        left: 42%;
+        left: 36%;
         top: 20px;
         transform: translateX(-50%) rotate(-40deg);
         transform-origin: 50% 0%;
