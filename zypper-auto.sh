@@ -14366,6 +14366,8 @@ generate_dashboard() {
     var _settingsAutosaveTimer = null;
     var _settingsAutosaveInFlight = false;
     var _settingsAutosavePendingToast = false;
+    var _settingsAutosavePromise = null;
+    var _settingsResetInProgress = false;
     var SETTINGS_AUTOSAVE_ENABLED = true;
     var SETTINGS_AUTOSAVE_DEBOUNCE_MS = 900;
 
@@ -14385,6 +14387,7 @@ generate_dashboard() {
     }
 
     function _settingsMarkDirty() {
+        if (_settingsResetInProgress) return;
         _settingsSetDirty(true);
 
         if (SETTINGS_AUTOSAVE_ENABLED) {
@@ -16143,9 +16146,15 @@ generate_dashboard() {
             function setLog(text) {
                 var pre = document.getElementById('sn-log');
                 if (!pre) return;
-                pre.textContent = String(text || '');
+                var t = String(text || '');
+                pre.textContent = t;
                 try { pre.scrollTop = pre.scrollHeight; } catch (eS) {}
-                highlightBlock('sn-log');
+                // Avoid expensive highlighting on huge logs (can freeze UI).
+                try {
+                    if (typeof highlightBlock === 'function' && t.length <= 12000) {
+                        highlightBlock('sn-log');
+                    }
+                } catch (eH) {}
             }
 
             function _wireCopyOutput() {
@@ -16243,7 +16252,14 @@ generate_dashboard() {
                     return;
                 }
 
-                runner(confirmToken, got2).then(function(r) {
+                // Snapper cleanup can take a long time and produces huge output.
+                // Use the background-job API so the UI can stream logs and avoid "stuck" appearance.
+                var useJob = false;
+                try {
+                    useJob = String(_sn.action || '') === 'cleanup';
+                } catch (eU) { useJob = false; }
+
+                function finalizeResult(r) {
                     var out = '';
                     var rc = -1;
                     try { out = String((r && r.output != null) ? r.output : ''); } catch (eO) { out = ''; }
@@ -16251,6 +16267,9 @@ generate_dashboard() {
 
                     if (out) setLog(out);
                     else setLog('(no output)');
+
+                    // Mirror output into the Snapper panel.
+                    try { if (typeof _snapperSetOut === 'function') _snapperSetOut(out || '(no output)'); } catch (eP) {}
 
                     if (rc === 0) {
                         setProg('Done', 100);
@@ -16273,7 +16292,126 @@ generate_dashboard() {
                         e.close.textContent = 'OK';
                         e.close.onclick = function() { _snClose(null); };
                     }
+                }
 
+                if (useJob) {
+                    setProg('Starting', 5);
+                    setLog('Starting Snapper job...');
+
+                    var bodyJob = { action: _sn.action, params: _sn.params };
+                    bodyJob.confirm_token = confirmToken;
+                    bodyJob.confirm_phrase = got2;
+
+                    var jobId = '';
+                    var pollFailures = 0;
+                    var pollMaxFailures = 10;
+                    var pollInFlight = false;
+                    var pollTimer = null;
+                    var lastPct = 5;
+
+                    function stopPoll() {
+                        if (pollTimer) {
+                            try { clearTimeout(pollTimer); } catch (e0) {}
+                            pollTimer = null;
+                        }
+                    }
+
+                    function pollTick() {
+                        if (pollInFlight) return;
+                        pollInFlight = true;
+
+                        return _api('/api/snapper/job?job_id=' + encodeURIComponent(jobId), { method: 'GET' }).then(function(j) {
+                            if (!j) return null;
+
+                            pollFailures = 0;
+
+                            var pct = 0;
+                            try { pct = parseInt(j.progress || 0, 10) || 0; } catch (eP0) { pct = 0; }
+                            lastPct = pct;
+
+                            setProg(j.stage || 'Running', pct);
+                            if (j.output != null) setLog(String(j.output || ''));
+
+                            if (j.done) {
+                                stopPoll();
+                                try {
+                                    var rcc = (j && j.rc != null) ? parseInt(j.rc, 10) : -1;
+                                    toast('Snapper: cleanup', (rcc === 0) ? 'OK' : ('rc=' + String(rcc)), (rcc === 0) ? 'ok' : 'err');
+                                } catch (eTD) {}
+                                finalizeResult({ rc: j.rc, output: j.output || '' });
+                            }
+
+                            return j;
+                        }).catch(function(err) {
+                            pollFailures++;
+                            var msg = (err && err.message) ? err.message : 'job poll failed';
+
+                            setProg('Reconnecting…', lastPct);
+                            setLog('ERROR polling job (' + String(pollFailures) + '/' + String(pollMaxFailures) + '): ' + msg + '\nRetrying…');
+
+                            if (pollFailures >= pollMaxFailures) {
+                                stopPoll();
+                                _sn.running = false;
+                                toast('Snapper polling failed', 'Too many errors. Please reload the page.', 'err');
+                                setProg('Failed', 100);
+                                _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+
+                                try {
+                                    if (typeof _sn.resolve === 'function') {
+                                        _sn.resolve(null);
+                                        _sn.resolve = null;
+                                    }
+                                } catch (eRes2) {}
+
+                                if (e.close) {
+                                    e.close.textContent = 'OK';
+                                    e.close.onclick = function() { _snClose(null); };
+                                }
+                            }
+
+                            return null;
+                        }).finally(function() {
+                            pollInFlight = false;
+                            if (_sn.running && jobId) {
+                                pollTimer = setTimeout(pollTick, 900);
+                            }
+                        });
+                    }
+
+                    _api('/api/snapper/start', { method: 'POST', body: JSON.stringify(bodyJob) }).then(function(r0) {
+                        if (!r0 || !r0.job_id) throw new Error('missing job_id');
+                        jobId = String(r0.job_id);
+                        setProg('Running', 10);
+                        setLog('Job started: ' + jobId + '\nPolling output...');
+                        pollTick();
+                        return r0;
+                    }).catch(function(err0) {
+                        stopPoll();
+                        var msg0 = (err0 && err0.message) ? err0.message : 'start failed';
+                        _sn.running = false;
+                        toast('Snapper failed to start', msg0, 'err');
+                        setProg('Failed', 100);
+                        setLog('ERROR: ' + msg0);
+                        _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+
+                        try {
+                            if (typeof _sn.resolve === 'function') {
+                                _sn.resolve(null);
+                                _sn.resolve = null;
+                            }
+                        } catch (eRes3) {}
+
+                        if (e.close) {
+                            e.close.textContent = 'OK';
+                            e.close.onclick = function() { _snClose(null); };
+                        }
+                    });
+
+                    return;
+                }
+
+                runner(confirmToken, got2).then(function(r) {
+                    finalizeResult(r || null);
                     return r;
                 }).catch(function(err) {
                     var msg = (err && err.message) ? err.message : 'failed';
@@ -21637,9 +21775,10 @@ generate_dashboard() {
 
     function settingsSave() {
         if (!_settingsSchema) return settingsLoad(true);
+        if (_settingsResetInProgress) return settingsLoad(true);
         var patch = _collectSettingsPatch(_settingsSchema);
         var keys = Object.keys(patch || {});
-        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
+        var p = _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
             toast('Settings saved', 'Applied to /etc/zypper-auto.conf', 'ok');
 
             var changed = _diffForKeys(_settingsLastConfig || _settingsConfig || {}, (r && r.config) ? r.config : {}, keys);
@@ -21658,11 +21797,17 @@ generate_dashboard() {
             _settingsClientLog('warn', 'settingsSave failed', { error: (e && e.message) ? e.message : 'unknown' });
             _settingsBanner('Save failed. You can click Factory reset to restore safe defaults.', true);
             return settingsLoad(false);
+        }).finally(function() {
+            try { _settingsAutosavePromise = null; } catch (e) {}
         });
+
+        _settingsAutosavePromise = p;
+        return p;
     }
 
     function settingsAutoSave() {
         if (!SETTINGS_AUTOSAVE_ENABLED) return;
+        if (_settingsResetInProgress) return;
         if (_settingsAutosaveInFlight) return;
         if (!_settingsDirty) return;
         if (!_settingsSchema) {
@@ -21676,7 +21821,7 @@ generate_dashboard() {
         _settingsAutosaveInFlight = true;
         var patch = _collectSettingsPatch(_settingsSchema);
         var keys = Object.keys(patch || {});
-        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
+        var p = _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
             toast('Settings auto-saved', 'Applied to /etc/zypper-auto.conf', 'ok');
 
             var changed = _diffForKeys(_settingsLastConfig || _settingsConfig || {}, (r && r.config) ? r.config : {}, keys);
@@ -21700,18 +21845,79 @@ generate_dashboard() {
         }).finally(function() {
             _settingsAutosaveInFlight = false;
             _settingsAutosavePendingToast = false;
+            try { _settingsAutosavePromise = null; } catch (e) {}
         });
+
+        _settingsAutosavePromise = p;
+        return p;
     }
 
     function settingsReset() {
-        return _api('/api/reset-config', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
-            toast('Factory reset complete', 'Defaults restored (backup created)', 'ok');
-            _settingsSetDirty(false);
-            return settingsLoad(false);
-        }).catch(function(e) {
-            toast('Factory reset failed', (e && e.message) ? e.message : 'unknown error', 'err');
-            return settingsLoad(false);
-        });
+        if (_settingsResetInProgress) return Promise.resolve(null);
+
+        // IMPORTANT: if auto-save (or Save) is in-flight, wait for it to finish first.
+        // Otherwise it can race AFTER reset and re-apply old values.
+        var wait = _settingsAutosavePromise;
+
+        function _disableInputs(disabled) {
+            try {
+                var form = document.getElementById('settings-form');
+                if (form) {
+                    var els = form.querySelectorAll('input,select,button,textarea');
+                    els.forEach(function(el) { try { el.disabled = !!disabled; } catch (e) {} });
+                }
+                var saveBtn = document.getElementById('settings-save');
+                var reloadBtn = document.getElementById('settings-reload');
+                var resetBtn = document.getElementById('settings-reset');
+                if (saveBtn) saveBtn.disabled = !!disabled;
+                if (reloadBtn) reloadBtn.disabled = !!disabled;
+                if (resetBtn) resetBtn.disabled = !!disabled;
+            } catch (e0) {}
+        }
+
+        function doResetNow() {
+            _settingsResetInProgress = true;
+
+            // Cancel any pending autosave timer.
+            try {
+                if (_settingsAutosaveTimer) {
+                    clearTimeout(_settingsAutosaveTimer);
+                    _settingsAutosaveTimer = null;
+                }
+            } catch (eT) {}
+
+            // Disable autosave during reset.
+            var prevAutosave = SETTINGS_AUTOSAVE_ENABLED;
+            SETTINGS_AUTOSAVE_ENABLED = false;
+            _settingsAutosavePendingToast = false;
+
+            _disableInputs(true);
+
+            return _api('/api/reset-config', { method: 'POST', body: JSON.stringify({}) }).then(function(r) {
+                toast('Factory reset complete', 'Defaults restored (backup created)', 'ok');
+                _settingsSetDirty(false);
+
+                // Optional: re-lock advanced/danger zone after reset (safer default).
+                try { window.__znh_settings_advanced_unlocked = false; } catch (eA) {}
+                try { window.__znh_settings_danger_unlocked = false; } catch (eD) {}
+
+                return settingsLoad(false);
+            }).catch(function(e) {
+                var msg = (e && e.message) ? e.message : 'unknown error';
+                toast('Factory reset failed', msg + ' (try: zypper-auto-helper --reset-config)', 'err');
+                return settingsLoad(false);
+            }).finally(function() {
+                SETTINGS_AUTOSAVE_ENABLED = prevAutosave;
+                _settingsResetInProgress = false;
+                _disableInputs(false);
+                try { _settingsAutosavePromise = null; } catch (eP) {}
+            });
+        }
+
+        if (wait && typeof wait.then === 'function') {
+            return wait.then(function() { return doResetNow(); }, function() { return doResetNow(); });
+        }
+        return doResetNow();
     }
 
     function _wireSettingsUI() {
@@ -21731,7 +21937,7 @@ generate_dashboard() {
             settingsLoad(true);
         } catch (e) {}
         if (resetBtn) resetBtn.addEventListener('click', function() {
-            if (confirm('Factory reset /etc/zypper-auto.conf to defaults? (a backup will be created)')) {
+            if (confirm('Factory reset /etc/zypper-auto.conf to defaults?\n\nThis runs: zypper-auto-helper --reset-config\n\n(A backup will be created)')) {
                 settingsReset();
             }
         });
@@ -30552,8 +30758,9 @@ run_snapper_menu_only() {
         fi
         echo "  6) AUTO: Disable option-5 timers (snapper + btrfsmaintenance + fstrim)"
         echo "  7) Exit (7 / E / Q)"
+        echo "  8) FORCE-PRUNE Cleanup (keep newest per config; ignores timeline limits)"
         echo ""
-        read -p "Select an option [1-7, E, Q]: " -r choice
+        read -p "Select an option [1-8, E, Q]: " -r choice
         log_info "[snapper-menu] User selected: ${choice}"
 
         case "${choice}" in
@@ -30578,6 +30785,9 @@ run_snapper_menu_only() {
             7|e|E|q|Q)
                 echo "Exiting Snapper menu."
                 break
+                ;;
+            8)
+                __znh_snapper_cleanup_now force-prune
                 ;;
             *)
                 echo "Invalid selection: '${choice}'."
@@ -40123,6 +40333,207 @@ def _scrub_any_running() -> dict:
     return out
 
 
+# --- Snapper job runner (dashboard API) ---
+# Runs Snapper helper operations (cleanup/auto-enable/etc.) in a transient systemd unit.
+SNAPPER_LOG_DIR = DUP_LOG_DIR
+SNAPPER_STATUS_DIR = DUP_STATUS_DIR
+
+
+def _snapper_paths(job_id: str) -> tuple[str, str, str, str]:
+    jid = (job_id or "").strip()
+    unit = f"znh-webui-snapper-{jid[:8]}"
+    log_path = f"{SNAPPER_LOG_DIR}/webui-snapper-{jid[:10]}.log"
+    status_path = f"{SNAPPER_STATUS_DIR}/webui-snapper-{jid[:10]}.status"
+    script_path = f"{SNAPPER_STATUS_DIR}/webui-snapper-{jid[:10]}.sh"
+    return unit, log_path, status_path, script_path
+
+
+def _recover_snapper_job(job_id: str) -> dict | None:
+    # token_urlsafe() uses [A-Za-z0-9_-]. Reject anything else.
+    jid = (job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", jid or ""):
+        return None
+
+    unit, log_path, status_path, _script_path = _snapper_paths(jid)
+
+    have_any = os.path.exists(log_path) or os.path.exists(status_path)
+
+    props = {}
+    rc_show, out_show = _run_cmd(
+        ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus"],
+        timeout_s=3,
+        log=None,
+    )
+    if rc_show == 0:
+        for line in (out_show or "").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k.strip()] = v.strip()
+        if props.get("ActiveState"):
+            have_any = True
+
+    if not have_any:
+        return None
+
+    active = props.get("ActiveState", "")
+    sub = props.get("SubState", "")
+
+    status = _read_kv_status(status_path) if os.path.exists(status_path) else {}
+
+    done = False
+    rc = None
+
+    try:
+        done = str(status.get("done", "")).strip() in ("1", "true", "yes")
+    except Exception:
+        done = False
+
+    if done:
+        try:
+            rc = int(str(status.get("rc", "1") or "1"))
+        except Exception:
+            rc = 1
+
+    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
+        done = True
+        try:
+            rc = int(props.get("ExecMainStatus", "1") or "1")
+        except Exception:
+            rc = 1
+
+    running = not done
+
+    tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
+
+    stage = str(status.get("stage") or ("Running" if active == "active" else "Starting"))
+    if done:
+        if rc == 0:
+            stage = "Done"
+        else:
+            stage = "Failed"
+
+    progress = 0
+    try:
+        stlow = stage.lower()
+        if done:
+            progress = 100
+        elif stlow.startswith("starting"):
+            progress = 5
+        elif "wait" in stlow:
+            progress = 10
+        else:
+            progress = 25
+    except Exception:
+        progress = 0
+
+    action = str(status.get("action", "") or "").strip()
+    title = str(status.get("title", "") or "").strip()
+
+    return {
+        "job_id": jid,
+        "type": "snapper",
+        "action": action,
+        "title": title,
+        "running": bool(running),
+        "done": bool(done),
+        "rc": rc,
+        "stage": stage,
+        "progress": int(progress),
+        "output": tail,
+        "output_truncated": bool(truncated),
+        "resumed": True,
+        "unit": unit,
+        "log_path": log_path,
+        "status_path": status_path,
+    }
+
+
+def _snapper_any_running() -> dict:
+    """Best-effort: detect if any snapper unit is currently running."""
+    out = {
+        "running": False,
+        "action": "",
+        "title": "",
+        "unit": "",
+        "status_path": "",
+        "checked": 0,
+    }
+
+    try:
+        paths = glob.glob(os.path.join(SNAPPER_STATUS_DIR, "webui-snapper-*.status"))
+    except Exception:
+        paths = []
+
+    # Prefer newest status files.
+    try:
+        paths = sorted(paths, key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+
+    now = time.time()
+    for p in (paths or [])[:40]:
+        out["checked"] = out.get("checked", 0) + 1
+
+        # Ignore very old leftovers.
+        age = 0.0
+        try:
+            age = float(now - os.path.getmtime(p))
+        except Exception:
+            age = 0.0
+        if age > 6 * 3600:
+            continue
+
+        st = {}
+        try:
+            st = _read_kv_status(p)
+        except Exception:
+            st = {}
+
+        done = False
+        try:
+            done = str(st.get("done", "")).strip() in ("1", "true", "yes")
+        except Exception:
+            done = False
+        if done:
+            continue
+
+        base = os.path.basename(p)
+        prefix = ""
+        try:
+            prefix = base.replace("webui-snapper-", "", 1).replace(".status", "", 1)
+        except Exception:
+            prefix = ""
+        unit = f"znh-webui-snapper-{prefix[:8]}" if prefix else ""
+
+        active = ""
+        if unit:
+            try:
+                rc_show, out_show = _run_cmd(
+                    ["systemctl", "show", unit, "-p", "ActiveState"],
+                    timeout_s=2,
+                    log=None,
+                )
+                if rc_show == 0:
+                    for line in (out_show or "").splitlines():
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            if k.strip() == "ActiveState":
+                                active = v.strip()
+            except Exception:
+                pass
+
+        is_running = (active == "active") or (age < 30 * 60)
+        if is_running:
+            out["running"] = True
+            out["action"] = str(st.get("action", "") or "").strip()
+            out["title"] = str(st.get("title", "") or "").strip()
+            out["unit"] = unit
+            out["status_path"] = p
+            return out
+
+    return out
+
+
 def _quick_paths(job_id: str) -> tuple[str, str, str, str]:
     jid = (job_id or "").strip()
     unit = f"znh-webui-quick-{jid[:8]}"
@@ -41198,6 +41609,21 @@ class Handler(BaseHTTPRequestHandler):
             rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))
             # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
             return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out}, origin)
+
+        # --- Snapper job status (dashboard) ---
+        if path == "/api/snapper/job":
+            job_id = ""
+            try:
+                job_id = str((qs.get("job_id") or [""])[0]).strip()
+            except Exception:
+                job_id = ""
+            if not job_id:
+                return _json_response(self, 400, {"error": "job_id required"}, origin)
+
+            recovered = _recover_snapper_job(job_id)
+            if recovered:
+                return _json_response(self, 200, recovered, origin)
+            return _json_response(self, 404, {"error": "job not found"}, origin)
 
         # --- Self-update status (dashboard) ---
         if path == "/api/self-update/status":
@@ -43237,6 +43663,236 @@ class Handler(BaseHTTPRequestHandler):
                 "hint": allowed[action],
             }, origin)
 
+        if path == "/api/snapper/start":
+            # Best-effort concurrency guard: avoid clobbering the single-task UX.
+            try:
+                ri = _snapper_any_running()
+                if ri.get("running"):
+                    return _json_response(self, 409, {
+                        "error": "a snapper job is already running",
+                        "job_running": True,
+                        "unit": ri.get("unit"),
+                        "status_path": ri.get("status_path"),
+                        "action": ri.get("action"),
+                        "title": ri.get("title"),
+                    }, origin)
+            except Exception:
+                pass
+
+            body = _read_json(self)
+            action = str(body.get("action", "") or "").strip()
+            params = body.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+
+            # Determine if action requires confirmation.
+            needs_confirm = action in ("create", "cleanup", "auto-enable", "auto-disable")
+            if action in ("status", "list"):
+                needs_confirm = False
+
+            confirm_token = str(body.get("confirm_token", "") or "").strip()
+            confirm_phrase = str(body.get("confirm_phrase", "") or "").strip()
+
+            if needs_confirm:
+                now_ts = time.time()
+                _confirm_purge(now_ts)
+                with tokens_lock:
+                    items = getattr(self.server, "confirm_tokens", {})
+                    meta = items.get(confirm_token)
+                    if not meta:
+                        return _json_response(self, 400, {"error": "missing/expired confirm token"}, origin)
+                    if meta.get("action") != action:
+                        return _json_response(self, 400, {"error": "confirm token does not match action"}, origin)
+
+                    required_phrase = {
+                        "create": "SNAPSHOT",
+                        "cleanup": "CLEANUP",
+                        "auto-enable": "ENABLE",
+                        "auto-disable": "DISABLE",
+                    }.get(action, "")
+
+                    if required_phrase and confirm_phrase.upper() != required_phrase:
+                        return _json_response(self, 400, {"error": f"confirmation phrase mismatch (expected {required_phrase})"}, origin)
+
+                    # One-time token.
+                    try:
+                        items.pop(confirm_token, None)
+                    except Exception:
+                        pass
+
+            # Map actions to helper subcommands.
+            cmd = None
+            timeout_s = 120
+            title = f"snapper {action}".strip()
+
+            if action == "status":
+                cmd = [HELPER_BIN, "snapper", "status"]
+                timeout_s = 60
+                title = "snapper status"
+            elif action == "list":
+                n = str(params.get("n", "10"))
+                if not re.fullmatch(r"[0-9]+", n):
+                    n = "10"
+                nn = 10
+                try:
+                    nn = int(n)
+                except Exception:
+                    nn = 10
+                if nn < 1:
+                    nn = 1
+                if nn > 50:
+                    nn = 50
+                cmd = [HELPER_BIN, "snapper", "list", str(nn)]
+                timeout_s = 60
+                title = f"snapper list ({nn})"
+            elif action == "create":
+                desc = str(params.get("desc", "")).strip()
+                if len(desc) > 200:
+                    desc = desc[:200]
+                cmd = [HELPER_BIN, "snapper", "create", desc]
+                timeout_s = 5 * 60
+                title = "snapper create"
+            elif action == "cleanup":
+                mode = str(params.get("mode", "all")).strip()
+                if mode not in ("all", "force-prune", "number", "timeline", "empty-pre-post"):
+                    mode = "all"
+                cmd = [HELPER_BIN, "snapper", "cleanup", mode]
+                timeout_s = 60 * 60
+                title = f"snapper cleanup ({mode})"
+            elif action == "auto-enable":
+                cmd = [HELPER_BIN, "snapper", "auto"]
+                timeout_s = 20 * 60
+                title = "snapper auto-enable"
+            elif action == "auto-disable":
+                cmd = [HELPER_BIN, "snapper", "auto-off"]
+                timeout_s = 20 * 60
+                title = "snapper auto-disable"
+            else:
+                return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
+
+            # Run via systemd-run (persist across API/browser restarts)
+            job_id = secrets.token_urlsafe(18)
+            unit, log_path, status_path, script_file = _snapper_paths(job_id)
+
+            # Precreate log + status so the first poll can't race before the unit writes anything.
+            try:
+                os.makedirs(SNAPPER_LOG_DIR, exist_ok=True)
+                os.makedirs(SNAPPER_STATUS_DIR, exist_ok=True)
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+                with open(status_path, "w", encoding="utf-8") as f:
+                    f.write("done=0\n")
+                    f.write("rc=0\n")
+                    f.write("stage=starting\n")
+                    f.write(f"action={action}\n")
+                    f.write(f"title={title}\n")
+            except Exception:
+                pass
+
+            cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
+
+            script_text = "\n".join([
+                'set -euo pipefail',
+                f'LOG={shlex.quote(log_path)}',
+                f'STATUS={shlex.quote(status_path)}',
+                f'ACTION={shlex.quote(action)}',
+                f'TITLE={shlex.quote(title)}',
+                f'TIMEOUT_S={int(timeout_s)}',
+                'mkdir -p /var/log/zypper-auto/service-logs || true',
+                'mkdir -p /var/lib/zypper-auto || true',
+                'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                'write_status() {',
+                '  local done="$1"; local rc="$2"; local stage="$3"',
+                '  local tmp="${STATUS}.tmp.$$"',
+                '  {',
+                '    echo "done=${done}"',
+                '    echo "rc=${rc}"',
+                '    echo "stage=${stage}"',
+                '    echo "action=${ACTION:-}"',
+                '    echo "title=${TITLE:-}"',
+                '    echo "started_at_utc=${STARTED_AT}"',
+                '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                '  } >"${tmp}" 2>/dev/null || true',
+                '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
+                '}',
+                'write_status 0 0 starting',
+                'echo "==========================================" >>"$LOG" || true',
+                'echo " WebUI Snapper job " >>"$LOG" || true',
+                'echo "==========================================" >>"$LOG" || true',
+                'date >>"$LOG" 2>/dev/null || true',
+                'echo "" >>"$LOG" || true',
+                'echo "ACTION: ${ACTION}" >>"$LOG" || true',
+                'echo "TITLE : ${TITLE}" >>"$LOG" || true',
+                f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
+                'echo "" >>"$LOG" || true',
+                'export ZNH_NON_INTERACTIVE=1',
+                'write_status 0 0 running',
+                'set +e',
+                'if command -v timeout >/dev/null 2>&1; then',
+                f'  ( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
+                '  rc=${PIPESTATUS[0]}',
+                'else',
+                f'  ( {cmd_str} ) 2>&1 | tee -a "$LOG"',
+                '  rc=${PIPESTATUS[0]}',
+                'fi',
+                'set -e',
+                'echo "" >>"$LOG" || true',
+                'echo "[webui] snapper rc=${rc}" >>"$LOG" || true',
+                'if [ ${rc} -eq 124 ] 2>/dev/null; then',
+                '  write_status 1 ${rc} timed-out',
+                '  echo "[webui] ERROR: timed out" >>"$LOG" || true',
+                '  rm -f "$0" >/dev/null 2>&1 || true',
+                '  exit ${rc}',
+                'fi',
+                'if [ ${rc} -eq 0 ]; then',
+                '  write_status 1 ${rc} done',
+                'else',
+                '  write_status 1 ${rc} failed',
+                'fi',
+                'rm -f "$0" >/dev/null 2>&1 || true',
+                'exit ${rc}',
+            ])
+
+            try:
+                os.makedirs(SNAPPER_STATUS_DIR, exist_ok=True)
+                with open(script_file, "w", encoding="utf-8") as f:
+                    f.write("#!/usr/bin/env bash\n")
+                    f.write(script_text)
+                    f.write("\n")
+                os.chmod(script_file, 0o700)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"failed to write snapper unit script: {e}"}, origin)
+
+            sys_cmd = [
+                "systemd-run",
+                "--quiet",
+                "--collect",
+                "--unit",
+                unit,
+                "--",
+                "/usr/bin/bash",
+                script_file,
+            ]
+
+            try:
+                p = subprocess.run(
+                    sys_cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                if p.returncode != 0:
+                    out = (p.stdout or "").strip()
+                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
+
+            return _json_response(self, 200, {"job_id": job_id}, origin)
+
         if path == "/api/snapper/run":
             body = _read_json(self)
             action = str(body.get("action", "")).strip()
@@ -43847,10 +44503,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/reset-config":
             # Non-interactive reset via helper so it stays consistent with installer template.
             cmd = ["/usr/local/bin/zypper-auto-helper", "--reset-config", "--yes"]
+
+            rc = 0
+            out = ""
             try:
-                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-            except Exception:
-                pass
+                p = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=90,
+                )
+                rc = int(p.returncode)
+                out = (p.stdout or "")
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"reset-config exception: {e}"}, origin)
+
+            if rc != 0:
+                # Return some output for debugging; keep it bounded.
+                tail = out[-4000:] if len(out) > 4000 else out
+                return _json_response(self, 500, {"error": f"reset-config failed rc={rc}", "output": tail}, origin)
+
             eff, warnings, invalid = _read_conf(self.server.conf_path)
             # Ensure managed block matches the validated effective config.
             _write_managed_block(self.server.conf_path, eff)

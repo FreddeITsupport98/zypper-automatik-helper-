@@ -1837,6 +1837,9 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** Snapper Manager / cleanup now returns HTTP 200 with `rc` + output so the WebUI shows the full report even when Snapper returns non-zero (instead of a generic `HTTP 500`).
   - 🧿 **IMPROVED:** Snapper Manager confirmations (like Cleanup) now use an in-page wizard-style modal (typed phrase → Run button unlock) instead of a browser popup prompt.
     - Includes a **Copy output** button so the Snapper console log is easy to attach to bug reports.
+  - 🧵 **IMPROVED:** WebUI Snapper cleanup now runs as a **background systemd job** with **live log polling** (so long cleanups no longer look “stuck” at `Running: cleanup ...`).
+    - New localhost API endpoints: `/api/snapper/start` + `/api/snapper/job`.
+    - Also reduces expensive syntax-highlighting on huge logs to prevent UI freezes.
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
   - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
   - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
@@ -1852,6 +1855,7 @@ systemctl status zypper-autodownload.service
   - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots while keeping the newest snapshots per snapper config.
     - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
     - Force-prune now respects the keep-newest preference (it does **not** depend on Snapper `TIMELINE_LIMIT_*` / `NUMBER_LIMIT` rules).
+  - 🧰 **IMPROVED:** Snapper CLI menu now exposes a **FORCE-PRUNE Cleanup** option (advanced) so it’s discoverable outside the WebUI.
   - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
   - 🐛 **FIXED:** WebUI Snapper cleanup no longer fails just because Snapper is busy (e.g. `snapper-cleanup.service` active).
     - It now waits up to `SNAP_CLEANUP_BUSY_WAIT_SECONDS` (poll: `SNAP_CLEANUP_BUSY_POLL_SECONDS`) before refusing.
