@@ -16205,6 +16205,15 @@ generate_dashboard() {
             }
             opts.headers = headers;
 
+            // Avoid stale cached GETs (especially after Factory Reset / Save).
+            // The server already sends Cache-Control: no-store, but enforce client-side too.
+            try {
+                var m = String(method || 'GET').toUpperCase();
+                if (!opts.cache && (m === 'GET' || m === 'HEAD')) {
+                    opts.cache = 'no-store';
+                }
+            } catch (eCache) {}
+
             // Verbose: trace API calls into the backend log.
             // Avoid recursion: do not trace the /api/client-log endpoint itself.
             if (ZNH_DEBUG && path !== '/api/client-log') {
@@ -23326,6 +23335,10 @@ generate_dashboard() {
         function doResetNow() {
             _settingsResetInProgress = true;
 
+            // Snapshot current config for diff logging (avoid confusion if reset “does nothing”).
+            var beforeCfg = null;
+            try { beforeCfg = JSON.parse(JSON.stringify(_settingsConfig || {})); } catch (eBC) { beforeCfg = _settingsConfig || {}; }
+
             // Cancel any pending autosave timer.
             try {
                 if (_settingsAutosaveTimer) {
@@ -23349,7 +23362,50 @@ generate_dashboard() {
                 try { window.__znh_settings_advanced_unlocked = false; } catch (eA) {}
                 try { window.__znh_settings_danger_unlocked = false; } catch (eD) {}
 
-                return settingsLoad(false);
+                // Apply response config immediately (don’t depend on a follow-up /api/config GET,
+                // which can be stale if the browser caches or the backend is restarting).
+                try {
+                    if (r && r.config) {
+                        _settingsConfig = r.config;
+                        try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD2) {}
+                        try { znhDebugUpdateToggleUi(); } catch (eDU2) {}
+                        try { if (_settingsSchema) _renderSettingsForm(_settingsSchema, _settingsConfig); } catch (eRF) {}
+                        try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP0) {}
+                        try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(false); } catch (eBS0) {}
+
+                        // Lightweight diff log for key safety toggles.
+                        try {
+                            var changed = _diffForKeys(beforeCfg || {}, _settingsConfig || {}, ['KERNEL_PURGE_ENABLED']);
+                            _settingsClientLog('info', 'settingsReset applied', {
+                                changed: changed,
+                                invalid_keys: (r && r.invalid_keys) ? r.invalid_keys : [],
+                                warnings: (r && r.warnings) ? r.warnings.slice(0, 6) : []
+                            });
+                        } catch (eLog) {}
+                    }
+                } catch (eApply) {}
+
+                // Background refresh: verify backend sees the same config.
+                // Do NOT block UI on this.
+                try {
+                    setTimeout(function() {
+                        try {
+                            settingsLoad(false).then(function(c2) {
+                                try {
+                                    if (c2 && c2.config) {
+                                        var mismatch = _diffForKeys(_settingsConfig || {}, c2.config || {}, ['KERNEL_PURGE_ENABLED']);
+                                        if (mismatch && mismatch.KERNEL_PURGE_ENABLED) {
+                                            _settingsClientLog('warn', 'settingsReset verify mismatch', { mismatch: mismatch });
+                                            _settingsBanner('Reset applied, but API still reports different values (may be caching). Re-open Settings drawer in ~2s.', true);
+                                        }
+                                    }
+                                } catch (eV2) {}
+                            });
+                        } catch (eV) {}
+                    }, 900);
+                } catch (eST) {}
+
+                return r;
             }).catch(function(e) {
                 var msg = (e && e.message) ? e.message : 'unknown error';
                 toast('Factory reset failed', msg + ' (try: zypper-auto-helper --reset-config)', 'err');
@@ -34420,6 +34476,7 @@ run_uninstall_helper_only() {
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" \
             "$SUDO_USER_HOME/.config/fish/completions/zypper-auto-helper.fish" \
+            "$SUDO_USER_HOME/.config/fish/completions/scrub-ghost.fish" \
             "$SUDO_USER_HOME/.local/share/applications/zypper-auto-dashboard.desktop" \
             "${_dash_desktop_shortcut}" || true
 
@@ -34427,8 +34484,12 @@ run_uninstall_helper_only() {
         execute_guarded "Remove bash/zsh completion files" rm -f \
             /etc/bash_completion.d/zypper-auto-helper \
             /usr/share/bash-completion/completions/zypper-auto-helper \
+            /etc/bash_completion.d/scrub-ghost \
+            /usr/share/bash-completion/completions/scrub-ghost \
             /usr/share/zsh/site-functions/_zypper-auto-helper \
-            /usr/local/share/zsh/site-functions/_zypper-auto-helper || true
+            /usr/local/share/zsh/site-functions/_zypper-auto-helper \
+            /usr/share/zsh/site-functions/_scrub-ghost \
+            /usr/local/share/zsh/site-functions/_scrub-ghost || true
 
         # Remove bash/zsh aliases we added (non-fatal if missing).
         # Avoid `bash -lc` and ensure $SUDO_USER_HOME expands correctly.
@@ -37598,6 +37659,10 @@ ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --
         local ZNH_SNAPPER_CLEANUP_ALGOS
         ZNH_SNAPPER_CLEANUP_ALGOS="all number timeline empty-pre-post"
 
+    # scrub-ghost flags (for: zypper-auto-helper scrub-ghost ...)
+    local ZNH_SCRUB_GHOST_OPTS
+    ZNH_SCRUB_GHOST_OPTS="--dry-run --force --delete --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h"
+
     # --- bash completion (system-wide) ---
     local bash_dir bash_file
     bash_dir=""
@@ -37638,6 +37703,12 @@ _znh_zypper_auto_helper() {
         fi
     fi
 
+    # scrub-ghost flags
+    if [ "\${words[1]}" = "scrub-ghost" ]; then
+        COMPREPLY=( \$(compgen -W "${ZNH_SCRUB_GHOST_OPTS}" -- "\${cur}") )
+        return 0
+    fi
+
     COMPREPLY=()
     return 0
 }
@@ -37646,6 +37717,25 @@ complete -F _znh_zypper_auto_helper zypper-auto-helper 2>/dev/null || true
 EOF
         chmod 644 "${bash_file}" 2>/dev/null || true
         log_success "Installed bash completion: ${bash_file}"
+
+        # Also install completion for scrub-ghost as a standalone command.
+        local bash_file_sg
+        bash_file_sg="${bash_dir}/scrub-ghost"
+        log_debug "Writing bash completion file: ${bash_file_sg}"
+        write_atomic "${bash_file_sg}" <<EOF
+# bash completion for scrub-ghost (installed by zypper-auto-helper)
+
+_scrub_ghost_complete() {
+  local cur
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  local opts="${ZNH_SCRUB_GHOST_OPTS}"
+  COMPREPLY=( \$(compgen -W "\${opts}" -- "\${cur}") )
+}
+
+complete -F _scrub_ghost_complete scrub-ghost zypper-scrub-ghost 2>/dev/null || true
+EOF
+        chmod 644 "${bash_file_sg}" 2>/dev/null || true
+        log_success "Installed bash completion: ${bash_file_sg}"
     else
         log_debug "Bash completion directory not found; skipping bash completion install"
     fi
@@ -37690,6 +37780,9 @@ _znh_snapper_sub=(status list create cleanup auto auto-off)
 local -a _znh_snapper_cleanup
 _znh_snapper_cleanup=(all number timeline empty-pre-post)
 
+local -a _znh_scrub_ghost_opts
+_znh_scrub_ghost_opts=(--dry-run --force --delete --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h)
+
 _arguments -C \
   '1:command:->cmds' \
   '*::arg:->args'
@@ -37709,11 +37802,71 @@ case $state in
         return
       fi
     fi
+
+    if [[ ${words[2]} == scrub-ghost ]]; then
+      _values 'scrub-ghost option' $_znh_scrub_ghost_opts
+      return
+    fi
     ;;
 esac
 EOF
         chmod 644 "${zsh_file}" 2>/dev/null || true
         log_success "Installed zsh completion: ${zsh_file}"
+
+        # Also install completion for scrub-ghost as a standalone command.
+        local zsh_file_sg
+        zsh_file_sg="${zsh_dir}/_scrub-ghost"
+        log_debug "Writing zsh completion file: ${zsh_file_sg}"
+        write_atomic "${zsh_file_sg}" <<'EOF'
+#compdef scrub-ghost zypper-scrub-ghost
+
+# zsh completion for scrub-ghost (installed by zypper-auto-helper)
+
+_arguments -s \
+  '-h[show help]' \
+  '--help[show help]' \
+  '--dry-run[scan only (default)]' \
+  '--force[apply changes (move to backup)]' \
+  '--delete[permanently delete (implies --force)]' \
+  '--backup-dir=[backup directory]:dir:_files -/' \
+  '--backup-root=[backup root directory]:dir:_files -/' \
+  '--keep-backups=[keep last N backups]' \
+  '--entries-dir=[BLS entries directory]:dir:_files -/' \
+  '--boot-dir=[boot root directory]:dir:_files -/' \
+  '--rebuild-grub[run grub2-mkconfig after changes]' \
+  '--grub-cfg=[grub2-mkconfig output path]:file:_files' \
+  '--update-sdboot[run sdbootutil update-kernels after changes]' \
+  '--no-remount-rw[do not attempt temporary remount rw]' \
+  '--json[emit machine-readable JSON to stdout]' \
+  '--no-color[disable colored output]' \
+  '--verbose[verbose output]' \
+  '--debug[debug logging]' \
+  '--log-file=[log file path]:file:_files' \
+  '--menu[start interactive menu]' \
+  '--rescue[run rescue/chroot wizard (live ISO)]' \
+  '--list-backups[list backups]' \
+  '--restore-latest[restore from latest backup]' \
+  '--restore-best[restore from best backup]' \
+  '--restore-pick=[restore pick number]' \
+  '--restore-from=[restore from directory]:dir:_files -/' \
+  '--clean-restore[delete extra current entries on restore]' \
+  '--restore-anyway[restore even if validation fails]' \
+  '--validate-latest[validate latest backup]' \
+  '--validate-pick=[validate pick number]' \
+  '--validate-from=[validate from directory]:dir:_files -/' \
+  '--no-backup[disable filesystem entry backup]' \
+  '--no-snapper-backup[disable snapper backup]' \
+  '--no-verify-snapshots[disable snapper snapshot verification]' \
+  '--no-verify-modules[disable kernel modules verification]' \
+  '--prune-stale-snapshots[prune stale snapper entries (requires --force)]' \
+  '--prune-uninstalled[prune uninstalled-kernel entries (requires --confirm-uninstalled)]' \
+  '--prune-duplicates[prune duplicate boot entries]' \
+  '--prune-zombies[prune zombie entries (kernel OK, initrd missing/corrupt)]' \
+  '--confirm-uninstalled[extra confirmation for --prune-uninstalled]' \
+  '--completion=[print completion script]:shell:(zsh bash)'
+EOF
+        chmod 644 "${zsh_file_sg}" 2>/dev/null || true
+        log_success "Installed zsh completion: ${zsh_file_sg}"
     else
         log_debug "Zsh site-functions directory not found; skipping zsh completion install"
     fi
@@ -37731,7 +37884,10 @@ EOF
 # fish completion for zypper-auto-helper (installed by zypper-auto-helper)
 
 # top-level
-complete -c zypper-auto-helper -f -a "install debug snapper"
+complete -c zypper-auto-helper -f -a "install debug snapper scrub-ghost"
+
+# scrub-ghost flags
+complete -c zypper-auto-helper -n '__fish_seen_subcommand_from scrub-ghost' -f -a "--dry-run --force --delete --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h"
 
 # common option-like commands
 complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --debug"
@@ -37753,6 +37909,20 @@ EOF
         chown "$SUDO_USER:$SUDO_USER" "${fish_comp_file}" 2>/dev/null || true
         chmod 644 "${fish_comp_file}" 2>/dev/null || true
         log_success "Installed fish completion: ${fish_comp_file}"
+
+        # Also install completion for scrub-ghost as a standalone command.
+        local fish_comp_file_sg
+        fish_comp_file_sg="${fish_comp_dir}/scrub-ghost.fish"
+        log_debug "Writing fish completion file: ${fish_comp_file_sg}"
+        write_atomic "${fish_comp_file_sg}" <<EOF
+# fish completion for scrub-ghost (installed by zypper-auto-helper)
+
+complete -c scrub-ghost -f -a "${ZNH_SCRUB_GHOST_OPTS}"
+complete -c zypper-scrub-ghost -f -a "${ZNH_SCRUB_GHOST_OPTS}"
+EOF
+        chown "$SUDO_USER:$SUDO_USER" "${fish_comp_file_sg}" 2>/dev/null || true
+        chmod 644 "${fish_comp_file_sg}" 2>/dev/null || true
+        log_success "Installed fish completion: ${fish_comp_file_sg}"
     else
         log_debug "Fish config directory not present for user; skipping fish completion install"
     fi
