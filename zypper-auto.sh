@@ -12899,6 +12899,336 @@ generate_dashboard() {
         }
     }
 
+    // --- Panic screen (blue-screen style) for freezes/crashes ---
+    // This is a last-resort UX: if the UI becomes unresponsive during long-running jobs
+    // (Snapper cleanup / scrub-ghost / Rocket / etc), show a full-page crash screen with:
+    //  - a short report summary
+    //  - Download diagnostics (JSON flight recorder)
+    //  - Copy issue report text
+    //  - Open GitHub issues
+    var _znhPanic = {
+        active: false,
+        shown_ts: 0,
+        last_reason: '',
+        last_meta: null,
+        watchdog_timer: null,
+        watchdog_last: 0,
+        watchdog_interval_ms: 2000,
+        watchdog_threshold_ms: 7000,
+        error_count: 0,
+        error_window_ts: 0
+    };
+
+    function _znhPanicEscape(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function _znhPanicEnsure() {
+        var ex = document.getElementById('znh-panic');
+        if (ex) return ex;
+
+        var d = document.createElement('div');
+        d.id = 'znh-panic';
+        d.style.display = 'none';
+        d.style.position = 'fixed';
+        d.style.inset = '0';
+        d.style.zIndex = '25000';
+        d.style.overflow = 'auto';
+        d.style.background = 'linear-gradient(180deg, rgba(2,132,199,0.25), rgba(15,23,42,0.92))';
+        d.style.backdropFilter = 'blur(2px)';
+        d.style.webkitBackdropFilter = 'blur(2px)';
+
+        d.innerHTML = [
+            '<div class="container" style="padding-top: 26px; padding-bottom: 26px;">',
+            '  <div class="card" style="border-color: rgba(59,130,246,0.35); background: rgba(2,132,199,0.10);">',
+            '    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap: 10px; flex-wrap: wrap;">',
+            '      <div>',
+            '        <div style="font-weight: 950; font-size: 1.45rem;">WebUI freeze/crash detected</div>',
+            '        <div id="znh-panic-sub" style="margin-top:6px; color: rgba(226,232,240,0.92); font-weight: 850;">Close other tabs, then reload. If this happened during Snapper/scrub, attach the report below to a GitHub issue.</div>',
+            '      </div>',
+            '      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+            '        <button class="pill" type="button" id="znh-panic-reload">Reload tab</button>',
+            '        <button class="pill" type="button" id="znh-panic-close" style="border-color: rgba(255,255,255,0.14);">Close</button>',
+            '      </div>',
+            '    </div>',
+            '    <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+            '      <button class="pill" type="button" id="znh-panic-download">Download diagnostics (JSON)</button>',
+            '      <button class="pill" type="button" id="znh-panic-copy">Copy issue report</button>',
+            '      <button class="pill" type="button" id="znh-panic-issues">Open GitHub issues</button>',
+            '    </div>',
+            '    <div style="margin-top: 14px; color: rgba(226,232,240,0.92); font-weight: 850;">',
+            '      <div style="font-weight:950; margin-bottom: 8px;">Issue report (copy/paste)</div>',
+            '      <pre id="znh-panic-report" style="max-height: 420px;">(collecting…)</pre>',
+            '      <div style="margin-top:10px; color: rgba(226,232,240,0.82); font-weight: 800; font-size: 0.90rem;">Tip: also attach the downloaded JSON diagnostics file to your issue.</div>',
+            '    </div>',
+            '  </div>',
+            '</div>'
+        ].join('\n');
+
+        document.body.appendChild(d);
+
+        // Buttons
+        try {
+            var btnReload = document.getElementById('znh-panic-reload');
+            if (btnReload) btnReload.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+                try { window.location.reload(); } catch (e1) {}
+            });
+
+            var btnClose = document.getElementById('znh-panic-close');
+            if (btnClose) btnClose.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e2) {}
+                try { znhPanicHide(); } catch (e3) {}
+            });
+
+            var btnDl = document.getElementById('znh-panic-download');
+            if (btnDl) btnDl.addEventListener('click', function() {
+                try {
+                    if (window.ZNH && typeof window.ZNH.exportDiagnostics === 'function') {
+                        window.ZNH.exportDiagnostics({ includeDom: true, domMaxChars: 200000 });
+                        toast('Diagnostics exported', 'Saved JSON report', 'ok');
+                        return;
+                    }
+                } catch (e4) {}
+                toast('Diagnostics not available', 'Exporter not loaded', 'err');
+            });
+
+            var btnCopy = document.getElementById('znh-panic-copy');
+            if (btnCopy) btnCopy.addEventListener('click', function() {
+                var txt = '';
+                try { txt = String((document.getElementById('znh-panic-report') || {}).textContent || ''); } catch (e5) { txt = ''; }
+                try {
+                    if (typeof copyCmd === 'function') {
+                        copyCmd(txt, btnCopy);
+                        return;
+                    }
+                } catch (e6) {}
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(txt || '').then(function() { toast('Copied', 'Issue report copied', 'ok'); }, function() { toast('Copy failed', 'Clipboard permission denied', 'err'); });
+                        return;
+                    }
+                } catch (e7) {}
+                toast('Copy failed', 'Clipboard not available', 'err');
+            });
+
+            var btnIssues = document.getElementById('znh-panic-issues');
+            if (btnIssues) btnIssues.addEventListener('click', function() {
+                try {
+                    var url = String((window.ZNH_GITHUB_ISSUES_URL || 'https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues'));
+                    var w = window.open(url, '_blank', 'noopener');
+                    if (w) return;
+                } catch (e8) {}
+                try { window.location.href = String((window.ZNH_GITHUB_ISSUES_URL || 'https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues')); } catch (e9) {}
+            });
+        } catch (e10) {}
+
+        return d;
+    }
+
+    function znhPanicBuildReportText(reason, meta) {
+        var lines = [];
+        function add(s) { lines.push(String(s || '')); }
+
+        var now = '';
+        try { now = new Date().toISOString(); } catch (e0) { now = ''; }
+
+        add('== ZNH WebUI Panic Report ==');
+        add('time: ' + now);
+        add('reason: ' + String(reason || 'unknown'));
+
+        // Multi-tab state
+        try { add('multi-tab: ' + (window.ZNH_MULTI_INSTANCE_CONFLICT ? 'YES' : 'no')); } catch (e1) {}
+
+        // Running task bubble state
+        try {
+            var t = null;
+            try { t = _znhTaskLoad(); } catch (e2) { t = null; }
+            if (t && t.type && t.job_id) {
+                add('task.type: ' + String(t.type));
+                add('task.job_id: ' + String(t.job_id));
+                if (t.action) add('task.action: ' + String(t.action));
+                if (t.title) add('task.title: ' + String(t.title));
+            } else {
+                add('task: (none)');
+            }
+        } catch (e3) {}
+
+        // Last visible logs (best-effort)
+        function addBlock(label, id, maxChars) {
+            var txt = '';
+            try {
+                var el = document.getElementById(id);
+                if (el) txt = String(el.textContent || '');
+            } catch (e) { txt = ''; }
+            if (!String(txt || '').trim()) return;
+
+            var m = maxChars || 12000;
+            if (txt.length > m) txt = '(truncated; last ' + String(m) + ' chars)\n' + txt.slice(txt.length - m);
+
+            add('');
+            add('--- ' + label + ' ---');
+            add(txt);
+        }
+
+        addBlock('snapper-output panel', 'snapper-output', 12000);
+        addBlock('scrub-output panel', 'scrub-output', 12000);
+        addBlock('Snapper overlay log', 'sn-log', 12000);
+        addBlock('Main overlay live log', 'su-live-log', 12000);
+        addBlock('JS health log', 'js-health-log', 8000);
+
+        // Crash log (persistent)
+        try {
+            if (window.ZNH && window.ZNH.crash && typeof window.ZNH.crash.list === 'function') {
+                var arr = window.ZNH.crash.list() || [];
+                if (arr && arr.length) {
+                    add('');
+                    add('--- crash log (tail) ---');
+                    var tail = arr.slice(Math.max(0, arr.length - 8));
+                    for (var i = 0; i < tail.length; i++) {
+                        var it = tail[i] || {};
+                        add(String(it.ts || '') + ' ' + String(it.kind || '') + ' ' + String(it.msg || ''));
+                    }
+                }
+            }
+        } catch (e4) {}
+
+        // Meta (optional)
+        try {
+            if (meta && typeof meta === 'object') {
+                add('');
+                add('--- meta ---');
+                try { add(JSON.stringify(meta)); } catch (eJ) {}
+            }
+        } catch (e5) {}
+
+        return lines.join('\n');
+    }
+
+    function znhPanicShow(reason, meta) {
+        if (_znhPanic.active) return;
+        _znhPanic.active = true;
+        _znhPanic.shown_ts = (function() { try { return Date.now(); } catch (e) { return 0; } })();
+        _znhPanic.last_reason = String(reason || 'unknown');
+        _znhPanic.last_meta = meta || null;
+
+        try { _znhPanicEnsure(); } catch (e0) {}
+
+        var d = document.getElementById('znh-panic');
+        if (!d) return;
+
+        var sub = document.getElementById('znh-panic-sub');
+        if (sub) {
+            sub.textContent = 'Reason: ' + String(_znhPanic.last_reason || 'unknown') + '. Close other tabs, then reload. If this happened during Snapper/scrub, attach the report below to a GitHub issue.';
+        }
+
+        var pre = document.getElementById('znh-panic-report');
+        if (pre) {
+            pre.textContent = znhPanicBuildReportText(_znhPanic.last_reason, _znhPanic.last_meta);
+        }
+
+        d.style.display = 'block';
+        try { document.body.classList.add('overlay-open'); } catch (e1) {}
+    }
+
+    function znhPanicHide() {
+        _znhPanic.active = false;
+        var d = document.getElementById('znh-panic');
+        if (d) d.style.display = 'none';
+        try { document.body.classList.remove('overlay-open'); } catch (e0) {}
+    }
+
+    function znhPanicMaybe(reason, meta) {
+        // Debounce: don't spam.
+        try {
+            var now = Date.now();
+            if (_znhPanic.shown_ts && now - _znhPanic.shown_ts < 15000) return;
+        } catch (e0) {}
+
+        // Only trigger when tab is visible (ignore background timer throttling).
+        try {
+            if (document && document.hidden) return;
+        } catch (e1) {}
+
+        // Only trigger when a long-running task is active (reduces false positives).
+        var taskActive = false;
+        try {
+            var t = _znhTaskLoad();
+            taskActive = !!(t && t.type && t.job_id);
+        } catch (e2) { taskActive = false; }
+
+        if (!taskActive) return;
+
+        znhPanicShow(reason, meta || null);
+    }
+
+    function znhPanicInit() {
+        // Error bursts during a running task => show panic screen.
+        try {
+            window.addEventListener('error', function(ev) {
+                try {
+                    var msg = (ev && ev.message) ? String(ev.message) : '';
+                    if (!msg) return;
+
+                    var now = Date.now();
+                    if (!_znhPanic.error_window_ts || now - _znhPanic.error_window_ts > 15000) {
+                        _znhPanic.error_window_ts = now;
+                        _znhPanic.error_count = 0;
+                    }
+                    _znhPanic.error_count++;
+                    if (_znhPanic.error_count >= 3) {
+                        znhPanicMaybe('JS error burst: ' + msg, { source: 'window.error', count: _znhPanic.error_count });
+                    }
+                } catch (e0) {}
+            });
+        } catch (eE) {}
+
+        try {
+            window.addEventListener('unhandledrejection', function(ev) {
+                try {
+                    var msg = (ev && ev.reason) ? String(ev.reason) : 'promise rejection';
+                    var now = Date.now();
+                    if (!_znhPanic.error_window_ts || now - _znhPanic.error_window_ts > 15000) {
+                        _znhPanic.error_window_ts = now;
+                        _znhPanic.error_count = 0;
+                    }
+                    _znhPanic.error_count++;
+                    if (_znhPanic.error_count >= 3) {
+                        znhPanicMaybe('Unhandled rejections burst: ' + msg, { source: 'unhandledrejection', count: _znhPanic.error_count });
+                    }
+                } catch (e1) {}
+            });
+        } catch (eR) {}
+
+        // Freeze / stall watchdog: detects huge main-thread stalls while a task is running.
+        try {
+            _znhPanic.watchdog_last = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            _znhPanic.watchdog_timer = setInterval(function() {
+                try {
+                    if (_znhPanic.active) {
+                        _znhPanic.watchdog_last = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                        return;
+                    }
+                    if (document && document.hidden) {
+                        _znhPanic.watchdog_last = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                        return;
+                    }
+
+                    var now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    var expected = _znhPanic.watchdog_last + _znhPanic.watchdog_interval_ms;
+                    var drift = now - expected;
+                    _znhPanic.watchdog_last = now;
+
+                    if (drift > _znhPanic.watchdog_threshold_ms) {
+                        znhPanicMaybe('UI stall detected (main thread blocked ~' + String(Math.round(drift)) + 'ms)', { drift_ms: Math.round(drift) });
+                    }
+                } catch (eW) {}
+            }, _znhPanic.watchdog_interval_ms);
+        } catch (eW0) {}
+    }
+
+    try { znhPanicInit(); } catch (eP0) {}
+
     // Notification center (persistent inbox + glow icon)
     var ZNH_GITHUB_ISSUES_URL = 'https://github.com/FreddeITsupport98/zypper-automatik-helper-/issues';
 
@@ -16228,8 +16558,35 @@ generate_dashboard() {
     function _snapperSetOut(text) {
         var el = document.getElementById('snapper-output');
         if (!el) return;
-        el.textContent = String(text || '');
-        highlightBlock('snapper-output');
+
+        var t = '';
+        try { t = String(text || ''); } catch (e0) { t = ''; }
+
+        // Avoid repeated huge DOM updates (can freeze the page).
+        try {
+            if (el._znh_last_text != null && String(el._znh_last_text) === t) {
+                return;
+            }
+            el._znh_last_text = t;
+        } catch (e1) {}
+
+        // Keep UI responsive: show a bounded tail.
+        try {
+            var maxChars = 24000;
+            if (t.length > maxChars) {
+                t = '(output truncated; showing last ' + String(maxChars) + ' chars)\n' + t.slice(t.length - maxChars);
+            }
+        } catch (e2) {}
+
+        el.textContent = t;
+
+        // Avoid expensive highlighting on huge logs.
+        try {
+            if (typeof highlightBlock === 'function' && t.length <= 12000) {
+                highlightBlock('snapper-output');
+            }
+        } catch (eH) {}
+
         try { el.scrollTop = el.scrollHeight; } catch (e) {}
     }
 
@@ -17968,7 +18325,11 @@ generate_dashboard() {
 
                 _lastPct = parseInt(j.progress || 0, 10) || 0;
                 _suUpdateProgress(j.stage || 'Running', _lastPct);
-                if (j.output != null) _suSetLog(String(j.output));
+                if (j.output != null) {
+                    _suSetLog(String(j.output));
+                    // Mirror into the in-page scrub-ghost output panel (best-effort).
+                    try { if (typeof _scrubSetOut === 'function') _scrubSetOut(String(j.output || '')); } catch (eM) {}
+                }
                 try { znhTaskUpdateFromJob('scrub-ghost', j); } catch (e_task2) {}
 
                 if (j.done) {
@@ -17989,6 +18350,9 @@ generate_dashboard() {
                     if (!logText) {
                         try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (e2) { logText = ''; }
                     }
+
+                    // Mirror final tail into the in-page scrub-ghost output panel too.
+                    try { if (typeof _scrubSetOut === 'function') _scrubSetOut(String(logText || '')); } catch (eM2) {}
 
                     if (rc === 0) {
                         toast('scrub-ghost complete', String(title || ''), 'ok');
@@ -19467,13 +19831,40 @@ generate_dashboard() {
     function _suSetLog(text) {
         var pre = document.getElementById('su-live-log');
         if (!pre) return;
+
         var atBottom = false;
         try { atBottom = _nearBottom(pre, 60); } catch (e) { atBottom = true; }
-        pre.textContent = String(text || '');
+
+        var t = '';
+        try { t = String(text || ''); } catch (e0) { t = ''; }
+
+        // Avoid repeated huge DOM updates (can freeze the page).
+        try {
+            if (pre._znh_last_text != null && String(pre._znh_last_text) === t) {
+                return;
+            }
+            pre._znh_last_text = t;
+        } catch (e1) {}
+
+        // Keep it bounded.
+        try {
+            var maxChars = 24000;
+            if (t.length > maxChars) {
+                t = '(output truncated; showing last ' + String(maxChars) + ' chars)\n' + t.slice(t.length - maxChars);
+            }
+        } catch (e2) {}
+
+        pre.textContent = t;
         if (atBottom) {
             try { pre.scrollTop = pre.scrollHeight; } catch (ee) {}
         }
-        highlightBlock('su-live-log');
+
+        // Avoid expensive highlighting on huge logs.
+        try {
+            if (typeof highlightBlock === 'function' && t.length <= 12000) {
+                highlightBlock('su-live-log');
+            }
+        } catch (eH) {}
     }
 
     // --- Quick Actions (run allowlisted helper commands from WebUI) ---

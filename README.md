@@ -1901,6 +1901,8 @@ systemctl status zypper-autodownload.service
   - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and **hard-blocks** the page with a warning until you close the other tab(s) and reload.
   - 🧰 **IMPROVED:** Snapper cleanup now supports **minimize + resume** via the bottom-right job bubble (useful for long cleanups).
   - 🧰 **IMPROVED:** scrub-ghost (in-page Run button) now runs confirmed actions as a **background job** and opens a minimizable overlay viewer (same bubble/resume behavior as the wizard).
+  - 🧯 **NEW:** WebUI panic screen (blue-screen style): if the UI freezes/crashes during long-running jobs, it shows a full-page warning with **Copy issue report** + **Download diagnostics (JSON)** + **Open GitHub issues**.
+  - 🐛 **FIXED:** reduced UI freezes during huge Snapper/scrub output by bounding log rendering and skipping redundant updates.
   - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
   - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).
   - 🧰 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).
