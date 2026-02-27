@@ -671,6 +671,56 @@ __znh_detach_open_url() {
     return 1
 }
 
+__znh_run_root_cmd() {
+    # Usage: __znh_run_root_cmd <cmd> [args...]
+    # Best-effort root command runner used by user-mode --dash-open.
+    # Goals:
+    # - When launched from a desktop entry (no terminal), sudo cannot prompt.
+    #   Prefer pkexec in that case so the dashboard can refresh itself.
+    # - When launched from a terminal, prefer sudo for familiar CLI prompts.
+    # - Allow explicit override:
+    #     ZNH_ROOT_PROMPT=sudo   zypper-auto-helper --dash-open
+    #     ZNH_ROOT_PROMPT=pkexec zypper-auto-helper --dash-open
+    local prefer="${ZNH_ROOT_PROMPT:-auto}"
+
+    if [ "${EUID}" -eq 0 ] 2>/dev/null; then
+        "$@"
+        return $?
+    fi
+
+    if [ "${prefer}" = "sudo" ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            sudo "$@"
+            return $?
+        fi
+    elif [ "${prefer}" = "pkexec" ]; then
+        if command -v pkexec >/dev/null 2>&1; then
+            pkexec "$@"
+            return $?
+        fi
+    fi
+
+    # auto mode
+    if [ ! -t 0 ] 2>/dev/null; then
+        if command -v pkexec >/dev/null 2>&1; then
+            pkexec "$@"
+            return $?
+        fi
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+        return $?
+    fi
+
+    if command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+        return $?
+    fi
+
+    return 127
+}
+
 __znh_ensure_dash_desktop_shortcut() {
     # UX Polish Version: Adds visual feedback (Notifications) and "Press Enter" delays.
     # Usage: __znh_ensure_dash_desktop_shortcut <user> <home>
@@ -879,9 +929,9 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
 
     if [ ! -f "${dash_path}" ]; then
         echo "Dashboard file not found yet: ${dash_path}" >&2
-        if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
-            echo "Generating dashboard now (sudo zypper-auto-helper --dashboard)..." >&2
-            sudo /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
+        if [ -x /usr/local/bin/zypper-auto-helper ]; then
+            echo "Generating dashboard now (admin permissions may be required)..." >&2
+            __znh_run_root_cmd /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
         fi
     fi
 
@@ -938,7 +988,6 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         #   ZNH_DASH_OPEN_NO_REFRESH=1      -> disable auto-refresh
         #   ZNH_DASH_OPEN_FORCE_REFRESH=1   -> always refresh (even if timestamps match)
         if [ "${ZNH_DASH_OPEN_NO_REFRESH:-0}" -ne 1 ] 2>/dev/null \
-            && command -v sudo >/dev/null 2>&1 \
             && [ -x /usr/local/bin/zypper-auto-helper ]; then
 
             helper_mtime=$(stat -c %Y /usr/local/bin/zypper-auto-helper 2>/dev/null || echo 0)
@@ -946,8 +995,8 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
 
             if [ "${ZNH_DASH_OPEN_FORCE_REFRESH:-0}" -eq 1 ] 2>/dev/null \
                 || [ "${helper_mtime:-0}" -gt "${dash_mtime:-0}" ] 2>/dev/null; then
-                echo "Dashboard appears outdated; refreshing first (sudo zypper-auto-helper --dashboard)..." >&2
-                sudo /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
+                echo "Dashboard appears outdated; refreshing first (admin permissions may be required)..." >&2
+                __znh_run_root_cmd /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
             fi
         fi
 
@@ -982,8 +1031,8 @@ PY
         fi
 
         api_ok=0
-        if [ -n "${desired_token//[[:space:]]/}" ] && command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
-            if sudo /usr/local/bin/zypper-auto-helper --dash-api-on "${desired_token}" >/dev/null 2>&1; then
+        if [ -n "${desired_token//[[:space:]]/}" ] && [ -x /usr/local/bin/zypper-auto-helper ]; then
+            if __znh_run_root_cmd /usr/local/bin/zypper-auto-helper --dash-api-on "${desired_token}" >/dev/null 2>&1; then
                 api_ok=1
             fi
         fi
@@ -9974,17 +10023,26 @@ generate_dashboard() {
     .rocket-btn.rocket-complete { animation: rocketReady 1600ms ease-in-out infinite; }
     .rocket-btn.rocket-error { animation: rocketShake 420ms ease-in-out infinite; }
 
+    /* Rocket emoji wrapper: lets us anchor the flame to the actual emoji glyph
+       instead of guessing offsets inside the 36x36 button box. */
+    .rocket-emoji {
+        position: relative;
+        display: inline-block;
+        line-height: 1;
+        z-index: 1; /* keep emoji above flame */
+    }
+
     /* Simple flame effect (only when downloading)
-       NOTE: we use ::before so the flame renders *behind* the rocket emoji. */
-    .rocket-btn.rocket-downloading::before {
+       NOTE: flame is anchored to the emoji span, and rendered behind it. */
+    .rocket-btn.rocket-downloading .rocket-emoji::before {
         content: '';
         position: absolute;
         width: 11px;
         height: 14px;
-        /* Flame anchor: tweak these two values if emoji/font rendering differs */
-        left: 16%;
-        top: 21px;
-        transform: translateX(-50%) rotate(-40deg);
+        /* Flame anchor: tweak if emoji/font differs */
+        left: -2px;
+        top: 14px;
+        transform: rotate(-40deg);
         transform-origin: 50% 0%;
         border-radius: 999px;
         background: radial-gradient(circle at 50% 10%, rgba(255,255,255,0.85), rgba(250,204,21,0.65) 35%, rgba(249,115,22,0.15) 70%, rgba(249,115,22,0.0) 100%);
@@ -9992,6 +10050,7 @@ generate_dashboard() {
         opacity: 0.95;
         animation: flame 650ms ease-in-out infinite;
         pointer-events: none;
+        z-index: -1;
     }
     @keyframes flame {
         0% { height: 12px; opacity: 0.85; }
@@ -10694,7 +10753,7 @@ generate_dashboard() {
     <div class="card">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 10px;">
           <h1>
-            <button class="rocket-btn" id="rocket-btn" type="button" title="Install system updates (wizard)">🚀</button>
+            <button class="rocket-btn" id="rocket-btn" type="button" title="Install system updates (wizard)"><span class="rocket-emoji" aria-hidden="true">🚀</span></button>
             <span>Zypper Auto Command Center</span>
           </h1>
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
@@ -10832,34 +10891,34 @@ generate_dashboard() {
             <span class="cmd-desc">Default update flow (recommended) • preview first</span>
             <div class="cmd-copy-feedback">Opening…</div>
         </button>
-        <button class="cmd-btn" data-qa="verify" data-qa-copy="sudo zypper-auto-helper --verify">
+        <button class="cmd-btn" data-qa="verify" data-qa-copy="zypper-auto-helper --verify">
             <span class="cmd-label">Run: Verify & Fix</span>
             <span class="cmd-desc">Health checks + auto-repair (includes RPM DB repair)</span>
             <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" data-qa="health" data-qa-copy="sudo zypper-auto-helper --health">
+        <button class="cmd-btn" data-qa="health" data-qa-copy="zypper-auto-helper --health">
             <span class="cmd-label">Run: Health Report</span>
             <span class="cmd-desc">Analyze recent runs (errors, locks, crashes)</span>
             <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" data-qa="logs" data-qa-copy="sudo zypper-auto-helper --logs">
+        <button class="cmd-btn" data-qa="logs" data-qa-copy="zypper-auto-helper --logs">
             <span class="cmd-label">Run: View Logs</span>
             <span class="cmd-desc">Tail recent installer/service/notifier logs</span>
             <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" data-qa="reset-downloads" data-qa-copy="sudo zypper-auto-helper --reset-downloads" data-qa-danger="1">
+        <button class="cmd-btn" data-qa="reset-downloads" data-qa-copy="zypper-auto-helper --reset-downloads" data-qa-danger="1">
             <span class="cmd-label">Run: Reset Downloads</span>
             <span class="cmd-desc">Clear cached state + restart timers (confirmation required)</span>
             <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" data-qa="reset-config" data-qa-copy="sudo zypper-auto-helper --reset-config" data-qa-danger="1">
+        <button class="cmd-btn" data-qa="reset-config" data-qa-copy="zypper-auto-helper --reset-config" data-qa-danger="1">
             <span class="cmd-label">Run: Reset Config</span>
             <span class="cmd-desc">Recreate defaults (with backup) (confirmation required)</span>
             <div class="cmd-copy-feedback">Running…</div>
         </button>
-        <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --dashboard', this)">
+        <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --dashboard', this)">
             <span class="cmd-label">Copy: Refresh Dashboard</span>
-            <span class="cmd-desc">Regenerate this page (sudo)</span>
+            <span class="cmd-desc">Regenerate this page (root)</span>
             <div class="cmd-copy-feedback">Copied!</div>
         </button>
         <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --dash-open', this)">
@@ -10887,12 +10946,12 @@ generate_dashboard() {
               <span class="cmd-desc">Open served dashboard in browser</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
-          <button class="cmd-btn" data-qa="live-logs" data-qa-copy="sudo zypper-auto-helper --live-logs" data-qa-interactive="1">
+          <button class="cmd-btn" data-qa="live-logs" data-qa-copy="zypper-auto-helper --live-logs" data-qa-interactive="1">
               <span class="cmd-label">Live Logs</span>
               <span class="cmd-desc">Interactive (requires terminal) • copy-only in WebUI</span>
               <div class="cmd-copy-feedback">Open</div>
           </button>
-          <button class="cmd-btn" onclick="copyCmd('sudo zypper-auto-helper --rm-conflict', this)">
+          <button class="cmd-btn" onclick="copyCmd('zypper-auto-helper --rm-conflict', this)">
               <span class="cmd-label">Fix RPM Conflicts</span>
               <span class="cmd-desc">Clean safe duplicate RPM versions</span>
               <div class="cmd-copy-feedback">Copied!</div>
@@ -10907,32 +10966,32 @@ generate_dashboard() {
               <span class="cmd-desc">Verify GUI/DBus wiring</span>
               <div class="cmd-copy-feedback">Copied!</div>
           </button>
-          <button class="cmd-btn" data-qa="snapshot-state" data-qa-copy="sudo zypper-auto-helper --snapshot-state">
+          <button class="cmd-btn" data-qa="snapshot-state" data-qa-copy="zypper-auto-helper --snapshot-state">
               <span class="cmd-label">Run: Snapshot State</span>
               <span class="cmd-desc">Write diagnostics snapshot</span>
               <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" data-qa="diag-bundle" data-qa-copy="sudo zypper-auto-helper --diag-bundle">
+          <button class="cmd-btn" data-qa="diag-bundle" data-qa-copy="zypper-auto-helper --diag-bundle">
               <span class="cmd-label">Run: Diag Bundle</span>
               <span class="cmd-desc">Collect a support bundle</span>
               <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" data-qa="diag-logs-on" data-qa-copy="sudo zypper-auto-helper --diag-logs-on" data-qa-danger="1">
+          <button class="cmd-btn" data-qa="diag-logs-on" data-qa-copy="zypper-auto-helper --diag-logs-on" data-qa-danger="1">
               <span class="cmd-label">Run: Diag Logs ON</span>
               <span class="cmd-desc">Enable aggregated log follower (confirmation required)</span>
               <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" data-qa="diag-logs-off" data-qa-copy="sudo zypper-auto-helper --diag-logs-off" data-qa-danger="1">
+          <button class="cmd-btn" data-qa="diag-logs-off" data-qa-copy="zypper-auto-helper --diag-logs-off" data-qa-danger="1">
               <span class="cmd-label">Run: Diag Logs OFF</span>
               <span class="cmd-desc">Disable aggregated log follower (confirmation required)</span>
               <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" data-qa="setup-sf" data-qa-copy="sudo zypper-auto-helper --setup-SF" data-qa-interactive="1" data-qa-danger="1">
+          <button class="cmd-btn" data-qa="setup-sf" data-qa-copy="zypper-auto-helper --setup-SF" data-qa-interactive="1" data-qa-danger="1">
               <span class="cmd-label">Setup Snap/Flatpak</span>
               <span class="cmd-desc">Interactive + system changes • copy-only in WebUI</span>
               <div class="cmd-copy-feedback">Open</div>
           </button>
-          <button class="cmd-btn" data-qa="debug-menu" data-qa-copy="sudo zypper-auto-helper debug" data-qa-interactive="1">
+          <button class="cmd-btn" data-qa="debug-menu" data-qa-copy="zypper-auto-helper debug" data-qa-interactive="1">
               <span class="cmd-label">Debug Menu</span>
               <span class="cmd-desc">Interactive diagnostics tools • copy-only in WebUI</span>
               <div class="cmd-copy-feedback">Open</div>

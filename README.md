@@ -275,6 +275,13 @@ The script is idempotent. You can run this on a fresh install *or* on a PC with 
 
 After installation (restart your shell or run `source ~/.bashrc`), you can use:
 
+**Note about `sudo`:** many examples in this README include `sudo` so they also work when you run the script directly.
+If you installed via `sudo ./zypper-auto.sh install`, the installer adds a small shell wrapper named `zypper-auto-helper` that will **auto-elevate** when needed—so you can usually run commands as:
+- `zypper-auto-helper --verify` (no `sudo`)
+- `zypper-auto-helper --dashboard` (no `sudo`)
+
+Exception: `zypper-auto-helper --dash-open` should be run **without** `sudo` so it can open your browser in your desktop session. It will only prompt for admin permissions if it needs to refresh dashboard artifacts or start the Settings API.
+
 ```bash
 zypper-auto-helper --help           # Show help
 zypper-auto-helper --verify         # Run health check and auto-repair
@@ -1477,6 +1484,7 @@ zypper-auto-helper --dash-open
 `--dash-open` will also (best-effort) **apply new changes** by generating/refreshing the dashboard first:
 - If `~/.local/share/zypper-notify/status.html` is missing, it runs `sudo zypper-auto-helper --dashboard` automatically.
 - If the installed helper (`/usr/local/bin/zypper-auto-helper`) is newer than `status.html`, it regenerates the dashboard before opening.
+- Tip: if you installed the default shell wrapper, the equivalent command is `zypper-auto-helper --dashboard` (no `sudo`). When launched from the desktop (no terminal), it may use `pkexec` instead of `sudo` for the admin prompt.
 
 You can disable the auto-refresh with:
 - `ZNH_DASH_OPEN_NO_REFRESH=1 zypper-auto-helper --dash-open`
@@ -1501,7 +1509,7 @@ It also starts a root-only **Dashboard API** on `127.0.0.1:8766` so the dashboar
 
 Important: **Browser refresh vs WebUI refresh**
 - Your browser’s reload button (or `Ctrl+R`) only reloads the *already-generated* `status.html`.
-- The dashboard button **Quick Actions → “Run: Refresh Dashboard”** triggers the helper to **regenerate** the dashboard (equivalent to running `sudo zypper-auto-helper --dashboard`), then reloads the page so you see the new content.
+- The dashboard button **Quick Actions → “Run: Refresh Dashboard”** triggers the helper to **regenerate** the dashboard (equivalent to running `sudo zypper-auto-helper --dashboard` (or `zypper-auto-helper --dashboard` when using the installed shell wrapper)), then reloads the page so you see the new content.
 - After helper updates (Self-Update or reinstall), the dashboard may gain new UI features. If your open tab is outdated, the WebUI shows a banner: **“✨ Dashboard update available”** with buttons to refresh/regenerate and reload.
   - It also detects when a *new* dashboard file was regenerated in the background (via a small `status-meta.json` sidecar), even if the helper version did not change.
 
