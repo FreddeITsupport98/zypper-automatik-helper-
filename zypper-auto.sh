@@ -9974,15 +9974,17 @@ generate_dashboard() {
     .rocket-btn.rocket-complete { animation: rocketReady 1600ms ease-in-out infinite; }
     .rocket-btn.rocket-error { animation: rocketShake 420ms ease-in-out infinite; }
 
-    /* Simple flame effect (only when downloading) */
-    .rocket-btn.rocket-downloading::after {
+    /* Simple flame effect (only when downloading)
+       NOTE: we use ::before so the flame renders *behind* the rocket emoji. */
+    .rocket-btn.rocket-downloading::before {
         content: '';
         position: absolute;
-        width: 10px;
+        width: 11px;
         height: 14px;
-        left: 50%;
-        top: 22px;
-        transform: translateX(-50%);
+        left: 42%;
+        top: 20px;
+        transform: translateX(-50%) rotate(-40deg);
+        transform-origin: 50% 0%;
         border-radius: 999px;
         background: radial-gradient(circle at 50% 10%, rgba(255,255,255,0.85), rgba(250,204,21,0.65) 35%, rgba(249,115,22,0.15) 70%, rgba(249,115,22,0.0) 100%);
         filter: blur(0.3px);
