@@ -10865,6 +10865,20 @@ generate_dashboard() {
         </div>
       </div>
 
+      <!-- Multi-tab safety banner (shown when the dashboard is open in multiple tabs/windows) -->
+      <div id="znh-multi-instance-banner" style="display:none; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--text);">
+        <div style="display:flex; gap:12px; justify-content: space-between; flex-wrap: wrap; align-items: center;">
+          <div>
+            <div style="font-weight: 950;">⚠ Multiple WebUI tabs detected</div>
+            <div id="znh-multi-instance-text" style="margin-top:4px; font-size:0.9rem; color: var(--muted); font-weight: 800;">Close other tabs (same WebUI). If you close them, reload this tab.</div>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
+            <button class="pill" type="button" id="znh-multi-instance-reload-btn">Reload tab</button>
+            <button class="pill" type="button" id="znh-multi-instance-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
+          </div>
+        </div>
+      </div>
+
       <div class="grid" style="margin-top: 18px;">
         <div class="stat-box">
             <span class="stat-label">Kernel</span>
@@ -14157,6 +14171,300 @@ generate_dashboard() {
 
     // Wire update banner early.
     try { znhDashboardUpdateInit(); } catch (eU0) {}
+
+    // --- WebUI multi-tab / multi-instance detection (soft lock / warning banner) ---
+    // Goal: avoid confusing races when the dashboard is open in multiple tabs/windows.
+    // Uses BroadcastChannel when available; falls back to a localStorage peer map.
+    var _znhMi = {
+        peersKey: 'znh_webui_peers_v1',
+        tabKey: 'znh_webui_tab_id_v1',
+        tabId: '',
+        hbMs: 2000,
+        staleMs: 6500,
+        timer: null,
+        peers: {},
+        conflict: false,
+        otherCount: 0,
+        toastShown: false,
+        dismissUntil: 0,
+        ch: null
+    };
+
+    function _znhMiNow() {
+        try { return Date.now(); } catch (e) { return 0; }
+    }
+
+    function _znhMiNewId() {
+        try {
+            // Keep IDs short (for storage + log hygiene).
+            return 't' + String(Math.floor(_znhMiNow() / 1000)) + '-' + String(Math.random()).slice(2, 9);
+        } catch (e) {
+            return 't' + String(Math.floor(Math.random() * 10000000));
+        }
+    }
+
+    function _znhMiGetTabId() {
+        // Prefer sessionStorage so a reload stays "the same tab".
+        var id = '';
+        try { id = String(sessionStorage.getItem(_znhMi.tabKey) || ''); } catch (e0) { id = ''; }
+        if (!id) {
+            id = _znhMiNewId();
+            try { sessionStorage.setItem(_znhMi.tabKey, id); } catch (e1) {}
+        }
+        return id;
+    }
+
+    function _znhMiReadPeers() {
+        try {
+            var raw = localStorage.getItem(_znhMi.peersKey) || '';
+            if (!raw) return {};
+            var j = JSON.parse(raw);
+            if (!j || typeof j !== 'object') return {};
+            return j;
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function _znhMiWritePeers(obj) {
+        try {
+            localStorage.setItem(_znhMi.peersKey, JSON.stringify(obj || {}));
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _znhMiPrunePeers(peers, now) {
+        peers = peers || {};
+        now = now || _znhMiNow();
+        var out = {};
+        var keys = [];
+        try { keys = Object.keys(peers); } catch (e0) { keys = []; }
+        for (var i = 0; i < keys.length; i++) {
+            var k = String(keys[i] || '');
+            if (!k) continue;
+            var it = peers[k] || null;
+            var ts = 0;
+            try {
+                if (it && typeof it === 'object') ts = parseInt(it.ts || 0, 10) || 0;
+                else ts = parseInt(it || 0, 10) || 0;
+            } catch (e1) { ts = 0; }
+            if (ts > 0 && now - ts <= _znhMi.staleMs) {
+                out[k] = (it && typeof it === 'object') ? it : { ts: ts };
+            }
+        }
+        return out;
+    }
+
+    function _znhMiBannerShow(msg) {
+        var b = document.getElementById('znh-multi-instance-banner');
+        var t = document.getElementById('znh-multi-instance-text');
+        if (!b) return;
+
+        // Allow a short "dismiss" grace period.
+        var now = _znhMiNow();
+        if (_znhMi.dismissUntil && now < _znhMi.dismissUntil) return;
+
+        try { if (msg && t) t.textContent = String(msg); } catch (e0) {}
+        b.style.display = 'block';
+    }
+
+    function _znhMiBannerHide() {
+        var b = document.getElementById('znh-multi-instance-banner');
+        if (!b) return;
+        b.style.display = 'none';
+    }
+
+    function _znhMiSetButtonsDisabled(sel, disabled) {
+        try {
+            var els = document.querySelectorAll(sel);
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                if (!el) continue;
+                try { el.disabled = !!disabled; } catch (e1) {}
+                try {
+                    if (disabled) {
+                        el.setAttribute('aria-disabled', 'true');
+                        el.style.opacity = '0.70';
+                        el.style.cursor = 'not-allowed';
+                    } else {
+                        el.removeAttribute('aria-disabled');
+                        el.style.opacity = '';
+                        el.style.cursor = '';
+                    }
+                } catch (e2) {}
+            }
+        } catch (e0) {}
+    }
+
+    function _znhMiApplyReadOnly(on) {
+        // Best-effort: disable the most state-changing WebUI buttons.
+        _znhMiSetButtonsDisabled('button.cmd-btn', on);
+        _znhMiSetButtonsDisabled('#rocket-btn', on);
+        _znhMiSetButtonsDisabled('#self-update-run-btn', on);
+        _znhMiSetButtonsDisabled('#self-update-toggle-btn', on);
+        _znhMiSetButtonsDisabled('#settings-save', on);
+        _znhMiSetButtonsDisabled('#settings-reset', on);
+        _znhMiSetButtonsDisabled('#snapper-status-btn, #snapper-list-btn, #snapper-create-btn, #snapper-cleanup-btn, #snapper-auto-enable-btn, #snapper-auto-disable-btn', on);
+        _znhMiSetButtonsDisabled('#scrub-run-btn, #scrub-wizard-btn', on);
+        _znhMiSetButtonsDisabled('#self-update-sim-run-btn, #rocket-update-sim-run-btn, #rocket-wizard-open-btn, #dash-refresh-run-btn, #dash-refresh-run-btn2', on);
+
+        // Also guard the Settings drawer inputs (prevents autosave races).
+        try {
+            var nodes = document.querySelectorAll('#settings-drawer input, #settings-drawer select, #settings-drawer textarea');
+            for (var i = 0; i < nodes.length; i++) {
+                try { nodes[i].disabled = !!on; } catch (e3) {}
+            }
+        } catch (e4) {}
+    }
+
+    function _znhMiSetConflict(on, count) {
+        on = !!on;
+        count = parseInt(count || 0, 10) || 0;
+        if (on === _znhMi.conflict && count === _znhMi.otherCount) return;
+
+        _znhMi.conflict = on;
+        _znhMi.otherCount = count;
+
+        try { window.ZNH_MULTI_INSTANCE_CONFLICT = on; } catch (e0) {}
+
+        if (on) {
+            var msg = 'Close other tabs (same WebUI). If you close them, reload this tab.';
+            if (count > 0) msg = 'Detected ' + String(count + 1) + ' WebUI tabs. Close other tabs (same WebUI). If you close them, reload this tab.';
+            _znhMiBannerShow(msg);
+            _znhMiApplyReadOnly(true);
+
+            if (!_znhMi.toastShown) {
+                _znhMi.toastShown = true;
+                try { toast('Multiple WebUI tabs detected', 'Close other tabs, then reload', 'err'); } catch (e1) {}
+                try { if (typeof window.znhUiWarn === 'function') window.znhUiWarn('multi-tab detected (' + String(count + 1) + ' tabs)'); } catch (e2) {}
+            }
+        } else {
+            _znhMiBannerHide();
+            _znhMiApplyReadOnly(false);
+            _znhMi.toastShown = false;
+        }
+    }
+
+    function _znhMiEval() {
+        var now = _znhMiNow();
+
+        // Merge in localStorage peer map.
+        var peers = _znhMiReadPeers();
+        peers = _znhMiPrunePeers(peers, now);
+
+        // Keep self alive.
+        peers[_znhMi.tabId] = { ts: now, gen_id: String(ZNH_DASHBOARD_GEN_ID || ''), helper_ver: ZNH_HELPER_VERSION_AT_GEN || 0 };
+
+        // Persist pruned map (best-effort).
+        _znhMiWritePeers(peers);
+
+        // Update local view.
+        _znhMi.peers = peers;
+
+        // Count other live tabs.
+        var keys = [];
+        try { keys = Object.keys(peers); } catch (e0) { keys = []; }
+        var other = 0;
+        for (var i = 0; i < keys.length; i++) {
+            var k = String(keys[i] || '');
+            if (!k || k === _znhMi.tabId) continue;
+            other++;
+        }
+
+        _znhMiSetConflict(other > 0, other);
+    }
+
+    function _znhMiTick() {
+        try { _znhMiEval(); } catch (e0) {}
+
+        // Broadcast heartbeat to other tabs (fast path).
+        try {
+            if (_znhMi.ch) {
+                _znhMi.ch.postMessage({ type: 'hb', id: _znhMi.tabId, ts: _znhMiNow() });
+            }
+        } catch (e1) {}
+
+        try {
+            if (_znhMi.timer) clearTimeout(_znhMi.timer);
+        } catch (e2) {}
+        _znhMi.timer = setTimeout(_znhMiTick, _znhMi.hbMs);
+    }
+
+    function znhMultiInstanceInit() {
+        _znhMi.tabId = _znhMiGetTabId();
+
+        // Banner buttons
+        (function() {
+            var btnReload = document.getElementById('znh-multi-instance-reload-btn');
+            var btnDismiss = document.getElementById('znh-multi-instance-dismiss-btn');
+
+            if (btnReload) btnReload.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+                try { window.location.reload(); } catch (e1) {}
+            });
+
+            if (btnDismiss) btnDismiss.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e2) {}
+                try { _znhMi.dismissUntil = _znhMiNow() + 20000; } catch (e3) { _znhMi.dismissUntil = 0; }
+                _znhMiBannerHide();
+            });
+        })();
+
+        // BroadcastChannel (if supported)
+        try {
+            if (typeof BroadcastChannel === 'function') {
+                _znhMi.ch = new BroadcastChannel('znh_webui_peers_v1');
+                _znhMi.ch.onmessage = function(ev) {
+                    try {
+                        var data = (ev && ev.data) ? ev.data : null;
+                        if (!data || !data.type) return;
+                        if (String(data.type) === 'hb') {
+                            var pid = String(data.id || '');
+                            if (!pid || pid === _znhMi.tabId) return;
+                            var peers = _znhMi.peers || {};
+                            peers[pid] = { ts: parseInt(data.ts || 0, 10) || _znhMiNow() };
+                            _znhMi.peers = peers;
+                        } else if (String(data.type) === 'bye') {
+                            var bid = String(data.id || '');
+                            if (bid) {
+                                try { delete _znhMi.peers[bid]; } catch (eB) {}
+                            }
+                        }
+                    } catch (e4) {}
+                };
+            }
+        } catch (e5) { _znhMi.ch = null; }
+
+        // React quickly to other tabs updating the peer map.
+        try {
+            window.addEventListener('storage', function(ev) {
+                try {
+                    if (!ev || String(ev.key || '') !== _znhMi.peersKey) return;
+                    _znhMiEval();
+                } catch (eS) {}
+            });
+        } catch (e6) {}
+
+        // Best-effort cleanup on close.
+        try {
+            window.addEventListener('beforeunload', function() {
+                try {
+                    var peers = _znhMiReadPeers();
+                    try { delete peers[_znhMi.tabId]; } catch (e1) {}
+                    _znhMiWritePeers(peers);
+                } catch (e2) {}
+                try { if (_znhMi.ch) _znhMi.ch.postMessage({ type: 'bye', id: _znhMi.tabId, ts: _znhMiNow() }); } catch (e3) {}
+            });
+        } catch (e7) {}
+
+        // Start loop
+        _znhMiTick();
+    }
+
+    // Start multi-tab detection early (best-effort).
+    try { znhMultiInstanceInit(); } catch (eMI0) {}
 
     // --- Background job bubble (resume running self-update / system-update jobs) ---
     var ZNH_TASK_KEY = 'znh_active_task_v1';
