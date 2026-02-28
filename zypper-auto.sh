@@ -2106,6 +2106,9 @@ LOG_FILE_SET=false
 MENU_REQUESTED=false
 NO_MENU=false
 
+# Smart Auto-Fix (non-interactive)
+SMART_AUTO_FIX_REQUESTED=false
+
 # Completion output
 PRINT_COMPLETION=false
 COMPLETION_SHELL="zsh"
@@ -2143,6 +2146,7 @@ Options:
   --dry-run              Scan only (default)
   --force                Apply changes (moves ghost/stale entries to backup dir)
   --delete               Permanently delete ghost entries (implies --force)
+  --smart-auto-fix        Smart Auto-Fix (non-interactive): repeatedly scans and applies the next recommended cleanup step until clean
   --backup-dir DIR       Backup directory to move pruned entries into (default: auto)
   --backup-root DIR      Root directory used for automatic backups (default: /var/backups/scrub-ghost)
   --keep-backups N        Keep last N backups under backup root (default: 5; 0 disables rotation)
@@ -2229,6 +2233,7 @@ _arguments -s \
   '--verbose[verbose output]' \
   '--debug[debug logging]' \
   '--log-file=[log file path]:file:_files' \
+  '--smart-auto-fix[smart auto-fix (non-interactive)]' \
   '--menu[start interactive menu]' \
   '--rescue[run rescue/chroot wizard (live ISO)]' \
   '--list-backups[list backups]' \
@@ -2259,7 +2264,7 @@ EOF
 _scrub_ghost_complete() {
   local cur
   cur="${COMP_WORDS[COMP_CWORD]}"
-  local opts="--dry-run --force --delete --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help"
+  local opts="--dry-run --force --delete --smart-auto-fix --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help"
   COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
 }
 
@@ -3756,6 +3761,10 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=false
       DELETE_MODE="delete"
       ;;
+    --smart-auto-fix)
+      SMART_AUTO_FIX_REQUESTED=true
+      DRY_RUN=false
+      ;;
     --backup-dir)
       require_arg "$1" "${2-}"
       shift
@@ -4847,6 +4856,114 @@ json_summary_int() {
 
 # --- SMART IMPROVEMENTS END ---
 
+smart_auto_fix_noninteractive() {
+  # Intended for WebUI/automation: repeatedly scans and applies the next recommended cleanup step.
+  # Adapts automatically after each run based on what remains.
+  #
+  # Safety principles:
+  # - Always uses backup mode (never --delete).
+  # - Only performs actions explicitly enabled by the current prune flags (e.g. --prune-stale-snapshots).
+  # - Ghost cleanup always happens as part of --force.
+  set +e
+
+  local max_iters=15
+  local iter=1
+
+  while (( iter <= max_iters )); do
+    log ""
+    log "${C_BOLD}Smart Auto-Fix (non-interactive)${C_RESET} iteration ${iter}/${max_iters}"
+
+    # Analyze using a quiet JSON dry-run.
+    build_common_flags_minimal
+    local json_output
+    json_output="$(SCRUB_GHOST_NO_MENU=1 bash "$SCRIPT_SELF" --no-menu \
+      --dry-run --json --no-color \
+      --prune-duplicates --prune-stale-snapshots --prune-uninstalled \
+      "${COMMON_FLAGS[@]}" --log-file /dev/null 2>/dev/null || true)"
+
+    local n_ghost n_zombie n_stale n_dupe n_uninstall
+    n_ghost="$(json_summary_int "$json_output" ghost)"
+    n_zombie="$(json_summary_int "$json_output" zombie_initrd)"
+    n_stale="$(json_summary_int "$json_output" stale_snapshot)"
+    n_dupe="$(json_summary_int "$json_output" duplicate_found)"
+    n_uninstall="$(json_summary_int "$json_output" uninstalled_kernel)"
+
+    # Which scopes are enabled by the caller? (AUTO chooses actions from these scopes.)
+    local can_stale=false
+    local can_dupe=false
+    local can_uninstall=false
+
+    [[ "$PRUNE_STALE_SNAPSHOTS" == true ]] && can_stale=true
+    [[ "$PRUNE_DUPLICATES" == true ]] && can_dupe=true
+    if [[ "$PRUNE_UNINSTALLED_KERNELS" == true && "$CONFIRM_PRUNE_UNINSTALLED" == true ]]; then
+      can_uninstall=true
+    fi
+
+    # Redundancy guard: if critical, avoid stale snapshot pruning automatically.
+    local redundancy_rc=0
+    check_kernel_redundancy >/dev/null 2>&1
+    redundancy_rc=$?
+
+    local can_stale_effective="$can_stale"
+    if [[ "$redundancy_rc" -eq 2 && "$can_stale" == true ]]; then
+      can_stale_effective=false
+    fi
+
+    # If nothing is left in the scopes we can safely handle, stop.
+    local work_left=0
+    (( n_ghost > 0 )) && work_left=$((work_left + 1))
+    [[ "$can_dupe" == true && "$n_dupe" -gt 0 ]] && work_left=$((work_left + 1))
+    [[ "$can_stale_effective" == true && "$n_stale" -gt 0 ]] && work_left=$((work_left + 1))
+    [[ "$can_uninstall" == true && "$n_uninstall" -gt 0 ]] && work_left=$((work_left + 1))
+
+    log "Remaining (detected): ghosts=$n_ghost dupes=$n_dupe stale=$n_stale uninstalled=$n_uninstall zombies=$n_zombie"
+    log "Enabled scopes: duplicates=$can_dupe stale=$can_stale uninstalled=$can_uninstall"
+
+    if [[ "$redundancy_rc" -eq 2 && "$can_stale" == true && "$n_stale" -gt 0 ]]; then
+      warn "Kernel redundancy is CRITICAL; stale snapshot pruning is disabled in auto mode until redundancy improves."
+    fi
+
+    if [[ "$work_left" -eq 0 ]]; then
+      log "${C_GREEN}Smart Auto-Fix: nothing left to do in the enabled scopes.${C_RESET}"
+      return 0
+    fi
+
+    local -a args
+    args=(--force)
+
+    # Choose the next action based on what remains (adapts each loop).
+    if [[ "$n_uninstall" -gt 0 && "$can_uninstall" == true ]]; then
+      [[ "$n_dupe" -gt 0 && "$can_dupe" == true ]] && args+=(--prune-duplicates)
+      [[ "$n_stale" -gt 0 && "$can_stale_effective" == true ]] && args+=(--prune-stale-snapshots)
+      args+=(--prune-uninstalled --confirm-uninstalled)
+      log "Next action: ${C_BOLD}K${C_RESET} (prune uninstalled kernels)"
+
+    elif [[ "$n_stale" -gt 0 && "$can_stale_effective" == true ]]; then
+      [[ "$n_dupe" -gt 0 && "$can_dupe" == true ]] && args+=(--prune-duplicates)
+      args+=(--prune-stale-snapshots)
+      log "Next action: ${C_BOLD}ALL${C_RESET} (safe fixes + stale snapshots)"
+
+    elif [[ "$n_dupe" -gt 0 && "$can_dupe" == true ]]; then
+      args+=(--prune-duplicates)
+      log "Next action: ${C_BOLD}FIX${C_RESET} (safe fixes only: ghosts + duplicates)"
+
+    else
+      # Ghost-only cleanup still runs with --force.
+      log "Next action: ${C_BOLD}FIX${C_RESET} (ghost cleanup)"
+    fi
+
+    log "Running: scrub-ghost ${args[*]}"
+    run_sub_minimal "${args[@]}"
+
+    # Avoid tight loops.
+    sleep 1
+    iter=$((iter + 1))
+  done
+
+  warn "Smart Auto-Fix reached max iterations ($max_iters). Re-run if needed."
+  return 0
+}
+
 menu_header() {
   log ""
   log "${C_BOLD}scrub-ghost interactive menu${C_RESET}"
@@ -5041,6 +5158,42 @@ menu_auto_fix() {
     fi
 
     log ""
+
+    local recommended
+    recommended=""
+
+    # Heuristic: guide the user by recommending the next relevant action.
+    # This adapts on each loop (after each run, we re-scan and recompute).
+    if [[ "$total_safe" -gt 0 ]]; then
+      if [[ "$n_stale" -gt 0 ]]; then
+        recommended="ALL"
+      else
+        recommended="FIX"
+      fi
+    elif [[ "$n_stale" -gt 0 ]]; then
+      recommended="ALL"
+    elif [[ "$n_uninstall" -gt 0 ]]; then
+      recommended="K"
+    elif [[ "$n_zombie" -gt 0 ]]; then
+      if [[ -n "$repair_suggestions" ]]; then
+        recommended="REPAIR"
+      else
+        recommended="Z"
+      fi
+    elif [[ "$orphan_count" -gt 0 ]]; then
+      recommended="ORPHANS"
+    elif [[ "$excess_count" -gt 0 ]]; then
+      recommended="VACUUM"
+    elif [[ "$corrupt_pkg_count" -gt 0 ]]; then
+      recommended="HEAL"
+    elif [[ "$def_health_rc" -eq 2 && -n "$LATEST_INSTALLED_VER" ]]; then
+      recommended="SET-DEF"
+    elif [[ "$grub_rc" -eq 1 ]]; then
+      recommended="UPDATE"
+    else
+      recommended="S"
+    fi
+
     log "Options:"
     if [[ "$def_health_rc" -eq 2 && -n "$LATEST_INSTALLED_VER" ]]; then
       log "  ${C_BOLD}SET-DEF${C_RESET}) Correct default entry (set to latest: $LATEST_INSTALLED_VER)"
@@ -5069,8 +5222,20 @@ menu_auto_fix() {
     log "  ${C_BOLD}S${C_RESET})    View detailed dry-run output"
     log "  ${C_BOLD}B${C_RESET})    Back"
 
+    if [[ -n "$recommended" ]]; then
+      log ""
+      log "Recommended next action: ${C_BOLD}${recommended}${C_RESET} (press Enter)"
+    fi
+
     local choice
     read -r -p "> " choice </dev/tty || return 0
+
+    choice="${choice//$'\r'/}"
+    choice="$(printf '%s' "$choice" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [[ -z "$choice" || "$choice" == "AUTO" || "$choice" == "auto" ]]; then
+      choice="$recommended"
+    fi
+    [[ -n "$choice" ]] || choice="B"
 
     case "$choice" in
       SET-DEF|set-def|setdef|SETDEF)
@@ -6477,6 +6642,11 @@ if [[ "$ACTION" == "restore" ]]; then
 
   restore_entries_from_backup "$RESTORE_FROM"
   post_apply_updates
+  exit 0
+fi
+
+if [[ "$SMART_AUTO_FIX_REQUESTED" == true ]]; then
+  smart_auto_fix_noninteractive
   exit 0
 fi
 
@@ -11211,7 +11381,7 @@ generate_dashboard() {
             <span class="stat-label">Action</span>
             <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
               <select id="scrub-action" style="padding:8px 10px; border-radius: 12px;">
-                <option value="auto" selected>AUTO (recommended)</option>
+                <option value="auto" selected>AUTO = Smart Auto-Fix (recommended)</option>
                 <option value="scan">scan (dry-run)</option>
                 <option value="apply">apply (custom)</option>
                 <option value="list-backups">list backups</option>
@@ -11242,7 +11412,7 @@ generate_dashboard() {
             </div>
 
             <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
-              Recommended: <strong>AUTO</strong> (safe backup mode + common prune options). Use <code>scan</code> first if unsure.
+              Recommended: <strong>AUTO</strong> = Smart Auto-Fix (adaptive loop). Use <code>scan</code> first if you want a preview.
               Apply/restore require a typed confirmation phrase.
             </div>
 
@@ -18101,7 +18271,10 @@ generate_dashboard() {
 
         if (action === 'scan') {
             pushFlag('--dry-run');
-        } else if (action === 'apply' || action === 'auto') {
+        } else if (action === 'auto') {
+            // AUTO == Smart Auto-Fix (recommended) / adaptive loop.
+            pushFlag('--smart-auto-fix');
+        } else if (action === 'apply') {
             if (applyMode === 'delete') pushFlag('--delete');
             else pushFlag('--force');
         } else if (action === 'list-backups') {
@@ -18303,7 +18476,7 @@ generate_dashboard() {
             '</div>',
 
             '<div class="overlay-kv">',
-            '  <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Recommended: <strong>AUTO</strong> (backup mode + common prune flags)</div>',
+            '  <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Recommended: <strong>AUTO</strong> = Smart Auto-Fix (adaptive loop; re-scans after each step)</div>',
             '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Danger: <strong>delete mode</strong>, <strong>restore</strong>, <strong>prune uninstalled kernels</strong></div>',
             '</div>',
 
@@ -18315,7 +18488,7 @@ generate_dashboard() {
             '<div style="margin-top: 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">',
             '  <label style="font-size:0.9rem; color: var(--muted); font-weight:900;">Action</label>',
             '  <select id="sg-action" style="padding:8px 10px; border-radius: 12px;">',
-            '    <option value="auto" selected>AUTO (recommended)</option>',
+            '    <option value="auto" selected>AUTO = Smart Auto-Fix (recommended)</option>',
             '    <option value="scan">scan (dry-run)</option>',
             '    <option value="apply">apply (custom)</option>',
             '    <option value="list-backups">list backups</option>',
@@ -18416,7 +18589,7 @@ generate_dashboard() {
         ].join('\n');
 
         _ruSetHeader('Wizard', 'Step 1/2', title);
-        _suSetMinBtnVisible(false);
+        _suSetMinBtnVisible(true);
 
         _suSetButtons({
             show_cancel: true,
@@ -18468,8 +18641,30 @@ generate_dashboard() {
             try { copyCmd(cmd, cb); } catch (e3) {}
         });
 
+        function _sgSyncActionUi() {
+            var act0 = 'auto';
+            try { act0 = String((document.getElementById('sg-action') || {}).value || 'auto'); } catch (e0) { act0 = 'auto'; }
+
+            var modeEl = document.getElementById('sg-apply-mode');
+            if (!modeEl) return;
+
+            if (act0 === 'auto') {
+                // AUTO == Smart Auto-Fix (backup mode only)
+                try { modeEl.value = 'backup'; } catch (e1) {}
+                try { modeEl.disabled = true; } catch (e2) {}
+            } else if (act0 === 'scan') {
+                try { modeEl.disabled = true; } catch (e3) {}
+            } else {
+                try { modeEl.disabled = false; } catch (e4) {}
+            }
+        }
+
+        var actEl = document.getElementById('sg-action');
+        if (actEl) actEl.addEventListener('change', _sgSyncActionUi);
+
         // Initial defaults
         try { _sgPresetAutoIntoForm(); } catch (e3) {}
+        try { _sgSyncActionUi(); } catch (e4) {}
     }
 
     function _sgRenderCopyOnly(action, params) {
@@ -18487,7 +18682,7 @@ generate_dashboard() {
         ].join('\n');
 
         _ruSetHeader('Copy only', 'Info', 'Ghost-Scrub Wizard');
-        _suSetMinBtnVisible(false);
+        _suSetMinBtnVisible(true);
         _suSetButtons({ show_cancel: false, show_back: true, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
 
         if (e.back) e.back.onclick = function() { _sgRenderConfig(); };
@@ -18507,7 +18702,7 @@ generate_dashboard() {
         var cmd = _sgBuildCopyCmd(action, params);
 
         _ruSetHeader('Confirm', 'Step 2/2', 'Ghost-Scrub Wizard');
-        _suSetMinBtnVisible(false);
+        _suSetMinBtnVisible(true);
 
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
@@ -18974,8 +19169,9 @@ generate_dashboard() {
 
             var body = ''
                 + 'scrub-ghost will modify boot entries when you run AUTO/apply.\n\n'
-                + 'Before you click Run, review the toggles below (they map to TUI flags).\n'
-                + 'Recommended: AUTO (backup mode) + prune stale + prune duplicates.\n\n'
+                + 'AUTO = Smart Auto-Fix (adaptive loop): it re-scans after each step and keeps going until clean.\n'
+                + 'Before you click Run, review the toggles below (they map to CLI flags).\n'
+                + 'Recommended: AUTO + prune stale + prune duplicates.\n\n'
                 + 'Tip: run scan (dry-run) first if you want to preview.';
 
             // Non-blocking: add to notification center (glowing bell), once.
@@ -18998,6 +19194,20 @@ generate_dashboard() {
             } catch (e1) {}
         }
 
+        function _scrubSyncActionUi(action) {
+            var modeEl = document.getElementById('scrub-apply-mode');
+            if (!modeEl) return;
+            if (action === 'auto') {
+                // AUTO == Smart Auto-Fix (backup mode only)
+                try { modeEl.value = 'backup'; } catch (e1) {}
+                try { modeEl.disabled = true; } catch (e2) {}
+            } else if (action === 'scan') {
+                try { modeEl.disabled = true; } catch (e3) {}
+            } else {
+                try { modeEl.disabled = false; } catch (e4) {}
+            }
+        }
+
         // When AUTO is selected, auto-apply the recommended preset.
         sel.addEventListener('change', function() {
             var action = 'auto';
@@ -19005,23 +19215,29 @@ generate_dashboard() {
             if (action === 'auto') {
                 scrubPresetAuto();
             }
+            _scrubSyncActionUi(action);
             _maybeGuidance(action);
         });
 
         // Apply recommended preset on initial load (since AUTO is default).
         try { scrubPresetAuto(); } catch (e0) {}
+        try { _scrubSyncActionUi('auto'); } catch (e0b) {}
         try { _maybeGuidance('auto'); } catch (e1) {}
 
         btn.addEventListener('click', function() {
             var action = 'auto';
             try { action = String((document.getElementById('scrub-action') || {}).value || 'auto'); } catch (e) { action = 'auto'; }
 
-            // AUTO is just apply with recommended defaults, but user can toggle anything.
-            var effectiveAction = (action === 'auto') ? 'apply' : action;
+            var effectiveAction = action;
 
             var applyMode = 'backup';
             try { applyMode = String((document.getElementById('scrub-apply-mode') || {}).value || 'backup'); } catch (e) { applyMode = 'backup'; }
             if (applyMode !== 'backup' && applyMode !== 'delete') applyMode = 'backup';
+
+            // AUTO == Smart Auto-Fix: always backup mode.
+            if (effectiveAction === 'auto') {
+                applyMode = 'backup';
+            }
 
             var keepBackups = _pint('scrub-keep-backups', 5, 1, 50);
 
@@ -19053,8 +19269,9 @@ generate_dashboard() {
             };
 
             // Extra guidance window right before running.
-            if (effectiveAction === 'apply') {
-                var summary = 'About to run scrub-ghost apply:\n'
+            if (effectiveAction === 'apply' || effectiveAction === 'auto') {
+                var title0 = (effectiveAction === 'auto') ? 'AUTO (Smart Auto-Fix)' : 'apply';
+                var summary = 'About to run scrub-ghost ' + title0 + ':\n'
                     + '- apply mode: ' + applyMode + '\n'
                     + '- prune stale snapshots: ' + (params.prune_stale ? 'ON' : 'OFF') + '\n'
                     + '- prune duplicates: ' + (params.prune_duplicates ? 'ON' : 'OFF') + '\n'
@@ -19069,6 +19286,7 @@ generate_dashboard() {
             // Confirm rules.
             var confirmAction = null;
             if (effectiveAction === 'apply') confirmAction = 'apply';
+            if (effectiveAction === 'auto') confirmAction = 'auto';
             if (effectiveAction === 'restore-latest') confirmAction = 'restore-latest';
 
             // Capture BEFORE so we can show "affected by prune" deltas after apply.
@@ -37721,7 +37939,7 @@ ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --
 
     # scrub-ghost flags (for: zypper-auto-helper scrub-ghost ...)
     local ZNH_SCRUB_GHOST_OPTS
-    ZNH_SCRUB_GHOST_OPTS="--dry-run --force --delete --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h"
+    ZNH_SCRUB_GHOST_OPTS="--dry-run --force --delete --smart-auto-fix --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h"
 
     # --- bash completion (system-wide) ---
     local bash_dir bash_file
@@ -37841,7 +38059,7 @@ local -a _znh_snapper_cleanup
 _znh_snapper_cleanup=(all number timeline empty-pre-post)
 
 local -a _znh_scrub_ghost_opts
-_znh_scrub_ghost_opts=(--dry-run --force --delete --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h)
+_znh_scrub_ghost_opts=(--dry-run --force --delete --smart-auto-fix --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h)
 
 _arguments -C \
   '1:command:->cmds' \
@@ -45711,7 +45929,17 @@ class Handler(BaseHTTPRequestHandler):
             a = str(scrub_action or "").strip()
             p = p or {}
 
-            if a in ("auto", "apply"):
+            if a == "auto":
+                prune_uninstalled = bool(p.get("prune_uninstalled", False))
+                no_backup = bool(p.get("no_backup", False))
+
+                if prune_uninstalled:
+                    return "KERNELS", "Type KERNELS to confirm Smart Auto-Fix including pruning uninstalled-kernel boot entries (extra danger)."
+                if no_backup:
+                    return "NOBACKUP", "Type NOBACKUP to confirm Smart Auto-Fix WITHOUT a filesystem backup copy (danger)."
+                return "AUTO", "Type AUTO to confirm Smart Auto-Fix (recommended; adaptive loop; moves broken entries to backup)."
+
+            if a == "apply":
                 apply_mode = str(p.get("apply_mode", "backup") or "backup").strip().lower()
                 prune_uninstalled = bool(p.get("prune_uninstalled", False))
                 no_backup = bool(p.get("no_backup", False))
@@ -45798,7 +46026,42 @@ class Handler(BaseHTTPRequestHandler):
                     cmd.append("--json")
                 timeout_s = 90
 
-            elif a in ("auto", "apply"):
+            elif a == "auto":
+                apply_mode = str(p.get("apply_mode", "backup") or "backup").strip().lower()
+                if apply_mode == "delete":
+                    raise ValueError("auto does not support delete mode; use action=apply")
+
+                if _scrub_pbool(p, "no_backup", False):
+                    cmd.append("--no-backup")
+                if _scrub_pbool(p, "no_snapper_backup", False):
+                    cmd.append("--no-snapper-backup")
+
+                if _scrub_pbool(p, "no_verify_snapshots", False):
+                    cmd.append("--no-verify-snapshots")
+                if _scrub_pbool(p, "no_verify_modules", False):
+                    cmd.append("--no-verify-modules")
+
+                # AUTO == scrub-ghost Smart Auto-Fix (adaptive loop).
+                cmd.append("--smart-auto-fix")
+
+                if _scrub_pbool(p, "prune_uninstalled", False):
+                    if not _scrub_pbool(p, "confirm_uninstalled", False):
+                        raise ValueError("prune_uninstalled requires confirm_uninstalled")
+
+                if _scrub_pbool(p, "update_sdboot", False):
+                    cmd.append("--update-sdboot")
+
+                if _scrub_pbool(p, "rebuild_grub", False):
+                    if grub_cfg:
+                        cmd.extend(["--grub-cfg", grub_cfg])
+                    cmd.append("--rebuild-grub")
+
+                keep_backups = _scrub_pint(p, "keep_backups", default=5, minv=0, maxv=50)
+                cmd.extend(["--keep-backups", str(keep_backups)])
+
+                timeout_s = 600
+
+            elif a == "apply":
                 apply_mode = str(p.get("apply_mode", "backup") or "backup").strip().lower()
                 if apply_mode not in ("backup", "delete"):
                     apply_mode = "backup"
@@ -45912,7 +46175,7 @@ class Handler(BaseHTTPRequestHandler):
                 params = {}
 
             allowed = {
-                "auto": "AUTO (recommended) scrub-ghost apply.",
+                "auto": "AUTO = Smart Auto-Fix (recommended) scrub-ghost adaptive loop.",
                 "apply": "Apply scrub-ghost with custom toggles.",
                 "restore-latest": "Restore latest scrub-ghost backup (danger).",
                 "restore-best": "Restore newest VALID scrub-ghost backup (danger).",
