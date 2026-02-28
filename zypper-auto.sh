@@ -2109,6 +2109,7 @@ NO_MENU=false
 # Smart Auto-Fix (non-interactive)
 SMART_AUTO_FIX_REQUESTED=false
 SMART_AUTO_FIX_MAX_STEPS=""
+SMART_ANALYZE_REQUESTED=false
 
 # Completion output
 PRINT_COMPLETION=false
@@ -2149,6 +2150,7 @@ Options:
   --delete               Permanently delete ghost entries (implies --force)
   --smart-auto-fix        Smart Auto-Fix (non-interactive): repeatedly scans and applies the next recommended cleanup step until clean
   --smart-auto-fix-max-steps N  Limit Smart Auto-Fix to N steps (useful for step-by-step WebUI runs; default: 15)
+  --smart-analyze          Smart Auto-Fix analysis (non-interactive): emit a machine-readable JSON recommendation report and exit (WebUI helper)
   --backup-dir DIR       Backup directory to move pruned entries into (default: auto)
   --backup-root DIR      Root directory used for automatic backups (default: /var/backups/scrub-ghost)
   --keep-backups N        Keep last N backups under backup root (default: 5; 0 disables rotation)
@@ -2237,6 +2239,7 @@ _arguments -s \
   '--log-file=[log file path]:file:_files' \
   '--smart-auto-fix[smart auto-fix (non-interactive)]' \
   '--smart-auto-fix-max-steps=[limit smart auto-fix to N steps]' \
+  '--smart-analyze[emit smart analysis as JSON (non-interactive)]' \
   '--menu[start interactive menu]' \
   '--rescue[run rescue/chroot wizard (live ISO)]' \
   '--list-backups[list backups]' \
@@ -2267,7 +2270,7 @@ EOF
 _scrub_ghost_complete() {
   local cur
   cur="${COMP_WORDS[COMP_CWORD]}"
-  local opts="--dry-run --force --delete --smart-auto-fix --smart-auto-fix-max-steps --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help"
+  local opts="--dry-run --force --delete --smart-auto-fix --smart-auto-fix-max-steps --smart-analyze --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help"
   COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
 }
 
@@ -3773,6 +3776,10 @@ while [[ $# -gt 0 ]]; do
       shift
       SMART_AUTO_FIX_MAX_STEPS="$1"
       ;;
+    --smart-analyze)
+      SMART_ANALYZE_REQUESTED=true
+      DRY_RUN=true
+      ;;
     --backup-dir)
       require_arg "$1" "${2-}"
       shift
@@ -4863,6 +4870,190 @@ json_summary_int() {
 }
 
 # --- SMART IMPROVEMENTS END ---
+
+smart_analyze_json() {
+  # Emit a Smart Auto-Fix analysis report as JSON to stdout.
+  # Intended for WebUI (no interactive prompts).
+  #
+  # This is separate from --json (which reports per-entry scan results).
+  set +e
+
+  # Ensure no color codes are emitted (JSON must be clean).
+  COLOR=false
+  C_RESET=""; C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_DIM=""
+
+  local storage_status storage_rc
+  storage_status="$(check_boot_storage_health 2>/dev/null || printf 'Unknown')"
+  storage_rc=$?
+
+  local redundancy_status redundancy_rc
+  redundancy_status="$(check_kernel_redundancy 2>/dev/null || printf 'Unknown')"
+  redundancy_rc=$?
+
+  local def_health def_health_rc
+  def_health="$(check_default_entry_health 2>/dev/null || printf 'N/A')"
+  def_health_rc=$?
+
+  local grub_status grub_rc
+  grub_status="$(check_grub_freshness 2>/dev/null || printf 'Unknown')"
+  grub_rc=$?
+
+  # Analyze using a quiet JSON dry-run.
+  build_common_flags_minimal
+  local json_output
+  json_output="$(SCRUB_GHOST_NO_MENU=1 bash "$SCRIPT_SELF" --no-menu \
+    --dry-run --json --no-color \
+    --prune-duplicates --prune-stale-snapshots --prune-uninstalled \
+    "${COMMON_FLAGS[@]}" --log-file /dev/null 2>/dev/null || true)"
+
+  local n_ghost n_zombie n_stale n_dupe n_uninstall
+  n_ghost="$(json_summary_int "$json_output" ghost)"
+  n_zombie="$(json_summary_int "$json_output" zombie_initrd)"
+  n_stale="$(json_summary_int "$json_output" stale_snapshot)"
+  n_dupe="$(json_summary_int "$json_output" duplicate_found)"
+  n_uninstall="$(json_summary_int "$json_output" uninstalled_kernel)"
+
+  local orphans orphan_count
+  orphans="$(scan_orphaned_files 2>/dev/null || printf 'None\n')"
+  orphan_count=0
+  if [[ "$orphans" != "None" ]]; then
+    orphan_count="$(printf '%s' "$orphans" | awk '{print $1}' | tr -dc '0-9' || echo 0)"
+    [[ "$orphan_count" =~ ^[0-9]+$ ]] || orphan_count=0
+  fi
+
+  local repair_suggestions repair_count
+  repair_suggestions="$(scan_repairable_entries 2>/dev/null || true)"
+  repair_count=0
+  if [[ -n "$repair_suggestions" ]]; then
+    repair_count="$(printf '%s\n' "$repair_suggestions" | awk 'NF{c++} END{print c+0}')"
+    [[ "$repair_count" =~ ^[0-9]+$ ]] || repair_count=0
+  fi
+
+  local excess_list excess_count
+  excess_list="$(scan_excess_kernels 2>/dev/null || true)"
+  excess_count=0
+  if [[ -n "$excess_list" ]]; then
+    excess_count="$(printf '%s\n' "$excess_list" | awk 'NF{c++} END{print c+0}')"
+    [[ "$excess_count" =~ ^[0-9]+$ ]] || excess_count=0
+  fi
+
+  local corrupt_pkg_list corrupt_pkg_count
+  corrupt_pkg_list="$(scan_corrupt_kernel_packages 2>/dev/null || true)"
+  corrupt_pkg_count=0
+  if [[ -n "$corrupt_pkg_list" ]]; then
+    corrupt_pkg_count="$(printf '%s\n' "$corrupt_pkg_list" | awk 'NF{c++} END{print c+0}')"
+    [[ "$corrupt_pkg_count" =~ ^[0-9]+$ ]] || corrupt_pkg_count=0
+  fi
+
+  local recommended
+  recommended="S"
+  local total_safe total_issues
+  total_safe=$((n_ghost + n_dupe))
+  total_issues=$((n_ghost + n_dupe + n_zombie + n_stale + n_uninstall))
+
+  if [[ "$total_safe" -gt 0 ]]; then
+    if [[ "$n_stale" -gt 0 && "$redundancy_rc" -ne 2 ]]; then
+      recommended="ALL"
+    else
+      recommended="FIX"
+    fi
+  elif [[ "$n_stale" -gt 0 && "$redundancy_rc" -ne 2 ]]; then
+    recommended="ALL"
+  elif [[ "$n_uninstall" -gt 0 ]]; then
+    recommended="K"
+  else
+    recommended="S"
+  fi
+
+  local clean
+  clean=false
+  if [[ "$total_issues" -eq 0 && "$excess_count" -eq 0 && "$corrupt_pkg_count" -eq 0 && "$repair_count" -eq 0 && "$orphan_count" -eq 0 && "$def_health_rc" -ne 2 && "$grub_rc" -ne 1 ]]; then
+    clean=true
+  fi
+
+  local report
+  report="Analysis Results & Recommendations:\n"
+  report+="---------------------------------------------------\n"
+  report+="0. Boot Storage:        ${storage_status}\n"
+  report+="0. Boot Redundancy:     ${redundancy_status}\n"
+  report+="0. Default Entry:       ${def_health}\n"
+  report+="0. GRUB Config:         ${grub_status}\n"
+  report+="1. Ghost Entries:       ${n_ghost}\n"
+  report+="1b. Zombie Initrd:      ${n_zombie}\n"
+  report+="2. Duplicate Entries:   ${n_dupe}\n"
+  report+="3. Stale Snapshots:     ${n_stale}\n"
+  report+="4. Uninstalled Kernels: ${n_uninstall}\n"
+  report+="5. Orphaned Images:     ${orphans}\n"
+  report+="6. Zombie Repair cmds:  ${repair_count}\n"
+  report+="7. Excess Kernels:      ${excess_count}\n"
+  report+="8. Corrupt Kernel RPMs: ${corrupt_pkg_count}\n"
+  report+="---------------------------------------------------\n"
+
+  # Emit JSON
+  printf '{'
+  printf '"ok":true'
+  printf ',"clean":%s' "$( [[ "$clean" == true ]] && printf true || printf false )"
+  printf ',"recommended":"%s"' "$(json_escape "$recommended")"
+  printf ',"report_text":"%s"' "$(json_escape "$report")"
+
+  printf ',"counts":{' 
+  printf '"ghost":%d' "$n_ghost"
+  printf ',"zombie_initrd":%d' "$n_zombie"
+  printf ',"duplicate":%d' "$n_dupe"
+  printf ',"stale_snapshot":%d' "$n_stale"
+  printf ',"uninstalled_kernel":%d' "$n_uninstall"
+  printf ',"orphans":%d' "$orphan_count"
+  printf ',"repair_cmds":%d' "$repair_count"
+  printf ',"excess_kernels":%d' "$excess_count"
+  printf ',"corrupt_kernel_pkgs":%d' "$corrupt_pkg_count"
+  printf '}'
+
+  printf ',"status":{' 
+  printf '"boot_storage":{"text":"%s","rc":%d}' "$(json_escape "$storage_status")" "$storage_rc"
+  printf ',"boot_redundancy":{"text":"%s","rc":%d}' "$(json_escape "$redundancy_status")" "$redundancy_rc"
+  printf ',"default_entry":{"text":"%s","rc":%d}' "$(json_escape "$def_health")" "$def_health_rc"
+  printf ',"grub_cfg":{"text":"%s","rc":%d}' "$(json_escape "$grub_status")" "$grub_rc"
+  printf '}'
+
+  printf ',"actions":['
+  local first=true
+  local fix_enabled=false
+  local all_enabled=false
+  local k_enabled=false
+
+  if [[ "$total_safe" -gt 0 ]]; then fix_enabled=true; fi
+  if [[ "$total_safe" -gt 0 || "$n_stale" -gt 0 ]]; then all_enabled=true; fi
+  if [[ "$redundancy_rc" -eq 2 && "$n_stale" -gt 0 ]]; then
+    # Mirror the CLI guard: avoid stale snapshot pruning when redundancy is critical.
+    all_enabled=false
+  fi
+  if [[ "$n_uninstall" -gt 0 ]]; then k_enabled=true; fi
+
+  # FIX
+  [[ "$first" == true ]] || printf ','
+  first=false
+  printf '{"id":"FIX","label":"SAFE FIX (ghosts + duplicates)","enabled":%s,"danger":false}' "$( [[ "$fix_enabled" == true ]] && printf true || printf false )"
+
+  # ALL
+  printf ',{'
+  printf '"id":"ALL","label":"ALL fixes (+ stale snapshots)","enabled":%s,"danger":false' "$( [[ "$all_enabled" == true ]] && printf true || printf false )"
+  printf '}'
+
+  # K
+  printf ',{'
+  printf '"id":"K","label":"K: prune uninstalled kernels (danger)","enabled":%s,"danger":true' "$( [[ "$k_enabled" == true ]] && printf true || printf false )"
+  printf '}'
+
+  # S
+  printf ',{"id":"S","label":"View dry-run details","enabled":true,"danger":false}'
+
+  printf ']'
+
+  printf '}'
+  printf '\n'
+
+  return 0
+}
 
 smart_auto_fix_noninteractive() {
   # Intended for WebUI/automation: repeatedly scans and applies the next recommended cleanup step.
@@ -6661,6 +6852,11 @@ if [[ "$ACTION" == "restore" ]]; then
 
   restore_entries_from_backup "$RESTORE_FROM"
   post_apply_updates
+  exit 0
+fi
+
+if [[ "$SMART_ANALYZE_REQUESTED" == true ]]; then
+  smart_analyze_json
   exit 0
 fi
 
@@ -18295,17 +18491,25 @@ generate_dashboard() {
         if (action === 'scan') {
             pushFlag('--dry-run');
         } else if (action === 'auto') {
-            // AUTO == Smart Auto-Fix (recommended) / adaptive loop.
-            // In the WebUI, this is typically run step-by-step (default 1 step per run).
-            pushFlag('--smart-auto-fix');
-            var nSteps = 1;
-            try {
-                nSteps = parseInt(String(params.smart_auto_fix_max_steps || '1'), 10);
-                if (isNaN(nSteps)) nSteps = 1;
-            } catch (eN) { nSteps = 1; }
-            if (nSteps < 1) nSteps = 1;
-            if (nSteps > 15) nSteps = 15;
-            pushKV('--smart-auto-fix-max-steps', String(nSteps));
+            var sc = '';
+            try { sc = String(params.smart_choice || '').trim().toUpperCase(); } catch (eSC) { sc = ''; }
+
+            if (sc) {
+                // WebUI interactive AUTO: run a single chosen Smart Auto-Fix step (no loop).
+                pushFlag('--force');
+            } else {
+                // AUTO == Smart Auto-Fix (recommended) / adaptive loop.
+                // In the WebUI, this is typically run step-by-step (default 1 step per run).
+                pushFlag('--smart-auto-fix');
+                var nSteps = 1;
+                try {
+                    nSteps = parseInt(String(params.smart_auto_fix_max_steps || '1'), 10);
+                    if (isNaN(nSteps)) nSteps = 1;
+                } catch (eN) { nSteps = 1; }
+                if (nSteps < 1) nSteps = 1;
+                if (nSteps > 15) nSteps = 15;
+                pushKV('--smart-auto-fix-max-steps', String(nSteps));
+            }
         } else if (action === 'apply') {
             if (applyMode === 'delete') pushFlag('--delete');
             else pushFlag('--force');
@@ -18698,6 +18902,11 @@ generate_dashboard() {
                 return;
             }
 
+            if (act === 'auto') {
+                _sgRenderSmartAnalyze(act, p);
+                return;
+            }
+
             _sgRenderConfirm(act, p);
         };
 
@@ -18797,6 +19006,184 @@ generate_dashboard() {
         });
     }
 
+    function _sgRenderSmartAnalyze(action, params) {
+        // Smart Auto-Fix interactive view: show analysis + allow choosing the next step.
+        var e = _suEls();
+        if (!e.body) return;
+
+        action = String(action || 'auto');
+        params = params || {};
+
+        // Clear any previous choice before re-analyzing.
+        try { delete params.smart_choice; } catch (eDel) {}
+
+        _sg.action = 'auto';
+        _sg.params = params;
+
+        _ruSetHeader('Analyze', 'Step 2/3', 'Smart Auto-Fix');
+        _suSetMinBtnVisible(true);
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">Smart Auto-Fix analysis</div>',
+            '  <div style="margin-top:6px; font-weight:800;">This is the same analysis the CLI menu uses. Pick what to run next.</div>',
+            '</div>',
+            '<div class="overlay-progress" style="margin-top: 12px;">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Analyzing…</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="sg-smart-report" style="max-height: 320px;">(loading…)</pre>',
+            '<div id="sg-smart-actions" style="margin-top:12px; padding:12px; border-radius: 14px; border: 2px solid rgba(239,68,68,0.65); background: rgba(239,68,68,0.08);">',
+            '  <div style="font-weight:950; margin-bottom:8px;">Choose next step</div>',
+            '  <div id="sg-smart-actions-row" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;"></div>',
+            '  <div id="sg-smart-reco" style="margin-top:10px; color: var(--muted); font-size:0.9rem;"></div>',
+            '</div>',
+            '<div style="margin-top:10px; color: var(--muted); font-size:0.88rem;">After each step completes, click <strong>Continue Auto-Fix</strong> to re-analyze and choose again.</div>'
+        ].join('\n');
+
+        _suSetButtons({ show_cancel: true, show_back: true, show_next: false, show_install: false, show_close: false, footer_center: true });
+
+        if (e.back) e.back.onclick = function() {
+            if (_sg.running) return;
+            _sgRenderConfig();
+        };
+        if (e.cancel) e.cancel.onclick = function() {
+            if (_sg.running) return;
+            _suShow(false);
+        };
+
+        _suUpdateProgress('Analyzing…', 10);
+
+        function renderButtons(data) {
+            var row = document.getElementById('sg-smart-actions-row');
+            if (!row) return;
+            row.innerHTML = '';
+
+            var acts = [];
+            try { acts = (data && data.actions) ? data.actions : []; } catch (eA) { acts = []; }
+            if (!acts || !acts.length) {
+                row.innerHTML = '<div style="color: var(--muted);">(no actions)</div>';
+                return;
+            }
+
+            function cloneParams() {
+                // Shallow clone is enough (values are primitives).
+                var p2 = {};
+                try {
+                    Object.keys(params || {}).forEach(function(k) { p2[k] = params[k]; });
+                } catch (eC) { p2 = params || {}; }
+                return p2;
+            }
+
+            function runChoice(id) {
+                id = String(id || '').trim().toUpperCase();
+                if (!id) return;
+
+                if (id === 'S') {
+                    // "Show" == run a dry-run scan in the wizard.
+                    _sg.action = 'scan';
+                    _sg.params = cloneParams();
+                    _sgRenderConfirm('scan', _sg.params);
+                    return;
+                }
+
+                var p2 = cloneParams();
+                p2.smart_choice = id;
+
+                // Enforce scopes per menu choice (keeps the WebUI behaviour stable).
+                if (id === 'FIX') {
+                    p2.prune_duplicates = true;
+                    p2.prune_stale = false;
+                    p2.prune_uninstalled = false;
+                    p2.confirm_uninstalled = false;
+                } else if (id === 'ALL') {
+                    p2.prune_duplicates = true;
+                    p2.prune_stale = true;
+                    p2.prune_uninstalled = false;
+                    p2.confirm_uninstalled = false;
+                } else if (id === 'K') {
+                    p2.prune_duplicates = true;
+                    p2.prune_stale = true;
+                    p2.prune_uninstalled = true;
+                    p2.confirm_uninstalled = true;
+                }
+
+                _sg.action = 'auto';
+                _sg.params = p2;
+                _sgRenderConfirm('auto', p2);
+            }
+
+            acts.forEach(function(a) {
+                var id = '';
+                var label = '';
+                var enabled = true;
+                var danger = false;
+                try { id = String(a.id || '').trim(); } catch (e0) { id = ''; }
+                try { label = String(a.label || id); } catch (e1) { label = id; }
+                try { enabled = !!a.enabled; } catch (e2) { enabled = true; }
+                try { danger = !!a.danger; } catch (e3) { danger = false; }
+
+                if (!id) return;
+
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'pill';
+                btn.textContent = label;
+                btn.disabled = !enabled;
+                if (danger) {
+                    btn.style.borderColor = 'rgba(239,68,68,0.55)';
+                    btn.style.background = 'rgba(239,68,68,0.10)';
+                }
+                btn.addEventListener('click', function(ev) {
+                    try { addRipple(btn, ev.clientX, ev.clientY); } catch (eR) {}
+                    if (btn.disabled) return;
+                    runChoice(id);
+                });
+                row.appendChild(btn);
+            });
+        }
+
+        _api('/api/scrub/smart-analyze', { method: 'POST', body: JSON.stringify({ params: params }) }).then(function(r) {
+            _suUpdateProgress('Analysis ready', 100);
+
+            var data = null;
+            try { data = (r && r.data) ? r.data : null; } catch (e0) { data = null; }
+
+            var report = '';
+            try { report = String((data && (data.report_text || data.report)) || ''); } catch (e1) { report = ''; }
+            if (!report) {
+                try { report = String((r && r.output) ? r.output : ''); } catch (e2) { report = ''; }
+            }
+            if (!report) report = '(no report)';
+
+            try {
+                var pre = document.getElementById('sg-smart-report');
+                if (pre) pre.textContent = report;
+            } catch (e3) {}
+
+            try {
+                var reco = document.getElementById('sg-smart-reco');
+                if (reco) {
+                    var rec = '';
+                    try { rec = String((data && data.recommended) ? data.recommended : '').trim(); } catch (eR0) { rec = ''; }
+                    var clean = false;
+                    try { clean = !!(data && data.clean); } catch (eR1) { clean = false; }
+                    reco.textContent = (clean ? 'System looks clean.' : ('Recommended: ' + (rec || 'FIX')));
+                }
+            } catch (e4) {}
+
+            renderButtons(data);
+        }).catch(function(err) {
+            var msg = (err && err.message) ? err.message : 'smart-analyze failed';
+            toast('Smart analyze failed', msg, 'err');
+            _suUpdateProgress('Failed', 100);
+            try {
+                var pre2 = document.getElementById('sg-smart-report');
+                if (pre2) pre2.textContent = 'ERROR: ' + msg;
+            } catch (e5) {}
+        });
+    }
+
     function _sgRenderConfirm(action, params) {
         var e = _suEls();
         if (!e.body) return;
@@ -18804,7 +19191,14 @@ generate_dashboard() {
         var needsConfirm = _sgActionNeedsConfirm(action, params);
         var cmd = _sgBuildCopyCmd(action, params);
 
-        _ruSetHeader('Confirm', 'Step 2/2', 'Ghost-Scrub Wizard');
+        var stepLabel = 'Step 2/2';
+        try {
+            if (String(action || '') === 'auto' && params && params.smart_choice) {
+                stepLabel = 'Step 3/3';
+            }
+        } catch (eS) { stepLabel = 'Step 2/2'; }
+
+        _ruSetHeader('Confirm', stepLabel, 'Ghost-Scrub Wizard');
         _suSetMinBtnVisible(true);
 
         e.body.innerHTML = [
@@ -19020,7 +19414,19 @@ generate_dashboard() {
         try {
             var cb = document.getElementById('sg-done-copy');
             if (cb) cb.addEventListener('click', function() {
-                try { copyTextToClipboard(tail || ''); toast('Copied', 'Output copied to clipboard', 'ok'); } catch (eC) {}
+                var txt = '';
+                try { txt = String(tail || ''); } catch (eT) { txt = ''; }
+                if (!String(txt || '').trim()) {
+                    toast('Nothing to copy', 'No output yet', 'err');
+                    return;
+                }
+                try {
+                    if (typeof copyTextToClipboard === 'function') {
+                        copyTextToClipboard(txt, cb, 'Output copied');
+                        return;
+                    }
+                } catch (e0) {}
+                try { if (typeof copyCmd === 'function') copyCmd(txt, cb); } catch (e1) { toast('Copy failed', 'Clipboard not available', 'err'); }
             });
         } catch (eCB) {}
 
@@ -19033,6 +19439,10 @@ generate_dashboard() {
             e.back.textContent = isAuto ? 'Continue Auto-Fix' : 'Run again';
             e.back.onclick = function() {
                 if (_sg.running) return;
+                if (isAuto) {
+                    try { _sgRenderSmartAnalyze('auto', _sg.params || {}); } catch (eR0) { try { _sgRenderConfig(); } catch (eR1) {} }
+                    return;
+                }
                 try { _sgRenderConfirm(_sg.action || 'auto', _sg.params || {}); } catch (eR) { try { _sgRenderConfig(); } catch (eR2) {} }
             };
         }
@@ -24022,6 +24432,58 @@ generate_dashboard() {
         }
     }
     window.copyCmd = copyCmd;
+
+    // Shared: copy arbitrary text (used by wizard outputs)
+    function copyTextToClipboard(text, btn, label) {
+        var t = '';
+        try { t = String(text || ''); } catch (e0) { t = ''; }
+        if (!String(t || '').trim()) {
+            toast('Nothing to copy', '', 'err');
+            return false;
+        }
+
+        function feedback(ok) {
+            try {
+                if (btn) {
+                    var old = String(btn.textContent || 'Copy');
+                    btn.textContent = ok ? 'Copied!' : 'Copy failed';
+                    btn.classList.add('pulse');
+                    setTimeout(function() {
+                        try { btn.textContent = old; } catch (e) {}
+                        try { btn.classList.remove('pulse'); } catch (e2) {}
+                    }, 1400);
+                }
+            } catch (eB) {}
+            if (ok) toast('Copied', String(label || 'Copied to clipboard'), 'ok');
+            else toast('Copy failed', 'Clipboard access blocked', 'err');
+        }
+
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(t).then(function() {
+                    feedback(true);
+                }, function() {
+                    throw new Error('clipboard blocked');
+                });
+                return true;
+            }
+        } catch (e1) {}
+
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = t;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            feedback(true);
+            return true;
+        } catch (e2) {
+            feedback(false);
+            return false;
+        }
+    }
+    window.copyTextToClipboard = copyTextToClipboard;
 
     // Open URL (used by Quick Actions: Open Live URL)
     function znhOpenUrl(url, btn) {
@@ -46077,7 +46539,8 @@ class Handler(BaseHTTPRequestHandler):
             p = p or {}
 
             if a == "auto":
-                prune_uninstalled = bool(p.get("prune_uninstalled", False))
+                smart_choice = str(p.get("smart_choice", "") or "").strip().upper()
+                prune_uninstalled = bool(p.get("prune_uninstalled", False)) or (smart_choice == "K")
                 no_backup = bool(p.get("no_backup", False))
 
                 if prune_uninstalled:
@@ -46167,7 +46630,12 @@ class Handler(BaseHTTPRequestHandler):
 
             timeout_s = 180
 
-            if a == "scan":
+            if a == "smart-analyze":
+                cmd.append("--smart-analyze")
+                timeout_s = 60
+                title = "scrub-ghost smart-analyze"
+
+            elif a == "scan":
                 cmd.insert(2, "--dry-run")
                 if _scrub_pbool(p, "json_output", False):
                     cmd.append("--json")
@@ -46188,11 +46656,27 @@ class Handler(BaseHTTPRequestHandler):
                 if _scrub_pbool(p, "no_verify_modules", False):
                     cmd.append("--no-verify-modules")
 
-                # AUTO == scrub-ghost Smart Auto-Fix (adaptive loop).
-                # WebUI defaults to step-by-step (1 step per run), but allow overriding steps per run.
-                cmd.append("--smart-auto-fix")
-                n_steps = _scrub_pint(p, "smart_auto_fix_max_steps", default=1, minv=1, maxv=15)
-                cmd.extend(["--smart-auto-fix-max-steps", str(n_steps)])
+                smart_choice = str(p.get("smart_choice", "") or "").strip().upper()
+
+                if smart_choice in ("FIX", "ALL", "K"):
+                    # Interactive WebUI AUTO: run a single chosen Smart Auto-Fix step (no loop).
+                    cmd.append("--force")
+
+                    # Enforce the chosen scopes (duplicate flags are ok).
+                    cmd.append("--prune-duplicates")
+                    if smart_choice in ("ALL", "K"):
+                        cmd.append("--prune-stale-snapshots")
+                    if smart_choice == "K":
+                        cmd.append("--prune-uninstalled")
+                        cmd.append("--confirm-uninstalled")
+
+                    title = f"scrub-ghost auto {smart_choice}"
+                else:
+                    # AUTO == scrub-ghost Smart Auto-Fix (adaptive loop).
+                    # WebUI defaults to step-by-step (1 step per run), but allow overriding steps per run.
+                    cmd.append("--smart-auto-fix")
+                    n_steps = _scrub_pint(p, "smart_auto_fix_max_steps", default=1, minv=1, maxv=15)
+                    cmd.extend(["--smart-auto-fix-max-steps", str(n_steps)])
 
                 if _scrub_pbool(p, "prune_uninstalled", False):
                     if not _scrub_pbool(p, "confirm_uninstalled", False):
@@ -46317,6 +46801,48 @@ class Handler(BaseHTTPRequestHandler):
 
             return cmd, int(timeout_s), title
 
+        if path == "/api/scrub/smart-analyze":
+            body = _read_json(self)
+            params = body.get("params", body)
+            if not isinstance(params, dict):
+                params = {}
+
+            try:
+                cmd, timeout_s, title = _scrub_cmd("smart-analyze", params)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"scrub smart-analyze build failed: {e}"}, origin)
+
+            extra_env = {"ZNH_NON_INTERACTIVE": "1"}
+            rc, out = _run_cmd(cmd, timeout_s=int(timeout_s), log=getattr(self.server, "_znh_log", None), extra_env=extra_env)
+
+            raw = (out or "").strip()
+            # Best-effort JSON parsing (always return HTTP 200 so UI can render errors).
+            data = None
+            parse_err = None
+            try:
+                # Try strict parse first.
+                data = json.loads(raw)
+            except Exception as e:
+                try:
+                    # Attempt to locate the JSON object in mixed output.
+                    i0 = raw.find("{")
+                    i1 = raw.rfind("}")
+                    if i0 >= 0 and i1 > i0:
+                        data = json.loads(raw[i0 : i1 + 1])
+                    else:
+                        raise e
+                except Exception as e2:
+                    parse_err = str(e2)
+
+            return _json_response(self, 200, {
+                "ok": (rc == 0 and data is not None),
+                "rc": int(rc),
+                "title": title,
+                "data": data,
+                "parse_error": parse_err,
+                "output": raw[-8000:] if raw else "",
+            }, origin)
+
         if path == "/api/scrub/confirm":
             body = _read_json(self)
             action = str(body.get("action", "")).strip()
@@ -46408,6 +46934,9 @@ class Handler(BaseHTTPRequestHandler):
                     required_phrase, _hint = _scrub_required_phrase(action, p0)
                     if required_phrase and confirm_phrase != str(required_phrase).strip().upper():
                         return _json_response(self, 400, {"error": f"confirmation phrase mismatch (expected {required_phrase})"}, origin)
+
+                    # Lock parameters to what was confirmed (prevents client-side mutation after confirm).
+                    params = p0
 
                     # One-time token.
                     try:
@@ -46570,6 +47099,9 @@ class Handler(BaseHTTPRequestHandler):
                     required_phrase, _hint = _scrub_required_phrase(action, p0)
                     if required_phrase and confirm_phrase != str(required_phrase).strip().upper():
                         return _json_response(self, 400, {"error": f"confirmation phrase mismatch (expected {required_phrase})"}, origin)
+
+                    # Lock parameters to what was confirmed (prevents client-side mutation after confirm).
+                    params = p0
 
                     # One-time token.
                     try:
