@@ -144,7 +144,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 ### 🗑️ Uninstallation & cleanup
 
-* **Safe Scripted Uninstaller (v58+):** New `--uninstall-zypper-helper` mode (alias: `--uninstall-zypper`) in `zypper-auto.sh` / `zypper-auto-helper` removes all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
+* **Safe Scripted Uninstaller (v58+):** Use the single uninstall flag `--uninstall-zypper` in `zypper-auto.sh` / `zypper-auto-helper` to remove all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
 *  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
 *  * `--dry-run` – show exactly what would be removed without making any changes
 *  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact (including the `status.html` dashboard) while still clearing caches
@@ -338,7 +338,7 @@ zypper-auto-helper --show-logs      # Open diagnostics logs folder in a file man
 zypper-auto-helper --test-notify    # Send a test desktop notification to verify GUI/DBus wiring
 
 # Scripted uninstaller
-zypper-auto-helper --uninstall-zypper-helper  # Remove only this helper's services/scripts/logs (alias: --uninstall-zypper)
+zypper-auto-helper --uninstall-zypper  # Remove only this helper's services/scripts/logs
 ```
 
 <a id="self-update"></a>
@@ -1907,6 +1907,12 @@ systemctl status zypper-autodownload.service
   - 🧰 **NEW:** WebUI **Managers** overlay (minimizable) for **Update manager + Rocket manager**:
     - Replaces “every load” browser popups with a persistent **notification bell** + job history.
     - Stores recent job IDs in the browser so you can reopen logs after installs.
+  - 🗄️ **NEW:** WebUI Managers **Server (SQLite)** tab (Dashboard API job history):
+    - Persistent across reloads/reboots and across browsers (server-side, not just `localStorage`).
+    - Supports search/filtering, basic stats (last 7 days), and a bounded log tail for fast searching.
+    - Retention is controlled by `WEBUI_HISTORY_RETENTION_DAYS` (7/30/90) + a manual cleanup/integrity action in the Server tab.
+    - SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
+    - API: `GET /api/history/health`, `GET /api/history/jobs`, `GET /api/history/job`, `GET /api/history/stats`, `POST /api/history/cleanup`
   - 📚 **DOCS:** README now includes a dedicated **Boot Entry Scrub (scrub-ghost)** user guide section (workflow, guardrails, WebUI wizard behavior, log locations, and confirmation phrases).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
@@ -2038,7 +2044,7 @@ systemctl status zypper-autodownload.service
 
 - **v58** (2025-12-31): **Scripted Uninstaller, External Config & Log Control**
   - 📝 **Short:** Safer uninstall, externalised config (including `DUP_EXTRA_FLAGS`), smarter config health warnings, and improved solver-conflict notifications that keep cached downloads and guide you to resolve conflicts.
-  - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper-helper` (or `zypper-auto-helper --uninstall-zypper-helper`) now removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
+  - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper` (or `zypper-auto-helper --uninstall-zypper`) removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
   - ⚙️ **NEW: Advanced uninstall flags** – `--yes` / `-y` / `--non-interactive` skip the confirmation prompt for automated or non-interactive environments; `--dry-run` shows exactly what **would** be removed without making any changes; `--keep-logs` preserves `/var/log/zypper-auto` install/service logs for debugging while still clearing per-user notifier caches.
   - 🧹 **IMPROVED: Clean systemd state on uninstall** – system and user units are stopped, disabled, removed from disk, and their "failed" states cleared via `systemctl reset-failed`/`systemctl --user reset-failed` so `systemctl status` no longer reports stale failures after uninstall.
   - 🧾 **NEW: External configuration file** – `/etc/zypper-auto.conf` now holds documented settings for post-update helpers (Flatpak/Snap/Soar/Brew), log retention, notifier cache/snooze behaviour, timer intervals, and per-installation zypper behaviour, so users can tweak behaviour without editing the script.
@@ -2110,11 +2116,9 @@ Use the built-in uninstaller to safely remove all helper components:
 
 ```bash
 # Run from the directory containing zypper-auto.sh (as root)
-sudo ./zypper-auto.sh --uninstall-zypper-helper
+sudo ./zypper-auto.sh --uninstall-zypper
 
 # Or using the installed helper command (typically without sudo via shell alias)
-zypper-auto-helper --uninstall-zypper-helper
-# Shorthand alias:
 zypper-auto-helper --uninstall-zypper
 ```
 
@@ -2137,25 +2141,25 @@ You can customise the behaviour with optional flags:
 
 ```bash
 # Skip the confirmation prompt (non-interactive)
-sudo ./zypper-auto.sh --uninstall-zypper-helper --yes
+sudo ./zypper-auto.sh --uninstall-zypper --yes
 # or
-sudo ./zypper-auto.sh --uninstall-zypper-helper --non-interactive
+sudo ./zypper-auto.sh --uninstall-zypper --non-interactive
 
 # Show what WOULD be removed, but make no changes
-sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run
+sudo ./zypper-auto.sh --uninstall-zypper --dry-run
 
 # Keep logs under /var/log/zypper-auto for debugging (including status.html dashboard)
-sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-logs
+sudo ./zypper-auto.sh --uninstall-zypper --yes --keep-logs
 
 # Keep hook scripts under /etc/zypper-auto/hooks
-sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --keep-hooks
+sudo ./zypper-auto.sh --uninstall-zypper --yes --keep-hooks
 
 # Also disable OS maintenance timers enabled via Snapper Option 5
 # NOTE: this only disables timers; it does NOT delete OS unit files.
-sudo ./zypper-auto.sh --uninstall-zypper-helper --yes --disable-maintenance-timers
+sudo ./zypper-auto.sh --uninstall-zypper --yes --disable-maintenance-timers
 
 # Flags can be combined as needed
-sudo ./zypper-auto.sh --uninstall-zypper-helper --dry-run --keep-logs --keep-hooks
+sudo ./zypper-auto.sh --uninstall-zypper --dry-run --keep-logs --keep-hooks
 ```
 
 <a id="uninstall-manual"></a>

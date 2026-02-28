@@ -49,8 +49,15 @@ esac
 # '-reset'.
 if [[ $# -gt 0 ]]; then
     case "${1:-}" in
+        --uninstall-zypper-helper)
+            echo "Removed flag: --uninstall-zypper-helper"
+            echo "Use: zypper-auto-helper --uninstall-zypper"
+            echo ""
+            echo "(Tip: run 'zypper-auto-helper --help' for the full command list.)"
+            exit 2
+            ;;
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
-        --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper-helper|--uninstall-zypper|\
+        --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
@@ -1945,6 +1952,7 @@ __znh_write_dashboard_schema_json() {
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
+    "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
@@ -8777,6 +8785,7 @@ EOF
     validate_allowed_set CLEANUP_REPORT_FORMAT both "text,json,both"
     validate_allowed_set BOOT_ENTRY_CLEANUP_MODE backup "backup,delete"
     validate_allowed_set SELF_UPDATE_CHANNEL stable "rolling,stable"
+    validate_allowed_set WEBUI_HISTORY_RETENTION_DAYS 30 "7,30,90"
 
     # Snapper knobs (bounded ints + bools)
     validate_bool_flag SNAP_RETENTION_OPTIMIZER_ENABLED true
@@ -9086,6 +9095,7 @@ EOF
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
+    _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
     _mark_missing_key "ZYPPER_TURBO_TUNER_ENABLED"
     _mark_missing_key "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED"
     _mark_missing_key "AUTO_REPAIR_TRY_REMOUNT_RW"
@@ -14642,6 +14652,13 @@ generate_dashboard() {
         storageKey: 'znh_job_history_v1'
     };
 
+    // Server-side history (SQLite via Dashboard API)
+    // Used by Managers → Server tab.
+    var _znhMgrServer = {
+        inFlight: false,
+        limit: 60
+    };
+
     function _znhJobsLoad() {
         try {
             var raw = localStorage.getItem(_znhJobs.storageKey) || '';
@@ -14750,7 +14767,7 @@ generate_dashboard() {
         try { _znhJobs.items = _znhJobsLoad() || []; } catch (e0) { _znhJobs.items = []; }
 
         var curTab = String(tab || (localStorage.getItem('znh_mgr_tab') || 'all'));
-        if (curTab !== 'all' && curTab !== 'self-update' && curTab !== 'system-update') curTab = 'all';
+        if (curTab !== 'all' && curTab !== 'self-update' && curTab !== 'system-update' && curTab !== 'server') curTab = 'all';
         try { localStorage.setItem('znh_mgr_tab', curTab); } catch (e1) {}
 
         // Filters (persisted)
@@ -14760,6 +14777,14 @@ generate_dashboard() {
         try { q = String(localStorage.getItem('znh_mgr_q') || ''); } catch (eQ0) { q = ''; }
         try { onlyFailed = (localStorage.getItem('znh_mgr_failed') || '') === '1'; } catch (eF0) { onlyFailed = false; }
         try { last24 = (localStorage.getItem('znh_mgr_last24') || '') === '1'; } catch (eL0) { last24 = false; }
+
+        // Server tab (SQLite) is rendered separately (async fetch) because data is not local.
+        if (curTab === 'server') {
+            try { znhManagersRenderServer(body, q, onlyFailed, last24); } catch (eSrv) {
+                try { body.innerHTML = '<div class="mgr-row err"><div class="t">Server history render failed</div><div class="b">' + String((eSrv && eSrv.message) ? eSrv.message : eSrv) + '</div></div>'; } catch (eSrv2) {}
+            }
+            return;
+        }
 
         function _qMatch(it) {
             if (!q) return true;
@@ -14810,7 +14835,7 @@ generate_dashboard() {
         }
 
         var html = [];
-        html.push('<div class="mgr-tabs">' + pill('All', 'all') + pill('Update manager', 'self-update') + pill('Rocket manager', 'system-update') + '</div>');
+        html.push('<div class="mgr-tabs">' + pill('All', 'all') + pill('Update manager', 'self-update') + pill('Rocket manager', 'system-update') + pill('Server (SQLite)', 'server') + '</div>');
         html.push('<div style="display:grid; gap: 10px; margin-top: 10px;">');
         html.push('  <input id="mgr-q" type="text" placeholder="Search job history (job_id, rc, keywords)…" value="' + safeHtml(q) + '" style="width:100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />');
         html.push('  <div style="display:flex; gap:10px; flex-wrap:wrap;">');
@@ -14963,6 +14988,425 @@ generate_dashboard() {
                 });
             });
         } catch (e3) {}
+    }
+
+    function znhManagersRenderServer(body, q, onlyFailed, last24) {
+        body = body || document.getElementById('mgr-body');
+        if (!body) return;
+
+        var curTab = 'server';
+
+        // Server-only filters (persisted)
+        var jobType = '';
+        try { jobType = String(localStorage.getItem('znh_mgr_srv_type') || ''); } catch (eT0) { jobType = ''; }
+        if (jobType && jobType !== 'system-dup' && jobType !== 'self-update' && jobType !== 'quick-action' && jobType !== 'scrub-ghost' && jobType !== 'snapper') jobType = '';
+
+        function pill(label, value) {
+            var cls = 'pill' + (curTab === value ? ' active' : '');
+            return '<button class="' + cls + '" type="button" data-mgr-tab="' + value + '">' + label + '</button>';
+        }
+
+        function safeHtml(s) {
+            return String(s || '').replace(/</g, '&lt;');
+        }
+
+        function opt(label, val) {
+            var sel = (String(jobType || '') === String(val || '')) ? 'selected' : '';
+            return '<option value="' + String(val || '') + '" ' + sel + '>' + String(label || '') + '</option>';
+        }
+
+        var html = [];
+        html.push('<div class="mgr-tabs">' + pill('All', 'all') + pill('Update manager', 'self-update') + pill('Rocket manager', 'system-update') + pill('Server (SQLite)', 'server') + '</div>');
+        html.push('<div style="display:grid; gap: 10px; margin-top: 10px;">');
+        html.push('  <input id="mgr-q" type="text" placeholder="Search server history (job_id, stage, log tail)…" value="' + safeHtml(q) + '" style="width:100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />');
+        html.push('  <div style="display:flex; gap:10px; flex-wrap:wrap;">');
+        html.push('    <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="mgr-failed" ' + (onlyFailed ? 'checked' : '') + ' /> Failed only</label>');
+        html.push('    <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="mgr-last24" ' + (last24 ? 'checked' : '') + ' /> Last 24h</label>');
+        html.push('    <label class="pill" style="gap:10px; justify-content:flex-start;">Type <select id="mgr-srv-type" style="margin-left:6px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);">' + opt('All', '') + opt('System update (Rocket)', 'system-dup') + opt('Self-update', 'self-update') + opt('Quick actions', 'quick-action') + opt('scrub-ghost', 'scrub-ghost') + opt('Snapper', 'snapper') + '</select></label>');
+        html.push('    <button class="pill" type="button" id="mgr-srv-refresh">Refresh</button>');
+        html.push('    <button class="pill" type="button" id="mgr-export-diag">Download UI diagnostics</button>');
+        html.push('  </div>');
+        html.push('</div>');
+
+        html.push('<div style="color: var(--muted); font-size:0.9rem; margin-top: 10px;">This is <strong>server-side</strong> job history stored in a local SQLite database by the Dashboard API (persists across reloads/reboots and across browsers). It stores a bounded log tail for search + file paths for full logs.</div>');
+
+        html.push('<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">');
+        html.push('  <label class="pill" style="gap:10px; justify-content:flex-start;">Retention <select id="mgr-srv-retention" style="margin-left:6px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);"><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>');
+        html.push('  <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="mgr-srv-integrity" /> Also run integrity check</label>');
+        html.push('  <button class="pill" type="button" id="mgr-srv-apply-retention">Apply retention + cleanup</button>');
+        html.push('  <button class="pill" type="button" id="mgr-srv-cleanup">Cleanup now</button>');
+        html.push('</div>');
+
+        html.push('<div style="display:grid; gap:10px; margin-top: 12px;">');
+        html.push('  <div id="mgr-srv-health" class="mgr-row warn"><div class="t">Server history health</div><div class="b">Loading…</div></div>');
+        html.push('  <div id="mgr-srv-stats" class="mgr-row warn"><div class="t">Stats (last 7 days)</div><div class="b">Loading…</div></div>');
+        html.push('  <div id="mgr-srv-list" style="display:grid; gap: 10px;"></div>');
+        html.push('</div>');
+
+        body.innerHTML = html.join('\n');
+
+        // Wire tabs
+        try {
+            var tabs = body.querySelectorAll('[data-mgr-tab]');
+            tabs.forEach(function(b) {
+                b.addEventListener('click', function(ev) {
+                    try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+                    var v = String(b.getAttribute('data-mgr-tab') || 'all');
+                    znhManagersRender(v);
+                });
+            });
+        } catch (e2) {}
+
+        // Wire filters
+        try {
+            var qEl = document.getElementById('mgr-q');
+            var fEl = document.getElementById('mgr-failed');
+            var lEl = document.getElementById('mgr-last24');
+            var exBtn = document.getElementById('mgr-export-diag');
+            var tpEl = document.getElementById('mgr-srv-type');
+            var refBtn = document.getElementById('mgr-srv-refresh');
+
+            var _qTimer = null;
+            if (qEl) {
+                qEl.addEventListener('input', function() {
+                    if (_qTimer) { try { clearTimeout(_qTimer); } catch (e) {} }
+                    _qTimer = setTimeout(function() {
+                        try { localStorage.setItem('znh_mgr_q', String(qEl.value || '')); } catch (e2) {}
+                        znhManagersRender(curTab);
+                    }, 180);
+                });
+            }
+            if (fEl) {
+                fEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_failed', fEl.checked ? '1' : '0'); } catch (e3) {}
+                    znhManagersRender(curTab);
+                });
+            }
+            if (lEl) {
+                lEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_last24', lEl.checked ? '1' : '0'); } catch (e4) {}
+                    znhManagersRender(curTab);
+                });
+            }
+            if (tpEl) {
+                tpEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_srv_type', String(tpEl.value || '')); } catch (e5) {}
+                    znhManagersRender(curTab);
+                });
+            }
+            if (refBtn) {
+                refBtn.addEventListener('click', function(ev) {
+                    try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e6) {}
+                    _znhManagersServerFetchAndRender({ q: String(q || ''), onlyFailed: !!onlyFailed, last24: !!last24, jobType: String(jobType || '') }, true);
+                });
+            }
+            if (exBtn) {
+                exBtn.addEventListener('click', function(ev) {
+                    try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e7) {}
+                    try {
+                        if (typeof window.znhNotifyRunAction === 'function') {
+                            window.znhNotifyRunAction({ type: 'export-ui-diagnostics' });
+                        }
+                    } catch (e8) {}
+                });
+            }
+        } catch (eF) {}
+
+        // Wire retention/cleanup
+        try {
+            var retSel = document.getElementById('mgr-srv-retention');
+            var integCb = document.getElementById('mgr-srv-integrity');
+            var applyBtn = document.getElementById('mgr-srv-apply-retention');
+            var cleanBtn = document.getElementById('mgr-srv-cleanup');
+
+            function _readRetentionDays() {
+                var d = 30;
+                try { d = parseInt(String(retSel ? retSel.value : '30'), 10) || 30; } catch (e0) { d = 30; }
+                if (d !== 7 && d !== 30 && d !== 90) d = 30;
+                return d;
+            }
+
+            function _readIntegrity() {
+                try { return !!(integCb && integCb.checked); } catch (e0) { return false; }
+            }
+
+            function _disable(v) {
+                try { if (retSel) retSel.disabled = !!v; } catch (e1) {}
+                try { if (applyBtn) applyBtn.disabled = !!v; } catch (e2) {}
+                try { if (cleanBtn) cleanBtn.disabled = !!v; } catch (e3) {}
+                try { if (integCb) integCb.disabled = !!v; } catch (e4) {}
+            }
+
+            if (applyBtn) applyBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+                var d = _readRetentionDays();
+                _disable(true);
+                _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: { WEBUI_HISTORY_RETENTION_DAYS: String(d) } }) }).then(function() {
+                    return _api('/api/history/cleanup', { method: 'POST', body: JSON.stringify({ days: d, integrity_check: _readIntegrity() }) });
+                }).then(function() {
+                    toast('Server history updated', 'Retention set to ' + String(d) + ' days', 'ok');
+                    znhManagersRender(curTab);
+                }).catch(function(err) {
+                    var msg = (err && err.message) ? err.message : 'failed';
+                    toast('Retention update failed', msg, 'err');
+                }).finally(function() {
+                    _disable(false);
+                });
+            });
+
+            if (cleanBtn) cleanBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e1) {}
+                var d2 = _readRetentionDays();
+                _disable(true);
+                _api('/api/history/cleanup', { method: 'POST', body: JSON.stringify({ days: d2, integrity_check: _readIntegrity() }) }).then(function() {
+                    toast('Cleanup complete', 'Cleanup ran (days=' + String(d2) + ')', 'ok');
+                    znhManagersRender(curTab);
+                }).catch(function(err) {
+                    var msg2 = (err && err.message) ? err.message : 'failed';
+                    toast('Cleanup failed', msg2, 'err');
+                }).finally(function() {
+                    _disable(false);
+                });
+            });
+
+        } catch (eC) {}
+
+        // Initial fetch
+        _znhManagersServerFetchAndRender({ q: String(q || ''), onlyFailed: !!onlyFailed, last24: !!last24, jobType: String(jobType || '') }, false);
+    }
+
+    function _znhManagersServerFetchAndRender(opts, force) {
+        opts = opts || {};
+        if (_znhMgrServer.inFlight && !force) return;
+        _znhMgrServer.inFlight = true;
+
+        var healthEl = document.getElementById('mgr-srv-health');
+        var statsEl = document.getElementById('mgr-srv-stats');
+        var listEl = document.getElementById('mgr-srv-list');
+
+        function _setBox(el, cls, title, body) {
+            if (!el) return;
+            try { el.className = 'mgr-row ' + String(cls || 'warn'); } catch (e0) {}
+            try {
+                var b2 = String(body || '').replace(/</g,'&lt;');
+                try { b2 = b2.replace(/\n/g, '<br>'); } catch (eB) {}
+                el.innerHTML = '<div class="t">' + String(title || '') + '</div><div class="b">' + b2 + '</div>';
+            } catch (e1) {}
+        }
+
+        try { _setBox(healthEl, 'warn', 'Server history health', 'Loading…'); } catch (e0) {}
+        try { _setBox(statsEl, 'warn', 'Stats (last 7 days)', 'Loading…'); } catch (e1) {}
+        try { if (listEl) listEl.innerHTML = '<div class="mgr-row warn"><div class="t">Server jobs</div><div class="b">Loading…</div></div>'; } catch (e2) {}
+
+        var q = String(opts.q || '').trim();
+        var onlyFailed = !!opts.onlyFailed;
+        var last24 = !!opts.last24;
+        var jobType = String(opts.jobType || '').trim();
+
+        var since = 0;
+        if (last24) {
+            try { since = (Date.now() / 1000.0) - (24 * 60 * 60); } catch (eS) { since = 0; }
+        }
+
+        var qp = [];
+        qp.push('limit=' + encodeURIComponent(String(_znhMgrServer.limit || 60)));
+        qp.push('offset=0');
+        if (jobType) qp.push('job_type=' + encodeURIComponent(jobType));
+        if (onlyFailed) qp.push('ok=0');
+        if (q) qp.push('q=' + encodeURIComponent(q));
+        if (since && since > 0) qp.push('since=' + encodeURIComponent(String(since)));
+
+        var jobsPath = '/api/history/jobs?' + qp.join('&');
+
+        Promise.all([
+            _api('/api/history/health'),
+            _api('/api/history/stats?days=7'),
+            _api(jobsPath)
+        ]).then(function(res) {
+            var health = res[0] || {};
+            var stats = res[1] || {};
+            var jobs = res[2] || {};
+
+            // Health
+            try {
+                var db = (health && health.db) ? health.db : {};
+                var body = ''
+                    + 'DB: ' + String(db.path || '(unknown)') + '\n'
+                    + 'Exists: ' + String(!!db.exists) + ' • Rows: ' + String(db.rows || 0) + ' • Size: ' + String(db.size_bytes || 0) + ' bytes' + '\n'
+                    + 'Retention: ' + String(db.retention_days || jobs.retention_days || '') + ' days' + '\n'
+                    + 'Last cleanup: ' + String(db.last_cleanup_ts || '(n/a)') + ' (days=' + String(db.last_cleanup_days || '') + ')' + '\n'
+                    + 'Integrity: ' + (String(db.last_integrity_check_ok || '') ? ('ok=' + String(db.last_integrity_check_ok) + ' ts=' + String(db.last_integrity_check_ts || '')) : '(n/a)');
+                _setBox(healthEl, (db.exists ? 'ok' : 'warn'), 'Server history health', body);
+
+                // Sync retention selector to effective value (best-effort)
+                try {
+                    var sel = document.getElementById('mgr-srv-retention');
+                    var d = parseInt(db.retention_days || jobs.retention_days || 30, 10) || 30;
+                    if (sel && (d === 7 || d === 30 || d === 90)) sel.value = String(d);
+                } catch (eR) {}
+            } catch (eH) {
+                _setBox(healthEl, 'err', 'Server history health', String((eH && eH.message) ? eH.message : eH));
+            }
+
+            // Stats
+            try {
+                var per = (stats && stats.per_day) ? stats.per_day : [];
+                var by = (stats && stats.by_type) ? stats.by_type : [];
+                var total = 0, ok = 0, fail = 0;
+                for (var i = 0; i < per.length; i++) {
+                    total += parseInt(per[i].total || 0, 10) || 0;
+                    ok += parseInt(per[i].ok || 0, 10) || 0;
+                    fail += parseInt(per[i].fail || 0, 10) || 0;
+                }
+                var lines = [];
+                lines.push('Total: ' + String(total) + ' • OK: ' + String(ok) + ' • Fail: ' + String(fail));
+                if (by && by.length) {
+                    var top = by.slice(0, 8);
+                    for (var j = 0; j < top.length; j++) {
+                        lines.push(String(top[j].type || '?') + ': ' + String(top[j].ok || 0) + '/' + String(top[j].total || 0) + ' ok');
+                    }
+                }
+                _setBox(statsEl, 'ok', 'Stats (last 7 days)', lines.join('\n'));
+            } catch (eS2) {
+                _setBox(statsEl, 'err', 'Stats (last 7 days)', String((eS2 && eS2.message) ? eS2.message : eS2));
+            }
+
+            // Jobs list
+            try {
+                var items = (jobs && jobs.items) ? jobs.items : [];
+                if (!items || !items.length) {
+                    if (listEl) listEl.innerHTML = '<div class="mgr-row"><div class="t">No server history yet</div><div class="b">Run a WebUI background job (Rocket / Self-update / Quick Actions / scrub-ghost / Snapper) to populate history.</div></div>';
+                } else {
+                    var rows = [];
+                    for (var k = 0; k < items.length; k++) {
+                        var it = items[k] || {};
+                        var tp = String(it.type || '');
+                        var jid = String(it.job_id || '');
+                        var title = String(it.title || tp || 'Job');
+                        var action = String(it.action || '');
+                        var stage = String(it.stage || '');
+                        var sim = !!it.simulate;
+                        var dr = !!it.dry_run;
+                        var ch = String(it.channel || '');
+                        var rc = (it.rc != null) ? parseInt(it.rc, 10) : null;
+                        if (rc != null && isNaN(rc)) rc = null;
+                        var done = !!it.done;
+                        var ok2 = (done && rc === 0);
+                        var fail2 = (done && rc != null && rc !== 0);
+
+                        var level = done ? (ok2 ? 'ok' : (fail2 ? 'err' : 'warn')) : 'warn';
+                        var cls = 'mgr-row ' + (level === 'ok' ? 'ok' : (level === 'err' ? 'err' : 'warn'));
+
+                        var when = '';
+                        try { when = it.started_ts ? new Date(parseFloat(it.started_ts) * 1000).toISOString().slice(0, 19).replace('T', ' ') + 'Z' : ''; } catch (eT) { when = ''; }
+
+                        var summary = '';
+                        try { summary = String(it.summary || ''); } catch (eSum) { summary = ''; }
+                        if (!summary) summary = stage;
+                        if (!summary) summary = done ? (ok2 ? 'Done' : 'Failed') : 'Running';
+
+                        // Map job type -> open action
+                        var canOpen = !!jid;
+                        var openLabel = 'Open';
+                        if (tp === 'system-dup') openLabel = 'Open log';
+
+                        rows.push('<div class="' + cls + '">');
+                        rows.push('  <div class="hdr"><div class="t">' + String(title || '').replace(/</g,'&lt;') + '</div><div class="m">' + when + (rc != null ? (' • rc=' + String(rc)) : '') + (tp ? (' • ' + String(tp)) : '') + '</div></div>');
+                        rows.push('  <div class="b">' + String(summary || '').replace(/</g,'&lt;') + '</div>');
+                        rows.push('  <div class="m">job_id=' + String(jid || '').replace(/</g,'&lt;') + (action ? (' • action=' + String(action).replace(/</g,'&lt;')) : '') + '</div>');
+
+                        if (canOpen) {
+                            rows.push('  <div class="mgr-actions"><button class="pill" type="button" data-mgr-srv-open="1"'
+                                + ' data-job-type="' + String(tp || '') + '"'
+                                + ' data-job-id="' + String(jid || '') + '"'
+                                + ' data-action="' + String(action || '') + '"'
+                                + ' data-title="' + String(title || '') + '"'
+                                + ' data-channel="' + String(ch || '') + '"'
+                                + ' data-dry-run="' + String(dr ? '1' : '0') + '"'
+                                + ' data-simulate="' + String(sim ? '1' : '0') + '"'
+                                + '>' + String(openLabel) + '</button></div>');
+                        }
+
+                        rows.push('</div>');
+                    }
+
+                    if (listEl) listEl.innerHTML = rows.join('\n');
+
+                    // Wire open buttons
+                    try {
+                        var btns = listEl ? listEl.querySelectorAll('[data-mgr-srv-open]') : [];
+                        btns.forEach(function(btn) {
+                            btn.addEventListener('click', function(ev) {
+                                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+                                var tp2 = String(btn.getAttribute('data-job-type') || '');
+                                var jid2 = String(btn.getAttribute('data-job-id') || '');
+                                if (!tp2 || !jid2) return;
+
+                                if (tp2 === 'system-dup') {
+                                    var sim2 = String(btn.getAttribute('data-simulate') || '0') === '1';
+                                    if (typeof window.znhNotifyRunAction === 'function') {
+                                        window.znhNotifyRunAction({ type: 'open-system-update-job', job_id: jid2, simulate: sim2 });
+                                    }
+                                    return;
+                                }
+
+                                if (tp2 === 'self-update') {
+                                    var ch2 = String(btn.getAttribute('data-channel') || 'stable');
+                                    if (ch2 !== 'stable' && ch2 !== 'rolling') ch2 = 'stable';
+                                    var dry2 = String(btn.getAttribute('data-dry-run') || '0') === '1';
+                                    if (typeof window.znhNotifyRunAction === 'function') {
+                                        window.znhNotifyRunAction({ type: 'open-self-update-job', job_id: jid2, channel: ch2, dry_run: dry2 });
+                                    }
+                                    return;
+                                }
+
+                                if (tp2 === 'quick-action') {
+                                    var act2 = String(btn.getAttribute('data-action') || '');
+                                    var tit2 = String(btn.getAttribute('data-title') || 'Quick action');
+                                    if (typeof window.znhNotifyRunAction === 'function') {
+                                        window.znhNotifyRunAction({ type: 'open-quick-action-job', job_id: jid2, action: act2, title: tit2 });
+                                    }
+                                    return;
+                                }
+
+                                if (tp2 === 'scrub-ghost') {
+                                    var sact2 = String(btn.getAttribute('data-action') || '');
+                                    var stit2 = String(btn.getAttribute('data-title') || 'scrub-ghost');
+                                    if (typeof window.znhNotifyRunAction === 'function') {
+                                        window.znhNotifyRunAction({ type: 'open-scrub-ghost-job', job_id: jid2, action: sact2, title: stit2 });
+                                    }
+                                    return;
+                                }
+
+                                if (tp2 === 'snapper') {
+                                    try {
+                                        if (typeof snapperTaskOpenOverlay === 'function') {
+                                            snapperTaskOpenOverlay({ job_id: jid2, title: String(btn.getAttribute('data-title') || 'Snapper job') });
+                                            return;
+                                        }
+                                    } catch (eSn) {}
+                                    toast('Not available', 'Snapper overlay not loaded', 'err');
+                                    return;
+                                }
+                            });
+                        });
+                    } catch (eW) {}
+
+                }
+            } catch (eL) {
+                if (listEl) listEl.innerHTML = '<div class="mgr-row err"><div class="t">Server history render failed</div><div class="b">' + String((eL && eL.message) ? eL.message : eL).replace(/</g,'&lt;') + '</div></div>';
+            }
+
+        }).catch(function(err) {
+            var msg = (err && err.message) ? err.message : 'failed';
+            _setBox(healthEl, 'err', 'Server history health', msg);
+            _setBox(statsEl, 'err', 'Stats (last 7 days)', msg);
+            try {
+                if (listEl) listEl.innerHTML = '<div class="mgr-row err"><div class="t">Server history fetch failed</div><div class="b">' + String(msg).replace(/</g,'&lt;') + '</div></div>';
+            } catch (e2) {}
+        }).finally(function() {
+            _znhMgrServer.inFlight = false;
+        });
     }
 
     function znhManagersInit() {
@@ -16018,6 +16462,7 @@ generate_dashboard() {
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
+        { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
@@ -35473,6 +35918,8 @@ run_uninstall_helper_only() {
         echo "    /usr/local/bin/zypper-auto-diag-follow (diagnostics follower helper)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-dashboard-perf-worker (dashboard perf worker)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-scrub-ghost + /usr/local/bin/scrub-ghost (boot entry scrubber)" | tee -a "${LOG_FILE}"
+        echo "  - Dashboard API state + history DB: /var/lib/zypper-auto/dashboard-history.sqlite3 (and -wal/-shm)" | tee -a "${LOG_FILE}"
+        echo "    plus: /var/lib/zypper-auto/dashboard-api.* /var/lib/zypper-auto/dashboard-schema.json" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
@@ -35700,6 +36147,9 @@ run_uninstall_helper_only() {
                 /var/lib/zypper-auto/dashboard-api.env \
                 /var/lib/zypper-auto/dashboard-schema.json \
                 /var/lib/zypper-auto/self-update-state.json \
+                /var/lib/zypper-auto/dashboard-history.sqlite3 \
+                /var/lib/zypper-auto/dashboard-history.sqlite3-wal \
+                /var/lib/zypper-auto/dashboard-history.sqlite3-shm \
                 2>/dev/null || true
             rmdir /var/lib/zypper-auto 2>/dev/null || true
         fi
@@ -36695,7 +37145,7 @@ elif [[ "${1:-}" == "--status" ]]; then
     log_info "Status report mode requested"
     run_status_only
     exit $?
-elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-helper" ]]; then
+elif [[ "${1:-}" == "--uninstall-zypper" ]]; then
     shift
     # Parse optional flags for the uninstaller:
     #   --yes / -y / --non-interactive : skip confirmation prompt
@@ -36726,7 +37176,7 @@ elif [[ "${1:-}" == "--uninstall-zypper" || "${1:-}" == "--uninstall-zypper-help
                 UNINSTALL_DISABLE_MAINT_TIMERS=1
                 ;;
             *)
-                log_error "Unknown option for --uninstall-zypper-helper: $1"
+                log_error "Unknown option for --uninstall-zypper: $1"
                 exit 1
                 ;;
         esac
@@ -36783,7 +37233,7 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
 fi
 
 # If we reach this point, all supported option-like commands (e.g. --verify,
-# --reset-config, --reset-downloads, --uninstall-zypper-helper, etc.) have
+# --reset-config, --reset-downloads, --uninstall-zypper, etc.) have
 # already been handled and exited above. Reject any unknown option that starts
 # with '-' so a typo like '-reset' does NOT silently fall back to a full
 # installation.
@@ -38775,7 +39225,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --uninstall-zypper-helper --debug --help -h help"
+ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -38893,7 +39343,7 @@ _znh_cmds=(
   --send-webhook --webhook
   --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner
   --show-logs --show-loggs
-  --uninstall-zypper --uninstall-zypper-helper
+  --uninstall-zypper
   --debug
   --help -h help
 )
@@ -39023,7 +39473,7 @@ complete -c zypper-auto-helper -f -a "--dashboard --generate-dashboard --dash-op
 complete -c zypper-auto-helper -f -a "--send-webhook --webhook"
 complete -c zypper-auto-helper -f -a "--diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner"
 complete -c zypper-auto-helper -f -a "--show-logs --show-loggs"
-complete -c zypper-auto-helper -f -a "--uninstall-zypper --uninstall-zypper-helper"
+complete -c zypper-auto-helper -f -a "--uninstall-zypper"
 complete -c zypper-auto-helper -f -a "--help -h help"
 
 # snapper submenu
@@ -42350,6 +42800,7 @@ import secrets
 import shlex
 import shutil
 import socketserver
+import sqlite3
 import subprocess
 import threading
 import time
@@ -42888,6 +43339,361 @@ QUICK_STATUS_DIR = DUP_STATUS_DIR
 # dashboard API restarts and browser crashes (WebUI resumes via job_id).
 SCRUB_LOG_DIR = DUP_LOG_DIR
 SCRUB_STATUS_DIR = DUP_STATUS_DIR
+
+# --- WebUI History DB (SQLite) ---
+# This stores *metadata* + a bounded log tail for durable Managers history.
+HISTORY_DB_PATH_DEFAULT = "/var/lib/zypper-auto/dashboard-history.sqlite3"
+HISTORY_SCHEMA_VERSION = 1
+HISTORY_LOG_TAIL_CHARS = 20_000
+HISTORY_LIST_LIMIT_MAX = 200
+HISTORY_QUERY_MAXLEN = 120
+
+
+def _history_bound_text(s: str, max_chars: int) -> str:
+    try:
+        t = str(s or "")
+    except Exception:
+        return ""
+    if max_chars <= 0:
+        return ""
+    if len(t) > int(max_chars):
+        t = t[-int(max_chars):]
+    return t
+
+
+def _history_retention_days_from_conf(eff_conf: dict) -> int:
+    # Allowed options (per user request): 7 / 30 / 90
+    try:
+        v = str((eff_conf or {}).get("WEBUI_HISTORY_RETENTION_DAYS", "30") or "30").strip()
+    except Exception:
+        v = "30"
+    if v not in ("7", "30", "90"):
+        v = "30"
+    try:
+        return int(v)
+    except Exception:
+        return 30
+
+
+def _history_db_connect(db_path: str):
+    # Per-thread connections (ThreadingHTTPServer)
+    # Use autocommit (isolation_level=None) to avoid needing explicit commit calls.
+    conn = sqlite3.connect(db_path, timeout=2.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=2000")
+    except Exception:
+        pass
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+    try:
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        pass
+    return conn
+
+
+def _history_db_init(db_path: str, *, log=None) -> None:
+    if not db_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except Exception:
+        pass
+
+    conn = _history_db_connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN")
+        cur.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs(
+              job_id TEXT PRIMARY KEY,
+              job_type TEXT,
+              action TEXT,
+              title TEXT,
+              simulate INTEGER,
+              dry_run INTEGER,
+              channel TEXT,
+              started_ts REAL,
+              updated_ts REAL,
+              finished_ts REAL,
+              rc INTEGER,
+              stage TEXT,
+              running INTEGER,
+              done INTEGER,
+              unit TEXT,
+              log_path TEXT,
+              status_path TEXT,
+              summary TEXT,
+              log_tail TEXT,
+              extra_json TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_started_ts ON jobs(started_ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_type_started_ts ON jobs(job_type, started_ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_rc_started_ts ON jobs(rc, started_ts)")
+
+        cur.execute("SELECT value FROM meta WHERE key='schema_version'")
+        row = cur.fetchone()
+        if not row:
+            cur.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(HISTORY_SCHEMA_VERSION),))
+        cur.execute("COMMIT")
+    except Exception as e:
+        try:
+            cur.execute("ROLLBACK")
+        except Exception:
+            pass
+        try:
+            if log:
+                log("warn", f"history db init failed: {e}")
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _history_conn(server):
+    # Thread-local connection cache
+    try:
+        tls = getattr(server, "history_tls", None)
+        if tls is None:
+            server.history_tls = threading.local()
+            tls = server.history_tls
+        c = getattr(tls, "conn", None)
+        if c is None:
+            c = _history_db_connect(getattr(server, "history_db_path", HISTORY_DB_PATH_DEFAULT))
+            tls.conn = c
+        return c
+    except Exception:
+        # Fallback: best-effort new connection
+        try:
+            return _history_db_connect(getattr(server, "history_db_path", HISTORY_DB_PATH_DEFAULT))
+        except Exception:
+            return None
+
+
+def _history_meta_set(server, key: str, value: str) -> None:
+    try:
+        conn = _history_conn(server)
+        if not conn:
+            return
+        conn.execute("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(key), str(value)))
+    except Exception:
+        return
+
+
+def _history_meta_get(server, key: str, default: str = "") -> str:
+    try:
+        conn = _history_conn(server)
+        if not conn:
+            return default
+        cur = conn.execute("SELECT value FROM meta WHERE key=?", (str(key),))
+        row = cur.fetchone()
+        if not row:
+            return default
+        return str(row[0] or "")
+    except Exception:
+        return default
+
+
+def _history_job_upsert(server, job: dict, *, summary: str = "", extra: dict | None = None) -> None:
+    # job is a normalized payload with keys similar to existing /api/*/job responses.
+    try:
+        if not server:
+            return
+        db_path = getattr(server, "history_db_path", "")
+        if not db_path:
+            return
+
+        jid = str(job.get("job_id", "") or "").strip()
+        if not jid:
+            return
+
+        job_type = str(job.get("type", "") or "").strip()
+        action = str(job.get("action", "") or "").strip()
+        title = str(job.get("title", "") or "").strip()
+        simulate = 1 if bool(job.get("simulate")) else 0
+        dry_run = 1 if bool(job.get("dry_run")) else 0
+        channel = str(job.get("channel", "") or "").strip()
+        running = 1 if bool(job.get("running")) else 0
+        done = 1 if bool(job.get("done")) else 0
+        rc = job.get("rc", None)
+        try:
+            rc = int(rc) if rc is not None else None
+        except Exception:
+            rc = None
+
+        stage = str(job.get("stage", "") or "").strip()
+        unit = str(job.get("unit", "") or "").strip()
+        log_path = str(job.get("log_path", "") or "").strip()
+        status_path = str(job.get("status_path", "") or "").strip()
+
+        # Prefer a bounded tail from payload output (already tail-limited for most job endpoints)
+        log_tail = ""
+        try:
+            log_tail = _history_bound_text(str(job.get("output", "") or ""), HISTORY_LOG_TAIL_CHARS)
+        except Exception:
+            log_tail = ""
+
+        summary2 = _history_bound_text(summary or "", 800)
+
+        now_ts = time.time()
+        started_ts = job.get("started_at", None)
+        try:
+            started_ts = float(started_ts) if started_ts is not None else None
+        except Exception:
+            started_ts = None
+        if started_ts is None:
+            started_ts = now_ts
+
+        finished_ts = job.get("finished_at", None)
+        try:
+            finished_ts = float(finished_ts) if finished_ts is not None else None
+        except Exception:
+            finished_ts = None
+        if done and (finished_ts is None or finished_ts <= 0):
+            finished_ts = now_ts
+        if not done:
+            finished_ts = 0.0
+
+        extra_json = ""
+        try:
+            if extra and isinstance(extra, dict):
+                extra_json = json.dumps(extra, ensure_ascii=False)[:40_000]
+        except Exception:
+            extra_json = ""
+
+        conn = _history_conn(server)
+        if not conn:
+            return
+
+        conn.execute(
+            """
+            INSERT INTO jobs(
+              job_id, job_type, action, title, simulate, dry_run, channel,
+              started_ts, updated_ts, finished_ts,
+              rc, stage, running, done,
+              unit, log_path, status_path,
+              summary, log_tail, extra_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(job_id) DO UPDATE SET
+              job_type=excluded.job_type,
+              action=excluded.action,
+              title=excluded.title,
+              simulate=excluded.simulate,
+              dry_run=excluded.dry_run,
+              channel=excluded.channel,
+              started_ts=COALESCE(jobs.started_ts, excluded.started_ts),
+              updated_ts=excluded.updated_ts,
+              finished_ts=CASE WHEN excluded.done=1 THEN excluded.finished_ts ELSE jobs.finished_ts END,
+              rc=excluded.rc,
+              stage=excluded.stage,
+              running=excluded.running,
+              done=excluded.done,
+              unit=CASE WHEN excluded.unit != '' THEN excluded.unit ELSE jobs.unit END,
+              log_path=CASE WHEN excluded.log_path != '' THEN excluded.log_path ELSE jobs.log_path END,
+              status_path=CASE WHEN excluded.status_path != '' THEN excluded.status_path ELSE jobs.status_path END,
+              summary=excluded.summary,
+              log_tail=excluded.log_tail,
+              extra_json=excluded.extra_json
+            """,
+            (
+                jid,
+                job_type,
+                action,
+                title,
+                int(simulate),
+                int(dry_run),
+                channel,
+                float(started_ts),
+                float(now_ts),
+                float(finished_ts),
+                rc,
+                stage,
+                int(running),
+                int(done),
+                unit,
+                log_path,
+                status_path,
+                summary2,
+                log_tail,
+                extra_json,
+            ),
+        )
+    except Exception:
+        return
+
+
+def _history_cleanup(server, eff_conf: dict, *, override_days: int | None = None) -> dict:
+    out = {"ok": False, "deleted": 0, "days": 0}
+    try:
+        days = override_days if override_days is not None else _history_retention_days_from_conf(eff_conf)
+        if days not in (7, 30, 90):
+            days = 30
+        out["days"] = days
+
+        conn = _history_conn(server)
+        if not conn:
+            out["error"] = "no db"
+            return out
+
+        cutoff = time.time() - (days * 86400.0)
+        cur = conn.execute("DELETE FROM jobs WHERE done=1 AND finished_ts > 0 AND finished_ts < ?", (float(cutoff),))
+        deleted = 0
+        try:
+            deleted = int(cur.rowcount or 0)
+        except Exception:
+            deleted = 0
+        out["deleted"] = deleted
+        out["ok"] = True
+
+        try:
+            _history_meta_set(server, "last_cleanup_ts", str(time.time()))
+            _history_meta_set(server, "last_cleanup_days", str(days))
+        except Exception:
+            pass
+
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
+
+def _history_integrity_check(server) -> dict:
+    out = {"ok": False, "result": "", "ts": time.time()}
+    try:
+        conn = _history_conn(server)
+        if not conn:
+            out["result"] = "no db"
+            return out
+        cur = conn.execute("PRAGMA integrity_check")
+        row = cur.fetchone()
+        res = str(row[0] if row else "")
+        out["result"] = res
+        out["ok"] = (res.strip().lower() == "ok")
+        try:
+            _history_meta_set(server, "last_integrity_check_ts", str(out["ts"]))
+            _history_meta_set(server, "last_integrity_check_ok", "1" if out["ok"] else "0")
+            _history_meta_set(server, "last_integrity_check_result", res[:400])
+        except Exception:
+            pass
+        return out
+    except Exception as e:
+        out["result"] = str(e)
+        return out
+
 
 
 def _scrub_paths(job_id: str) -> tuple[str, str, str, str]:
@@ -44138,8 +44944,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper, self-update, system-update, scrub-ghost, quick-action, and diag-logs endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/"):
+        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, and history endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -44374,6 +45180,10 @@ class Handler(BaseHTTPRequestHandler):
 
             recovered = _recover_snapper_job(job_id)
             if recovered:
+                try:
+                    _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                except Exception:
+                    pass
                 return _json_response(self, 200, recovered, origin)
             return _json_response(self, 404, {"error": "job not found"}, origin)
 
@@ -44724,8 +45534,13 @@ class Handler(BaseHTTPRequestHandler):
                         if not job:
                             recovered = _recover_self_update_job(job_id)
                             if recovered:
+                                try:
+                                    _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                                except Exception:
+                                    pass
                                 return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
+
                         out = str(job.get("output", ""))
                         tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                         tail = _zypper_xml_pretty(tail_raw)
@@ -44741,6 +45556,15 @@ class Handler(BaseHTTPRequestHandler):
                                     stage = "Finishing…"
                             except Exception:
                                 stage = "Finishing…"
+
+                        # Persist latest state into history DB (best-effort)
+                        try:
+                            payload_copy = dict(job)
+                            payload_copy["stage"] = stage
+                            payload_copy["progress"] = int(progress)
+                            _history_job_upsert(self.server, payload_copy, summary=f"{str(stage or '').strip()} ({int(progress)}%)")
+                        except Exception:
+                            pass
 
                         return _json_response(self, 200, {
                             "job_id": job_id,
@@ -44764,8 +45588,13 @@ class Handler(BaseHTTPRequestHandler):
                     if not job:
                         recovered = _recover_self_update_job(job_id)
                         if recovered:
+                            try:
+                                _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                            except Exception:
+                                pass
                             return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
+
                     out = str(job.get("output", ""))
                     tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                     tail = _zypper_xml_pretty(tail_raw)
@@ -44781,6 +45610,15 @@ class Handler(BaseHTTPRequestHandler):
                                 stage = "Finishing…"
                         except Exception:
                             stage = "Finishing…"
+
+                    # Persist latest state into history DB (best-effort)
+                    try:
+                        payload_copy = dict(job)
+                        payload_copy["stage"] = stage
+                        payload_copy["progress"] = int(progress)
+                        _history_job_upsert(self.server, payload_copy, summary=f"{str(stage or '').strip()} ({int(progress)}%)")
+                    except Exception:
+                        pass
 
                     return _json_response(self, 200, {
                         "job_id": job_id,
@@ -44974,8 +45812,19 @@ class Handler(BaseHTTPRequestHandler):
                         if not job:
                             recovered = _recover_system_dup_job(job_id)
                             if recovered:
+                                try:
+                                    _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                                except Exception:
+                                    pass
                                 return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
+
+                        # Persist latest state into history DB (best-effort)
+                        try:
+                            _history_job_upsert(self.server, dict(job), summary=str(job.get("stage") or ""))
+                        except Exception:
+                            pass
+
                         out = str(job.get("output", ""))
                         tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                         tail = _zypper_xml_pretty(tail_raw)
@@ -44999,8 +45848,19 @@ class Handler(BaseHTTPRequestHandler):
                     if not job:
                         recovered = _recover_system_dup_job(job_id)
                         if recovered:
+                            try:
+                                _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                            except Exception:
+                                pass
                             return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
+
+                    # Persist latest state into history DB (best-effort)
+                    try:
+                        _history_job_upsert(self.server, dict(job), summary=str(job.get("stage") or ""))
+                    except Exception:
+                        pass
+
                     out = str(job.get("output", ""))
                     tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
                     tail = _zypper_xml_pretty(tail_raw)
@@ -45034,6 +45894,10 @@ class Handler(BaseHTTPRequestHandler):
 
             recovered = _recover_scrub_job(job_id)
             if recovered:
+                try:
+                    _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                except Exception:
+                    pass
                 return _json_response(self, 200, recovered, origin)
             return _json_response(self, 404, {"error": "job not found"}, origin)
 
@@ -45049,6 +45913,10 @@ class Handler(BaseHTTPRequestHandler):
 
             recovered = _recover_quick_job(job_id)
             if recovered:
+                try:
+                    _history_job_upsert(self.server, recovered, summary=str(recovered.get("stage") or ""))
+                except Exception:
+                    pass
                 return _json_response(self, 200, recovered, origin)
             return _json_response(self, 404, {"error": "job not found"}, origin)
 
@@ -45073,8 +45941,353 @@ class Handler(BaseHTTPRequestHandler):
                 "enabled": bool(enabled),
             }, origin)
 
+        # --- History (SQLite) ---
+        if path == "/api/history/health":
+            eff, warnings, invalid = _read_conf(self.server.conf_path)
+            days = _history_retention_days_from_conf(eff)
+
+            db_path = str(getattr(self.server, "history_db_path", HISTORY_DB_PATH_DEFAULT) or HISTORY_DB_PATH_DEFAULT)
+            db_exists = False
+            db_size = 0
+            try:
+                db_exists = bool(db_path and os.path.exists(db_path))
+                if db_exists:
+                    db_size = int(os.path.getsize(db_path) or 0)
+            except Exception:
+                db_exists = False
+                db_size = 0
+
+            row_count = 0
+            try:
+                conn = _history_conn(self.server)
+                if conn:
+                    cur = conn.execute("SELECT COUNT(1) FROM jobs")
+                    r0 = cur.fetchone()
+                    row_count = int(r0[0] if r0 else 0)
+            except Exception:
+                row_count = 0
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "ts": time.time(),
+                "db": {
+                    "path": db_path,
+                    "exists": bool(db_exists),
+                    "size_bytes": int(db_size),
+                    "schema_version": _history_meta_get(self.server, "schema_version", str(HISTORY_SCHEMA_VERSION)),
+                    "rows": int(row_count),
+                    "retention_days": int(days),
+                    "last_cleanup_ts": _history_meta_get(self.server, "last_cleanup_ts", ""),
+                    "last_cleanup_days": _history_meta_get(self.server, "last_cleanup_days", ""),
+                    "last_integrity_check_ts": _history_meta_get(self.server, "last_integrity_check_ts", ""),
+                    "last_integrity_check_ok": _history_meta_get(self.server, "last_integrity_check_ok", ""),
+                    "last_integrity_check_result": _history_meta_get(self.server, "last_integrity_check_result", ""),
+                },
+                "config_warnings": warnings,
+                "invalid_keys": invalid,
+            }, origin)
+
+        if path == "/api/history/jobs":
+            eff, _warnings, _invalid = _read_conf(self.server.conf_path)
+
+            # Query params (allowlisted)
+            limit = 50
+            offset = 0
+            try:
+                limit = int(str((qs.get("limit") or ["50"])[0]))
+            except Exception:
+                limit = 50
+            try:
+                offset = int(str((qs.get("offset") or ["0"])[0]))
+            except Exception:
+                offset = 0
+            if limit < 1:
+                limit = 1
+            if limit > HISTORY_LIST_LIMIT_MAX:
+                limit = HISTORY_LIST_LIMIT_MAX
+            if offset < 0:
+                offset = 0
+            if offset > 500_000:
+                offset = 500_000
+
+            job_type = ""
+            try:
+                job_type = str((qs.get("job_type") or [""])[0]).strip()
+            except Exception:
+                job_type = ""
+            if job_type and job_type not in ("system-dup", "self-update", "snapper", "quick-action", "scrub-ghost"):
+                job_type = ""
+
+            action = ""
+            try:
+                action = str((qs.get("action") or [""])[0]).strip()
+            except Exception:
+                action = ""
+            if len(action) > 80:
+                action = action[:80]
+
+            rc_filter = ""
+            try:
+                rc_filter = str((qs.get("rc") or [""])[0]).strip()
+            except Exception:
+                rc_filter = ""
+
+            ok_filter = ""
+            try:
+                ok_filter = str((qs.get("ok") or [""])[0]).strip().lower()
+            except Exception:
+                ok_filter = ""
+
+            qtxt = ""
+            try:
+                qtxt = str((qs.get("q") or [""])[0])
+            except Exception:
+                qtxt = ""
+            qtxt = qtxt.replace("\x00", "").strip()
+            if len(qtxt) > HISTORY_QUERY_MAXLEN:
+                qtxt = qtxt[:HISTORY_QUERY_MAXLEN]
+
+            since_ts = 0.0
+            until_ts = 0.0
+            try:
+                since_raw = str((qs.get("since") or [""])[0]).strip()
+                if since_raw:
+                    since_ts = float(since_raw)
+            except Exception:
+                since_ts = 0.0
+            try:
+                until_raw = str((qs.get("until") or [""])[0]).strip()
+                if until_raw:
+                    until_ts = float(until_raw)
+            except Exception:
+                until_ts = 0.0
+
+            where = []
+            params = []
+            if job_type:
+                where.append("job_type=?")
+                params.append(job_type)
+            if action:
+                where.append("action=?")
+                params.append(action)
+
+            if ok_filter in ("1", "true", "yes", "ok"):
+                where.append("done=1 AND rc=0")
+            elif ok_filter in ("0", "false", "no", "fail", "failed"):
+                where.append("done=1 AND rc IS NOT NULL AND rc != 0")
+
+            if rc_filter and re.fullmatch(r"-?[0-9]+", rc_filter):
+                where.append("rc=?")
+                params.append(int(rc_filter))
+
+            if qtxt:
+                like = f"%{qtxt}%"
+                where.append("(job_id LIKE ? OR title LIKE ? OR summary LIKE ? OR action LIKE ? OR log_tail LIKE ?)")
+                params.extend([like, like, like, like, like])
+
+            if since_ts and since_ts > 0:
+                where.append("started_ts >= ?")
+                params.append(float(since_ts))
+            if until_ts and until_ts > 0:
+                where.append("started_ts <= ?")
+                params.append(float(until_ts))
+
+            sql = "SELECT job_id, job_type, action, title, simulate, dry_run, channel, started_ts, updated_ts, finished_ts, rc, stage, running, done, unit, log_path, status_path, summary FROM jobs"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY started_ts DESC LIMIT ? OFFSET ?"
+            params.append(int(limit))
+            params.append(int(offset))
+
+            items = []
+            try:
+                conn = _history_conn(self.server)
+                if conn:
+                    cur = conn.execute(sql, params)
+                    for r in cur.fetchall() or []:
+                        items.append({
+                            "job_id": str(r[0] or ""),
+                            "type": str(r[1] or ""),
+                            "action": str(r[2] or ""),
+                            "title": str(r[3] or ""),
+                            "simulate": bool(int(r[4] or 0)),
+                            "dry_run": bool(int(r[5] or 0)),
+                            "channel": str(r[6] or ""),
+                            "started_ts": float(r[7] or 0),
+                            "updated_ts": float(r[8] or 0),
+                            "finished_ts": float(r[9] or 0),
+                            "rc": r[10],
+                            "stage": str(r[11] or ""),
+                            "running": bool(int(r[12] or 0)),
+                            "done": bool(int(r[13] or 0)),
+                            "unit": str(r[14] or ""),
+                            "log_path": str(r[15] or ""),
+                            "status_path": str(r[16] or ""),
+                            "summary": str(r[17] or ""),
+                        })
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"history query failed: {e}"}, origin)
+
+            # Best-effort cleanup trigger (keeps DB bounded without needing a separate timer)
+            try:
+                now_ts = time.time()
+                last = float(_history_meta_get(self.server, "last_cleanup_ts", "0") or "0")
+                if (now_ts - last) > 3600:
+                    _history_cleanup(self.server, eff)
+            except Exception:
+                pass
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "items": items,
+                "limit": int(limit),
+                "offset": int(offset),
+                "retention_days": int(_history_retention_days_from_conf(eff)),
+            }, origin)
+
+        if path == "/api/history/job":
+            job_id = ""
+            try:
+                job_id = str((qs.get("job_id") or [""])[0]).strip()
+            except Exception:
+                job_id = ""
+            if not job_id:
+                return _json_response(self, 400, {"error": "job_id required"}, origin)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", job_id or ""):
+                return _json_response(self, 400, {"error": "invalid job_id"}, origin)
+
+            conn = _history_conn(self.server)
+            if not conn:
+                return _json_response(self, 500, {"error": "history db not available"}, origin)
+
+            row = None
+            try:
+                cur = conn.execute(
+                    "SELECT job_id, job_type, action, title, simulate, dry_run, channel, started_ts, updated_ts, finished_ts, rc, stage, running, done, unit, log_path, status_path, summary, log_tail, extra_json FROM jobs WHERE job_id=?",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"history lookup failed: {e}"}, origin)
+
+            if not row:
+                return _json_response(self, 404, {"error": "not found"}, origin)
+
+            log_path = str(row[15] or "")
+            file_tail = ""
+            file_tail_truncated = False
+            try:
+                if log_path and os.path.exists(log_path):
+                    file_tail, file_tail_truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS)
+            except Exception:
+                file_tail = ""
+                file_tail_truncated = False
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "job": {
+                    "job_id": str(row[0] or ""),
+                    "type": str(row[1] or ""),
+                    "action": str(row[2] or ""),
+                    "title": str(row[3] or ""),
+                    "simulate": bool(int(row[4] or 0)),
+                    "dry_run": bool(int(row[5] or 0)),
+                    "channel": str(row[6] or ""),
+                    "started_ts": float(row[7] or 0),
+                    "updated_ts": float(row[8] or 0),
+                    "finished_ts": float(row[9] or 0),
+                    "rc": row[10],
+                    "stage": str(row[11] or ""),
+                    "running": bool(int(row[12] or 0)),
+                    "done": bool(int(row[13] or 0)),
+                    "unit": str(row[14] or ""),
+                    "log_path": log_path,
+                    "status_path": str(row[16] or ""),
+                    "summary": str(row[17] or ""),
+                    "log_tail": str(row[18] or ""),
+                    "extra_json": str(row[19] or ""),
+                },
+                "file_tail": file_tail,
+                "file_tail_truncated": bool(file_tail_truncated),
+            }, origin)
+
+        if path == "/api/history/stats":
+            days = 7
+            try:
+                days = int(str((qs.get("days") or ["7"])[0]).strip() or "7")
+            except Exception:
+                days = 7
+            if days < 1:
+                days = 1
+            if days > 90:
+                days = 90
+
+            since = time.time() - (float(days) * 86400.0)
+
+            conn = _history_conn(self.server)
+            if not conn:
+                return _json_response(self, 500, {"error": "history db not available"}, origin)
+
+            per_day = []
+            by_type = []
+            try:
+                cur = conn.execute(
+                    """
+                    SELECT date(started_ts, 'unixepoch') AS d,
+                           COUNT(1) AS total,
+                           SUM(CASE WHEN done=1 AND rc=0 THEN 1 ELSE 0 END) AS ok,
+                           SUM(CASE WHEN done=1 AND rc IS NOT NULL AND rc!=0 THEN 1 ELSE 0 END) AS fail,
+                           AVG(CASE WHEN done=1 AND finished_ts>0 AND started_ts>0 THEN (finished_ts-started_ts) ELSE NULL END) AS avg_sec
+                      FROM jobs
+                     WHERE started_ts >= ?
+                     GROUP BY d
+                     ORDER BY d ASC
+                    """,
+                    (float(since),),
+                )
+                for r in cur.fetchall() or []:
+                    per_day.append({
+                        "day": str(r[0] or ""),
+                        "total": int(r[1] or 0),
+                        "ok": int(r[2] or 0),
+                        "fail": int(r[3] or 0),
+                        "avg_duration_sec": float(r[4] or 0.0),
+                    })
+
+                cur2 = conn.execute(
+                    """
+                    SELECT job_type,
+                           COUNT(1) AS total,
+                           SUM(CASE WHEN done=1 AND rc=0 THEN 1 ELSE 0 END) AS ok,
+                           SUM(CASE WHEN done=1 AND rc IS NOT NULL AND rc!=0 THEN 1 ELSE 0 END) AS fail
+                      FROM jobs
+                     WHERE started_ts >= ?
+                     GROUP BY job_type
+                     ORDER BY total DESC
+                    """,
+                    (float(since),),
+                )
+                for r2 in cur2.fetchall() or []:
+                    by_type.append({
+                        "type": str(r2[0] or ""),
+                        "total": int(r2[1] or 0),
+                        "ok": int(r2[2] or 0),
+                        "fail": int(r2[3] or 0),
+                    })
+
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"stats query failed: {e}"}, origin)
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "days": int(days),
+                "since_ts": float(since),
+                "per_day": per_day,
+                "by_type": by_type,
+            }, origin)
+
         # If we got here and the path is under an auth-required prefix, it's not implemented.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/"):
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/history/"):
             return _json_response(self, 404, {"error": "not found"}, origin)
 
         if path == "/api/ping":
@@ -45126,6 +46339,43 @@ class Handler(BaseHTTPRequestHandler):
             cmd = ["/usr/local/bin/zypper-auto-helper", "--dashboard"]
             rc, out = _run_cmd(cmd, timeout_s=120, log=getattr(self.server, "_znh_log", None))
             return _json_response(self, 200 if rc == 0 else 500, {"rc": rc, "output": out}, origin)
+
+        # --- History cleanup (SQLite retention) ---
+        if path == "/api/history/cleanup":
+            body = _read_json(self)
+            eff, warnings, invalid = _read_conf(self.server.conf_path)
+
+            days = None
+            try:
+                if body.get("days") is not None:
+                    days = int(str(body.get("days") or "").strip() or "0")
+            except Exception:
+                days = None
+            if days is not None and days not in (7, 30, 90):
+                days = None
+
+            result = _history_cleanup(self.server, eff, override_days=days)
+
+            # Optional: integrity check (slow) only if explicitly requested.
+            integ = False
+            try:
+                integ = bool(body.get("integrity_check", False))
+            except Exception:
+                integ = False
+            integ_res = None
+            if integ:
+                try:
+                    integ_res = _history_integrity_check(self.server)
+                except Exception:
+                    integ_res = None
+
+            return _json_response(self, 200, {
+                "ok": bool(result.get("ok")),
+                "result": result,
+                "integrity": integ_res,
+                "config_warnings": warnings,
+                "invalid_keys": invalid,
+            }, origin)
 
         # --- Confirmation token cache (shared) ---
         def _confirm_purge(now_ts: float):
@@ -45418,6 +46668,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
 
+            # Persist job metadata into history DB (best-effort)
+            try:
+                _history_job_upsert(self.server, {
+                    "job_id": job_id,
+                    "type": "quick-action",
+                    "action": action,
+                    "title": title,
+                    "simulate": False,
+                    "dry_run": False,
+                    "channel": "",
+                    "running": True,
+                    "done": False,
+                    "rc": None,
+                    "stage": "Starting",
+                    "unit": unit,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "started_at": time.time(),
+                    "finished_at": 0,
+                    "output": "",
+                }, summary=f"{title} (starting)")
+            except Exception:
+                pass
+
             return _json_response(self, 200, {"job_id": job_id}, origin)
 
         # --- Self-update control (dashboard) ---
@@ -45678,6 +46952,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
 
+            # Persist job metadata into history DB (best-effort)
+            try:
+                _history_job_upsert(self.server, {
+                    "job_id": job_id,
+                    "type": "self-update",
+                    "action": "start",
+                    "title": "self-update",
+                    "channel": ch,
+                    "dry_run": bool(dry_run),
+                    "simulate": False,
+                    "running": True,
+                    "done": False,
+                    "rc": None,
+                    "stage": "Starting",
+                    "unit": unit,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "started_at": time.time(),
+                    "finished_at": 0,
+                    "output": "",
+                }, summary=f"self-update ({ch}) starting")
+            except Exception:
+                pass
+
             return _json_response(self, 200, {"job_id": job_id}, origin)
 
         # Backward-compatible synchronous endpoint (no live progress; returns full output).
@@ -45836,6 +47134,7 @@ class Handler(BaseHTTPRequestHandler):
             unit = f"znh-webui-dup-{job_id[:8]}"
             log_path = f"/var/log/zypper-auto/service-logs/webui-dup-{job_id[:10]}.log"
             status_path = f"/var/lib/zypper-auto/webui-dup-{job_id[:10]}.status"
+            title2 = "system update (Rocket)" + (" (dry-run)" if simulate else "")
 
             # Precreate log + status so job recovery can't race before the unit writes anything.
             try:
@@ -45848,13 +47147,18 @@ class Handler(BaseHTTPRequestHandler):
                     f.write("rc=0\n")
                     f.write("stage=starting\n")
                     f.write(f"simulate={1 if simulate else 0}\n")
+                    f.write("action=dup\n")
+                    f.write(f"title={title2}\n")
             except Exception:
                 pass
 
             job = {
                 "job_id": job_id,
                 "type": "system-dup",
+                "action": "dup",
+                "title": title2,
                 "simulate": simulate,
+                "dry_run": bool(simulate),
                 "running": True,
                 "done": False,
                 "rc": None,
@@ -45883,6 +47187,14 @@ class Handler(BaseHTTPRequestHandler):
 
             with lock:
                 jobs[job_id] = job
+
+            server = self.server
+
+            # Persist job metadata into history DB (best-effort)
+            try:
+                _history_job_upsert(server, dict(job), summary=f"{title2} (starting)")
+            except Exception:
+                pass
 
             def worker():
                 # Compose a shell script for the transient unit.
@@ -46137,6 +47449,7 @@ class Handler(BaseHTTPRequestHandler):
                         f.write("\n")
                     os.chmod(script_file, 0o700)
                 except Exception as e:
+                    payload_copy = None
                     with lock:
                         j = jobs.get(job_id)
                         if j:
@@ -46146,6 +47459,30 @@ class Handler(BaseHTTPRequestHandler):
                             j["finished_at"] = time.time()
                             j["stage"] = "Failed"
                             _job_output_append(j, f"[dashboard-api] Failed to write unit script: {e}\n")
+                            try:
+                                payload_copy = dict(j)
+                            except Exception:
+                                payload_copy = None
+
+                    # Best-effort: write failure into status file so recovery/history reflect it even after API restart.
+                    try:
+                        with open(status_path, "w", encoding="utf-8") as f:
+                            f.write("done=1\n")
+                            f.write("rc=1\n")
+                            f.write("stage=failed\n")
+                            f.write(f"simulate={1 if simulate else 0}\n")
+                            f.write("action=dup\n")
+                            f.write(f"title={title2}\n")
+                    except Exception:
+                        pass
+
+                    # Best-effort history upsert
+                    try:
+                        if payload_copy:
+                            _history_job_upsert(server, payload_copy, summary="Failed to write unit script")
+                    except Exception:
+                        pass
+
                     try:
                         if script_file and os.path.exists(script_file):
                             os.remove(script_file)
@@ -46206,6 +47543,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise RuntimeError(f"systemd-run failed rc={p.returncode}")
 
                 except Exception as e:
+                    payload_copy = None
                     with lock:
                         j = jobs.get(job_id)
                         if j:
@@ -46215,6 +47553,30 @@ class Handler(BaseHTTPRequestHandler):
                             j["finished_at"] = time.time()
                             j["stage"] = "Failed"
                             _job_output_append(j, f"\n[dashboard-api] Failed to start update: {e}\n")
+                            try:
+                                payload_copy = dict(j)
+                            except Exception:
+                                payload_copy = None
+
+                    # Best-effort: write failure into status file so recovery/history reflect it even after API restart.
+                    try:
+                        with open(status_path, "w", encoding="utf-8") as f:
+                            f.write("done=1\n")
+                            f.write("rc=1\n")
+                            f.write("stage=failed\n")
+                            f.write(f"simulate={1 if simulate else 0}\n")
+                            f.write("action=dup\n")
+                            f.write(f"title={title2}\n")
+                    except Exception:
+                        pass
+
+                    # Best-effort history upsert
+                    try:
+                        if payload_copy:
+                            _history_job_upsert(server, payload_copy, summary="Failed to start system update")
+                    except Exception:
+                        pass
+
                     try:
                         if script_file and os.path.exists(script_file):
                             os.remove(script_file)
@@ -46352,6 +47714,12 @@ class Handler(BaseHTTPRequestHandler):
                             j["stage"] = "Done" if not simulate else "Dry-run done"
                         else:
                             j["stage"] = "Failed"
+
+                        # Best-effort history upsert
+                        try:
+                            _history_job_upsert(server, dict(j), summary=str(j.get("stage") or ""))
+                        except Exception:
+                            pass
 
 
                 # CLEANUP (best-effort): if the unit script still exists, remove it.
@@ -46642,6 +48010,30 @@ class Handler(BaseHTTPRequestHandler):
                     return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
             except Exception as e:
                 return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
+
+            # Persist job metadata into history DB (best-effort)
+            try:
+                _history_job_upsert(self.server, {
+                    "job_id": job_id,
+                    "type": "snapper",
+                    "action": action,
+                    "title": title,
+                    "simulate": False,
+                    "dry_run": False,
+                    "channel": "",
+                    "running": True,
+                    "done": False,
+                    "rc": None,
+                    "stage": "Starting",
+                    "unit": unit,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "started_at": time.time(),
+                    "finished_at": 0,
+                    "output": "",
+                }, summary=f"{title} (starting)")
+            except Exception:
+                pass
 
             return _json_response(self, 200, {"job_id": job_id}, origin)
 
@@ -47305,6 +48697,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
 
+            # Persist job metadata into history DB (best-effort)
+            try:
+                _history_job_upsert(self.server, {
+                    "job_id": job_id,
+                    "type": "scrub-ghost",
+                    "action": action,
+                    "title": title,
+                    "simulate": False,
+                    "dry_run": False,
+                    "channel": "",
+                    "running": True,
+                    "done": False,
+                    "rc": None,
+                    "stage": "Starting",
+                    "unit": unit,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "started_at": time.time(),
+                    "finished_at": 0,
+                    "output": "",
+                }, summary=f"{title} (starting)")
+            except Exception:
+                pass
+
             return _json_response(self, 200, {"job_id": job_id}, origin)
 
         if path == "/api/scrub/run":
@@ -47531,6 +48947,94 @@ def main():
     httpd.token = token
     httpd.conf_path = args.config
     httpd._znh_log = log
+
+    # --- History DB init ---
+    httpd.history_db_path = HISTORY_DB_PATH_DEFAULT
+    httpd.history_tls = threading.local()
+    httpd.history_lock = threading.Lock()
+    try:
+        _history_db_init(httpd.history_db_path, log=log)
+        log("info", f"History DB ready: {httpd.history_db_path}")
+    except Exception as e:
+        log("warn", f"History DB init failed (non-fatal): {e}")
+        # Disable persistence if init fails.
+        httpd.history_db_path = ""
+
+    def _history_background_worker():
+        # Periodically refresh DB job state from status files so jobs complete
+        # even if the browser never polls.
+        last_cleanup = 0.0
+        last_integrity = 0.0
+        while True:
+            try:
+                time.sleep(4.0)
+
+                if not getattr(httpd, "history_db_path", ""):
+                    continue
+
+                # Refresh running jobs
+                try:
+                    conn = _history_conn(httpd)
+                    if conn:
+                        cur = conn.execute(
+                            "SELECT job_id, job_type FROM jobs WHERE done=0 OR running=1 ORDER BY updated_ts DESC LIMIT 80"
+                        )
+                        rows = cur.fetchall() or []
+                    else:
+                        rows = []
+                except Exception:
+                    rows = []
+
+                for r in rows:
+                    try:
+                        jid = str(r[0] or "").strip()
+                        tp = str(r[1] or "").strip()
+                        payload = None
+                        if tp == "system-dup":
+                            payload = _recover_system_dup_job(jid)
+                        elif tp == "self-update":
+                            payload = _recover_self_update_job(jid)
+                        elif tp == "snapper":
+                            payload = _recover_snapper_job(jid)
+                        elif tp == "scrub-ghost":
+                            payload = _recover_scrub_job(jid)
+                        elif tp == "quick-action":
+                            payload = _recover_quick_job(jid)
+
+                        if payload:
+                            _history_job_upsert(httpd, payload, summary=str(payload.get("stage") or ""))
+                    except Exception:
+                        continue
+
+                # Retention cleanup (hourly)
+                now_ts = time.time()
+                if (now_ts - last_cleanup) > 3600:
+                    try:
+                        eff, _w, _inv = _read_conf(httpd.conf_path)
+                        _history_cleanup(httpd, eff)
+                        last_cleanup = now_ts
+                    except Exception:
+                        last_cleanup = now_ts
+
+                # Integrity check (daily)
+                if (now_ts - last_integrity) > (24 * 3600):
+                    try:
+                        _history_integrity_check(httpd)
+                        last_integrity = now_ts
+                    except Exception:
+                        last_integrity = now_ts
+
+            except Exception:
+                # Never let background worker die.
+                try:
+                    time.sleep(10.0)
+                except Exception:
+                    pass
+
+    try:
+        threading.Thread(target=_history_background_worker, daemon=True).start()
+    except Exception:
+        pass
 
     # Confirmation token cache must be thread-safe (ThreadingHTTPServer).
     httpd.confirm_tokens = {}
