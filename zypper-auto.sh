@@ -2108,6 +2108,7 @@ NO_MENU=false
 
 # Smart Auto-Fix (non-interactive)
 SMART_AUTO_FIX_REQUESTED=false
+SMART_AUTO_FIX_MAX_STEPS=""
 
 # Completion output
 PRINT_COMPLETION=false
@@ -2147,6 +2148,7 @@ Options:
   --force                Apply changes (moves ghost/stale entries to backup dir)
   --delete               Permanently delete ghost entries (implies --force)
   --smart-auto-fix        Smart Auto-Fix (non-interactive): repeatedly scans and applies the next recommended cleanup step until clean
+  --smart-auto-fix-max-steps N  Limit Smart Auto-Fix to N steps (useful for step-by-step WebUI runs; default: 15)
   --backup-dir DIR       Backup directory to move pruned entries into (default: auto)
   --backup-root DIR      Root directory used for automatic backups (default: /var/backups/scrub-ghost)
   --keep-backups N        Keep last N backups under backup root (default: 5; 0 disables rotation)
@@ -2234,6 +2236,7 @@ _arguments -s \
   '--debug[debug logging]' \
   '--log-file=[log file path]:file:_files' \
   '--smart-auto-fix[smart auto-fix (non-interactive)]' \
+  '--smart-auto-fix-max-steps=[limit smart auto-fix to N steps]' \
   '--menu[start interactive menu]' \
   '--rescue[run rescue/chroot wizard (live ISO)]' \
   '--list-backups[list backups]' \
@@ -2264,7 +2267,7 @@ EOF
 _scrub_ghost_complete() {
   local cur
   cur="${COMP_WORDS[COMP_CWORD]}"
-  local opts="--dry-run --force --delete --smart-auto-fix --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help"
+  local opts="--dry-run --force --delete --smart-auto-fix --smart-auto-fix-max-steps --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help"
   COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
 }
 
@@ -3765,6 +3768,11 @@ while [[ $# -gt 0 ]]; do
       SMART_AUTO_FIX_REQUESTED=true
       DRY_RUN=false
       ;;
+    --smart-auto-fix-max-steps)
+      require_arg "$1" "${2-}"
+      shift
+      SMART_AUTO_FIX_MAX_STEPS="$1"
+      ;;
     --backup-dir)
       require_arg "$1" "${2-}"
       shift
@@ -4867,6 +4875,13 @@ smart_auto_fix_noninteractive() {
   set +e
 
   local max_iters=15
+  if [[ -n "${SMART_AUTO_FIX_MAX_STEPS:-}" ]]; then
+    if [[ "$SMART_AUTO_FIX_MAX_STEPS" =~ ^[0-9]+$ ]]; then
+      if [[ "$SMART_AUTO_FIX_MAX_STEPS" -ge 1 && "$SMART_AUTO_FIX_MAX_STEPS" -le 200 ]]; then
+        max_iters="$SMART_AUTO_FIX_MAX_STEPS"
+      fi
+    fi
+  fi
   local iter=1
 
   while (( iter <= max_iters )); do
@@ -4960,7 +4975,11 @@ smart_auto_fix_noninteractive() {
     iter=$((iter + 1))
   done
 
-  warn "Smart Auto-Fix reached max iterations ($max_iters). Re-run if needed."
+  if [[ "$max_iters" -lt 15 ]]; then
+    log "Smart Auto-Fix paused after ${max_iters} step(s) (step limit). Use WebUI Continue/Run again to proceed."
+  else
+    warn "Smart Auto-Fix reached max iterations ($max_iters). Re-run if needed."
+  fi
   return 0
 }
 
@@ -18234,6 +18253,8 @@ generate_dashboard() {
         params: {},
         confirm: null,
         required_phrase: '',
+        last_phrase: '',
+        prefill: null,
         job_id: '',
         running: false,
         poll_timer: null
@@ -18245,6 +18266,8 @@ generate_dashboard() {
         _sg.params = {};
         _sg.confirm = null;
         _sg.required_phrase = '';
+        _sg.last_phrase = '';
+        _sg.prefill = null;
         _sg.job_id = '';
         _sg.running = false;
         if (_sg.poll_timer) {
@@ -18463,6 +18486,48 @@ generate_dashboard() {
         return false;
     }
 
+    function _sgSetFormFromParams(action, p) {
+        // Best-effort: populate the wizard form with already chosen params.
+        // This is used when the in-page panel redirects AUTO into the wizard.
+        p = p || {};
+        function setChecked(id, v) {
+            try { var el = document.getElementById(id); if (el) el.checked = !!v; } catch (e) {}
+        }
+        function setVal(id, v) {
+            try { var el = document.getElementById(id); if (el) el.value = (v == null) ? '' : String(v); } catch (e) {}
+        }
+
+        setVal('sg-action', action || 'auto');
+        setVal('sg-apply-mode', p.apply_mode || 'backup');
+        setVal('sg-keep-backups', (p.keep_backups != null) ? String(p.keep_backups) : '5');
+
+        setChecked('sg-prune-duplicates', !!p.prune_duplicates);
+        setChecked('sg-prune-stale', !!p.prune_stale);
+        setChecked('sg-prune-uninstalled', !!p.prune_uninstalled);
+        setChecked('sg-confirm-uninstalled', !!p.confirm_uninstalled);
+        setChecked('sg-prune-zombies', !!p.prune_zombies);
+
+        setChecked('sg-update-sdboot', !!p.update_sdboot);
+        setChecked('sg-rebuild-grub', !!p.rebuild_grub);
+
+        setChecked('sg-no-remount-rw', !!p.no_remount_rw);
+        setChecked('sg-no-backup', !!p.no_backup);
+        setChecked('sg-no-snapper-backup', !!p.no_snapper_backup);
+        setChecked('sg-no-verify-snapshots', !!p.no_verify_snapshots);
+        setChecked('sg-no-verify-modules', !!p.no_verify_modules);
+
+        setChecked('sg-json', !!p.json_output);
+        setChecked('sg-verbose', !!p.verbose);
+        setChecked('sg-debug', !!p.debug);
+
+        setVal('sg-entries-dir', p.entries_dir || '');
+        setVal('sg-boot-dir', p.boot_dir || '');
+        setVal('sg-backup-root', p.backup_root || '');
+        setVal('sg-backup-dir', p.backup_dir || '');
+        setVal('sg-grub-cfg', p.grub_cfg || '');
+        setVal('sg-log-file', p.log_file || '');
+    }
+
     function _sgRenderConfig() {
         var e = _suEls();
         if (!e.body) return;
@@ -18662,8 +18727,14 @@ generate_dashboard() {
         var actEl = document.getElementById('sg-action');
         if (actEl) actEl.addEventListener('change', _sgSyncActionUi);
 
-        // Initial defaults
-        try { _sgPresetAutoIntoForm(); } catch (e3) {}
+        // Initial defaults / prefill
+        try {
+            if (_sg && _sg.prefill && _sg.prefill.action) {
+                _sgSetFormFromParams(_sg.prefill.action, _sg.prefill.params || {});
+            } else {
+                _sgPresetAutoIntoForm();
+            }
+        } catch (e3) {}
         try { _sgSyncActionUi(); } catch (e4) {}
     }
 
@@ -18746,13 +18817,28 @@ generate_dashboard() {
                 blk.innerHTML = '<div style="color: var(--muted); font-size:0.92rem;">No confirmation required for this action.</div>';
                 return;
             }
+            var extra = '';
+            try {
+                if (String(action || '') === 'auto') {
+                    extra = '<div style="margin-top:8px; color: var(--muted); font-size:0.88rem;">WebUI AUTO runs <strong>one Smart Auto-Fix step per run</strong>. Use <strong>Continue Auto-Fix</strong> after each step to proceed.</div>';
+                }
+            } catch (eX) { extra = ''; }
+
             blk.innerHTML = [
                 '<div class="overlay-kv">',
                 '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Confirmation phrase: <strong>' + _sgEscapeHtml(phrase || 'CONFIRM') + '</strong></div>',
                 '</div>',
                 '<div style="color: var(--muted); font-size:0.92rem;">' + _sgEscapeHtml(hint || 'Type the phrase exactly to proceed.') + '</div>',
-                '<input id="sg-phrase" type="text" placeholder="Type confirmation phrase…" style="margin-top:10px; width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />'
+                '<input id="sg-phrase" type="text" placeholder="Type confirmation phrase…" style="margin-top:10px; width:100%; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);" />',
+                extra
             ].join('\n');
+
+            try {
+                var inp0 = document.getElementById('sg-phrase');
+                if (inp0 && _sg && _sg.last_phrase) {
+                    inp0.value = String(_sg.last_phrase || '');
+                }
+            } catch (eP0) {}
         }
 
         var _confirmInfo = null;
@@ -18801,6 +18887,9 @@ generate_dashboard() {
                 try { tok = String((_confirmInfo && _confirmInfo.confirm_token) ? _confirmInfo.confirm_token : '').trim(); } catch (e2) { tok = ''; }
                 body.confirm_token = tok;
                 body.confirm_phrase = got2;
+
+                // Remember phrase for step-by-step AUTO runs.
+                try { _sg.last_phrase = String(got2 || ''); } catch (e3) {}
             }
 
             function doStartJob() {
@@ -18869,7 +18958,7 @@ generate_dashboard() {
             '  </div>',
             '  <pre class="overlay-pre" id="sg-done-log" style="max-height: 320px;">(no output)</pre>',
             '</div>',
-            '<div style="color: var(--muted); font-size:0.88rem;">Tip: use <strong>Run again</strong> to repeat, or <strong>OK</strong> to close.</div>'
+            '<div style="color: var(--muted); font-size:0.88rem;">Tip: use <strong>' + ((_sg && _sg.action === 'auto') ? 'Continue Auto-Fix' : 'Run again') + '</strong> to repeat, or <strong>OK</strong> to close.</div>'
         ].join('\n');
 
         try {
@@ -18905,7 +18994,9 @@ generate_dashboard() {
         _suSetButtons({ show_cancel: false, show_back: true, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
 
         if (e.back) {
-            e.back.textContent = 'Run again';
+            var isAuto = false;
+            try { isAuto = String(_sg.action || '') === 'auto'; } catch (eA) { isAuto = false; }
+            e.back.textContent = isAuto ? 'Continue Auto-Fix' : 'Run again';
             e.back.onclick = function() {
                 if (_sg.running) return;
                 try { _sgRenderConfirm(_sg.action || 'auto', _sg.params || {}); } catch (eR) { try { _sgRenderConfig(); } catch (eR2) {} }
@@ -19061,6 +19152,18 @@ generate_dashboard() {
         try { _ruReset(); } catch (e1) {}
         try { if (typeof _qaReset === 'function') _qaReset(); } catch (e2) {}
         _sgReset();
+
+        _suShow(true);
+        _sgRenderConfig();
+    }
+
+    function scrubWizardOpenWith(action, params) {
+        try { _suReset(); } catch (e0) {}
+        try { _ruReset(); } catch (e1) {}
+        try { if (typeof _qaReset === 'function') _qaReset(); } catch (e2) {}
+        _sgReset();
+
+        try { _sg.prefill = { action: String(action || 'auto'), params: params || {} }; } catch (e3) { _sg.prefill = null; }
 
         _suShow(true);
         _sgRenderConfig();
@@ -19293,6 +19396,16 @@ generate_dashboard() {
             var mayChange = (effectiveAction === 'apply' || effectiveAction === 'auto' || (String(effectiveAction || '').indexOf('restore-') === 0));
 
             function doRunScrub() {
+                // AUTO step-by-step UX works best in the wizard (typed phrase can be re-used).
+                if (effectiveAction === 'auto') {
+                    try {
+                        if (typeof scrubWizardOpenWith === 'function') {
+                            scrubWizardOpenWith('auto', params);
+                            return;
+                        }
+                    } catch (eWiz) {}
+                }
+
                 var p = null;
                 try { p = scrubRun(effectiveAction, params, confirmAction); } catch (eP) { p = null; }
 
@@ -37939,7 +38052,7 @@ ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --
 
     # scrub-ghost flags (for: zypper-auto-helper scrub-ghost ...)
     local ZNH_SCRUB_GHOST_OPTS
-    ZNH_SCRUB_GHOST_OPTS="--dry-run --force --delete --smart-auto-fix --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h"
+    ZNH_SCRUB_GHOST_OPTS="--dry-run --force --delete --smart-auto-fix --smart-auto-fix-max-steps --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h"
 
     # --- bash completion (system-wide) ---
     local bash_dir bash_file
@@ -38059,7 +38172,7 @@ local -a _znh_snapper_cleanup
 _znh_snapper_cleanup=(all number timeline empty-pre-post)
 
 local -a _znh_scrub_ghost_opts
-_znh_scrub_ghost_opts=(--dry-run --force --delete --smart-auto-fix --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h)
+_znh_scrub_ghost_opts=(--dry-run --force --delete --smart-auto-fix --smart-auto-fix-max-steps --backup-dir --backup-root --keep-backups --entries-dir --boot-dir --rebuild-grub --grub-cfg --update-sdboot --no-remount-rw --json --no-color --verbose --debug --log-file --menu --rescue --list-backups --restore-latest --restore-best --restore-pick --restore-from --clean-restore --restore-anyway --validate-latest --validate-pick --validate-from --no-backup --no-snapper-backup --no-verify-snapshots --no-verify-modules --prune-stale-snapshots --prune-uninstalled --prune-duplicates --prune-zombies --confirm-uninstalled --completion --help -h)
 
 _arguments -C \
   '1:command:->cmds' \
@@ -46042,7 +46155,9 @@ class Handler(BaseHTTPRequestHandler):
                     cmd.append("--no-verify-modules")
 
                 # AUTO == scrub-ghost Smart Auto-Fix (adaptive loop).
+                # WebUI runs this step-by-step (1 step per run) so the user can review output and click Continue.
                 cmd.append("--smart-auto-fix")
+                cmd.extend(["--smart-auto-fix-max-steps", "1"])
 
                 if _scrub_pbool(p, "prune_uninstalled", False):
                     if not _scrub_pbool(p, "confirm_uninstalled", False):

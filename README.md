@@ -1827,8 +1827,10 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** WebUI Settings auto-save no longer fails with `Read-only file system: /etc/zypper-auto.conf` after a config reset (dashboard API unit now allows `/etc` writes so the Settings API can safely rewrite config + create backups).
   - 🧰 **IMPROVED:** CLI completions now include `scrub-ghost` and its flags for `zypper-auto-helper` (bash/zsh/fish). Standalone completions for `scrub-ghost`/`zypper-scrub-ghost` are also installed.
   - 🧠 **CHANGED:** scrub-ghost **AUTO** now maps to **Smart Auto-Fix** (recommended) in the WebUI (in-page panel + wizard) and Dashboard API.
-    - AUTO is an adaptive loop: it re-scans after each step and keeps going until clean.
+    - AUTO is an adaptive loop: it re-scans after each step.
+    - In the WebUI, AUTO runs **step-by-step** (1 step per run) so you can review the log and click **Continue Auto-Fix** after each step.
     - New CLI flag: `scrub-ghost --smart-auto-fix`
+    - New advanced flag: `scrub-ghost --smart-auto-fix-max-steps N`
   - 🧿 **IMPROVED:** Ghost-Scrub Wizard overlay can now be **minimized** during the whole flow (config/confirm/running), not only while the job is running.
   - 🧰 **IMPROVED:** WebUI Settings now does a passive refresh on tab focus/visibility (when there are no unsaved edits), so if you reset config from CLI the dashboard updates indicators like `KERNEL_PURGE_ENABLED` automatically.
   - 🛡️ **IMPROVED:** Snapper system config tuning options (`SNAP_RETENTION_*`) are now treated as **Danger zone** settings in the WebUI (requires Advanced unlock + danger zone unlock + per-setting confirmation phrase).
