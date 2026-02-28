@@ -1829,6 +1829,7 @@ systemctl status zypper-autodownload.service
   - 🧠 **CHANGED:** scrub-ghost **AUTO** now maps to **Smart Auto-Fix** (recommended) in the WebUI (in-page panel + wizard) and Dashboard API.
     - AUTO is an adaptive loop: it re-scans after each step.
     - In the WebUI, AUTO runs **step-by-step** (1 step per run) so you can review the log and click **Continue Auto-Fix** after each step.
+    - WebUI advanced: you can change **AUTO steps/run** (default: 1) in the wizard if you want fewer/more steps per click.
     - New CLI flag: `scrub-ghost --smart-auto-fix`
     - New advanced flag: `scrub-ghost --smart-auto-fix-max-steps N`
   - 🧿 **IMPROVED:** Ghost-Scrub Wizard overlay can now be **minimized** during the whole flow (config/confirm/running), not only while the job is running.

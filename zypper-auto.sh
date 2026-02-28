@@ -18296,11 +18296,20 @@ generate_dashboard() {
             pushFlag('--dry-run');
         } else if (action === 'auto') {
             // AUTO == Smart Auto-Fix (recommended) / adaptive loop.
+            // In the WebUI, this is typically run step-by-step (default 1 step per run).
             pushFlag('--smart-auto-fix');
+            var nSteps = 1;
+            try {
+                nSteps = parseInt(String(params.smart_auto_fix_max_steps || '1'), 10);
+                if (isNaN(nSteps)) nSteps = 1;
+            } catch (eN) { nSteps = 1; }
+            if (nSteps < 1) nSteps = 1;
+            if (nSteps > 15) nSteps = 15;
+            pushKV('--smart-auto-fix-max-steps', String(nSteps));
         } else if (action === 'apply') {
             if (applyMode === 'delete') pushFlag('--delete');
             else pushFlag('--force');
-        } else if (action === 'list-backups') {
+        }
             pushFlag('--list-backups');
         } else if (action === 'validate-latest') {
             pushFlag('--validate-latest');
@@ -18378,6 +18387,7 @@ generate_dashboard() {
 
         setVal('sg-action', 'auto');
         setVal('sg-apply-mode', 'backup');
+        setVal('sg-auto-steps', '1');
 
         setChecked('sg-prune-duplicates', true);
         setChecked('sg-prune-stale', true);
@@ -18432,6 +18442,7 @@ generate_dashboard() {
 
         var p = {
             apply_mode: val('sg-apply-mode') || 'backup',
+            smart_auto_fix_max_steps: pint('sg-auto-steps', 1, 1, 15),
             keep_backups: pint('sg-keep-backups', 5, 0, 50),
 
             prune_duplicates: cb('sg-prune-duplicates', true),
@@ -18499,6 +18510,7 @@ generate_dashboard() {
 
         setVal('sg-action', action || 'auto');
         setVal('sg-apply-mode', p.apply_mode || 'backup');
+        setVal('sg-auto-steps', (p.smart_auto_fix_max_steps != null) ? String(p.smart_auto_fix_max_steps) : '1');
         setVal('sg-keep-backups', (p.keep_backups != null) ? String(p.keep_backups) : '5');
 
         setChecked('sg-prune-duplicates', !!p.prune_duplicates);
@@ -18574,6 +18586,7 @@ generate_dashboard() {
             '    <option value="delete">delete (permanent)</option>',
             '  </select>',
 
+            '  <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);">AUTO steps/run: <input id="sg-auto-steps" type="number" min="1" max="15" step="1" value="1" style="width:90px; padding:6px 8px; border-radius: 12px;" title="Smart Auto-Fix steps per run (WebUI). Default: 1 for interactive step-by-step." /></label>',
             '  <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);">keep backups: <input id="sg-keep-backups" type="number" min="0" max="50" step="1" value="5" style="width:90px; padding:6px 8px; border-radius: 12px;" /></label>',
             '</div>',
 
@@ -18711,16 +18724,35 @@ generate_dashboard() {
             try { act0 = String((document.getElementById('sg-action') || {}).value || 'auto'); } catch (e0) { act0 = 'auto'; }
 
             var modeEl = document.getElementById('sg-apply-mode');
-            if (!modeEl) return;
+            var stepsEl = document.getElementById('sg-auto-steps');
 
             if (act0 === 'auto') {
                 // AUTO == Smart Auto-Fix (backup mode only)
-                try { modeEl.value = 'backup'; } catch (e1) {}
-                try { modeEl.disabled = true; } catch (e2) {}
+                if (modeEl) {
+                    try { modeEl.value = 'backup'; } catch (e1) {}
+                    try { modeEl.disabled = true; } catch (e2) {}
+                }
+                if (stepsEl) {
+                    try { stepsEl.disabled = false; } catch (e3) {}
+                    try {
+                        var v = String(stepsEl.value || '').trim();
+                        if (!v) stepsEl.value = '1';
+                    } catch (e4) {}
+                }
             } else if (act0 === 'scan') {
-                try { modeEl.disabled = true; } catch (e3) {}
+                if (modeEl) {
+                    try { modeEl.disabled = true; } catch (e5) {}
+                }
+                if (stepsEl) {
+                    try { stepsEl.disabled = true; } catch (e6) {}
+                }
             } else {
-                try { modeEl.disabled = false; } catch (e4) {}
+                if (modeEl) {
+                    try { modeEl.disabled = false; } catch (e7) {}
+                }
+                if (stepsEl) {
+                    try { stepsEl.disabled = true; } catch (e8) {}
+                }
             }
         }
 
@@ -18896,7 +18928,9 @@ generate_dashboard() {
                 toast('Starting…', 'scrub-ghost', 'ok');
                 _api('/api/scrub/start', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
                     if (!r || !r.job_id) throw new Error('missing job_id');
-                    _sgPollJob(String(r.job_id), action, 'scrub-ghost');
+                    var jid = String(r.job_id);
+                    try { _sgRenderRunning({ type: 'scrub-ghost', job_id: jid, action: action, title: 'scrub-ghost' }); } catch (eV) {}
+                    _sgPollJob(jid, action, 'scrub-ghost');
                 }).catch(function(err) {
                     var msg = (err && err.message) ? err.message : 'start failed';
                     toast('scrub-ghost failed to start', msg, 'err');
@@ -46155,9 +46189,10 @@ class Handler(BaseHTTPRequestHandler):
                     cmd.append("--no-verify-modules")
 
                 # AUTO == scrub-ghost Smart Auto-Fix (adaptive loop).
-                # WebUI runs this step-by-step (1 step per run) so the user can review output and click Continue.
+                # WebUI defaults to step-by-step (1 step per run), but allow overriding steps per run.
                 cmd.append("--smart-auto-fix")
-                cmd.extend(["--smart-auto-fix-max-steps", "1"])
+                n_steps = _scrub_pint(p, "smart_auto_fix_max_steps", default=1, minv=1, maxv=15)
+                cmd.extend(["--smart-auto-fix-max-steps", str(n_steps)])
 
                 if _scrub_pbool(p, "prune_uninstalled", False):
                     if not _scrub_pbool(p, "confirm_uninstalled", False):
