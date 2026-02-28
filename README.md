@@ -1832,6 +1832,13 @@ systemctl status zypper-autodownload.service
     - WebUI advanced: you can change **AUTO steps/run** (default: 1) in the wizard if you want fewer/more steps per click.
     - New CLI flag: `scrub-ghost --smart-auto-fix`
     - New advanced flag: `scrub-ghost --smart-auto-fix-max-steps N`
+  - 🧿 **NEW:** scrub-ghost **Smart Analyze (WebUI)**
+    - New CLI flag: `scrub-ghost --smart-analyze` (emits a machine-readable JSON analysis + recommendations report)
+    - New Dashboard API endpoint: `POST /api/scrub/smart-analyze`
+    - WebUI Ghost-Scrub Wizard AUTO now shows the **analysis screen first** and displays action buttons (FIX / ALL / K / Show)
+    - Clicking a button runs **only that step** in a background job (no stdin / no hidden non-interactive loop)
+    - Safety: when kernel redundancy is **CRITICAL**, the analysis disables stale snapshot pruning actions (mirrors the CLI guard)
+  - 🐛 **FIXED:** WebUI Ghost-Scrub Wizard **Copy output** button now reliably copies the output tail to clipboard.
   - 🧿 **IMPROVED:** Ghost-Scrub Wizard overlay can now be **minimized** during the whole flow (config/confirm/running), not only while the job is running.
   - 🧰 **IMPROVED:** WebUI Settings now does a passive refresh on tab focus/visibility (when there are no unsaved edits), so if you reset config from CLI the dashboard updates indicators like `KERNEL_PURGE_ENABLED` automatically.
   - 🛡️ **IMPROVED:** Snapper system config tuning options (`SNAP_RETENTION_*`) are now treated as **Danger zone** settings in the WebUI (requires Advanced unlock + danger zone unlock + per-setting confirmation phrase).

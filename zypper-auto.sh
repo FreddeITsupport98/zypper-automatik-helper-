@@ -4883,20 +4883,24 @@ smart_analyze_json() {
   C_RESET=""; C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_DIM=""
 
   local storage_status storage_rc
-  storage_status="$(check_boot_storage_health 2>/dev/null || printf 'Unknown')"
+  storage_status="$(check_boot_storage_health 2>/dev/null)"
   storage_rc=$?
+  if [[ -z "${storage_status:-}" ]]; then storage_status="Unknown"; fi
 
   local redundancy_status redundancy_rc
-  redundancy_status="$(check_kernel_redundancy 2>/dev/null || printf 'Unknown')"
+  redundancy_status="$(check_kernel_redundancy 2>/dev/null)"
   redundancy_rc=$?
+  if [[ -z "${redundancy_status:-}" ]]; then redundancy_status="Unknown"; fi
 
   local def_health def_health_rc
-  def_health="$(check_default_entry_health 2>/dev/null || printf 'N/A')"
+  def_health="$(check_default_entry_health 2>/dev/null)"
   def_health_rc=$?
+  if [[ -z "${def_health:-}" ]]; then def_health="N/A"; fi
 
   local grub_status grub_rc
-  grub_status="$(check_grub_freshness 2>/dev/null || printf 'Unknown')"
+  grub_status="$(check_grub_freshness 2>/dev/null)"
   grub_rc=$?
+  if [[ -z "${grub_status:-}" ]]; then grub_status="Unknown"; fi
 
   # Analyze using a quiet JSON dry-run.
   build_common_flags_minimal
@@ -47358,6 +47362,15 @@ EOF
 then
     chmod 644 "${DASH_API_UNIT}" 2>/dev/null || true
     execute_guarded "systemd daemon-reload (dashboard api unit)" systemctl daemon-reload || true
+
+    # If the Dashboard API is already running, restart it so it picks up newly installed
+    # code immediately (new endpoints like /api/scrub/smart-analyze).
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet zypper-auto-dashboard-api.service 2>/dev/null; then
+            execute_guarded "Restart dashboard API service (reload new endpoints)" systemctl restart zypper-auto-dashboard-api.service || true
+        fi
+    fi
+
     log_success "Dashboard API systemd unit installed: ${DASH_API_UNIT}"
 else
     log_warn "Failed to write dashboard API unit file (non-fatal): ${DASH_API_UNIT}"
