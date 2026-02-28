@@ -4518,13 +4518,23 @@ kver_has_pinned_entry() {
 
 check_default_entry_health() {
   # Checks if GRUB saved_entry points to an existing BLS file.
+  #
+  # IMPORTANT UX:
+  # - "N/A" is confusing in the WebUI. Prefer a clear, meaningful status.
+  # - If GRUB is not present, show "NOT GRUB" (neutral).
+  # - If GRUB exists but saved_entry is missing/unset, show "UNKNOWN" (warning).
   local def_id
   def_id="${GRUB_DEFAULT_ID:-}"
   [[ -z "$def_id" ]] && def_id="$(get_grub_default_id 2>/dev/null || true)"
 
   if [[ -z "$def_id" ]]; then
-    printf '%bN/A%b' "$C_DIM" "$C_RESET"
-    return 0
+    if ! command -v grub2-editenv >/dev/null 2>&1; then
+      printf '%bNOT GRUB%b' "$C_DIM" "$C_RESET"
+      return 0
+    fi
+
+    printf '%bUNKNOWN (saved_entry not set)%b' "$C_YELLOW" "$C_RESET"
+    return 1
   fi
 
   local expected="$ENTRIES_DIR/${def_id}.conf"
@@ -4895,7 +4905,7 @@ smart_analyze_json() {
   local def_health def_health_rc
   def_health="$(check_default_entry_health 2>/dev/null)"
   def_health_rc=$?
-  if [[ -z "${def_health:-}" ]]; then def_health="N/A"; fi
+  if [[ -z "${def_health:-}" ]]; then def_health="Unknown"; fi
 
   local grub_status grub_rc
   grub_status="$(check_grub_freshness 2>/dev/null)"
@@ -11189,6 +11199,76 @@ generate_dashboard() {
         max-height: min(360px, calc(100vh - 420px));
         overflow-y: auto;
     }
+
+    /* Bigger overlay log/report windows (scrub-ghost wizard UX) */
+    .overlay-pre-lg {
+        max-height: min(56vh, calc(100vh - 420px));
+        min-height: 240px;
+    }
+    .overlay-pre-xl {
+        max-height: min(74vh, calc(100vh - 340px));
+        min-height: 360px;
+    }
+
+    /* scrub-ghost Smart Analyze scorecard (WebUI colors like CLI menu) */
+    .sg-score {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.03);
+    }
+    .sg-score-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+    }
+    .sg-score-item {
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.10);
+        background: rgba(0,0,0,0.10);
+        min-height: 54px;
+        display: grid;
+        gap: 6px;
+        align-content: start;
+    }
+    .sg-score-title {
+        font-size: 0.82rem;
+        color: var(--muted);
+        font-weight: 900;
+        letter-spacing: 0.2px;
+        text-transform: uppercase;
+    }
+    .sg-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.12);
+        font-weight: 950;
+        font-size: 0.88rem;
+        line-height: 1.2;
+        width: fit-content;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .sg-badge .dot { font-size: 0.95rem; }
+    .sg-ok { border-color: rgba(34,197,94,0.45); background: rgba(34,197,94,0.10); }
+    .sg-warn { border-color: rgba(250,204,21,0.45); background: rgba(250,204,21,0.12); }
+    .sg-crit { border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.10); }
+    .sg-info { border-color: rgba(96,165,250,0.40); background: rgba(96,165,250,0.10); }
+
+    .sg-actions-box {
+        border: 2px solid rgba(239,68,68,0.65);
+        background: rgba(239,68,68,0.08);
+    }
+    .sg-actions-box.clean {
+        border-color: rgba(34,197,94,0.55);
+        background: rgba(34,197,94,0.08);
+    }
     .overlay-progress {
         display: grid;
         gap: 8px;
@@ -11587,7 +11667,7 @@ generate_dashboard() {
 
       <div style="margin-top: 14px;">
         <div class="stat-label" style="text-transform:none;">Output</div>
-        <pre id="snapper-output" style="max-height: 420px;">(no snapper action run yet)</pre>
+        <pre id="snapper-output" style="max-height: min(70vh, 760px); min-height: 260px;">(no snapper action run yet)</pre>
       </div>
 
       <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.10);">
@@ -11672,7 +11752,7 @@ generate_dashboard() {
 
         <div style="margin-top: 14px;">
           <div class="stat-label" style="text-transform:none;">Output</div>
-          <pre id="scrub-output" style="max-height: 420px;">(no scrub action run yet)</pre>
+          <pre id="scrub-output" style="max-height: min(70vh, 760px); min-height: 260px;">(no scrub action run yet)</pre>
         </div>
       </div>
     </div>
@@ -19037,8 +19117,12 @@ generate_dashboard() {
             '  <div class="overlay-progress-row"><span id="su-stage">Analyzing…</span><span id="su-percent">0%</span></div>',
             '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
             '</div>',
-            '<pre class="overlay-pre" id="sg-smart-report" style="max-height: 52vh; min-height: 260px; width: 100%;">(loading…)</pre>',
-            '<div id="sg-smart-actions" style="margin-top:12px; padding:12px; border-radius: 14px; border: 2px solid rgba(239,68,68,0.65); background: rgba(239,68,68,0.08);">',
+            '<div id="sg-smart-score" class="sg-score" style="margin-top: 12px;">',
+            '  <div style="font-weight:950; margin-bottom:8px;">Status overview</div>',
+            '  <div style="color: var(--muted); font-size:0.88rem;">(loading…)</div>',
+            '</div>',
+            '<pre class="overlay-pre overlay-pre-xl" id="sg-smart-report">(loading…)</pre>',
+            '<div id="sg-smart-actions" class="sg-actions-box" style="margin-top:12px; padding:12px; border-radius: 14px;">',
             '  <div id="sg-smart-actions-title" style="font-weight:950; margin-bottom:8px;">Choose next step</div>',
             '  <div id="sg-smart-actions-row" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;"></div>',
             '  <div id="sg-smart-reco" style="margin-top:10px; color: var(--muted); font-size:0.9rem;"></div>',
@@ -19058,6 +19142,80 @@ generate_dashboard() {
         };
 
         _suUpdateProgress('Analyzing…', 10);
+
+        function _sgRcToCls(rc, text) {
+            var r = 0;
+            try { r = parseInt(rc || 0, 10) || 0; } catch (e0) { r = 0; }
+            var t = '';
+            try { t = String(text || ''); } catch (e1) { t = ''; }
+            var tu = '';
+            try { tu = t.toUpperCase(); } catch (e2) { tu = ''; }
+            if (tu.indexOf('NOT GRUB') !== -1) return 'sg-info';
+            if (r >= 2) return 'sg-crit';
+            if (r === 1) return 'sg-warn';
+            return 'sg-ok';
+        }
+
+        function _sgBadge(text, cls) {
+            var safe = '';
+            try { safe = _sgEscapeHtml(String(text || '')); } catch (e0) { safe = String(text || ''); }
+            return '<span class="sg-badge ' + String(cls || 'sg-info') + '"><span class="dot">●</span><span>' + safe + '</span></span>';
+        }
+
+        function renderScore(data) {
+            var box = document.getElementById('sg-smart-score');
+            if (!box) return;
+
+            var st = {};
+            var counts = {};
+            try { st = (data && data.status) ? data.status : {}; } catch (e0) { st = {}; }
+            try { counts = (data && data.counts) ? data.counts : {}; } catch (e1) { counts = {}; }
+
+            function stItem(title, obj) {
+                obj = obj || {};
+                var txt = '';
+                var rc = 0;
+                try { txt = String(obj.text || ''); } catch (e2) { txt = ''; }
+                try { rc = parseInt(obj.rc || 0, 10) || 0; } catch (e3) { rc = 0; }
+                var cls = _sgRcToCls(rc, txt);
+                return [
+                    '<div class="sg-score-item">',
+                    '  <div class="sg-score-title">' + _sgEscapeHtml(title) + '</div>',
+                    '  ' + _sgBadge(txt || '(unknown)', cls),
+                    '</div>'
+                ].join('\n');
+            }
+
+            function countBadge(label, n) {
+                var v = 0;
+                try { v = parseInt(n || 0, 10) || 0; } catch (e4) { v = 0; }
+                var cls = (v > 0) ? 'sg-warn' : 'sg-ok';
+                return _sgBadge(String(label) + ': ' + String(v), cls);
+            }
+
+            var parts = [];
+            parts.push('<div class="sg-score-grid">');
+            parts.push(stItem('Boot Storage', (st && st.boot_storage) ? st.boot_storage : {}));
+            parts.push(stItem('Boot Redundancy', (st && st.boot_redundancy) ? st.boot_redundancy : {}));
+            parts.push(stItem('Default Entry', (st && st.default_entry) ? st.default_entry : {}));
+            parts.push(stItem('GRUB Config', (st && st.grub_cfg) ? st.grub_cfg : {}));
+
+            // Counts / findings (kept compact)
+            parts.push('<div class="sg-score-item">');
+            parts.push('  <div class="sg-score-title">Findings</div>');
+            parts.push('  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">'
+                + countBadge('ghost', (counts || {}).ghost)
+                + countBadge('dupe', (counts || {}).duplicate)
+                + countBadge('stale', (counts || {}).stale_snapshot)
+                + countBadge('uninstalled', (counts || {}).uninstalled_kernel)
+                + countBadge('orphans', (counts || {}).orphans)
+                + '</div>');
+            parts.push('</div>');
+
+            parts.push('</div>');
+
+            box.innerHTML = '<div style="font-weight:950; margin-bottom:8px;">Status overview</div>' + parts.join('\n');
+        }
 
         function renderButtons(data) {
             var row = document.getElementById('sg-smart-actions-row');
@@ -19084,6 +19242,14 @@ generate_dashboard() {
                 var t = document.getElementById('sg-smart-actions-title');
                 if (t) t.textContent = isClean ? 'No scrub actions required' : 'Choose next step';
             } catch (eT) {}
+
+            // Color the actions box based on clean state.
+            try {
+                var box = document.getElementById('sg-smart-actions');
+                if (box) {
+                    box.classList.toggle('clean', !!isClean);
+                }
+            } catch (eB) {}
 
             if (!acts || !acts.length) {
                 row.innerHTML = '<div style="color: var(--muted);">(no actions)</div>';
@@ -19201,6 +19367,15 @@ generate_dashboard() {
                 if (pre) pre.textContent = report;
             } catch (e3) {}
 
+            // Best-effort: add color highlighting like the CLI menu.
+            try {
+                if (typeof highlightBlock === 'function') {
+                    highlightBlock('sg-smart-report');
+                }
+            } catch (eH) {}
+
+            try { renderScore(data); } catch (eS) {}
+
             try {
                 var reco = document.getElementById('sg-smart-reco');
                 if (reco) {
@@ -19252,7 +19427,7 @@ generate_dashboard() {
             '  <div class="overlay-progress-row"><span id="su-stage">Waiting</span><span id="su-percent">0%</span></div>',
             '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
             '</div>',
-            '<pre class="overlay-pre" id="su-live-log" style="max-height: 280px;">(output will appear here)</pre>',
+            '<pre class="overlay-pre overlay-pre-lg" id="su-live-log">(output will appear here)</pre>',
             '<div style="color: var(--muted); font-size:0.88rem;">You can minimize this window and reopen it from the bottom-right bubble while it runs.</div>'
         ].join('\n');
 
@@ -19404,7 +19579,7 @@ generate_dashboard() {
             '  <div class="overlay-progress-row"><span id="su-stage">Running</span><span id="su-percent">0%</span></div>',
             '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
             '</div>',
-            '<pre class="overlay-pre" id="su-live-log" style="max-height: 320px;">(resuming logs…)</pre>'
+            '<pre class="overlay-pre overlay-pre-lg" id="su-live-log">(resuming logs…)</pre>'
         ].join('\n');
 
         _ruSetHeader('Running', 'In progress', title);
@@ -19424,7 +19599,7 @@ generate_dashboard() {
             '    <div style="font-weight:950; margin-bottom: 8px;">Output (tail)</div>',
             '    <button class="pill" type="button" id="sg-done-copy" style="margin-bottom:8px;">Copy output</button>',
             '  </div>',
-            '  <pre class="overlay-pre" id="sg-done-log" style="max-height: 320px;">(no output)</pre>',
+            '  <pre class="overlay-pre overlay-pre-lg" id="sg-done-log">(no output)</pre>',
             '</div>',
             '<div style="color: var(--muted); font-size:0.88rem;">Tip: use <strong>' + ((_sg && _sg.action === 'auto') ? 'Continue Auto-Fix' : 'Run again') + '</strong> to repeat, or <strong>OK</strong> to close.</div>'
         ].join('\n');
@@ -24618,6 +24793,20 @@ generate_dashboard() {
         html = html.replace(/^\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]*\]/gm, function(m) {
             return '<span class="log-time">' + m + '</span>';
         });
+
+        // scrub-ghost/menu-style status words (uppercase; avoid matching class names)
+        html = html.replace(/\b(HEALTHY|FRESH|CLEAN)\b/g, function(m) {
+            return '<span class="log-success">' + m + '</span>';
+        });
+        html = html.replace(/\b(UNKNOWN|MINIMAL|STALE)\b/g, function(m) {
+            return '<span class="log-warn">' + m + '</span>';
+        });
+        html = html.replace(/\b(BROKEN|MISSING|CRITICAL|CORRUPT)\b/g, function(m) {
+            return '<span class="log-error">' + m + '</span>';
+        });
+
+        // Phrase highlighting
+        html = html.replace(/NOT GRUB/g, '<span class="log-info">NOT GRUB</span>');
 
         // Keywords
         html = html.replace(/\b(error|failed|failure|critical)\b/gi, function(m) {

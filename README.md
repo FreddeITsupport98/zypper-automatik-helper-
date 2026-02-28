@@ -1822,6 +1822,10 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🧿 **IMPROVED:** WebUI scrub-ghost Smart Analyze (AUTO) readability:
+    - Larger log/report windows (stretches much closer to full overlay height)
+    - Colored status overview scorecard (Boot Storage / Redundancy / Default Entry / GRUB config + key counts)
+    - Default Entry no longer shows confusing `N/A` (now reports `NOT GRUB` or `UNKNOWN`)
   - 🧰 **IMPROVED:** WebUI Settings button label now says **“Save / Apply”** to make it clearer that saving immediately applies changes to `/etc/zypper-auto.conf`.
   - 🐛 **FIXED:** WebUI **Factory Reset** now immediately applies the reset config response (so toggles like `KERNEL_PURGE_ENABLED` flip back to defaults instantly) and forces `no-store` caching on Settings API GETs to prevent stale UI values.
   - 🐛 **FIXED:** WebUI Settings auto-save no longer fails with `Read-only file system: /etc/zypper-auto.conf` after a config reset (dashboard API unit now allows `/etc` writes so the Settings API can safely rewrite config + create backups).
