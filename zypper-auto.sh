@@ -4192,14 +4192,15 @@ check_boot_storage_health() {
 
   [[ -z "$usage" ]] && usage=0
 
+  # NOTE: printf uses "%%" to print a literal percent sign.
   if [[ "$usage" -ge 90 ]]; then
-    printf '%bCRITICAL (%s%%%%)%b' "$C_RED" "$usage" "$C_RESET"
+    printf '%bCRITICAL (%s%%)%b' "$C_RED" "$usage" "$C_RESET"
     return 2
   elif [[ "$usage" -ge 75 ]]; then
-    printf '%bWARNING (%s%%%%)%b' "$C_YELLOW" "$usage" "$C_RESET"
+    printf '%bWARNING (%s%%)%b' "$C_YELLOW" "$usage" "$C_RESET"
     return 1
   else
-    printf '%bHEALTHY (%s%%%%)%b' "$C_GREEN" "$usage" "$C_RESET"
+    printf '%bHEALTHY (%s%%)%b' "$C_GREEN" "$usage" "$C_RESET"
     return 0
   fi
 }
@@ -24809,13 +24810,20 @@ generate_dashboard() {
         html = html.replace(/NOT GRUB/g, '<span class="log-info">NOT GRUB</span>');
 
         // Keywords
-        html = html.replace(/\b(error|failed|failure|critical)\b/gi, function(m) {
+        // IMPORTANT: avoid matching inside our own injected markup like:
+        //   <span class="log-success"> ...
+        // because that would corrupt the HTML (and show fragments like: success">...).
+        // We use a fixed-length negative lookbehind to skip "log-" class names.
+        html = html.replace(/\b(failed|failure|critical)\b/gi, function(m) {
             return '<span class="log-error">' + m + '</span>';
         });
-        html = html.replace(/\b(warn|warning)\b/gi, function(m) {
+        html = html.replace(/(?<!log-)\berror\b/gi, function(m) {
+            return '<span class="log-error">' + m + '</span>';
+        });
+        html = html.replace(/(?<!log-)\b(warn|warning)\b/gi, function(m) {
             return '<span class="log-warn">' + m + '</span>';
         });
-        html = html.replace(/\b(success|complete|fixed|repaired|enabled|started)\b/gi, function(m) {
+        html = html.replace(/(?<!log-)\b(success|complete|fixed|repaired|enabled|started)\b/gi, function(m) {
             return '<span class="log-success">' + m + '</span>';
         });
         html = html.replace(/\b(installing|installed|install|removing|removed|cleanup|cleaning)\b/gi, function(m) {
