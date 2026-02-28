@@ -4976,22 +4976,23 @@ smart_analyze_json() {
   fi
 
   local report
-  report="Analysis Results & Recommendations:\n"
-  report+="---------------------------------------------------\n"
-  report+="0. Boot Storage:        ${storage_status}\n"
-  report+="0. Boot Redundancy:     ${redundancy_status}\n"
-  report+="0. Default Entry:       ${def_health}\n"
-  report+="0. GRUB Config:         ${grub_status}\n"
-  report+="1. Ghost Entries:       ${n_ghost}\n"
-  report+="1b. Zombie Initrd:      ${n_zombie}\n"
-  report+="2. Duplicate Entries:   ${n_dupe}\n"
-  report+="3. Stale Snapshots:     ${n_stale}\n"
-  report+="4. Uninstalled Kernels: ${n_uninstall}\n"
-  report+="5. Orphaned Images:     ${orphans}\n"
-  report+="6. Zombie Repair cmds:  ${repair_count}\n"
-  report+="7. Excess Kernels:      ${excess_count}\n"
-  report+="8. Corrupt Kernel RPMs: ${corrupt_pkg_count}\n"
-  report+="---------------------------------------------------\n"
+  # IMPORTANT: build the report with REAL newlines so JSON parsing yields a readable multi-line string.
+  report=$'Analysis Results & Recommendations:\n'
+  report+=$'---------------------------------------------------\n'
+  report+="0. Boot Storage:        ${storage_status}"$'\n'
+  report+="0. Boot Redundancy:     ${redundancy_status}"$'\n'
+  report+="0. Default Entry:       ${def_health}"$'\n'
+  report+="0. GRUB Config:         ${grub_status}"$'\n'
+  report+="1. Ghost Entries:       ${n_ghost}"$'\n'
+  report+="1b. Zombie Initrd:      ${n_zombie}"$'\n'
+  report+="2. Duplicate Entries:   ${n_dupe}"$'\n'
+  report+="3. Stale Snapshots:     ${n_stale}"$'\n'
+  report+="4. Uninstalled Kernels: ${n_uninstall}"$'\n'
+  report+="5. Orphaned Images:     ${orphans}"$'\n'
+  report+="6. Zombie Repair cmds:  ${repair_count}"$'\n'
+  report+="7. Excess Kernels:      ${excess_count}"$'\n'
+  report+="8. Corrupt Kernel RPMs: ${corrupt_pkg_count}"$'\n'
+  report+=$'---------------------------------------------------\n'
 
   # Emit JSON
   printf '{'
@@ -19036,9 +19037,9 @@ generate_dashboard() {
             '  <div class="overlay-progress-row"><span id="su-stage">Analyzing…</span><span id="su-percent">0%</span></div>',
             '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
             '</div>',
-            '<pre class="overlay-pre" id="sg-smart-report" style="max-height: 320px;">(loading…)</pre>',
+            '<pre class="overlay-pre" id="sg-smart-report" style="max-height: 52vh; min-height: 260px; width: 100%;">(loading…)</pre>',
             '<div id="sg-smart-actions" style="margin-top:12px; padding:12px; border-radius: 14px; border: 2px solid rgba(239,68,68,0.65); background: rgba(239,68,68,0.08);">',
-            '  <div style="font-weight:950; margin-bottom:8px;">Choose next step</div>',
+            '  <div id="sg-smart-actions-title" style="font-weight:950; margin-bottom:8px;">Choose next step</div>',
             '  <div id="sg-smart-actions-row" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;"></div>',
             '  <div id="sg-smart-reco" style="margin-top:10px; color: var(--muted); font-size:0.9rem;"></div>',
             '</div>',
@@ -19064,7 +19065,26 @@ generate_dashboard() {
             row.innerHTML = '';
 
             var acts = [];
+            var isClean = false;
+            try { isClean = !!(data && data.clean); } catch (eC0) { isClean = false; }
+
             try { acts = (data && data.actions) ? data.actions : []; } catch (eA) { acts = []; }
+
+            // Adapt to state: hide disabled buttons by default (clean state should not look scary).
+            try {
+                acts = (acts || []).filter(function(a) {
+                    if (!a) return false;
+                    if (String(a.id || '') === 'S') return true; // always keep "Show"
+                    try { return !!a.enabled; } catch (eE) { return true; }
+                });
+            } catch (eF) {}
+
+            // Update the title based on "clean" status.
+            try {
+                var t = document.getElementById('sg-smart-actions-title');
+                if (t) t.textContent = isClean ? 'No scrub actions required' : 'Choose next step';
+            } catch (eT) {}
+
             if (!acts || !acts.length) {
                 row.innerHTML = '<div style="color: var(--muted);">(no actions)</div>';
                 return;
@@ -19160,6 +19180,22 @@ generate_dashboard() {
             }
             if (!report) report = '(no report)';
 
+            // Normalize legacy escape sequences just in case (best-effort).
+            // New servers already return real newlines; this is just for older/cached mixed output.
+            try {
+                report = String(report || '');
+
+                // Convert literal "\\n" sequences into real newlines.
+                report = report.split('\\r\\n').join('\n');
+                report = report.split('\\n').join('\n');
+                report = report.split('\\t').join('\t');
+
+                // Convert double-escaped "\\\\n" sequences too.
+                report = report.split('\\\\r\\\\n').join('\n');
+                report = report.split('\\\\n').join('\n');
+                report = report.split('\\\\t').join('\t');
+            } catch (eN0) {}
+
             try {
                 var pre = document.getElementById('sg-smart-report');
                 if (pre) pre.textContent = report;
@@ -19172,7 +19208,7 @@ generate_dashboard() {
                     try { rec = String((data && data.recommended) ? data.recommended : '').trim(); } catch (eR0) { rec = ''; }
                     var clean = false;
                     try { clean = !!(data && data.clean); } catch (eR1) { clean = false; }
-                    reco.textContent = (clean ? 'System looks clean.' : ('Recommended: ' + (rec || 'FIX')));
+                    reco.textContent = (clean ? 'System looks clean (no scrub actions required).' : ('Recommended: ' + (rec || 'FIX')));
                 }
             } catch (e4) {}
 
