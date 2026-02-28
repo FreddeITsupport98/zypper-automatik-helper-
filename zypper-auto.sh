@@ -18309,7 +18309,7 @@ generate_dashboard() {
         } else if (action === 'apply') {
             if (applyMode === 'delete') pushFlag('--delete');
             else pushFlag('--force');
-        }
+        } else if (action === 'list-backups') {
             pushFlag('--list-backups');
         } else if (action === 'validate-latest') {
             pushFlag('--validate-latest');
