@@ -39,6 +39,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
   - Usage
   - Diagnostics
   - Logging & monitoring
+  - Server history (SQLite)
   - Additional resources
   - Uninstallation
 
@@ -56,6 +57,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [Usage](#usage)
 - [Diagnostics](#diagnostics)
 - [Logging & monitoring](#logging-monitoring)
+- [Server history (SQLite)](#server-history-sqlite)
 - [Additional resources](#additional-resources)
 - [Uninstallation](#uninstallation)
 
@@ -1514,6 +1516,31 @@ It also starts a root-only **Dashboard API** on `127.0.0.1:8766` so the dashboar
 - **Refresh the dashboard from the WebUI** (Quick Actions → “Run: Refresh Dashboard”), which regenerates the root dashboard and then your open tab reloads (the sync worker copies it into your user dashboard directory)
 - **Resume running jobs:** when the WebUI starts a long-running job (Self-update or System Update wizard), the page shows a bottom-right “background job bubble” (spinning indicator) so if you minimize/close the overlay or reload the page, you can click the bubble to reopen the job view and continue watching progress.
 
+<a id="server-history-sqlite"></a>
+##### Server history (SQLite) (Managers tab)
+
+There are 3 ways to view server-side job history. If you are not technical, use **Option 1**.
+
+Option 1 (easiest): WebUI
+- Open the dashboard
+- Open **Managers**
+- Open the **Server (SQLite)** tab
+
+Option 2 (advanced): Dashboard API (JSON)
+- Token file: `/var/lib/zypper-auto/dashboard-api.token`
+- Example:
+  ```bash
+  curl -H "X-ZNH-Token: $(sudo cat /var/lib/zypper-auto/dashboard-api.token)" http://127.0.0.1:8766/api/history/health
+  ```
+
+Option 3 (advanced): open the DB with sqlite3
+- SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
+- Example:
+  ```bash
+  sudo sqlite3 /var/lib/zypper-auto/dashboard-history.sqlite3 \
+    "select job_id, job_type, rc, stage from jobs order by started_ts desc limit 20;"
+  ```
+
 Important: **Browser refresh vs WebUI refresh**
 - Your browser’s reload button (or `Ctrl+R`) only reloads the *already-generated* `status.html`.
 - The dashboard button **Quick Actions → “Run: Refresh Dashboard”** triggers the helper to **regenerate** the dashboard (equivalent to running `sudo zypper-auto-helper --dashboard` (or `zypper-auto-helper --dashboard` when using the installed shell wrapper)), then reloads the page so you see the new content.
@@ -1913,6 +1940,13 @@ systemctl status zypper-autodownload.service
     - Retention is controlled by `WEBUI_HISTORY_RETENTION_DAYS` (7/30/90) + a manual cleanup/integrity action in the Server tab.
     - SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
     - API: `GET /api/history/health`, `GET /api/history/jobs`, `GET /api/history/job`, `GET /api/history/stats`, `POST /api/history/cleanup`
+    - How to view history:
+      - Option 1 (easiest): **WebUI** → open dashboard → **Managers** → **Server (SQLite)** tab.
+      - Option 2 (advanced): query the API directly (requires token header `X-ZNH-Token`):
+        - Token file: `/var/lib/zypper-auto/dashboard-api.token`
+        - Example: `curl -H "X-ZNH-Token: $(sudo cat /var/lib/zypper-auto/dashboard-api.token)" http://127.0.0.1:8766/api/history/health`
+      - Option 3 (advanced): open the SQLite DB directly:
+        - `sudo sqlite3 /var/lib/zypper-auto/dashboard-history.sqlite3 'select job_id, job_type, rc, stage from jobs order by started_ts desc limit 20;'`
   - 📚 **DOCS:** README now includes a dedicated **Boot Entry Scrub (scrub-ghost)** user guide section (workflow, guardrails, WebUI wizard behavior, log locations, and confirmation phrases).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
@@ -2131,6 +2165,7 @@ By default this will:
 - Remove custom hook scripts under `/etc/zypper-auto/hooks` (if present)
 - Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto` (including cleanup audit reports under `cleanup-reports/` and the generated `status.html` dashboard)
 - Remove helper-created backups under `/var/backups/zypper-auto` (boot-entry backups, btrfsmaintenance config backups)
+- Remove server-side Managers history DB (SQLite): `/var/lib/zypper-auto/dashboard-history.sqlite3` (and `-wal` / `-shm`)
 - Remove `/boot/do_purge_kernels` marker (if it was created by the helper)
 - Reload both system and user systemd daemons and clear any "failed" states
 

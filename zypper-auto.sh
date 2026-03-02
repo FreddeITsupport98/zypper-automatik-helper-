@@ -15029,6 +15029,7 @@ generate_dashboard() {
         html.push('</div>');
 
         html.push('<div style="color: var(--muted); font-size:0.9rem; margin-top: 10px;">This is <strong>server-side</strong> job history stored in a local SQLite database by the Dashboard API (persists across reloads/reboots and across browsers). It stores a bounded log tail for search + file paths for full logs.</div>');
+        html.push('<div class="mgr-row" style="margin-top: 10px;"><div class="t">Help: 3 ways to view this SQLite history</div><div class="b">Option 1 (easiest): use this <strong>Server (SQLite)</strong> tab.<br>Option 2 (API): call <code>/api/history/*</code> (example: <code>/api/history/health</code>, <code>/api/history/jobs</code>) with header <code>X-ZNH-Token</code> (token file: <code>/var/lib/zypper-auto/dashboard-api.token</code>).<br>Option 3 (sqlite3): open <code>/var/lib/zypper-auto/dashboard-history.sqlite3</code> with <code>sqlite3</code>.</div></div>');
 
         html.push('<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">');
         html.push('  <label class="pill" style="gap:10px; justify-content:flex-start;">Retention <select id="mgr-srv-retention" style="margin-left:6px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);"><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>');
