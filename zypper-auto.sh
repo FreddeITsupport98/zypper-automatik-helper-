@@ -26619,10 +26619,77 @@ JSON_EOF
     chmod 644 "${out_install_tail_root}" 2>/dev/null || true
 
     # Verify/repair log (tail) for the dashboard 'View: Verify/Repair' tab.
+    # UX: when verification failed (remaining>0), append a best-effort failure summary
+    # so the dashboard explains *why* it failed without requiring users to parse the full log.
     local verify_root_log
     verify_root_log="${LOG_DIR}/service-logs/verify.log"
+
+    local verify_summary_file_dash
+    verify_summary_file_dash="${LOG_DIR}/last-verify-summary.txt"
+
+    local verify_run_id verify_checks verify_remaining
+    verify_run_id=""
+    verify_checks=""
+    verify_remaining="${verify_last_remaining:-0}"
+
+    if [ -f "${verify_summary_file_dash}" ]; then
+        verify_run_id=$(grep -E '^run_id=' "${verify_summary_file_dash}" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
+        verify_checks=$(grep -E '^checks=' "${verify_summary_file_dash}" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
+        verify_remaining=$(grep -E '^remaining=' "${verify_summary_file_dash}" 2>/dev/null | head -n 1 | cut -d= -f2- || echo "${verify_remaining}")
+    fi
+
+    # Normalize
+    if ! [[ "${verify_remaining:-}" =~ ^[0-9]+$ ]]; then
+        verify_remaining="${verify_last_remaining:-0}"
+    fi
+
     if [ -f "${verify_root_log}" ]; then
-        tail -n 260 "${verify_root_log}" 2>/dev/null | write_atomic "${out_verify_tail_root}" 2>/dev/null || true
+        {
+            echo "----- verify.log (tail) -----"
+            tail -n 260 "${verify_root_log}" 2>/dev/null || true
+
+            echo
+            echo "----- Verification summary (dashboard) -----"
+            echo "Log: ${verify_root_log}"
+            if [ -n "${verify_run_id:-}" ]; then
+                echo "Run ID: ${verify_run_id}"
+            fi
+            if [ -n "${verify_checks:-}" ]; then
+                echo "Checks: ${verify_checks}"
+            fi
+            echo "Detected: ${verify_last_detected:-0} | Auto-fixed: ${verify_last_fixed:-0} | Remaining: ${verify_remaining}"
+            echo "Timestamp: ${verify_last_ts:-unknown}"
+
+            if [ "${verify_remaining}" -gt 0 ] 2>/dev/null; then
+                echo
+                echo "Why it failed (best-effort):"
+                echo "Showing the most relevant ERROR/WARN/FAILED lines from the last verify run (helps spot the cause fast)."
+
+                if [ -n "${verify_run_id:-}" ]; then
+                    echo "--- ERROR extract (RUN=${verify_run_id}) ---"
+                    grep -F "[RUN=${verify_run_id}]" "${verify_root_log}" 2>/dev/null \
+                        | grep -E '\\[(ERROR|WARN)\\]|>>> .*failed|✗|FAILED|⚠' 2>/dev/null \
+                        | tail -n 80 || true
+                    echo "--- END ERROR extract ---"
+                else
+                    echo "--- ERROR extract (last 80) ---"
+                    grep -E '\\[(ERROR|WARN)\\]|>>> .*failed|✗|FAILED|⚠' "${verify_root_log}" 2>/dev/null \
+                        | tail -n 80 || true
+                    echo "--- END ERROR extract ---"
+                fi
+
+                echo
+                echo "Common causes to check:"
+                echo "  - systemd user services not enabled (linger disabled)"
+                echo "  - DBus session issues (notifier can't talk to desktop)"
+                echo "  - permission errors (cannot read/write helper files under /var/log or /etc)"
+                echo
+                echo "Tip: the FIRST [ERROR] line is usually the root cause."
+            else
+                echo
+                echo "Verification passed: no remaining issues."
+            fi
+        } | write_atomic "${out_verify_tail_root}" 2>/dev/null || true
     else
         write_atomic "${out_verify_tail_root}" <<<"Verify log not found yet at ${verify_root_log}." 2>/dev/null || true
     fi

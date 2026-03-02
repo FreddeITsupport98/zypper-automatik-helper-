@@ -1555,6 +1555,11 @@ Troubleshooting: **JS health indicator (Live mode / tabs not working)**
 - Option-based verbose mode (no URL needed): set `DASHBOARD_JS_VERBOSE_DEBUG=true` in **Settings** (or in `/etc/zypper-auto.conf`).
 - Practical UI toggle: in **Recent Activity Log → “🧪 JS health (debug)”**, use the button **“Verbose debug: ON/OFF”** to toggle `DASHBOARD_JS_VERBOSE_DEBUG` directly (no need to hunt in Settings).
   - Note: if you also have `?debug=1` in the URL, debug stays on because URL debug is forced.
+
+Screenshot example (Recent Activity Log + JS health debug tools):
+
+![Recent Activity Log (JS health debug + view switching)](icon/Screenshot_20260302_211452.png)
+
 - The **first red error** in DevTools → Console is usually the root cause.
 
 Troubleshooting: **Advanced dashboard debugging toolkit (window.ZNH + Debug HUD + crash logs + mock mode)**
@@ -1899,6 +1904,7 @@ systemctl status zypper-autodownload.service
     - (already existing) WebUI network/API errors occur (with issue-report guidance + diagnostics exporter)
     - Includes quick link buttons: **Post issue** (GitHub Issues) and **Download diagnostics**.
   - 🧰 **IMPROVED:** the **“🧪 JS health (debug)”** panel now includes a **Clear crash log** button to reset the persistent crash log stored in your browser.
+  - 🧰 **IMPROVED:** dashboard **Recent Activity Log → View: Verify/Repair** now appends a small **failure summary** (with extracted ERROR/WARN lines) when verification fails, so it’s easier to see what caused the failure.
   - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
   - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots while keeping the newest snapshots per snapper config.
