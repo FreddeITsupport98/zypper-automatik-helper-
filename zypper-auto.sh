@@ -192,9 +192,11 @@ __znh_dashboard_http_server_py() {
     # - Keep no-cache headers so browsers always refresh.
     cat <<'PY'
 import functools
+import json
 import os
 import sys
-from urllib.parse import unquote, urlparse
+import time
+from urllib.parse import parse_qs, unquote, urlparse
 from http.server import SimpleHTTPRequestHandler
 
 # ThreadingHTTPServer exists on modern Python; fall back to a ThreadingMixIn-based server.
@@ -221,8 +223,22 @@ DENY_NAMES = {
 }
 DENY_SUFFIXES = (".pid", ".err", ".port", ".token", ".env")
 
+# Log stream mapping used by /znh/events/log (Server-Sent Events).
+# These are files that already exist next to status.html.
+LOG_VIEW_FILES = {
+    "live": "dashboard-live.log",
+    "install": "dashboard-install-tail.log",
+    "verify": "dashboard-verify-tail.log",
+    "diag": "dashboard-diag-tail.log",
+    "api": "dashboard-api.log",
+    "journal": "dashboard-journal-tail.log",
+}
+
 
 class SecureHandler(SimpleHTTPRequestHandler):
+    # SSE requires persistent connections; http.server defaults to HTTP/1.0.
+    protocol_version = "HTTP/1.1"
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
@@ -232,6 +248,17 @@ class SecureHandler(SimpleHTTPRequestHandler):
     def list_directory(self, path):
         self.send_error(403, "Forbidden")
         return None
+
+    def do_GET(self):
+        # SSE log streaming endpoint (cuts down on frequent fetch polling).
+        try:
+            req_path = unquote(urlparse(self.path).path or "")
+            if req_path == "/znh/events/log":
+                return self._handle_sse_log_stream()
+        except Exception:
+            pass
+
+        return super().do_GET()
 
     def send_head(self):
         try:
@@ -248,6 +275,139 @@ class SecureHandler(SimpleHTTPRequestHandler):
             pass
 
         return super().send_head()
+
+    def _sse_event(self, name, payload):
+        data = json.dumps(payload or {}, ensure_ascii=False)
+        out = f"event: {name}\n"
+        for ln in (data or "").splitlines() or [""]:
+            out += f"data: {ln}\n"
+        out += "\n"
+        try:
+            self.wfile.write(out.encode("utf-8", errors="replace"))
+            self.wfile.flush()
+        except Exception:
+            raise
+
+    def _sse_keepalive(self):
+        # Comment line = keepalive (ignored by EventSource).
+        try:
+            self.wfile.write(b": keepalive\n\n")
+            self.wfile.flush()
+        except Exception:
+            raise
+
+    def _handle_sse_log_stream(self):
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query or "")
+
+        view = "live"
+        try:
+            view = str((qs.get("view") or ["live"])[0] or "live").strip().lower()
+        except Exception:
+            view = "live"
+        if view not in LOG_VIEW_FILES:
+            view = "live"
+
+        fname = LOG_VIEW_FILES.get(view) or "dashboard-live.log"
+
+        # Resolve path under served directory (must remain within it).
+        root = os.path.abspath(getattr(self, "directory", "."))
+        fpath = os.path.abspath(os.path.join(root, fname))
+        if not (fpath == root or fpath.startswith(root + os.sep)):
+            self.send_error(403, "Forbidden")
+            return
+
+        # Start response
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        # SSE loop
+        max_tail_bytes = 60000
+        max_raw_chars = 200000
+
+        pos = 0
+        last_inode = None
+        last_keep = 0.0
+
+        def _read_tail():
+            if not os.path.exists(fpath):
+                return f"(log file not found yet: {fname})\n", 0, None
+            st = os.stat(fpath)
+            inode = getattr(st, "st_ino", None)
+            size = int(getattr(st, "st_size", 0) or 0)
+            start = max(0, size - max_tail_bytes)
+            with open(fpath, "rb") as f:
+                f.seek(start)
+                raw = f.read() or b""
+                new_pos = f.tell()
+            txt = raw.decode("utf-8", errors="replace")
+            if len(txt) > max_raw_chars:
+                txt = txt[-max_raw_chars:]
+            return txt, int(new_pos), inode
+
+        # Initial reset
+        try:
+            txt0, pos, last_inode = _read_tail()
+            self._sse_event("reset", {"view": view, "text": txt0})
+        except Exception:
+            return
+
+        last_keep = time.time()
+
+        while True:
+            # Lightweight server-side poll. This removes the browser-side fetch() churn,
+            # and the loop is only active while a tab is connected.
+            try:
+                time.sleep(0.35)
+
+                now = time.time()
+                if (now - last_keep) > 12.0:
+                    self._sse_keepalive()
+                    last_keep = now
+
+                if not os.path.exists(fpath):
+                    # No file yet; re-send a small reset occasionally.
+                    if (now - last_keep) > 2.5:
+                        self._sse_event("reset", {"view": view, "text": f"(log file not found yet: {fname})\n"})
+                        last_keep = now
+                    continue
+
+                st = os.stat(fpath)
+                inode = getattr(st, "st_ino", None)
+                size = int(getattr(st, "st_size", 0) or 0)
+
+                rotated = False
+                if last_inode is not None and inode is not None and inode != last_inode:
+                    rotated = True
+                if size < pos:
+                    rotated = True
+
+                if rotated:
+                    txtR, pos, last_inode = _read_tail()
+                    self._sse_event("reset", {"view": view, "text": txtR})
+                    continue
+
+                if size > pos:
+                    with open(fpath, "rb") as f:
+                        f.seek(pos)
+                        raw = f.read() or b""
+                        pos = f.tell()
+
+                    if raw:
+                        chunk = raw.decode("utf-8", errors="replace")
+                        if chunk:
+                            # Bound chunk size
+                            if len(chunk) > max_raw_chars:
+                                chunk = chunk[-max_raw_chars:]
+                            self._sse_event("append", {"view": view, "text": chunk})
+
+            except Exception:
+                # Client disconnected (BrokenPipe / ConnectionReset) or other error.
+                return
 
 
 def main() -> int:
@@ -17202,6 +17362,323 @@ generate_dashboard() {
         });
     }
 
+    // --- Streaming helpers (SSE over fetch) ---
+    // Used for overlay job logs to avoid high-frequency polling.
+    function _znhSseFetchSupported() {
+        try {
+            if (!window.fetch) return false;
+            if (!window.ReadableStream) return false;
+            if (!window.TextDecoder) return false;
+        } catch (e) {
+            return false;
+        }
+        // Only meaningful on served dashboards (http/https). file:// has no API.
+        try {
+            if (!window.location) return false;
+            if (window.location.protocol !== 'http:' && window.location.protocol !== 'https:') return false;
+        } catch (e2) {
+            return false;
+        }
+        return true;
+    }
+
+    function _znhSseParseLineState() {
+        return { event: 'message', data: '' };
+    }
+
+    function _znhSseDispatch(st, cb) {
+        if (!st) return;
+        var ev = String(st.event || 'message');
+        var data = String(st.data || '');
+        if (!data) {
+            try { st.event = 'message'; st.data = ''; } catch (e0) {}
+            return;
+        }
+        // Strip a trailing newline to match EventSource semantics.
+        try {
+            if (data.endsWith('\n')) data = data.slice(0, -1);
+        } catch (e1) {}
+        try { cb(ev, data); } catch (e2) {}
+        try { st.event = 'message'; st.data = ''; } catch (e3) {}
+    }
+
+    function _znhSseFetchStream(url, headers, onEvent, onError) {
+        var ctrl = {
+            abort: null,
+            running: false,
+            connected: false,
+            stop: function() {
+                try {
+                    if (ctrl.abort) ctrl.abort.abort();
+                } catch (e0) {}
+                ctrl.running = false;
+            }
+        };
+
+        if (!_znhSseFetchSupported()) {
+            try { if (onError) onError(new Error('streaming not supported')); } catch (e0) {}
+            return ctrl;
+        }
+
+        var ac = null;
+        try { ac = new AbortController(); } catch (e1) { ac = null; }
+        ctrl.abort = ac;
+        ctrl.running = true;
+
+        function fail(err) {
+            try { ctrl.running = false; } catch (e0) {}
+
+            // If we intentionally aborted the stream, don't treat it as an error.
+            try {
+                if (err && (err.name === 'AbortError' || String(err.message || '').toLowerCase().indexOf('aborted') !== -1)) {
+                    return;
+                }
+            } catch (eA) {}
+
+            try { if (onError) onError(err || new Error('stream failed')); } catch (e1) {}
+        }
+
+        fetch(url, {
+            method: 'GET',
+            headers: headers || {},
+            cache: 'no-store',
+            signal: ac ? ac.signal : undefined
+        }).then(function(resp) {
+            if (!resp || !resp.ok) {
+                var code = resp ? resp.status : 0;
+                var e = new Error('HTTP ' + String(code));
+                try { e.http_status = code; } catch (ee) {}
+                throw e;
+            }
+
+            if (!resp.body || !resp.body.getReader) {
+                throw new Error('no response body stream');
+            }
+
+            ctrl.connected = true;
+
+            var reader = resp.body.getReader();
+            var dec = new TextDecoder('utf-8');
+            var buf = '';
+            var st = _znhSseParseLineState();
+
+            function processLine(line) {
+                // Blank line dispatches the event.
+                if (line === '') {
+                    _znhSseDispatch(st, onEvent);
+                    return;
+                }
+
+                // Comment line
+                if (line.charAt(0) === ':') {
+                    return;
+                }
+
+                if (line.indexOf('event:') === 0) {
+                    try { st.event = String(line.slice(6)).trim() || 'message'; } catch (e0) { st.event = 'message'; }
+                    return;
+                }
+
+                if (line.indexOf('data:') === 0) {
+                    var d = '';
+                    try { d = String(line.slice(5)); } catch (e1) { d = ''; }
+                    // Preserve a newline between multiple data: lines.
+                    try { st.data = String(st.data || '') + d + '\n'; } catch (e2) { st.data = d + '\n'; }
+                    return;
+                }
+            }
+
+            function pump() {
+                return reader.read().then(function(r) {
+                    if (r.done) {
+                        // Flush any pending event.
+                        try { _znhSseDispatch(st, onEvent); } catch (eF) {}
+                        ctrl.running = false;
+                        return;
+                    }
+
+                    var chunk = '';
+                    try { chunk = dec.decode(r.value || new Uint8Array(), { stream: true }); } catch (eD) { chunk = ''; }
+                    if (!chunk) return pump();
+
+                    buf = String(buf || '') + chunk;
+
+                    // Process lines.
+                    var idx = 0;
+                    while (true) {
+                        var nl = buf.indexOf('\n', idx);
+                        if (nl === -1) break;
+                        var line = buf.slice(idx, nl);
+                        if (line.endsWith('\r')) line = line.slice(0, -1);
+                        processLine(line);
+                        idx = nl + 1;
+                    }
+                    buf = buf.slice(idx);
+
+                    return pump();
+                }).catch(function(err) {
+                    fail(err);
+                });
+            }
+
+            return pump();
+        }).catch(function(err) {
+            fail(err);
+        });
+
+        return ctrl;
+    }
+
+    function _znhApiJobStreamStart(jobType, jobId, handlers) {
+        handlers = handlers || {};
+        var st = {
+            ctrl: null,
+            connected: false,
+            stopped: false,
+            stop: function() {
+                st.stopped = true;
+                try { if (st.ctrl && typeof st.ctrl.stop === 'function') st.ctrl.stop(); } catch (e0) {}
+                st.ctrl = null;
+            }
+        };
+
+        if (!_znhSseFetchSupported()) {
+            try { if (handlers.onError) handlers.onError(new Error('streaming not supported')); } catch (e0) {}
+            return st;
+        }
+
+        jobType = String(jobType || '').trim();
+        jobId = String(jobId || '').trim();
+        if (!jobType || !jobId) {
+            try { if (handlers.onError) handlers.onError(new Error('missing jobType/jobId')); } catch (e1) {}
+            return st;
+        }
+
+        function _stopCtrlOnly() {
+            try { if (st.ctrl && typeof st.ctrl.stop === 'function') st.ctrl.stop(); } catch (e0) {}
+            st.ctrl = null;
+        }
+
+        function _startWithToken(tok) {
+            if (st.stopped) return;
+
+            var url = SETTINGS_API_BASE + '/api/events/job?job_type=' + encodeURIComponent(jobType) + '&job_id=' + encodeURIComponent(jobId) + '&ts=' + Date.now();
+            var headers = { 'X-ZNH-Token': tok };
+
+            st.ctrl = _znhSseFetchStream(url, headers, function(evName, dataText) {
+                st.connected = true;
+                var payload = null;
+                try { payload = JSON.parse(String(dataText || '{}')); } catch (eJ) { payload = null; }
+
+                if (evName === 'reset') {
+                    try { if (handlers.onReset) handlers.onReset(payload || {}); } catch (e0) {}
+                } else if (evName === 'append') {
+                    try { if (handlers.onAppend) handlers.onAppend(payload || {}); } catch (e1) {}
+                } else if (evName === 'done') {
+                    try { if (handlers.onDone) handlers.onDone(payload || {}); } catch (e2) {}
+                    try { st.stop(); } catch (e3) {}
+                } else {
+                    // ignore
+                }
+            }, function(err) {
+                // Token caching race: if API restarted and token rotated, retry once.
+                try {
+                    if (err && err.http_status && (err.http_status === 401 || err.http_status === 403) && !st._didRetryAuth) {
+                        st._didRetryAuth = true;
+                        try { _clearTokenCaches(); } catch (e0) {}
+                        try { _stopCtrlOnly(); } catch (e1) {}
+
+                        setTimeout(function() {
+                            if (st.stopped) return;
+                            _fetchToken().then(function(tok2) {
+                                _startWithToken(tok2);
+                            }).catch(function(err2) {
+                                try { if (handlers.onError) handlers.onError(err2 || new Error('token fetch failed')); } catch (e3) {}
+                            });
+                        }, 30);
+                        return;
+                    }
+                } catch (e2) {}
+
+                try { if (handlers.onError) handlers.onError(err || new Error('stream error')); } catch (e3) {}
+            });
+        }
+
+        // Fetch token (with the same caching/repair flow as _api).
+        _fetchToken().then(function(tok) {
+            _startWithToken(tok);
+        }).catch(function(err) {
+            try { if (handlers.onError) handlers.onError(err || new Error('token fetch failed')); } catch (e2) {}
+        });
+
+        return st;
+    }
+
+    function _znhOverlayLogApplyRaw(preId, rawText, opts) {
+        opts = opts || {};
+        var pre = document.getElementById(String(preId || ''));
+        if (!pre) return;
+
+        var atBottom = true;
+        try { atBottom = _nearBottom(pre, 60); } catch (e0) { atBottom = true; }
+
+        var raw = '';
+        try { raw = String(rawText || ''); } catch (e1) { raw = ''; }
+
+        // Keep a raw buffer so append events don't need to reconstruct full strings.
+        try { pre._znh_raw = raw; } catch (e2) {}
+
+        var t = raw;
+        var maxChars = 24000;
+        try {
+            if (opts.maxChars != null) maxChars = parseInt(opts.maxChars, 10) || maxChars;
+        } catch (e3) {}
+
+        try {
+            if (t.length > maxChars) {
+                t = '(output truncated; showing last ' + String(maxChars) + ' chars)\n' + t.slice(t.length - maxChars);
+            }
+        } catch (e4) {}
+
+        try {
+            if (pre._znh_last_text != null && String(pre._znh_last_text) === t) return;
+            pre._znh_last_text = t;
+        } catch (e5) {}
+
+        pre.textContent = t;
+
+        if (atBottom) {
+            try { pre.scrollTop = pre.scrollHeight; } catch (eS) {}
+        }
+
+        if (opts.highlightId) {
+            try {
+                if (typeof highlightBlock === 'function' && t.length <= 12000) {
+                    highlightBlock(String(opts.highlightId));
+                }
+            } catch (eH) {}
+        }
+    }
+
+    function _znhOverlayLogAppend(preId, chunkText, opts) {
+        opts = opts || {};
+        var pre = document.getElementById(String(preId || ''));
+        if (!pre) return;
+
+        var raw = '';
+        try { raw = String(pre._znh_raw || ''); } catch (e0) { raw = ''; }
+        try { raw = raw + String(chunkText || ''); } catch (e1) {}
+
+        // Bound raw buffer too.
+        try {
+            var rawMax = 60000;
+            if (opts.rawMax != null) rawMax = parseInt(opts.rawMax, 10) || rawMax;
+            if (raw.length > rawMax) raw = raw.slice(raw.length - rawMax);
+        } catch (e2) {}
+
+        _znhOverlayLogApplyRaw(preId, raw, opts);
+    }
+
     function _settingsClientLog(level, msg, ctx) {
         // Best-effort: send UI events to the API log so debug level matches the rest of the project.
         // Never throw + never leave unhandled rejections.
@@ -18218,6 +18695,7 @@ generate_dashboard() {
         var pollMaxFailures = 10;
         var pollInFlight = false;
         var lastPct = 0;
+        var _pollFinalOnce = false;
 
         function tick() {
             if (pollInFlight) return;
@@ -18312,13 +18790,114 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 pollInFlight = false;
-                if (_sn.running && jobId) {
+                if (_sn.running && jobId && !_pollFinalOnce) {
                     _sn.poll_timer = setTimeout(tick, 900);
                 }
             });
         }
 
-        tick();
+        var _startedPolling = false;
+        function _startPolling(reason) {
+            if (_startedPolling) return;
+            _startedPolling = true;
+            try {
+                if (_sn.stream && typeof _sn.stream.stop === 'function') {
+                    _sn.stream.stop();
+                }
+            } catch (eS0) {}
+            _sn.stream = null;
+            if (_sn.stream_fallback_timer) {
+                try { clearTimeout(_sn.stream_fallback_timer); } catch (eS1) {}
+                _sn.stream_fallback_timer = null;
+            }
+            try {
+                if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'Snapper: starting polling (' + String(reason || 'fallback') + ')');
+            } catch (eS2) {}
+            tick();
+        }
+
+        // After the stream says "done", do a small bounded set of final polls to fetch the canonical job payload.
+        // This avoids re-entering the full 900ms polling loop.
+        function _finalPoll(reason) {
+            try {
+                if (_sn.stream && typeof _sn.stream.stop === 'function') _sn.stream.stop();
+            } catch (eS0) {}
+            _sn.stream = null;
+            if (_sn.stream_fallback_timer) {
+                try { clearTimeout(_sn.stream_fallback_timer); } catch (eS1) {}
+                _sn.stream_fallback_timer = null;
+            }
+
+            var tries = 0;
+            function once() {
+                tries++;
+                _pollFinalOnce = true;
+                var p = null;
+                try { p = tick(); } catch (e0) { p = null; }
+                if (!p || typeof p.finally !== 'function') {
+                    _pollFinalOnce = false;
+                    return;
+                }
+                p.finally(function() {
+                    _pollFinalOnce = false;
+                    if (_sn.running && jobId && tries < 6) {
+                        setTimeout(once, 350);
+                    } else if (_sn.running && jobId) {
+                        _startPolling(String(reason || 'final-timeout'));
+                    }
+                });
+            }
+            once();
+        }
+
+        // Prefer streaming (SSE-over-fetch)
+        try {
+            if (_sn.stream && typeof _sn.stream.stop === 'function') _sn.stream.stop();
+        } catch (eSS0) {}
+        _sn.stream = null;
+
+        var _snStreamReady = false;
+        try {
+            _sn.stream = _znhApiJobStreamStart('snapper', String(jobId), {
+                onReset: function(p) {
+                    _snStreamReady = true;
+                    if (_sn.stream_fallback_timer) {
+                        try { clearTimeout(_sn.stream_fallback_timer); } catch (eT0) {}
+                        _sn.stream_fallback_timer = null;
+                    }
+                    try { _snUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try { _znhOverlayLogApplyRaw('sn-log', String((p && p.text != null) ? p.text : ''), { maxChars: 24000, rawMax: 60000, highlightId: 'sn-log' }); } catch (e1) {}
+                    try { if (typeof _snapperSetOut === 'function') _snapperSetOut(String((p && p.text != null) ? p.text : '')); } catch (eM0) {}
+                    try { znhTaskUpdateFromJob('snapper-cleanup', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onAppend: function(p) {
+                    _snStreamReady = true;
+                    try { _snUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try {
+                        var txt = String((p && p.text != null) ? p.text : '');
+                        if (txt) _znhOverlayLogAppend('sn-log', txt, { maxChars: 24000, rawMax: 60000 });
+                        if (txt && typeof _snapperSetOut === 'function') _snapperSetOut(String((document.getElementById('sn-log') || {}).textContent || ''));
+                    } catch (e1) {}
+                    try { znhTaskUpdateFromJob('snapper-cleanup', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onDone: function(_pDone) {
+                    _snStreamReady = true;
+                    _finalPoll('stream-done');
+                },
+                onError: function(err) {
+                    // If the stream fails mid-run, fall back to polling.
+                    if (!_sn.running) return;
+                    _startPolling((err && err.message) ? err.message : 'stream-error');
+                }
+            });
+
+            _sn.stream_fallback_timer = setTimeout(function() {
+                if (_snStreamReady) return;
+                _startPolling('stream-timeout');
+            }, 1100);
+        } catch (eSS1) {
+            _startPolling('stream-exception');
+        }
     }
 
     function snapperTaskOpenOverlay(t) {
@@ -18408,6 +18987,14 @@ generate_dashboard() {
         _sn.job_id = '';
         _sn.last_job = null;
         try { _snStopPoll(); } catch (e2) {}
+
+        // Stop streaming (if any)
+        try { if (_sn.stream && typeof _sn.stream.stop === 'function') _sn.stream.stop(); } catch (e2s) {}
+        _sn.stream = null;
+        if (_sn.stream_fallback_timer) {
+            try { clearTimeout(_sn.stream_fallback_timer); } catch (e3s) {}
+            _sn.stream_fallback_timer = null;
+        }
 
         try { _snSetMinBtnVisible(false); } catch (e3) {}
     }
@@ -19001,6 +19588,13 @@ generate_dashboard() {
         if (_sg.poll_timer) {
             try { clearTimeout(_sg.poll_timer); } catch (e) {}
             _sg.poll_timer = null;
+        }
+        // Stop streaming (if any)
+        try { if (_sg.stream && typeof _sg.stream.stop === 'function') _sg.stream.stop(); } catch (e2) {}
+        _sg.stream = null;
+        if (_sg.stream_fallback_timer) {
+            try { clearTimeout(_sg.stream_fallback_timer); } catch (e3) {}
+            _sg.stream_fallback_timer = null;
         }
     }
 
@@ -20151,6 +20745,7 @@ generate_dashboard() {
         var _pollInFlight = false;
         var _pollWarned = false;
         var _lastPct = 0;
+        var _pollFinalOnce = false;
 
         function tick() {
             if (_pollInFlight) return;
@@ -20243,13 +20838,115 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 _pollInFlight = false;
-                if (_sg.running) {
+                if (_sg.running && !_pollFinalOnce) {
                     _sg.poll_timer = setTimeout(tick, 850);
                 }
             });
         }
 
-        tick();
+        var _startedPolling = false;
+        function _startPolling(reason) {
+            if (_startedPolling) return;
+            _startedPolling = true;
+            try {
+                if (_sg.stream && typeof _sg.stream.stop === 'function') {
+                    _sg.stream.stop();
+                }
+            } catch (eS0) {}
+            _sg.stream = null;
+            if (_sg.stream_fallback_timer) {
+                try { clearTimeout(_sg.stream_fallback_timer); } catch (eS1) {}
+                _sg.stream_fallback_timer = null;
+            }
+            try {
+                if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'scrub-ghost: starting polling (' + String(reason || 'fallback') + ')');
+            } catch (eS2) {}
+            tick();
+        }
+
+        // After the stream says "done", do a small bounded set of final polls to fetch the canonical job payload.
+        // This avoids re-entering the full 850ms polling loop.
+        function _finalPoll(reason) {
+            try {
+                if (_sg.stream && typeof _sg.stream.stop === 'function') _sg.stream.stop();
+            } catch (eS0) {}
+            _sg.stream = null;
+            if (_sg.stream_fallback_timer) {
+                try { clearTimeout(_sg.stream_fallback_timer); } catch (eS1) {}
+                _sg.stream_fallback_timer = null;
+            }
+
+            var tries = 0;
+            function once() {
+                tries++;
+                _pollFinalOnce = true;
+                var p = null;
+                try { p = tick(); } catch (e0) { p = null; }
+                if (!p || typeof p.finally !== 'function') {
+                    _pollFinalOnce = false;
+                    return;
+                }
+                p.finally(function() {
+                    _pollFinalOnce = false;
+                    if (_sg.running && tries < 6) {
+                        setTimeout(once, 350);
+                    } else if (_sg.running) {
+                        _startPolling(String(reason || 'final-timeout'));
+                    }
+                });
+            }
+            once();
+        }
+
+        // Prefer streaming (SSE-over-fetch)
+        try {
+            if (_sg.stream && typeof _sg.stream.stop === 'function') _sg.stream.stop();
+        } catch (eSS0) {}
+        _sg.stream = null;
+
+        var _sgStreamReady = false;
+        try {
+            _sg.stream = _znhApiJobStreamStart('scrub-ghost', String(job_id), {
+                onReset: function(p) {
+                    _sgStreamReady = true;
+                    if (_sg.stream_fallback_timer) {
+                        try { clearTimeout(_sg.stream_fallback_timer); } catch (eT0) {}
+                        _sg.stream_fallback_timer = null;
+                    }
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try { _znhOverlayLogApplyRaw('su-live-log', String((p && p.text != null) ? p.text : ''), { maxChars: 24000, rawMax: 60000 }); } catch (e1) {}
+                    // Mirror into in-page scrub-ghost output panel (best-effort)
+                    try { if (typeof _scrubSetOut === 'function') _scrubSetOut(String((p && p.text != null) ? p.text : '')); } catch (eM0) {}
+                    try { znhTaskUpdateFromJob('scrub-ghost', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onAppend: function(p) {
+                    _sgStreamReady = true;
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try {
+                        var txt = String((p && p.text != null) ? p.text : '');
+                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 24000, rawMax: 60000 });
+                        if (txt && typeof _scrubSetOut === 'function') _scrubSetOut(String((document.getElementById('su-live-log') || {}).textContent || ''));
+                    } catch (e1) {}
+                    try { znhTaskUpdateFromJob('scrub-ghost', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onDone: function(_pDone) {
+                    _sgStreamReady = true;
+                    _finalPoll('stream-done');
+                },
+                onError: function(err) {
+                    // If the stream fails mid-run, fall back to polling.
+                    if (!_sg.running) return;
+                    _startPolling((err && err.message) ? err.message : 'stream-error');
+                }
+            });
+
+            _sg.stream_fallback_timer = setTimeout(function() {
+                if (_sgStreamReady) return;
+                _startPolling('stream-timeout');
+            }, 1100);
+        } catch (eSS1) {
+            _startPolling('stream-exception');
+        }
     }
 
     function scrubWizardOpen() {
@@ -21137,6 +21834,13 @@ generate_dashboard() {
             try { clearInterval(_su.poll_timer); } catch (e) {}
             _su.poll_timer = null;
         }
+        // Stop streaming (if any)
+        try { if (_su.stream && typeof _su.stream.stop === 'function') _su.stream.stop(); } catch (e2) {}
+        _su.stream = null;
+        if (_su.stream_fallback_timer) {
+            try { clearTimeout(_su.stream_fallback_timer); } catch (e3) {}
+            _su.stream_fallback_timer = null;
+        }
     }
 
     function _suSetButtons(opts) {
@@ -21786,6 +22490,13 @@ generate_dashboard() {
             try { clearTimeout(_qa.poll_timer); } catch (e) {}
             _qa.poll_timer = null;
         }
+        // Stop streaming (if any)
+        try { if (_qa.stream && typeof _qa.stream.stop === 'function') _qa.stream.stop(); } catch (e2) {}
+        _qa.stream = null;
+        if (_qa.stream_fallback_timer) {
+            try { clearTimeout(_qa.stream_fallback_timer); } catch (e3) {}
+            _qa.stream_fallback_timer = null;
+        }
     }
 
     function _qaSetHeader(mode, stepText, title) {
@@ -22149,6 +22860,7 @@ generate_dashboard() {
         var _pollInFlight = false;
         var _pollWarned = false;
         var _lastPct = 0;
+        var _pollFinalOnce = false;
 
         function tick() {
             if (_pollInFlight) return;
@@ -22225,13 +22937,112 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 _pollInFlight = false;
-                if (_qa.running) {
+                if (_qa.running && !_pollFinalOnce) {
                     _qa.poll_timer = setTimeout(tick, 850);
                 }
             });
         }
 
-        tick();
+        var _startedPolling = false;
+        function _startPolling(reason) {
+            if (_startedPolling) return;
+            _startedPolling = true;
+            try {
+                if (_qa.stream && typeof _qa.stream.stop === 'function') {
+                    _qa.stream.stop();
+                }
+            } catch (eS0) {}
+            _qa.stream = null;
+            if (_qa.stream_fallback_timer) {
+                try { clearTimeout(_qa.stream_fallback_timer); } catch (eS1) {}
+                _qa.stream_fallback_timer = null;
+            }
+            try {
+                if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'Quick Action: starting polling (' + String(reason || 'fallback') + ')');
+            } catch (eS2) {}
+            tick();
+        }
+
+        // After the stream says "done", do a small bounded set of final polls to fetch the canonical job payload.
+        // This avoids re-entering the full 850ms polling loop.
+        function _finalPoll(reason) {
+            try {
+                if (_qa.stream && typeof _qa.stream.stop === 'function') _qa.stream.stop();
+            } catch (eS0) {}
+            _qa.stream = null;
+            if (_qa.stream_fallback_timer) {
+                try { clearTimeout(_qa.stream_fallback_timer); } catch (eS1) {}
+                _qa.stream_fallback_timer = null;
+            }
+
+            var tries = 0;
+            function once() {
+                tries++;
+                _pollFinalOnce = true;
+                var p = null;
+                try { p = tick(); } catch (e0) { p = null; }
+                if (!p || typeof p.finally !== 'function') {
+                    _pollFinalOnce = false;
+                    return;
+                }
+                p.finally(function() {
+                    _pollFinalOnce = false;
+                    if (_qa.running && tries < 6) {
+                        setTimeout(once, 350);
+                    } else if (_qa.running) {
+                        _startPolling(String(reason || 'final-timeout'));
+                    }
+                });
+            }
+            once();
+        }
+
+        // Prefer streaming (SSE-over-fetch)
+        try {
+            if (_qa.stream && typeof _qa.stream.stop === 'function') _qa.stream.stop();
+        } catch (eSS0) {}
+        _qa.stream = null;
+
+        var _qaStreamReady = false;
+        try {
+            _qa.stream = _znhApiJobStreamStart('quick-action', String(job_id), {
+                onReset: function(p) {
+                    _qaStreamReady = true;
+                    if (_qa.stream_fallback_timer) {
+                        try { clearTimeout(_qa.stream_fallback_timer); } catch (eT0) {}
+                        _qa.stream_fallback_timer = null;
+                    }
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try { _znhOverlayLogApplyRaw('su-live-log', String((p && p.text != null) ? p.text : ''), { maxChars: 24000, rawMax: 60000 }); } catch (e1) {}
+                    try { znhTaskUpdateFromJob('quick-action', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onAppend: function(p) {
+                    _qaStreamReady = true;
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try {
+                        var txt = String((p && p.text != null) ? p.text : '');
+                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 24000, rawMax: 60000 });
+                    } catch (e1) {}
+                    try { znhTaskUpdateFromJob('quick-action', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onDone: function(_pDone) {
+                    _qaStreamReady = true;
+                    _finalPoll('stream-done');
+                },
+                onError: function(err) {
+                    // If the stream fails mid-run, fall back to polling.
+                    if (!_qa.running) return;
+                    _startPolling((err && err.message) ? err.message : 'stream-error');
+                }
+            });
+
+            _qa.stream_fallback_timer = setTimeout(function() {
+                if (_qaStreamReady) return;
+                _startPolling('stream-timeout');
+            }, 1100);
+        } catch (eSS1) {
+            _startPolling('stream-exception');
+        }
     }
 
     function _suFetchStableReleaseNotesText() {
@@ -22474,6 +23285,7 @@ generate_dashboard() {
         var _pollInFlight = false;
         var _pollWarned = false;
         var _lastPct = 0;
+        var _pollFinalOnce = false;
 
         function tick() {
             if (_pollInFlight) return;
@@ -22752,15 +23564,125 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 _pollInFlight = false;
-                if (_su.running) {
+                if (_su.running && !_pollFinalOnce) {
                     // Recursive setTimeout avoids request pile-up on slow responses.
                     _su.poll_timer = setTimeout(tick, 650);
                 }
             });
         }
 
-        // First tick immediately; subsequent ticks are scheduled by tick() itself.
-        tick();
+        var _startedPolling = false;
+        function _startPolling(reason) {
+            if (_startedPolling) return;
+            _startedPolling = true;
+            try {
+                if (_su.stream && typeof _su.stream.stop === 'function') {
+                    _su.stream.stop();
+                }
+            } catch (eS0) {}
+            _su.stream = null;
+            if (_su.stream_fallback_timer) {
+                try { clearTimeout(_su.stream_fallback_timer); } catch (eS1) {}
+                _su.stream_fallback_timer = null;
+            }
+            try {
+                if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'Self-update: starting polling (' + String(reason || 'fallback') + ')');
+            } catch (eS2) {}
+            tick();
+        }
+
+        // After the stream says "done", do a small bounded set of final polls to fetch the canonical job payload.
+        // This avoids re-entering the full 650ms polling loop.
+        function _finalPoll(reason) {
+            try {
+                if (_su.stream && typeof _su.stream.stop === 'function') _su.stream.stop();
+            } catch (eS0) {}
+            _su.stream = null;
+            if (_su.stream_fallback_timer) {
+                try { clearTimeout(_su.stream_fallback_timer); } catch (eS1) {}
+                _su.stream_fallback_timer = null;
+            }
+
+            var tries = 0;
+            function once() {
+                tries++;
+                _pollFinalOnce = true;
+                var p = null;
+                try { p = tick(); } catch (e0) { p = null; }
+                if (!p || typeof p.finally !== 'function') {
+                    _pollFinalOnce = false;
+                    return;
+                }
+                p.finally(function() {
+                    _pollFinalOnce = false;
+                    if (_su.running && tries < 6) {
+                        setTimeout(once, 350);
+                    } else if (_su.running) {
+                        _startPolling(String(reason || 'final-timeout'));
+                    }
+                });
+            }
+            once();
+        }
+
+        // Prefer streaming (SSE-over-fetch) to avoid tight polling loops.
+        try {
+            if (_su.stream && typeof _su.stream.stop === 'function') _su.stream.stop();
+        } catch (eSS0) {}
+        _su.stream = null;
+
+        var _suStreamReady = false;
+        try {
+            _su.stream = _znhApiJobStreamStart('self-update', String(job_id), {
+                onReset: function(p) {
+                    _suStreamReady = true;
+                    if (_su.stream_fallback_timer) {
+                        try { clearTimeout(_su.stream_fallback_timer); } catch (eT0) {}
+                        _su.stream_fallback_timer = null;
+                    }
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+
+                    // Include a short header like the polling path does.
+                    var txt0 = '';
+                    try { txt0 = String((p && p.text != null) ? p.text : ''); } catch (eT) { txt0 = ''; }
+                    try {
+                        var lp = (p && p.log_path != null) ? String(p.log_path) : '';
+                        if (lp) {
+                            var hdr = '[webui] Full log: ' + lp + '\n[webui] NOTE: WebUI shows a tail view (latest output).\n\n';
+                            txt0 = hdr + txt0;
+                        }
+                    } catch (eLP) {}
+
+                    try { _znhOverlayLogApplyRaw('su-live-log', txt0, { maxChars: 24000, rawMax: 80000, highlightId: 'su-live-log' }); } catch (e1) {}
+                    try { znhTaskUpdateFromJob('self-update', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onAppend: function(p) {
+                    _suStreamReady = true;
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try {
+                        var txt = String((p && p.text != null) ? p.text : '');
+                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 24000, rawMax: 80000 });
+                    } catch (e1) {}
+                    try { znhTaskUpdateFromJob('self-update', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onDone: function(_pDone) {
+                    _suStreamReady = true;
+                    _finalPoll('stream-done');
+                },
+                onError: function(err) {
+                    // If the stream fails mid-run, fall back to polling.
+                    if (!_su.running) return;
+                    _startPolling((err && err.message) ? err.message : 'stream-error');
+                }
+            });
+
+            _su.stream_fallback_timer = setTimeout(function() {
+                if (_suStreamReady) return;
+                _startPolling('stream-timeout');
+            }, 1100);
+        } catch (eSS1) {
+            _startPolling('stream-exception');
+        }
     }
 
     function selfUpdatePostSuccessInit() {
@@ -23214,6 +24136,13 @@ generate_dashboard() {
         if (_ru.poll_timer) {
             try { clearTimeout(_ru.poll_timer); } catch (e) {}
             _ru.poll_timer = null;
+        }
+        // Stop streaming (if any)
+        try { if (_ru.stream && typeof _ru.stream.stop === 'function') _ru.stream.stop(); } catch (e2) {}
+        _ru.stream = null;
+        if (_ru.stream_fallback_timer) {
+            try { clearTimeout(_ru.stream_fallback_timer); } catch (e3) {}
+            _ru.stream_fallback_timer = null;
         }
     }
 
@@ -23754,6 +24683,7 @@ generate_dashboard() {
         var _pollInFlight = false;
         var _pollWarned = false;
         var _lastPct = 0;
+        var _pollFinalOnce = false;
 
         function tick() {
             if (_pollInFlight) return;
@@ -23967,15 +24897,117 @@ generate_dashboard() {
                 return null;
             }).finally(function() {
                 _pollInFlight = false;
-                if (_ru.running) {
+                if (_ru.running && !_pollFinalOnce) {
                     // Recursive setTimeout avoids request pile-up on slow responses.
                     _ru.poll_timer = setTimeout(tick, 850);
                 }
             });
         }
 
-        // First tick immediately; subsequent ticks are scheduled by tick().
-        tick();
+        var _startedPolling = false;
+        function _startPolling(reason) {
+            if (_startedPolling) return;
+            _startedPolling = true;
+            try {
+                if (_ru.stream && typeof _ru.stream.stop === 'function') {
+                    _ru.stream.stop();
+                }
+            } catch (eS0) {}
+            _ru.stream = null;
+            if (_ru.stream_fallback_timer) {
+                try { clearTimeout(_ru.stream_fallback_timer); } catch (eS1) {}
+                _ru.stream_fallback_timer = null;
+            }
+            try {
+                if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'Rocket: starting polling (' + String(reason || 'fallback') + ')');
+            } catch (eS2) {}
+            tick();
+        }
+
+        // After the stream says "done", do a small bounded set of final polls to fetch the canonical job payload.
+        // This avoids re-entering the full 850ms polling loop.
+        function _finalPoll(reason) {
+            try {
+                if (_ru.stream && typeof _ru.stream.stop === 'function') _ru.stream.stop();
+            } catch (eS0) {}
+            _ru.stream = null;
+            if (_ru.stream_fallback_timer) {
+                try { clearTimeout(_ru.stream_fallback_timer); } catch (eS1) {}
+                _ru.stream_fallback_timer = null;
+            }
+
+            var tries = 0;
+            function once() {
+                tries++;
+                _pollFinalOnce = true;
+                var p = null;
+                try { p = tick(); } catch (e0) { p = null; }
+                if (!p || typeof p.finally !== 'function') {
+                    _pollFinalOnce = false;
+                    return;
+                }
+                p.finally(function() {
+                    _pollFinalOnce = false;
+                    if (_ru.running && tries < 6) {
+                        setTimeout(once, 350);
+                    } else if (_ru.running) {
+                        _startPolling(String(reason || 'final-timeout'));
+                    }
+                });
+            }
+            once();
+        }
+
+        // Prefer streaming (SSE-over-fetch) to avoid 850ms polling loops.
+        try {
+            if (_ru.stream && typeof _ru.stream.stop === 'function') _ru.stream.stop();
+        } catch (eSS0) {}
+        _ru.stream = null;
+
+        var _ruStreamReady = false;
+        try {
+            _ru.stream = _znhApiJobStreamStart('system-dup', String(job_id), {
+                onReset: function(p) {
+                    _ruStreamReady = true;
+                    if (_ru.stream_fallback_timer) {
+                        try { clearTimeout(_ru.stream_fallback_timer); } catch (eT0) {}
+                        _ru.stream_fallback_timer = null;
+                    }
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try { _znhOverlayLogApplyRaw('su-live-log', String((p && p.text != null) ? p.text : ''), { maxChars: 24000, rawMax: 60000, highlightId: 'su-live-log' }); } catch (e1) {}
+                    try { znhTaskUpdateFromJob('system-update', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onAppend: function(p) {
+                    _ruStreamReady = true;
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
+                    try {
+                        var txt = String((p && p.text != null) ? p.text : '');
+                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 24000, rawMax: 60000 });
+                    } catch (e1) {}
+                    try { znhTaskUpdateFromJob('system-update', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
+                },
+                onDone: function(_pDone) {
+                    _ruStreamReady = true;
+                    // Fetch canonical final payload (includes restart check + conflict detection).
+                    _finalPoll('stream-done');
+                },
+                onError: function(err) {
+                    // If the stream fails mid-run, fall back to polling.
+                    if (!_ru.running) return;
+                    _startPolling((err && err.message) ? err.message : 'stream-error');
+                }
+            });
+
+            // Fallback: if we didn't connect quickly, start polling.
+            _ru.stream_fallback_timer = setTimeout(function() {
+                if (_ruStreamReady) return;
+                _startPolling('stream-timeout');
+            }, 1100);
+
+            // If streaming isn't supported, _znhApiJobStreamStart triggers onError; keep fallback timer short.
+        } catch (eSS1) {
+            _startPolling('stream-exception');
+        }
     }
 
     function rocketUpdateWizardOpen(arg) {
@@ -25705,6 +26737,9 @@ generate_dashboard() {
                 pollDownloaderStatus();
                 pollPerf();
                 pollRecentActivityLog();
+                try { _znhRecentLogStreamEnsure(true); } catch (eSSE) {}
+            } else {
+                try { _znhRecentLogStreamStop(); } catch (eSSE2) {}
             }
         });
     })();
@@ -26352,8 +27387,159 @@ generate_dashboard() {
         updateJumpButton('log-content', 'recent-log-wrap');
         _updateLogTabsUI();
 
-        // Fetch immediately even if live mode is off (useful for click-to-view).
-        pollRecentActivityLog(true);
+        // Prefer SSE stream when Live mode is on; fallback to a one-shot fetch.
+        var usedStream = false;
+        try { usedStream = _znhRecentLogStreamEnsure(true); } catch (eSSE0) { usedStream = false; }
+        if (!usedStream) {
+            // Fetch immediately even if live mode is off (useful for click-to-view).
+            pollRecentActivityLog(true);
+        }
+    }
+
+    // --- Recent Activity Log SSE stream (reduces fetch() polling) ---
+    var _znhRecentLogStream = {
+        es: null,
+        view: '',
+        raw: '',
+        had_error: false
+    };
+
+    function _znhRecentLogStreamIsActive() {
+        try {
+            return !!(_znhRecentLogStream.es && _znhRecentLogStream.es.readyState === 1);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _znhRecentLogStreamStop() {
+        try {
+            if (_znhRecentLogStream.es) {
+                try { _znhRecentLogStream.es.close(); } catch (e0) {}
+            }
+        } catch (e) {}
+        _znhRecentLogStream.es = null;
+        _znhRecentLogStream.view = '';
+        _znhRecentLogStream.raw = '';
+    }
+
+    function _znhRecentLogStreamApplyRaw(rawText) {
+        // Bound raw buffer so we never grow unbounded.
+        try {
+            var maxChars = 200000;
+            if (rawText && rawText.length > maxChars) {
+                rawText = rawText.slice(rawText.length - maxChars);
+            }
+        } catch (eB) {}
+
+        var tailed = tailLines(rawText || '', 220);
+        if (tailed === _lastLiveLog) return;
+
+        var prev = _lastLiveLog;
+        _lastLiveLog = tailed;
+
+        var el = document.getElementById('log-content');
+        if (!el) return;
+
+        var nearBottom = _nearBottom(el, 80);
+
+        if (!nearBottom && !_logAutoScrollOnce) {
+            _pendingLogText = tailed;
+            _pendingLogView = logView;
+            updateJumpButton('log-content', 'recent-log-wrap');
+            return;
+        }
+
+        _pendingLogText = '';
+        _pendingLogView = '';
+
+        var doHighlight = (logView !== 'live');
+        if (!doHighlight && prev && tailed.indexOf(prev) === 0) {
+            var diff = tailed.slice(prev.length);
+            if (diff) {
+                try { el.appendChild(document.createTextNode(diff)); } catch (e0) { el.textContent = tailed; }
+            }
+        } else {
+            el.textContent = tailed;
+        }
+
+        if (doHighlight) {
+            highlightBlock('log-content');
+        }
+
+        if (nearBottom || _logAutoScrollOnce) {
+            el.scrollTop = el.scrollHeight;
+            _logAutoScrollOnce = false;
+        }
+        updateJumpButton('log-content', 'recent-log-wrap');
+    }
+
+    function _znhRecentLogStreamEnsure(forceRestart) {
+        // Only stream when Live mode is enabled.
+        if (!liveEnabled) {
+            _znhRecentLogStreamStop();
+            return false;
+        }
+
+        // EventSource isn't supported in all contexts; fall back to polling.
+        if (typeof window.EventSource !== 'function') {
+            _znhRecentLogStreamStop();
+            return false;
+        }
+
+        if (!forceRestart && _znhRecentLogStream.es && _znhRecentLogStream.view === logView) {
+            return true;
+        }
+
+        _znhRecentLogStreamStop();
+
+        var url = '/znh/events/log?view=' + encodeURIComponent(String(logView || 'live')) + '&ts=' + Date.now();
+        var es = null;
+        try {
+            es = new window.EventSource(url);
+        } catch (e0) {
+            es = null;
+        }
+        if (!es) return false;
+
+        _znhRecentLogStream.es = es;
+        _znhRecentLogStream.view = logView;
+        _znhRecentLogStream.raw = '';
+        _znhRecentLogStream.had_error = false;
+
+        es.addEventListener('reset', function(ev) {
+            try {
+                var payload = null;
+                try { payload = JSON.parse(String((ev && ev.data) ? ev.data : '{}')); } catch (eJ) { payload = null; }
+                var txt = payload && payload.text != null ? String(payload.text) : '';
+                _znhRecentLogStream.raw = txt;
+                _znhRecentLogStreamApplyRaw(_znhRecentLogStream.raw);
+            } catch (e2) {
+                // ignore
+            }
+        });
+
+        es.addEventListener('append', function(ev) {
+            try {
+                var payload = null;
+                try { payload = JSON.parse(String((ev && ev.data) ? ev.data : '{}')); } catch (eJ) { payload = null; }
+                var txt = payload && payload.text != null ? String(payload.text) : '';
+                if (!txt) return;
+                _znhRecentLogStream.raw = String(_znhRecentLogStream.raw || '') + txt;
+                _znhRecentLogStreamApplyRaw(_znhRecentLogStream.raw);
+            } catch (e2) {
+                // ignore
+            }
+        });
+
+        es.onerror = function() {
+            // Fall back to polling on stream errors. We don't spam a toast here.
+            // The JS health panel + console will show the root error if needed.
+            try { _znhRecentLogStream.had_error = true; } catch (e0) {}
+            try { _znhRecentLogStreamStop(); } catch (e1) {}
+        };
+
+        return true;
     }
 
     // Wire log view tabs
@@ -26369,6 +27555,14 @@ generate_dashboard() {
     try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'wired log tabs'); } catch (e) {}
 
     function pollRecentActivityLog(force) {
+        // Prefer SSE stream when available (Live mode only).
+        try { _znhRecentLogStreamEnsure(false); } catch (eSSE) {}
+        try {
+            if (_znhRecentLogStreamIsActive()) {
+                return Promise.resolve(null);
+            }
+        } catch (eSSE2) {}
+
         if (!liveEnabled && !force) return Promise.resolve(null);
         if (!force && _pollLogInFlight) return Promise.resolve(null);
         _pollLogInFlight = true;
@@ -26521,6 +27715,7 @@ generate_dashboard() {
     pollLive();
     pollDownloaderStatus();
     pollPerf(true);
+    try { _znhRecentLogStreamEnsure(false); } catch (eSSE0) {}
     pollRecentActivityLog();
     pollDashboardMeta();
 
@@ -45012,14 +46207,372 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, and history endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/"):
+        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, history, and streaming endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/") or path.startswith("/api/events/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
                 except Exception:
                     pass
                 return _json_response(self, 401, {"error": "unauthorized"}, origin)
+
+        # --- Job log streaming (SSE over fetch) ---
+        # NOTE: Browsers cannot use native EventSource here because it cannot send the required
+        # X-ZNH-Token header. The WebUI uses fetch() with a streaming body and parses SSE frames.
+        if path == "/api/events/job":
+            job_type = ""
+            job_id = ""
+            try:
+                job_type = str((qs.get("job_type") or qs.get("type") or [""])[0]).strip()
+            except Exception:
+                job_type = ""
+            try:
+                job_id = str((qs.get("job_id") or [""])[0]).strip()
+            except Exception:
+                job_id = ""
+
+            if not job_type:
+                return _json_response(self, 400, {"error": "job_type required"}, origin)
+            if not job_id:
+                return _json_response(self, 400, {"error": "job_id required"}, origin)
+
+            # token_urlsafe() uses [A-Za-z0-9_-]. Reject anything else.
+            if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", job_id or ""):
+                return _json_response(self, 400, {"error": "invalid job_id"}, origin)
+
+            # Allowlist supported job types.
+            if job_type not in ("system-dup", "self-update", "quick-action", "scrub-ghost", "snapper"):
+                return _json_response(self, 400, {"error": f"unsupported job_type: {job_type}"}, origin)
+
+            # Resolve paths deterministically from job_id.
+            unit = ""
+            log_path = ""
+            status_path = ""
+            try:
+                if job_type == "system-dup":
+                    unit, log_path, status_path = _dup_paths(job_id)
+                elif job_type == "self-update":
+                    unit, log_path, status_path, _ = _su_paths(job_id)
+                elif job_type == "quick-action":
+                    unit, log_path, status_path, _ = _quick_paths(job_id)
+                elif job_type == "scrub-ghost":
+                    unit, log_path, status_path, _ = _scrub_paths(job_id)
+                elif job_type == "snapper":
+                    unit, log_path, status_path, _ = _snapper_paths(job_id)
+            except Exception:
+                unit = ""
+                log_path = ""
+                status_path = ""
+
+            if not log_path or not status_path:
+                return _json_response(self, 500, {"error": "could not resolve job paths"}, origin)
+
+            # SSE headers
+            self.send_response(200)
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            def _sse_write(ev: str, payload: dict) -> bool:
+                try:
+                    data = json.dumps(payload, ensure_ascii=False)
+                    msg = f"event: {ev}\n" + f"data: {data}\n\n"
+                    self.wfile.write(msg.encode("utf-8", errors="replace"))
+                    try:
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return True
+                except (BrokenPipeError, ConnectionResetError):
+                    return False
+                except Exception:
+                    return False
+
+            def _sse_keepalive() -> bool:
+                try:
+                    self.wfile.write(f": keepalive {time.time()}\n\n".encode("utf-8", errors="replace"))
+                    try:
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return True
+                except (BrokenPipeError, ConnectionResetError):
+                    return False
+                except Exception:
+                    return False
+
+            def _status_done_rc() -> tuple[bool, int | None, str]:
+                done0 = False
+                rc0 = None
+                stage0 = ""
+                try:
+                    if os.path.exists(status_path):
+                        st = _read_kv_status(status_path)
+                        done0 = str(st.get("done", "")).strip() in ("1", "true", "yes")
+                        stage0 = str(st.get("stage", "") or "")
+                        if done0:
+                            try:
+                                rc0 = int(str(st.get("rc", "1") or "1"))
+                            except Exception:
+                                rc0 = 1
+                except Exception:
+                    done0 = False
+                    rc0 = None
+                    stage0 = ""
+                return bool(done0), rc0, stage0
+
+            def _normalize_stage(s: str) -> str:
+                try:
+                    raw = str(s or "").strip()
+                except Exception:
+                    raw = ""
+                if not raw:
+                    return "Running"
+                low = raw.lower()
+                if low in ("starting", "start"):
+                    return "Starting"
+                if low in ("running", "run"):
+                    return "Running"
+                if low in ("done", "complete", "completed"):
+                    return "Done"
+                if low in ("failed", "fail", "error"):
+                    return "Failed"
+                if "time" in low and "out" in low:
+                    return "Timed out"
+                if low == "waiting-for-lock":
+                    return "Waiting for lock"
+                return raw
+
+            # Best-effort initial tail
+            try:
+                max_tail = JOB_OUTPUT_TAIL_CHARS
+            except Exception:
+                max_tail = 40_000
+
+            tail_txt = ""
+            offset = 0
+            try:
+                if os.path.exists(log_path):
+                    with open(log_path, "rb") as f:
+                        f.seek(0, os.SEEK_END)
+                        size = f.tell()
+                        start = max(0, size - int(max_tail))
+                        offset = size
+                        f.seek(start)
+                        data = f.read()
+                    tail_txt = data.decode("utf-8", errors="replace")
+            except Exception:
+                tail_txt = ""
+                offset = 0
+
+            # Track stage/progress across streamed chunks.
+            stg = "Starting"
+            pct = 0
+            try:
+                # Prefer status-based stage immediately.
+                done0, rc0, stage0 = _status_done_rc()
+                if stage0:
+                    stg = _normalize_stage(stage0)
+                    if done0 and rc0 == 0:
+                        stg = "Done"
+                    elif done0 and rc0 is not None and rc0 != 0:
+                        stg = "Failed"
+                if done0:
+                    pct = 100
+                elif stg.lower().startswith("starting"):
+                    pct = 5
+                elif "wait" in stg.lower():
+                    pct = 10
+                else:
+                    pct = 25
+            except Exception:
+                stg = "Starting"
+                pct = 0
+
+            # Seed progress parser from the initial tail for types that support it.
+            try:
+                jtmp = {"stage": stg, "progress": int(pct)}
+                if job_type == "system-dup":
+                    for ln in (tail_txt or "").splitlines(True):
+                        _job_update_progress_dup(jtmp, ln)
+                elif job_type == "self-update":
+                    for ln in (tail_txt or "").splitlines(True):
+                        _job_update_progress(jtmp, ln)
+                stg = str(jtmp.get("stage") or stg)
+                pct = int(jtmp.get("progress") or pct)
+            except Exception:
+                pass
+
+            # Never show 100% until done.
+            try:
+                done0, _rc0, _stage0 = _status_done_rc()
+                if not done0 and pct >= 100:
+                    pct = 99
+                    if str(stg or "").lower() in ("done", "dry-run done", "up-to-date"):
+                        stg = "Finishing…"
+            except Exception:
+                pass
+
+            # Pretty-print zypper --xmlout stream for Rocket/system-dup.
+            tail_send = tail_txt
+            try:
+                if job_type == "system-dup":
+                    tail_send = _zypper_xml_pretty(tail_txt)
+            except Exception:
+                tail_send = tail_txt
+
+            if not _sse_write(
+                "reset",
+                {
+                    "ts": time.time(),
+                    "job_type": job_type,
+                    "job_id": job_id,
+                    "unit": unit,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "stage": stg,
+                    "progress": int(pct),
+                    "running": True,
+                    "done": False,
+                    "rc": None,
+                    "text": tail_send or "",
+                },
+            ):
+                return
+
+            last_keepalive = time.time()
+            start_ts = time.time()
+
+            while True:
+                # Keepalive (helps proxies + avoids stale connections)
+                try:
+                    if (time.time() - last_keepalive) > 15.0:
+                        if not _sse_keepalive():
+                            return
+                        last_keepalive = time.time()
+                except Exception:
+                    pass
+
+                # Stop after a long time (safety); overlays will fall back to polling if needed.
+                try:
+                    if (time.time() - start_ts) > (6 * 3600):
+                        _sse_write("done", {"ts": time.time(), "job_type": job_type, "job_id": job_id, "done": True, "rc": 124, "stage": "Timed out", "progress": 100, "text": ""})
+                        return
+                except Exception:
+                    pass
+
+                # Append new log bytes
+                chunk = ""
+                try:
+                    if os.path.exists(log_path):
+                        with open(log_path, "rb") as f:
+                            try:
+                                f.seek(int(offset))
+                            except Exception:
+                                f.seek(0)
+                            data2 = f.read(64 * 1024)
+                            try:
+                                offset = f.tell()
+                            except Exception:
+                                offset = int(offset)
+                        chunk = data2.decode("utf-8", errors="replace") if data2 else ""
+                except Exception:
+                    chunk = ""
+
+                if chunk:
+                    # Progress parsing (use raw chunk for xml percent parsing).
+                    try:
+                        jtmp2 = {"stage": stg, "progress": int(pct)}
+                        if job_type == "system-dup":
+                            for ln in chunk.splitlines(True):
+                                _job_update_progress_dup(jtmp2, ln)
+                        elif job_type == "self-update":
+                            for ln in chunk.splitlines(True):
+                                _job_update_progress(jtmp2, ln)
+                        stg = str(jtmp2.get("stage") or stg)
+                        pct = int(jtmp2.get("progress") or pct)
+                    except Exception:
+                        pass
+
+                    # Status-file stage may be more authoritative for some job types.
+                    try:
+                        done_s, rc_s, stage_s = _status_done_rc()
+                        if stage_s:
+                            stg = _normalize_stage(stage_s)
+                        if done_s:
+                            pct = 100
+                            if rc_s == 0:
+                                stg = "Done"
+                            elif rc_s is not None and rc_s != 0:
+                                stg = "Failed"
+                    except Exception:
+                        pass
+
+                    # Never show 100% until done.
+                    try:
+                        done_s2, _rc_s2, _stage_s2 = _status_done_rc()
+                        if not done_s2 and pct >= 100:
+                            pct = 99
+                            if str(stg or "").lower() in ("done", "dry-run done", "up-to-date"):
+                                stg = "Finishing…"
+                    except Exception:
+                        pass
+
+                    send_txt = chunk
+                    try:
+                        if job_type == "system-dup":
+                            send_txt = _zypper_xml_pretty(chunk)
+                    except Exception:
+                        send_txt = chunk
+
+                    if not _sse_write(
+                        "append",
+                        {
+                            "ts": time.time(),
+                            "job_type": job_type,
+                            "job_id": job_id,
+                            "stage": stg,
+                            "progress": int(pct),
+                            "done": False,
+                            "rc": None,
+                            "text": send_txt or "",
+                        },
+                    ):
+                        return
+
+                # Done?
+                done, rc, stage_s = _status_done_rc()
+                if done:
+                    st_done = "Done" if (rc == 0) else "Failed"
+                    if stage_s:
+                        st_done = _normalize_stage(stage_s)
+                        if rc == 0:
+                            st_done = "Done"
+                        elif rc is not None and rc != 0:
+                            st_done = "Failed"
+
+                    _sse_write(
+                        "done",
+                        {
+                            "ts": time.time(),
+                            "job_type": job_type,
+                            "job_id": job_id,
+                            "stage": st_done,
+                            "progress": 100,
+                            "running": False,
+                            "done": True,
+                            "rc": rc,
+                            "text": "",
+                        },
+                    )
+                    return
+
+                time.sleep(0.35)
 
         def _statvfs_usage(path0: str) -> dict:
             p = str(path0 or "").strip()

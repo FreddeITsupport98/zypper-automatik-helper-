@@ -1904,6 +1904,14 @@ systemctl status zypper-autodownload.service
     - (already existing) WebUI network/API errors occur (with issue-report guidance + diagnostics exporter)
     - Includes quick link buttons: **Post issue** (GitHub Issues) and **Download diagnostics**.
   - 🧰 **IMPROVED:** the **“🧪 JS health (debug)”** panel now includes a **Clear crash log** button to reset the persistent crash log stored in your browser.
+  - 🧵 **IMPROVED:** dashboard Recent Activity Log now uses **SSE (Server-Sent Events)** for live log updates when opened via `--dash-open` (Live mode), reducing fetch/polling churn and CPU usage (with automatic fallback to polling).
+  - 🧵 **IMPROVED:** WebUI overlay job log viewers now prefer **push streaming** (SSE-over-`fetch()` with auth headers) instead of 650–900ms polling loops:
+    - Rocket / system update (`system-dup`)
+    - Self-update
+    - Quick Actions
+    - scrub-ghost
+    - Snapper cleanup
+    - Fallback: if streaming isn’t supported or the stream errors, the existing polling logic is used automatically. On completion, the UI does a small bounded final fetch to show canonical results.
   - 🧰 **IMPROVED:** dashboard **Recent Activity Log → View: Verify/Repair** now appends a small **failure summary** (with extracted ERROR/WARN lines) when verification fails, so it’s easier to see what caused the failure.
   - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
