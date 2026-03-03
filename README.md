@@ -1904,6 +1904,7 @@ systemctl status zypper-autodownload.service
     - (already existing) WebUI network/API errors occur (with issue-report guidance + diagnostics exporter)
     - Includes quick link buttons: **Post issue** (GitHub Issues) and **Download diagnostics**.
   - 🧰 **IMPROVED:** the **“🧪 JS health (debug)”** panel now includes a **Clear crash log** button to reset the persistent crash log stored in your browser.
+  - 🧪 **IMPROVED:** the **“🧪 JS health (debug)”** log is now persistent in your browser (localStorage) and keeps the last ~500 lines (with a Clear button).
   - 🧵 **IMPROVED:** dashboard Recent Activity Log now uses **SSE (Server-Sent Events)** for live log updates when opened via `--dash-open` (Live mode), reducing fetch/polling churn and CPU usage (with automatic fallback to polling).
   - 🧵 **IMPROVED:** WebUI overlay job log viewers now prefer **push streaming** (SSE-over-`fetch()` with auth headers) instead of 650–900ms polling loops:
     - Rocket / system update (`system-dup`)
@@ -1951,6 +1952,7 @@ systemctl status zypper-autodownload.service
   - 🗄️ **NEW:** WebUI Managers **Server (SQLite)** tab (Dashboard API job history):
     - Persistent across reloads/reboots and across browsers (server-side, not just `localStorage`).
     - Supports search/filtering, basic stats (last 7 days), and a bounded log tail for fast searching.
+  - 🗄️ **IMPROVED:** dashboard Recent Activity Log now includes a visible **SQLite viewer** button that jumps directly to **Managers → Server (SQLite)** for discoverability.
     - Retention is controlled by `WEBUI_HISTORY_RETENTION_DAYS` (7/30/90) + a manual cleanup/integrity action in the Server tab.
     - SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
     - API: `GET /api/history/health`, `GET /api/history/jobs`, `GET /api/history/job`, `GET /api/history/stats`, `POST /api/history/cleanup`

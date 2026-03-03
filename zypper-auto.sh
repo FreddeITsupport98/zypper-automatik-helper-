@@ -11985,6 +11985,12 @@ generate_dashboard() {
 
     <div class="card">
       <h2>Recent Activity Log</h2>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 6px 0 10px 0; ">
+        <button class="pill" type="button" id="znh-open-sqlite-btn"
+          title="Open Managers → Server (SQLite) tab"
+          onclick="try{localStorage.setItem('znh_mgr_tab','server');}catch(e){}; try{ if (typeof window.znhManagersOpen === 'function') { window.znhManagersOpen(); if (typeof window.znhManagersRender === 'function') window.znhManagersRender('server'); } else if (typeof window.znhNotifyRunAction === 'function') { window.znhNotifyRunAction({ type: 'open-managers' }); } } catch (e2) {}">SQLite viewer</button>
+        <span style="font-size:0.82rem; color: var(--muted);">Server history (SQLite) is under <strong>Managers → Server (SQLite)</strong>.</span>
+      </div>
       <div class="stat-label" style="margin-bottom:10px; text-transform:none;">File: <span id="last-install-log">${last_install_log_esc}</span></div>
 
       <details id="js-health-details" style="margin: 10px 0 12px 0; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">
@@ -12000,11 +12006,12 @@ generate_dashboard() {
             <button class="pill" type="button" id="znh-debug-toggle-btn" title="Toggle verbose JS debug via Settings API">Verbose debug: (loading…)</button>
             <button class="pill" type="button" id="znh-console-forward-toggle-btn" title="Forward browser console logs into dashboard-api.log (developer tool)">Console forward: (loading…)</button>
             <button class="pill" type="button" id="znh-js-health-copy-btn" onclick="__znhCopyBlockBootstrap('js-health-log', this)" title="Copy JS health log (debug breadcrumbs/errors)">Copy JS debug log</button>
+            <button class="pill" type="button" id="znh-js-health-clear-btn" onclick="try{ if (typeof window.__znhHealthClear === 'function') window.__znhHealthClear(); }catch(e){}" title="Clear the JS debug log stored in your browser (localStorage)">Clear JS debug log</button>
             <button class="pill" type="button" id="znh-js-crash-clear-btn" title="Clear the persistent crash log stored in your browser (localStorage)">Clear crash log</button>
-            <span style="font-size:0.82rem; color: var(--muted);">Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed). Console forwarding is gated behind verbose debug.</span>
+            <span style="font-size:0.82rem; color: var(--muted);">Saved: <span id="znh-js-health-count">0</span>/500 lines • Toggles <code>DASHBOARD_JS_VERBOSE_DEBUG</code> (no URL needed). Console forwarding is gated behind verbose debug.</span>
           </div>
         </div>
-        <pre id="js-health-log" style="max-height: 180px; margin-top: 10px;">(booting…)</pre>
+        <pre id="js-health-log" style="max-height: min(60vh, 560px); margin-top: 10px;">(booting…)</pre>
       </details>
 
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 10px 0;">
@@ -12160,6 +12167,33 @@ generate_dashboard() {
     (function() {
         try { window.__znh_js_ok = false; } catch (e0) {}
         try { window.__znh_js_health_log = []; } catch (e0b) {}
+        try { window.__znh_js_health_max_lines = 500; } catch (e0c) {}
+
+        // Persistent JS health log (localStorage): survives reloads so you can inspect
+        // debug breadcrumbs even after crashes/restarts.
+        var _HEALTH_KEY = 'znh_js_health_log_v2';
+        function _healthLoadPersisted() {
+            try {
+                var raw = '';
+                try { raw = localStorage.getItem(_HEALTH_KEY) || ''; } catch (e0) { raw = ''; }
+                if (!raw) return [];
+                var j = JSON.parse(raw);
+                if (!Array.isArray(j)) return [];
+                // Keep it bounded even if an older build wrote too much.
+                var max0 = 500;
+                try { max0 = parseInt(window.__znh_js_health_max_lines || 500, 10) || 500; } catch (e1) { max0 = 500; }
+                if (j.length > max0) j = j.slice(j.length - max0);
+                return j;
+            } catch (e) {
+                return [];
+            }
+        }
+        function _healthSavePersisted(arr) {
+            try {
+                if (!arr) return;
+                localStorage.setItem(_HEALTH_KEY, JSON.stringify(arr));
+            } catch (e) {}
+        }
 
         // Persistent crash log (localStorage): survives page reloads so you can inspect
         // crash history even if the dashboard JS fails early.
@@ -12346,26 +12380,80 @@ generate_dashboard() {
             } catch (e) {}
         }
 
+        // Restore persisted health log (best-effort)
+        try {
+            var initLog = _healthLoadPersisted();
+            if (initLog && initLog.length) {
+                window.__znh_js_health_log = initLog;
+            }
+        } catch (eL0) {}
+
+        var _healthSaveTimer = null;
+        var _healthSaveLast = 0;
+
+        function _healthSaveThrottled() {
+            try {
+                if (_healthSaveTimer) return;
+                var now = 0;
+                try { now = Date.now(); } catch (eT) { now = 0; }
+
+                // Save at most once per ~900ms to avoid hammering localStorage.
+                if (now && _healthSaveLast && (now - _healthSaveLast) < 900) {
+                    _healthSaveTimer = setTimeout(function() {
+                        _healthSaveTimer = null;
+                        try { _healthSaveLast = Date.now(); } catch (eTS) {}
+                        try { _healthSavePersisted(window.__znh_js_health_log || []); } catch (eS) {}
+                    }, 900);
+                    return;
+                }
+
+                _healthSaveLast = now || 0;
+                _healthSaveTimer = setTimeout(function() {
+                    _healthSaveTimer = null;
+                    try { _healthSavePersisted(window.__znh_js_health_log || []); } catch (eS2) {}
+                }, 30);
+            } catch (e) {}
+        }
+
         function _healthRender() {
             try {
                 var el = document.getElementById('js-health-log');
                 if (!el) return;
                 var arr = window.__znh_js_health_log || [];
                 el.textContent = arr.length ? arr.join('\n') : '(empty)';
+                try {
+                    var c = document.getElementById('znh-js-health-count');
+                    if (c) c.textContent = String(arr.length || 0);
+                } catch (eC) {}
             } catch (e) {}
         }
 
         function _healthAppend(level, msg) {
             var line = '[' + _now() + '] ' + String(level || 'info').toUpperCase() + ': ' + String(msg || '');
             try {
+                var maxLines = 500;
+                try { maxLines = parseInt(window.__znh_js_health_max_lines || 500, 10) || 500; } catch (eM) { maxLines = 500; }
+
                 if (!window.__znh_js_health_log) window.__znh_js_health_log = [];
                 window.__znh_js_health_log.push(line);
-                if (window.__znh_js_health_log.length > 120) {
-                    window.__znh_js_health_log = window.__znh_js_health_log.slice(window.__znh_js_health_log.length - 120);
+                if (window.__znh_js_health_log.length > maxLines) {
+                    window.__znh_js_health_log = window.__znh_js_health_log.slice(window.__znh_js_health_log.length - maxLines);
                 }
             } catch (e0c) {}
+
             _healthRender();
+            _healthSaveThrottled();
         }
+
+        // Allow UI to clear the JS health log (persistent)
+        try {
+            window.__znhHealthClear = function() {
+                try { window.__znh_js_health_log = []; } catch (e0) {}
+                try { localStorage.removeItem(_HEALTH_KEY); } catch (e1) {}
+                try { _healthRender(); } catch (e2) {}
+                try { _healthAppend('info', 'JS debug log cleared'); } catch (e3) {}
+            };
+        } catch (eClr) {}
 
         function _setJsBadge(state, msg, title) {
             var b = null;
