@@ -1352,8 +1352,11 @@ PY
         #
         # Apply performance mode (default powersaving) to worker cadence.
         znh_perf_mode="${DASHBOARD_PERFORMANCE_MODE:-}"
-        if [ -z "${znh_perf_mode:-}" ]; then
-            znh_perf_mode="$(__znh_conf_peek_value DASHBOARD_PERFORMANCE_MODE 2>/dev/null || true)"
+        # Non-root --dash-open runs before load_config; best-effort parse config directly.
+        if [ -z "${znh_perf_mode:-}" ] && [ -r "/etc/zypper-auto.conf" ]; then
+            znh_perf_mode=$(grep -E '^[[:space:]]*DASHBOARD_PERFORMANCE_MODE=' "/etc/zypper-auto.conf" 2>/dev/null \
+                | head -n 1 \
+                | sed -E "s/^[[:space:]]*DASHBOARD_PERFORMANCE_MODE=//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^['\"]//; s/['\"]$//" 2>/dev/null || true)
         fi
         znh_perf_mode="$(printf '%s' "${znh_perf_mode}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' 2>/dev/null || printf '%s' "${znh_perf_mode}")"
 
