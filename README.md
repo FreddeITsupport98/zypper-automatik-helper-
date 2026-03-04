@@ -1894,6 +1894,11 @@ systemctl status zypper-autodownload.service
   - 🧵 **IMPROVED:** WebUI Snapper cleanup now runs as a **background systemd job** with **live log polling** (so long cleanups no longer look “stuck” at `Running: cleanup ...`).
     - New localhost API endpoints: `/api/snapper/start` + `/api/snapper/job`.
     - Also reduces expensive syntax-highlighting on huge logs to prevent UI freezes.
+  - 🧿 **NEW (danger):** WebUI Snapper Manager now supports **Rollback** (one-click recovery):
+    - Enter a snapshot ID and click **Rollback**.
+    - Confirmation phrase: **ROLLBACK** (typed in the in-page Snapper confirmation modal).
+    - Runs `snapper rollback <ID>` as a background systemd job (minimize + resume supported).
+    - After success: the UI shows **“reboot required”** (rollback changes root filesystem state).
   - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
   - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
   - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
@@ -1913,7 +1918,13 @@ systemctl status zypper-autodownload.service
     - scrub-ghost
     - Snapper cleanup
     - Fallback: if streaming isn’t supported or the stream errors, the existing polling logic is used automatically. On completion, the UI does a small bounded final fetch to show canonical results.
+  - ⚡ **IMPROVED:** WebUI log highlighting is now **debounced** during streaming/rapid updates (reduces UI freezes on large/fast logs).
+  - ⚡ **IMPROVED:** WebUI multi-tab detection now prefers **BroadcastChannel** heartbeats when available (reduces `localStorage` JSON churn).
   - 🧰 **IMPROVED:** dashboard **Recent Activity Log → View: Verify/Repair** now appends a small **failure summary** (with extracted ERROR/WARN lines) when verification fails, so it’s easier to see what caused the failure.
+  - 🧠 **IMPROVED:** WebUI **AI Smart Report (offline)** now scans the same persisted log artifacts shown in **Recent Activity Log** (Live + Install/Verify/Diag tails + API log + journal tail) so bug reports include what you see in the dashboard.
+  - ⚡ **NEW:** `DASHBOARD_PERFORMANCE_MODE` (**powersaving** default) lets you choose **Performance / Balanced / PowerSaving**.
+    - Tunes WebUI polling cadence + bounded UI buffers (Recent Activity tail size + perf chart points) to avoid CPU/RAM hogging in long-lived tabs.
+    - Also adjusts `--dash-open` sync/perf worker cadence so background dashboard workers are lower-impact in PowerSaving mode.
   - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
   - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots while keeping the newest snapshots per snapper config.
@@ -1952,6 +1963,15 @@ systemctl status zypper-autodownload.service
   - 🗄️ **NEW:** WebUI Managers **Server (SQLite)** tab (Dashboard API job history):
     - Persistent across reloads/reboots and across browsers (server-side, not just `localStorage`).
     - Supports search/filtering, basic stats (last 7 days), and a bounded log tail for fast searching.
+  - 📈 **NEW:** Managers → Server (SQLite) now includes a lightweight **timeline chart** (canvas; no external libs):
+    - Shows OK vs Fail counts per day.
+    - Filters: job type and day range (7/30/90).
+    - API: `/api/history/stats` now supports `job_type=` filtering (used by the chart).
+  - 🧠 **NEW:** Managers → Server now includes an **AI Smart Report (offline)** generator:
+    - Scans **recent log tails** under `/var/log/zypper-auto/*` and extracts ERROR/WARN lines.
+    - Also includes **recent failed jobs** from the local SQLite history (when available).
+    - Output is safe + bounded to avoid hogging CPU/RAM, and can be copied or downloaded as JSON.
+    - API endpoint: `POST /api/ai/smart-report` (requires `X-ZNH-Token`).
   - 🗄️ **IMPROVED:** dashboard Recent Activity Log now includes a visible **SQLite viewer** button that jumps directly to **Managers → Server (SQLite)** for discoverability.
     - Retention is controlled by `WEBUI_HISTORY_RETENTION_DAYS` (7/30/90) + a manual cleanup/integrity action in the Server tab.
     - SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
@@ -1965,6 +1985,8 @@ systemctl status zypper-autodownload.service
         - `sudo sqlite3 /var/lib/zypper-auto/dashboard-history.sqlite3 'select job_id, job_type, rc, stage from jobs order by started_ts desc limit 20;'`
   - 📚 **DOCS:** README now includes a dedicated **Boot Entry Scrub (scrub-ghost)** user guide section (workflow, guardrails, WebUI wizard behavior, log locations, and confirmation phrases).
   - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
+  - ⚡ **IMPROVED:** dashboard sync worker now uses **idle backoff** (event-driven with inotify when available) so it uses less CPU when the dashboard is idle.
+    - Optional cap: `ZNH_DASHBOARD_SYNC_MAX_IDLE_SECONDS` (default: 30)
   - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
   - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
   - 🐛 **FIXED:** dashboard Live mode poller now parses `status-data.json` more defensively (lenient JSON recovery) and avoids recording transient poll failures as persistent WebUI crash logs.

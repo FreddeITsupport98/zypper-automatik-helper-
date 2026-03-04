@@ -477,6 +477,7 @@ __znh_start_dashboard_sync_worker() {
     # dashboard tab doesn't go stale when root timers run in the background.
     # This runs as the desktop user, reading world-readable files under /var/log.
     local dash_dir="$1" user_name="${2:-}" user_home="${3:-}"
+    local interval_override="${4:-}" max_idle_override="${5:-}"
     local pid_file
     pid_file="${dash_dir}/dashboard-sync.pid"
 
@@ -541,7 +542,7 @@ sync_one() {
   return 0
 }
 
-while true; do
+sync_all() {
   sync_one "${src_root}/status-data.json" "${dash_dir}/status-data.json"
   sync_one "${src_root}/dashboard-install-tail.log" "${dash_dir}/dashboard-install-tail.log"
   sync_one "${src_root}/dashboard-diag-tail.log" "${dash_dir}/dashboard-diag-tail.log"
@@ -553,33 +554,71 @@ while true; do
   sync_one "${src_root}/download-status.txt" "${dash_dir}/download-status.txt"
 
   # Live log: cap size so long-lived tabs can't blow up the browser (or disk).
-  # We only need recent context.
+  # Only refresh when the source changed.
   if [ -f "${src_root}/dashboard-live.log" ]; then
-    tmp="${dash_dir}/dashboard-live.log.tmp.$$"
-    tail -n 2500 "${src_root}/dashboard-live.log" >"${tmp}" 2>/dev/null || true
-    if mv -f "${tmp}" "${dash_dir}/dashboard-live.log" 2>/dev/null; then
-      chmod 644 "${dash_dir}/dashboard-live.log" 2>/dev/null || true
-    else
-      rm -f "${tmp}" 2>/dev/null || true
+    if [ ! -f "${dash_dir}/dashboard-live.log" ] || [ "${src_root}/dashboard-live.log" -nt "${dash_dir}/dashboard-live.log" ]; then
+      tmp="${dash_dir}/dashboard-live.log.tmp.$$"
+      tail -n 2500 "${src_root}/dashboard-live.log" >"${tmp}" 2>/dev/null || true
+      if mv -f "${tmp}" "${dash_dir}/dashboard-live.log" 2>/dev/null; then
+        chmod 644 "${dash_dir}/dashboard-live.log" 2>/dev/null || true
+      else
+        rm -f "${tmp}" 2>/dev/null || true
+      fi
     fi
   fi
 
   # status.html is larger; only update if it changed.
   sync_one "${src_root}/status.html" "${dash_dir}/status.html"
+}
 
-  # Prefer event-driven sync when available so Live mode feels instant.
-  # Wait for changes OR time out after ${interval}s.
+# Performance: make sync event-driven. We back off when idle so we don't burn
+# CPU every ${interval}s just to stat/copy the same files.
+idle="${interval}"
+max_idle="${ZNH_DASHBOARD_SYNC_MAX_IDLE_SECONDS:-30}"
+case "$max_idle" in
+  ''|*[!0-9]*) max_idle=30 ;;
+ esac
+if [ "$max_idle" -lt "$interval" ] 2>/dev/null; then max_idle="$interval"; fi
+if [ "$max_idle" -gt 300 ] 2>/dev/null; then max_idle=300; fi
+
+# Initial sync so the dashboard is immediately consistent.
+sync_all
+
+while true; do
   if command -v inotifywait >/dev/null 2>&1; then
-    # Debounce: if logs are being written rapidly, inotify can fire extremely
-    # often. Sleep briefly after an event so we group bursts into one sync.
-    inotifywait -qq -t "${interval}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null
+    # Wait for changes OR time out.
+    set +e
+    inotifywait -qq -t "${idle}" -e close_write,moved_to,create,delete "${src_root}" 2>/dev/null
     rc=$?
+    set -e
+
     if [ "${rc}" -eq 0 ] 2>/dev/null; then
-      sleep 0.5
+      # Debounce bursts into one sync.
+      sleep 0.35
+      idle="${interval}"
+    elif [ "${rc}" -eq 2 ] 2>/dev/null; then
+      # Idle timeout: exponential backoff.
+      if [ "${idle}" -lt "${max_idle}" ] 2>/dev/null; then
+        idle=$((idle * 2))
+        if [ "${idle}" -gt "${max_idle}" ] 2>/dev/null; then idle="${max_idle}"; fi
+      fi
+    else
+      # inotify error: fall back to sleep/backoff.
+      sleep "${idle}" || true
+      if [ "${idle}" -lt "${max_idle}" ] 2>/dev/null; then
+        idle=$((idle * 2))
+        if [ "${idle}" -gt "${max_idle}" ] 2>/dev/null; then idle="${max_idle}"; fi
+      fi
     fi
   else
-    sleep "$interval"
+    sleep "${idle}" || true
+    if [ "${idle}" -lt "${max_idle}" ] 2>/dev/null; then
+      idle=$((idle * 2))
+      if [ "${idle}" -gt "${max_idle}" ] 2>/dev/null; then idle="${max_idle}"; fi
+    fi
   fi
+
+  sync_all
  done
 EOF
 
@@ -589,12 +628,33 @@ EOF
         chown "${user_name}:${user_name}" "${worker_script}" 2>/dev/null || true
     fi
 
+    # Optional: override worker cadence via env vars (used by DASHBOARD_PERFORMANCE_MODE).
+    # Use strict numeric validation because these values may originate from config.
+    local env_args env_prefix_str
+    env_args=()
+
+    if [[ "${interval_override:-}" =~ ^[0-9]+$ ]]; then
+        env_args+=("ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS=${interval_override}")
+    fi
+    if [[ "${max_idle_override:-}" =~ ^[0-9]+$ ]]; then
+        env_args+=("ZNH_DASHBOARD_SYNC_MAX_IDLE_SECONDS=${max_idle_override}")
+    fi
+
+    env_prefix_str=""
+    if [ "${#env_args[@]}" -gt 0 ] 2>/dev/null; then
+        env_prefix_str="env ${env_args[*]}"
+    fi
+
     # Launch worker detached as the desktop user if known.
     # Use a simple argv-only launch command so quoting can't break.
     if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
-        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash \"\$@\"' _ \"${worker_script}\" \"${dash_dir}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        sudo -u "${user_name}" bash -lc "${env_prefix_str:+${env_prefix_str} }nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash \"\$@\"' _ \"${worker_script}\" \"${dash_dir}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
     else
-        nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash "$@"' _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
+        if [ "${#env_args[@]}" -gt 0 ] 2>/dev/null; then
+            env "${env_args[@]}" nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash "$@"' _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
+        else
+            nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash "$@"' _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
+        fi
         echo $! >"${pid_file}" 2>/dev/null || true
     fi
 
@@ -656,6 +716,7 @@ __znh_start_dashboard_perf_worker() {
     # plot live CPU/memory/IO usage for helper-related services.
     # Runs as the desktop user.
     local dash_dir="$1" user_name="${2:-}" user_home="${3:-}"
+    local interval_override="${4:-}" max_samples_override="${5:-}"
     local pid_file
     pid_file="${dash_dir}/dashboard-perf.pid"
 
@@ -685,12 +746,24 @@ __znh_start_dashboard_perf_worker() {
     local units
     units="zypper-autodownload.service,zypper-auto-verify.service,zypper-auto-dashboard-api.service"
 
+    # Optional overrides (used by DASHBOARD_PERFORMANCE_MODE)
+    local interval max_samples
+    interval="2"
+    max_samples="180"
+    if [[ "${interval_override:-}" =~ ^[0-9]+$ ]] && [ "${interval_override}" -ge 1 ] 2>/dev/null; then
+        interval="${interval_override}"
+    fi
+    if [[ "${max_samples_override:-}" =~ ^[0-9]+$ ]] && [ "${max_samples_override}" -ge 30 ] 2>/dev/null; then
+        max_samples="${max_samples_override}"
+    fi
+    if [ "${max_samples}" -gt 2000 ] 2>/dev/null; then max_samples=2000; fi
+
     # Launch worker detached as the desktop user if known.
     if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
-        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval 2 --max-samples 180 --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval ${interval} --max-samples ${max_samples} --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
     else
         # Fallback: run as current user.
-        nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf "$@"' _ "${worker_bin}" --out-dir "${dash_dir}" --interval 2 --max-samples 180 --units "${units}" >/dev/null 2>&1 &
+        nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf "$@"' _ "${worker_bin}" --out-dir "${dash_dir}" --interval "${interval}" --max-samples "${max_samples}" --units "${units}" >/dev/null 2>&1 &
         echo $! >"${pid_file}" 2>/dev/null || true
     fi
 
@@ -1274,11 +1347,46 @@ PY
             fi
         fi
 
-        # Start sync worker so status-data.json/log views keep updating even if
+        # Start sync/perf workers so status-data.json/log views keep updating even if
         # this dashboard tab stays open for days.
-        __znh_start_dashboard_sync_worker "${dash_dir}" "${USER:-}" "${HOME:-}" || true
-        # Start perf worker for live service performance charts (best-effort)
-        __znh_start_dashboard_perf_worker "${dash_dir}" "${USER:-}" "${HOME:-}" || true
+        #
+        # Apply performance mode (default powersaving) to worker cadence.
+        znh_perf_mode="${DASHBOARD_PERFORMANCE_MODE:-}"
+        if [ -z "${znh_perf_mode:-}" ]; then
+            znh_perf_mode="$(__znh_conf_peek_value DASHBOARD_PERFORMANCE_MODE 2>/dev/null || true)"
+        fi
+        znh_perf_mode="$(printf '%s' "${znh_perf_mode}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' 2>/dev/null || printf '%s' "${znh_perf_mode}")"
+
+        znh_sync_interval=8
+        znh_sync_max_idle=120
+        znh_perf_interval=8
+        znh_perf_max_samples=120
+        case "${znh_perf_mode}" in
+            performance)
+                znh_sync_interval=2
+                znh_sync_max_idle=30
+                znh_perf_interval=2
+                znh_perf_max_samples=240
+                ;;
+            balanced)
+                znh_sync_interval=4
+                znh_sync_max_idle=60
+                znh_perf_interval=4
+                znh_perf_max_samples=180
+                ;;
+            powersaving|"")
+                ;;
+            *)
+                # Unknown value -> powersaving defaults
+                ;;
+        esac
+
+        # Restart workers so the cadence change actually applies.
+        __znh_stop_dashboard_sync_worker "${dash_dir}" || true
+        __znh_stop_dashboard_perf_worker "${dash_dir}" || true
+
+        __znh_start_dashboard_sync_worker "${dash_dir}" "${USER:-}" "${HOME:-}" "${znh_sync_interval}" "${znh_sync_max_idle}" || true
+        __znh_start_dashboard_perf_worker "${dash_dir}" "${USER:-}" "${HOME:-}" "${znh_perf_interval}" "${znh_perf_max_samples}" || true
 
         # Ensure Desktop/app launcher exists (best-effort)
         __znh_ensure_dash_desktop_shortcut "${USER:-}" "${HOME:-}" || true
@@ -2112,6 +2220,7 @@ __znh_write_dashboard_schema_json() {
     "HOOKS_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
+    "DASHBOARD_PERFORMANCE_MODE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
@@ -8188,6 +8297,20 @@ DASHBOARD_BROWSER=""
 # Default: false
 DASHBOARD_JS_VERBOSE_DEBUG=false
 
+# DASHBOARD_PERFORMANCE_MODE
+# Controls the dashboard WebUI polling cadence and dash-open background worker intervals.
+#
+# Allowed values:
+#   - powersaving  (default) : slow polling, low CPU/RAM usage
+#   - balanced              : medium polling
+#   - performance           : fast polling (most responsive, uses more CPU)
+#
+# NOTE: changing this affects the WebUI immediately after Settings reload, but to
+# fully apply it to the dash-open background workers (sync/perf workers), re-open
+# the dashboard with:
+#   zypper-auto-helper --dash-open
+DASHBOARD_PERFORMANCE_MODE="powersaving"
+
 # SELF_UPDATE_CHANNEL
 # Controls which update channel is used by default when you run:
 #   sudo zypper-auto-helper --self-update
@@ -8929,6 +9052,7 @@ EOF
     validate_bool_flag ENABLE_PIPX_UPDATES true
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
+    validate_allowed_set DASHBOARD_PERFORMANCE_MODE powersaving "powersaving,balanced,performance"
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
@@ -11801,6 +11925,17 @@ generate_dashboard() {
           </div>
         </div>
 
+        <div class="stat-box" style="border-color: rgba(239,68,68,0.25); background: rgba(239,68,68,0.06);">
+          <span class="stat-label">Rollback (danger)</span>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <input id="snapper-rollback-id" type="number" min="1" step="1" placeholder="Snapshot ID" style="width:140px; padding:8px 10px; border-radius: 12px;" />
+            <button class="pill" type="button" id="snapper-rollback-btn" style="border-color: rgba(239,68,68,0.45);">Rollback</button>
+          </div>
+          <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
+            Warning: rollback changes your root filesystem to a previous snapshot. After a successful rollback, you must reboot.
+          </div>
+        </div>
+
         <div class="stat-box">
           <span class="stat-label">Full Cleanup (Option 4)</span>
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
@@ -13269,6 +13404,88 @@ generate_dashboard() {
         try { if (typeof znhConsoleForwardUpdateToggleUi === 'function') znhConsoleForwardUpdateToggleUi(); } catch (eCF1) {}
 
         return want;
+    }
+
+    // --- Dashboard performance mode (PowerSaving/Balanced/Performance) ---
+    // Goal: avoid CPU/RAM hogging in long-lived tabs by letting the user pick
+    // a polling cadence for Live mode (and a few bounded UI buffers).
+    var ZNH_PERF_MODE = 'powersaving';
+    var ZNH_POLL_MS = {
+        live: 15000,
+        downloader: 8000,
+        perf: 8000,
+        log: 8000,
+        meta: 30000
+    };
+    var ZNH_RECENT_LOG_TAIL_LINES = 180;
+    var ZNH_PERF_CHART_POINTS = 40;
+
+    function znhPerfModeNormalize(v) {
+        var s = '';
+        try { s = String(v || '').trim().toLowerCase(); } catch (e0) { s = ''; }
+        if (s === 'power-saving') s = 'powersaving';
+        if (s !== 'powersaving' && s !== 'balanced' && s !== 'performance') s = 'powersaving';
+        return s;
+    }
+
+    function znhPerfApplyFromConfig(cfg) {
+        // Returns normalized mode.
+        var mode = 'powersaving';
+        try { mode = znhPerfModeNormalize((cfg && cfg.DASHBOARD_PERFORMANCE_MODE != null) ? cfg.DASHBOARD_PERFORMANCE_MODE : ''); } catch (e0) { mode = 'powersaving'; }
+
+        ZNH_PERF_MODE = mode;
+
+        if (mode === 'performance') {
+            ZNH_POLL_MS = { live: 5000, downloader: 2000, perf: 2000, log: 2000, meta: 15000 };
+            ZNH_RECENT_LOG_TAIL_LINES = 240;
+            ZNH_PERF_CHART_POINTS = 60;
+        } else if (mode === 'balanced') {
+            ZNH_POLL_MS = { live: 8000, downloader: 4000, perf: 4000, log: 4000, meta: 20000 };
+            ZNH_RECENT_LOG_TAIL_LINES = 200;
+            ZNH_PERF_CHART_POINTS = 50;
+        } else {
+            // powersaving (default)
+            ZNH_POLL_MS = { live: 15000, downloader: 8000, perf: 8000, log: 8000, meta: 30000 };
+            ZNH_RECENT_LOG_TAIL_LINES = 160;
+            ZNH_PERF_CHART_POINTS = 40;
+        }
+
+        try {
+            if (typeof window.znhJsHealthLog === 'function') {
+                window.znhJsHealthLog('info', 'Performance mode: ' + mode);
+            }
+        } catch (e1) {}
+
+        return mode;
+    }
+
+    function znhPerfIntervalMs(kind, fallbackMs) {
+        var v = fallbackMs;
+        try {
+            v = (ZNH_POLL_MS && ZNH_POLL_MS[kind] != null) ? parseInt(ZNH_POLL_MS[kind], 10) : fallbackMs;
+            if (!isFinite(v) || v <= 0) v = fallbackMs;
+        } catch (e0) {
+            v = fallbackMs;
+        }
+        if (v < 400) v = 400;
+        if (v > 120000) v = 120000;
+        return v;
+    }
+
+    function znhRecentLogTailLinesEffective() {
+        var n = 220;
+        try { n = parseInt(ZNH_RECENT_LOG_TAIL_LINES || 220, 10) || 220; } catch (e0) { n = 220; }
+        if (n < 60) n = 60;
+        if (n > 600) n = 600;
+        return n;
+    }
+
+    function znhPerfChartPointsEffective() {
+        var n = 60;
+        try { n = parseInt(ZNH_PERF_CHART_POINTS || 60, 10) || 60; } catch (e0) { n = 60; }
+        if (n < 15) n = 15;
+        if (n > 120) n = 120;
+        return n;
     }
 
     function znhDebugLog() {
@@ -15249,6 +15466,15 @@ generate_dashboard() {
         try { jobType = String(localStorage.getItem('znh_mgr_srv_type') || ''); } catch (eT0) { jobType = ''; }
         if (jobType && jobType !== 'system-dup' && jobType !== 'self-update' && jobType !== 'quick-action' && jobType !== 'scrub-ghost' && jobType !== 'snapper') jobType = '';
 
+        // Chart settings (persisted)
+        var chartType = '';
+        var chartDays = 30;
+        try { chartType = String(localStorage.getItem('znh_mgr_srv_chart_type') || 'system-dup'); } catch (eCT0) { chartType = 'system-dup'; }
+        try { chartDays = parseInt(String(localStorage.getItem('znh_mgr_srv_chart_days') || '30'), 10) || 30; } catch (eCD0) { chartDays = 30; }
+        if (chartDays !== 7 && chartDays !== 30 && chartDays !== 90) chartDays = 30;
+        if (chartType && chartType !== 'system-dup' && chartType !== 'self-update' && chartType !== 'quick-action' && chartType !== 'scrub-ghost' && chartType !== 'snapper') chartType = 'system-dup';
+        if (chartType === 'all') chartType = '';
+
         function pill(label, value) {
             var cls = 'pill' + (curTab === value ? ' active' : '');
             return '<button class="' + cls + '" type="button" data-mgr-tab="' + value + '">' + label + '</button>';
@@ -15261,6 +15487,18 @@ generate_dashboard() {
         function opt(label, val) {
             var sel = (String(jobType || '') === String(val || '')) ? 'selected' : '';
             return '<option value="' + String(val || '') + '" ' + sel + '>' + String(label || '') + '</option>';
+        }
+
+        function optChartType(label, val) {
+            var vv = String(val || '');
+            var sel = (String(chartType || '') === vv) ? 'selected' : '';
+            return '<option value="' + vv + '" ' + sel + '>' + String(label || '') + '</option>';
+        }
+
+        function optChartDays(label, val) {
+            var vv = String(val || '');
+            var sel = (String(chartDays || '') === vv) ? 'selected' : '';
+            return '<option value="' + vv + '" ' + sel + '>' + String(label || '') + '</option>';
         }
 
         var html = [];
@@ -15289,6 +15527,36 @@ generate_dashboard() {
         html.push('<div style="display:grid; gap:10px; margin-top: 12px;">');
         html.push('  <div id="mgr-srv-health" class="mgr-row warn"><div class="t">Server history health</div><div class="b">Loading…</div></div>');
         html.push('  <div id="mgr-srv-stats" class="mgr-row warn"><div class="t">Stats (last 7 days)</div><div class="b">Loading…</div></div>');
+        html.push('  <div id="mgr-srv-chart" class="mgr-row warn"><div class="t">Timeline chart <span id="mgr-srv-chart-meta" style="color: var(--muted); font-weight:750;"></span></div><div class="b">'
+            + '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">'
+            + '  <label class="pill" style="gap:10px; justify-content:flex-start;">Chart type <select id="mgr-srv-chart-type" style="margin-left:6px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);">'
+            + optChartType('All', '')
+            + optChartType('System update (Rocket)', 'system-dup')
+            + optChartType('Self-update', 'self-update')
+            + optChartType('Quick actions', 'quick-action')
+            + optChartType('scrub-ghost', 'scrub-ghost')
+            + optChartType('Snapper', 'snapper')
+            + '</select></label>'
+            + '  <label class="pill" style="gap:10px; justify-content:flex-start;">Days <select id="mgr-srv-chart-days" style="margin-left:6px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);">'
+            + optChartDays('7', 7)
+            + optChartDays('30', 30)
+            + optChartDays('90', 90)
+            + '</select></label>'
+            + '</div>'
+            + '<canvas id="mgr-srv-chart-cv" style="width:100%; height:140px; display:block; margin-top:10px;"></canvas>'
+            + '<div id="mgr-srv-chart-note" style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Loading…</div>'
+            + '</div></div>');
+        html.push('  <div id="mgr-ai-report" class="mgr-row warn"><div class="t">AI Smart Report (offline) <span id="mgr-ai-meta" style="color: var(--muted); font-weight:750;"></span></div><div class="b">'
+            + '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">'
+            + '  <label class="pill" style="gap:10px; justify-content:flex-start;">Range <select id="mgr-ai-days" style="margin-left:6px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);"><option value="1">Last 24h</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select></label>'
+            + '  <label class="pill" style="gap:10px; justify-content:flex-start;"><input type="checkbox" id="mgr-ai-debug" /> Include debug</label>'
+            + '  <button class="pill" type="button" id="mgr-ai-run">Generate</button>'
+            + '  <button class="pill" type="button" id="mgr-ai-copy" style="border-color: rgba(255,255,255,0.14);">Copy</button>'
+            + '  <button class="pill" type="button" id="mgr-ai-dl-json" style="border-color: rgba(255,255,255,0.14);">Download JSON</button>'
+            + '</div>'
+            + '<pre id="mgr-ai-out" style="max-height: 260px; overflow:auto; margin-top:10px; white-space:pre-wrap;">(not generated yet)</pre>'
+            + '<div id="mgr-ai-note" style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Scans recent log tails + recent failed jobs (SQLite) and extracts ERROR/WARN lines. It is local + bounded to avoid high CPU/RAM.</div>'
+            + '</div></div>');
         html.push('  <div id="mgr-srv-list" style="display:grid; gap: 10px;"></div>');
         html.push('</div>');
 
@@ -15314,6 +15582,8 @@ generate_dashboard() {
             var exBtn = document.getElementById('mgr-export-diag');
             var tpEl = document.getElementById('mgr-srv-type');
             var refBtn = document.getElementById('mgr-srv-refresh');
+            var cTpEl = document.getElementById('mgr-srv-chart-type');
+            var cDaysEl = document.getElementById('mgr-srv-chart-days');
 
             var _qTimer = null;
             if (qEl) {
@@ -15347,6 +15617,18 @@ generate_dashboard() {
                 refBtn.addEventListener('click', function(ev) {
                     try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e6) {}
                     _znhManagersServerFetchAndRender({ q: String(q || ''), onlyFailed: !!onlyFailed, last24: !!last24, jobType: String(jobType || '') }, true);
+                });
+            }
+            if (cTpEl) {
+                cTpEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_srv_chart_type', String(cTpEl.value || '')); } catch (eCT) {}
+                    znhManagersRender(curTab);
+                });
+            }
+            if (cDaysEl) {
+                cDaysEl.addEventListener('change', function() {
+                    try { localStorage.setItem('znh_mgr_srv_chart_days', String(cDaysEl.value || '30')); } catch (eCD) {}
+                    znhManagersRender(curTab);
                 });
             }
             if (exBtn) {
@@ -15420,6 +15702,172 @@ generate_dashboard() {
 
         } catch (eC) {}
 
+        // Wire AI Smart Report
+        try {
+            var aiDaysEl = document.getElementById('mgr-ai-days');
+            var aiDebugEl = document.getElementById('mgr-ai-debug');
+            var aiRunBtn = document.getElementById('mgr-ai-run');
+            var aiCopyBtn = document.getElementById('mgr-ai-copy');
+            var aiDlBtn = document.getElementById('mgr-ai-dl-json');
+            var aiOutEl = document.getElementById('mgr-ai-out');
+            var aiMetaEl = document.getElementById('mgr-ai-meta');
+
+            var _aiLast = null;
+
+            // Restore persisted prefs
+            try {
+                var d0 = String(localStorage.getItem('znh_mgr_ai_days') || '7');
+                if (aiDaysEl && (d0 === '1' || d0 === '7' || d0 === '30')) aiDaysEl.value = d0;
+            } catch (eP0) {}
+            try {
+                var dbg0 = (localStorage.getItem('znh_mgr_ai_debug') || '') === '1';
+                if (aiDebugEl) aiDebugEl.checked = dbg0;
+            } catch (eP1) {}
+
+            function _aiDisable(v) {
+                try { if (aiDaysEl) aiDaysEl.disabled = !!v; } catch (e0) {}
+                try { if (aiDebugEl) aiDebugEl.disabled = !!v; } catch (e1) {}
+                try { if (aiRunBtn) aiRunBtn.disabled = !!v; } catch (e2) {}
+                try { if (aiCopyBtn) aiCopyBtn.disabled = !!v; } catch (e3) {}
+                try { if (aiDlBtn) aiDlBtn.disabled = !!v; } catch (e4) {}
+            }
+
+            function _aiSetText(s) {
+                try {
+                    if (aiOutEl) aiOutEl.textContent = String(s || '');
+                } catch (e0) {}
+            }
+
+            function _aiCopyText(text, btn) {
+                var txt = '';
+                try { txt = String(text || ''); } catch (e0) { txt = ''; }
+                if (!String(txt || '').trim()) {
+                    toast('Nothing to copy', '', 'err');
+                    return;
+                }
+
+                function done(ok) {
+                    try {
+                        if (btn) {
+                            var old = String(btn.textContent || 'Copy');
+                            btn.textContent = ok ? 'Copied!' : 'Copy failed';
+                            setTimeout(function() { try { btn.textContent = old; } catch (e) {} }, 1200);
+                        }
+                    } catch (e1) {}
+                    toast(ok ? 'Copied' : 'Copy failed', ok ? 'Copied to clipboard' : 'Clipboard not available', ok ? 'ok' : 'err');
+                }
+
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(txt).then(function() {
+                            done(true);
+                        }, function() {
+                            throw new Error('clipboard blocked');
+                        });
+                        return;
+                    }
+                } catch (e2) {}
+
+                try {
+                    var ta = document.createElement('textarea');
+                    ta.value = txt;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    done(true);
+                } catch (e3) {
+                    done(false);
+                }
+            }
+
+            function _aiDownloadJson(filename, obj) {
+                try {
+                    var data = JSON.stringify(obj || {}, null, 2);
+                    var blob = new Blob([data], { type: 'application/json' });
+                    var url = URL.createObjectURL(blob);
+                    var a = document.createElement('a');
+                    a.href = url;
+                    a.download = String(filename || ('znh-ai-report-' + String(Date.now()) + '.json'));
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(function() {
+                        try { document.body.removeChild(a); } catch (e0) {}
+                        try { URL.revokeObjectURL(url); } catch (e1) {}
+                    }, 0);
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }
+
+            function _aiRunNow() {
+                var days = 7;
+                try { days = parseInt(String(aiDaysEl ? aiDaysEl.value : '7'), 10) || 7; } catch (e0) { days = 7; }
+                if (days !== 1 && days !== 7 && days !== 30) days = 7;
+
+                var incDbg = false;
+                try { incDbg = !!(aiDebugEl && aiDebugEl.checked); } catch (e1) { incDbg = false; }
+
+                try { localStorage.setItem('znh_mgr_ai_days', String(days)); } catch (eS0) {}
+                try { localStorage.setItem('znh_mgr_ai_debug', incDbg ? '1' : '0'); } catch (eS1) {}
+
+                try { if (aiMetaEl) aiMetaEl.textContent = '(generating…)'; } catch (e2) {}
+                _aiDisable(true);
+                _aiSetText('(generating… please wait)');
+
+                _api('/api/ai/smart-report', { method: 'POST', body: JSON.stringify({ days: days, include_debug: incDbg }) }).then(function(r) {
+                    _aiLast = r;
+                    var txt = '';
+                    try { txt = String((r && r.text) ? r.text : ''); } catch (eT0) { txt = ''; }
+                    if (!txt) {
+                        try { txt = JSON.stringify(r, null, 2); } catch (eT1) { txt = '(report ready, but could not stringify)'; }
+                    }
+                    _aiSetText(txt);
+
+                    try {
+                        if (aiMetaEl) {
+                            var c = (r && r.counts) ? r.counts : {};
+                            aiMetaEl.textContent = '(errors=' + String(c.errors || 0) + ', warnings=' + String(c.warnings || 0) + (incDbg ? (', debug=' + String(c.debug || 0)) : '') + ')';
+                        }
+                    } catch (eM) {}
+
+                    toast('AI report ready', 'Smart report generated', 'ok');
+                }).catch(function(err) {
+                    var msg = (err && err.message) ? err.message : 'failed';
+                    _aiSetText('ERROR: ' + String(msg));
+                    try { if (aiMetaEl) aiMetaEl.textContent = '(failed)'; } catch (eM2) {}
+                    toast('AI report failed', msg, 'err');
+                }).finally(function() {
+                    _aiDisable(false);
+                });
+            }
+
+            if (aiRunBtn) aiRunBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e0) {}
+                _aiRunNow();
+            });
+
+            if (aiCopyBtn) aiCopyBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e1) {}
+                var txt = '';
+                try { txt = String(aiOutEl ? (aiOutEl.textContent || '') : ''); } catch (e2) { txt = ''; }
+                _aiCopyText(txt, aiCopyBtn);
+            });
+
+            if (aiDlBtn) aiDlBtn.addEventListener('click', function(ev) {
+                try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e2) {}
+                if (!_aiLast) {
+                    toast('No report yet', 'Click Generate first', 'err');
+                    return;
+                }
+                var ok = _aiDownloadJson('znh-ai-smart-report-' + String(Date.now()) + '.json', _aiLast);
+                if (ok) toast('Downloaded', 'Saved JSON report', 'ok');
+                else toast('Download failed', 'Could not save file', 'err');
+            });
+
+        } catch (eAI) {}
+
         // Initial fetch
         _znhManagersServerFetchAndRender({ q: String(q || ''), onlyFailed: !!onlyFailed, last24: !!last24, jobType: String(jobType || '') }, false);
     }
@@ -15431,6 +15879,7 @@ generate_dashboard() {
 
         var healthEl = document.getElementById('mgr-srv-health');
         var statsEl = document.getElementById('mgr-srv-stats');
+        var chartEl = document.getElementById('mgr-srv-chart');
         var listEl = document.getElementById('mgr-srv-list');
 
         function _setBox(el, cls, title, body) {
@@ -15445,6 +15894,13 @@ generate_dashboard() {
 
         try { _setBox(healthEl, 'warn', 'Server history health', 'Loading…'); } catch (e0) {}
         try { _setBox(statsEl, 'warn', 'Stats (last 7 days)', 'Loading…'); } catch (e1) {}
+        try {
+            if (chartEl) chartEl.className = 'mgr-row warn';
+            var noteEl0 = document.getElementById('mgr-srv-chart-note');
+            if (noteEl0) noteEl0.textContent = 'Loading…';
+            var metaEl0 = document.getElementById('mgr-srv-chart-meta');
+            if (metaEl0) metaEl0.textContent = '';
+        } catch (e1b) {}
         try { if (listEl) listEl.innerHTML = '<div class="mgr-row warn"><div class="t">Server jobs</div><div class="b">Loading…</div></div>'; } catch (e2) {}
 
         var q = String(opts.q || '').trim();
@@ -15467,14 +15923,29 @@ generate_dashboard() {
 
         var jobsPath = '/api/history/jobs?' + qp.join('&');
 
+        // Chart query (separate from the 7-day summary stats box)
+        var chartType = '';
+        var chartDays = 30;
+        try { chartType = String(localStorage.getItem('znh_mgr_srv_chart_type') || 'system-dup'); } catch (eCT0) { chartType = 'system-dup'; }
+        try { chartDays = parseInt(String(localStorage.getItem('znh_mgr_srv_chart_days') || '30'), 10) || 30; } catch (eCD0) { chartDays = 30; }
+        if (chartDays !== 7 && chartDays !== 30 && chartDays !== 90) chartDays = 30;
+        if (chartType && chartType !== 'system-dup' && chartType !== 'self-update' && chartType !== 'quick-action' && chartType !== 'scrub-ghost' && chartType !== 'snapper') chartType = 'system-dup';
+
+        var chartQp = [];
+        chartQp.push('days=' + encodeURIComponent(String(chartDays)));
+        if (chartType) chartQp.push('job_type=' + encodeURIComponent(String(chartType)));
+        var chartPath = '/api/history/stats?' + chartQp.join('&');
+
         Promise.all([
             _api('/api/history/health'),
             _api('/api/history/stats?days=7'),
+            _api(chartPath),
             _api(jobsPath)
         ]).then(function(res) {
             var health = res[0] || {};
             var stats = res[1] || {};
-            var jobs = res[2] || {};
+            var chart = res[2] || {};
+            var jobs = res[3] || {};
 
             // Health
             try {
@@ -15518,6 +15989,119 @@ generate_dashboard() {
                 _setBox(statsEl, 'ok', 'Stats (last 7 days)', lines.join('\n'));
             } catch (eS2) {
                 _setBox(statsEl, 'err', 'Stats (last 7 days)', String((eS2 && eS2.message) ? eS2.message : eS2));
+            }
+
+            // Chart
+            try {
+                var metaEl = document.getElementById('mgr-srv-chart-meta');
+                var noteEl = document.getElementById('mgr-srv-chart-note');
+                var cv = document.getElementById('mgr-srv-chart-cv');
+
+                var per2 = (chart && chart.per_day) ? chart.per_day : [];
+                var cDays = parseInt(chart.days || 0, 10) || 0;
+                var cType = String(chart.job_type || chartType || '');
+
+                if (metaEl) {
+                    var m = '(' + String(cDays || chartDays) + ' days' + (cType ? (', ' + cType) : '') + ')';
+                    metaEl.textContent = m;
+                }
+
+                function _drawNoData(ctx, w, h, msg) {
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.fillStyle = 'rgba(148,163,184,0.95)';
+                    ctx.font = '12px sans-serif';
+                    ctx.fillText(String(msg || 'No data'), 10, 20);
+                }
+
+                if (!cv || !cv.getContext) {
+                    try { if (chartEl) chartEl.className = 'mgr-row warn'; } catch (eC00) {}
+                    try { if (noteEl) noteEl.textContent = 'Canvas not available.'; } catch (eC01) {}
+                } else {
+                    var w = cv.clientWidth || 680;
+                    var h = 140;
+                    var dpr = window.devicePixelRatio || 1;
+                    cv.width = Math.max(1, Math.floor(w * dpr));
+                    cv.height = Math.max(1, Math.floor(h * dpr));
+                    var ctx = cv.getContext('2d');
+                    if (ctx && ctx.setTransform) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+                    var max = 0;
+                    var sumT = 0, sumOk = 0, sumFail = 0;
+                    for (var ii = 0; ii < per2.length; ii++) {
+                        var tt = parseInt(per2[ii].total || 0, 10) || 0;
+                        max = Math.max(max, tt);
+                        sumT += tt;
+                        sumOk += parseInt(per2[ii].ok || 0, 10) || 0;
+                        sumFail += parseInt(per2[ii].fail || 0, 10) || 0;
+                    }
+
+                    if (!per2.length || max <= 0) {
+                        _drawNoData(ctx, w, h, 'No data for this range/type');
+                    } else {
+                        ctx.clearRect(0, 0, w, h);
+
+                        var pad = 10;
+                        var plotW = Math.max(1, w - pad * 2);
+                        var plotH = Math.max(1, h - pad * 2);
+
+                        // grid lines
+                        ctx.strokeStyle = 'rgba(148,163,184,0.18)';
+                        ctx.lineWidth = 1;
+                        for (var g = 0; g <= 3; g++) {
+                            var yy = pad + Math.round((plotH * g) / 3);
+                            ctx.beginPath();
+                            ctx.moveTo(pad, yy);
+                            ctx.lineTo(pad + plotW, yy);
+                            ctx.stroke();
+                        }
+
+                        var barW = plotW / per2.length;
+                        for (var x = 0; x < per2.length; x++) {
+                            var d = per2[x] || {};
+                            var tot = parseInt(d.total || 0, 10) || 0;
+                            var okc = parseInt(d.ok || 0, 10) || 0;
+                            var failc = parseInt(d.fail || 0, 10) || 0;
+
+                            var totH = Math.round((tot / max) * plotH);
+                            var okH = (tot > 0) ? Math.round((okc / tot) * totH) : 0;
+                            var failH = (tot > 0) ? Math.round((failc / tot) * totH) : 0;
+
+                            var bx = pad + Math.floor(x * barW);
+                            var bw = Math.max(1, Math.floor(barW - 1));
+
+                            var y0 = pad + plotH;
+                            // ok segment
+                            ctx.fillStyle = 'rgba(34,197,94,0.85)';
+                            ctx.fillRect(bx, y0 - okH, bw, okH);
+                            // fail segment (stacked on top)
+                            ctx.fillStyle = 'rgba(239,68,68,0.85)';
+                            ctx.fillRect(bx, y0 - okH - failH, bw, failH);
+                        }
+
+                        // axis label (tiny)
+                        ctx.fillStyle = 'rgba(148,163,184,0.75)';
+                        ctx.font = '11px sans-serif';
+                        ctx.fillText('max/day=' + String(max), pad, pad + 10);
+                    }
+
+                    // Keep the mgr-row layout; chart draws inside it.
+                    try {
+                        if (chartEl) chartEl.className = 'mgr-row ok';
+                    } catch (eC0) {}
+
+                    if (noteEl) {
+                        var note = 'Total: ' + String(sumT) + ' • OK: ' + String(sumOk) + ' • Fail: ' + String(sumFail);
+                        if (cType) note += ' • type=' + String(cType);
+                        noteEl.textContent = note;
+                    }
+                }
+
+            } catch (eC) {
+                try { if (chartEl) chartEl.className = 'mgr-row err'; } catch (eC1) {}
+                try {
+                    var noteEl2 = document.getElementById('mgr-srv-chart-note');
+                    if (noteEl2) noteEl2.textContent = String((eC && eC.message) ? eC.message : eC);
+                } catch (eC2) {}
             }
 
             // Jobs list
@@ -15650,6 +16234,11 @@ generate_dashboard() {
             var msg = (err && err.message) ? err.message : 'failed';
             _setBox(healthEl, 'err', 'Server history health', msg);
             _setBox(statsEl, 'err', 'Stats (last 7 days)', msg);
+            try { if (chartEl) chartEl.className = 'mgr-row err'; } catch (eC0) {}
+            try {
+                var noteEl3 = document.getElementById('mgr-srv-chart-note');
+                if (noteEl3) noteEl3.textContent = String(msg || 'failed');
+            } catch (eC1) {}
             try {
                 if (listEl) listEl.innerHTML = '<div class="mgr-row err"><div class="t">Server history fetch failed</div><div class="b">' + String(msg).replace(/</g,'&lt;') + '</div></div>';
             } catch (e2) {}
@@ -16125,7 +16714,12 @@ generate_dashboard() {
         conflict: false,
         otherCount: 0,
         toastShown: false,
-        ch: null
+        ch: null,
+
+        // Performance: when BroadcastChannel is available, prefer it over
+        // localStorage writes (JSON.stringify every 2s can be surprisingly expensive).
+        // We keep localStorage as a fallback for older browsers.
+        useLocalStorage: true
     };
 
     function _znhMiNow() {
@@ -16254,7 +16848,7 @@ generate_dashboard() {
         _znhMiSetButtonsDisabled('#self-update-toggle-btn', on);
         _znhMiSetButtonsDisabled('#settings-save', on);
         _znhMiSetButtonsDisabled('#settings-reset', on);
-        _znhMiSetButtonsDisabled('#snapper-status-btn, #snapper-list-btn, #snapper-create-btn, #snapper-cleanup-btn, #snapper-auto-enable-btn, #snapper-auto-disable-btn', on);
+        _znhMiSetButtonsDisabled('#snapper-status-btn, #snapper-list-btn, #snapper-create-btn, #snapper-cleanup-btn, #snapper-rollback-btn, #snapper-auto-enable-btn, #snapper-auto-disable-btn', on);
         _znhMiSetButtonsDisabled('#scrub-run-btn, #scrub-wizard-btn', on);
         _znhMiSetButtonsDisabled('#self-update-sim-run-btn, #rocket-update-sim-run-btn, #rocket-wizard-open-btn, #dash-refresh-run-btn, #dash-refresh-run-btn2', on);
 
@@ -16298,15 +16892,24 @@ generate_dashboard() {
     function _znhMiEval() {
         var now = _znhMiNow();
 
-        // Merge in localStorage peer map.
-        var peers = _znhMiReadPeers();
+        // Merge peers.
+        // - Newer browsers: BroadcastChannel (no localStorage churn)
+        // - Older browsers: localStorage peer map
+        var peers = {};
+        if (_znhMi.useLocalStorage) {
+            peers = _znhMiReadPeers();
+        } else {
+            peers = _znhMi.peers || {};
+        }
         peers = _znhMiPrunePeers(peers, now);
 
         // Keep self alive.
         peers[_znhMi.tabId] = { ts: now, gen_id: String(ZNH_DASHBOARD_GEN_ID || ''), helper_ver: ZNH_HELPER_VERSION_AT_GEN || 0 };
 
         // Persist pruned map (best-effort).
-        _znhMiWritePeers(peers);
+        if (_znhMi.useLocalStorage) {
+            _znhMiWritePeers(peers);
+        }
 
         // Update local view.
         _znhMi.peers = peers;
@@ -16365,6 +16968,10 @@ generate_dashboard() {
         try {
             if (typeof BroadcastChannel === 'function') {
                 _znhMi.ch = new BroadcastChannel('znh_webui_peers_v1');
+                if (_znhMi.ch) {
+                    // Prefer BroadcastChannel (performance).
+                    _znhMi.useLocalStorage = false;
+                }
                 _znhMi.ch.onmessage = function(ev) {
                     try {
                         var data = (ev && ev.data) ? ev.data : null;
@@ -16381,11 +16988,13 @@ generate_dashboard() {
                                 try { delete _znhMi.peers[bid]; } catch (eB) {}
 
                                 // Also try to remove from localStorage peer map so other tabs update immediately.
-                                try {
-                                    var peers2 = _znhMiReadPeers();
-                                    try { delete peers2[bid]; } catch (eB2) {}
-                                    _znhMiWritePeers(peers2);
-                                } catch (eB3) {}
+                                if (_znhMi.useLocalStorage) {
+                                    try {
+                                        var peers2 = _znhMiReadPeers();
+                                        try { delete peers2[bid]; } catch (eB2) {}
+                                        _znhMiWritePeers(peers2);
+                                    } catch (eB3) {}
+                                }
 
                                 // Re-evaluate immediately (no need to wait for stale timeout).
                                 try { _znhMiEval(); } catch (eB4) {}
@@ -16397,21 +17006,26 @@ generate_dashboard() {
         } catch (e5) { _znhMi.ch = null; }
 
         // React quickly to other tabs updating the peer map.
-        try {
-            window.addEventListener('storage', function(ev) {
-                try {
-                    if (!ev || String(ev.key || '') !== _znhMi.peersKey) return;
-                    _znhMiEval();
-                } catch (eS) {}
-            });
-        } catch (e6) {}
+        // Only relevant for the localStorage fallback path.
+        if (_znhMi.useLocalStorage) {
+            try {
+                window.addEventListener('storage', function(ev) {
+                    try {
+                        if (!ev || String(ev.key || '') !== _znhMi.peersKey) return;
+                        _znhMiEval();
+                    } catch (eS) {}
+                });
+            } catch (e6) {}
+        }
 
         function _znhMiBye() {
-            try {
-                var peers = _znhMiReadPeers();
-                try { delete peers[_znhMi.tabId]; } catch (e1) {}
-                _znhMiWritePeers(peers);
-            } catch (e2) {}
+            if (_znhMi.useLocalStorage) {
+                try {
+                    var peers = _znhMiReadPeers();
+                    try { delete peers[_znhMi.tabId]; } catch (e1) {}
+                    _znhMiWritePeers(peers);
+                } catch (e2) {}
+            }
             try { if (_znhMi.ch) _znhMi.ch.postMessage({ type: 'bye', id: _znhMi.tabId, ts: _znhMiNow() }); } catch (e3) {}
         }
 
@@ -16711,6 +17325,7 @@ generate_dashboard() {
         { key: 'HOOKS_ENABLED', type: 'bool', label: 'Hooks enabled' },
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
+        { key: 'DASHBOARD_PERFORMANCE_MODE', type: 'enum', label: 'Dashboard: performance mode (PowerSaving/Balanced/Performance)', help: 'Controls WebUI polling cadence and dash-open worker intervals. Default is powersaving to avoid CPU/RAM hogging. Tip: after changing this, re-open the dashboard (zypper-auto-helper --dash-open) to restart background workers with the new mode.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
@@ -17702,6 +18317,38 @@ generate_dashboard() {
         return st;
     }
 
+    // Debounced highlighting: highlighting repeatedly (regex over full HTML) can freeze the UI
+    // when logs are streaming in quickly.
+    var _znhHl = { timers: {} };
+    function _znhHighlightDebounced(id, textLen, delayMs) {
+        id = String(id || '').trim();
+        if (!id) return;
+
+        // Only highlight small logs (large strings are expensive).
+        var n = 0;
+        try { n = parseInt(textLen || 0, 10) || 0; } catch (e0) { n = 0; }
+        if (n > 12000) return;
+
+        var d = 450;
+        try { d = parseInt(delayMs || 450, 10) || 450; } catch (e1) { d = 450; }
+        if (d < 50) d = 50;
+        if (d > 2500) d = 2500;
+
+        // Reset timer per-id.
+        try {
+            if (_znhHl.timers[id]) {
+                clearTimeout(_znhHl.timers[id]);
+                _znhHl.timers[id] = null;
+            }
+        } catch (e2) {}
+
+        _znhHl.timers[id] = setTimeout(function() {
+            try {
+                if (typeof highlightBlock === 'function') highlightBlock(id);
+            } catch (e3) {}
+        }, d);
+    }
+
     function _znhOverlayLogApplyRaw(preId, rawText, opts) {
         opts = opts || {};
         var pre = document.getElementById(String(preId || ''));
@@ -17741,9 +18388,7 @@ generate_dashboard() {
 
         if (opts.highlightId) {
             try {
-                if (typeof highlightBlock === 'function' && t.length <= 12000) {
-                    highlightBlock(String(opts.highlightId));
-                }
+                _znhHighlightDebounced(String(opts.highlightId), t.length, (opts.highlightDelayMs != null) ? opts.highlightDelayMs : 450);
             } catch (eH) {}
         }
     }
@@ -18716,7 +19361,7 @@ generate_dashboard() {
 
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
-            '  <div style="font-weight:950;">Snapper cleanup running</div>',
+            '  <div style="font-weight:950;">Snapper job running</div>',
             '  <div style="margin-top:6px; font-weight:800;">This job runs in the background. You can minimize and reopen from the bottom-right bubble.</div>',
             '</div>',
             '<div class="overlay-progress">',
@@ -18769,15 +19414,19 @@ generate_dashboard() {
         }
     }
 
-    function _snPollJob(jobId, title) {
+    function _snPollJob(jobId, title, action) {
         jobId = String(jobId || '').trim();
         if (!jobId) return;
 
         _sn.job_id = jobId;
         _sn.running = true;
 
+        var act = '';
+        try { act = String(action || '').trim(); } catch (eA) { act = ''; }
+        if (!act) act = 'snapper';
+
         // Ensure persistent task bubble is visible + resume-safe.
-        try { znhTaskSet({ type: 'snapper-cleanup', job_id: jobId, action: 'cleanup', title: String(title || 'Snapper cleanup') }); } catch (eT) {}
+        try { znhTaskSet({ type: 'snapper-cleanup', job_id: jobId, action: act, title: String(title || 'Snapper job') }); } catch (eT) {}
 
         var pollFailures = 0;
         var pollMaxFailures = 10;
@@ -18841,7 +19490,13 @@ generate_dashboard() {
                         }
                     } catch (eRes) {}
 
-                    try { toast('Snapper cleanup', (rc === 0) ? 'OK' : ('rc=' + String(rc)), (rc === 0) ? 'ok' : 'err'); } catch (eToast) {}
+                    var toastTitle = 'Snapper';
+                    try { toastTitle = String(title || 'Snapper'); } catch (eTT) { toastTitle = 'Snapper'; }
+                    try {
+                        var toastMsg = (rc === 0) ? 'OK' : ('rc=' + String(rc));
+                        if (rc === 0 && String(act || '') === 'rollback') toastMsg = 'OK (reboot required)';
+                        toast(toastTitle, toastMsg, (rc === 0) ? 'ok' : 'err');
+                    } catch (eToast) {}
                     try { znhTaskDone('snapper-cleanup', rc === 0); } catch (eTD) {}
                 }
 
@@ -18995,12 +19650,12 @@ generate_dashboard() {
         if (!jid) return;
 
         _snEnsureOverlay();
-        _snRenderRunning({ title: String(t.title || 'Snapper cleanup'), job_id: jid });
+        _snRenderRunning({ title: String(t.title || 'Snapper job'), job_id: jid });
         _snShow(true);
 
         // Ensure polling is active.
         if (!_sn.running || String(_sn.job_id || '') !== jid) {
-            _snPollJob(jid, String(t.title || 'Snapper cleanup'));
+            _snPollJob(jid, String(t.title || 'Snapper job'), String(t.action || ''));
         }
     }
 
@@ -19011,11 +19666,11 @@ generate_dashboard() {
         if (!jid) return;
 
         _snEnsureOverlay();
-        _snRenderRunning({ title: String(t.title || 'Snapper cleanup'), job_id: jid });
+        _snRenderRunning({ title: String(t.title || 'Snapper job'), job_id: jid });
         _snShow(false);
 
         if (!_sn.running || String(_sn.job_id || '') !== jid) {
-            _snPollJob(jid, String(t.title || 'Snapper cleanup'));
+            _snPollJob(jid, String(t.title || 'Snapper job'), String(t.action || ''));
         }
     }
 
@@ -19032,6 +19687,12 @@ generate_dashboard() {
             try { mode = String(params.mode || 'all'); } catch (e) { mode = 'all'; }
             mode = String(mode || 'all').trim();
             if (mode) args.push(mode);
+        }
+
+        if (action === 'rollback') {
+            var rid = '';
+            try { rid = String(params.id || '').trim(); } catch (e2) { rid = ''; }
+            if (rid) args.push(rid);
         }
 
         if (action === 'create') {
@@ -19280,11 +19941,12 @@ generate_dashboard() {
                     return;
                 }
 
-                // Snapper cleanup can take a long time and produces huge output.
+                // Snapper actions like cleanup and rollback can take a long time and produce huge output.
                 // Use the background-job API so the UI can stream logs and avoid "stuck" appearance.
                 var useJob = false;
                 try {
-                    useJob = String(_sn.action || '') === 'cleanup';
+                    var a0 = String(_sn.action || '');
+                    useJob = (a0 === 'cleanup' || a0 === 'rollback');
                 } catch (eU) { useJob = false; }
 
                 function finalizeResult(r) {
@@ -19346,11 +20008,22 @@ generate_dashboard() {
                         var jobId = String(r0.job_id);
 
                         // Switch UI into a resumable, minimizable running view.
-                        _snRenderRunning({ title: 'Snapper cleanup', job_id: jobId });
+                        var jobTitle = 'Snapper job';
+                        try {
+                            if (String(_sn.action || '') === 'cleanup') {
+                                jobTitle = 'Snapper cleanup';
+                            } else if (String(_sn.action || '') === 'rollback') {
+                                var rid = '';
+                                try { rid = String((_sn.params || {}).id || '').trim(); } catch (eRid) { rid = ''; }
+                                jobTitle = 'Snapper rollback' + (rid ? (' #' + rid) : '');
+                            }
+                        } catch (eT0) { jobTitle = 'Snapper job'; }
+
+                        _snRenderRunning({ title: jobTitle, job_id: jobId });
                         _snShow(true);
 
                         // Begin polling + bubble support.
-                        _snPollJob(jobId, 'Snapper cleanup');
+                        _snPollJob(jobId, jobTitle, String(_sn.action || ''));
                         return r0;
                     }).catch(function(err0) {
                         var msg0 = (err0 && err0.message) ? err0.message : 'start failed';
@@ -19426,7 +20099,9 @@ generate_dashboard() {
             _snapperSetOut('Running: ' + action + ' ...');
             return _api('/api/snapper/run', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
                 _snapperSetOut(r.output || '(no output)');
-                toast('Snapper: ' + action, (r.rc === 0) ? 'OK' : ('rc=' + r.rc), (r.rc === 0) ? 'ok' : 'err');
+                var msg = (r.rc === 0) ? 'OK' : ('rc=' + r.rc);
+                if (r.rc === 0 && String(action || '') === 'rollback') msg = 'OK (reboot required)';
+                toast('Snapper: ' + action, msg, (r.rc === 0) ? 'ok' : 'err');
                 _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
                 return r;
             }).catch(function(e) {
@@ -19468,6 +20143,7 @@ generate_dashboard() {
         var b4 = document.getElementById('snapper-cleanup-btn');
         var b5 = document.getElementById('snapper-auto-enable-btn');
         var b6 = document.getElementById('snapper-auto-disable-btn');
+        var b7 = document.getElementById('snapper-rollback-btn');
 
         if (b1) b1.addEventListener('click', function() {
             _api('/api/snapper/status', { method: 'GET' }).then(function(r) {
@@ -19504,6 +20180,16 @@ generate_dashboard() {
             var desc = '';
             try { desc = String((document.getElementById('snapper-desc') || {}).value || ''); } catch (e) { desc = ''; }
             snapperRun('create', { desc: desc }, 'create');
+        });
+
+        if (b7) b7.addEventListener('click', function() {
+            var snapId = '';
+            try { snapId = String((document.getElementById('snapper-rollback-id') || {}).value || '').trim(); } catch (e) { snapId = ''; }
+            if (!snapId || !String(snapId).match(/^[0-9]+$/)) {
+                toast('Invalid snapshot ID', 'Enter a numeric Snapper snapshot ID', 'err');
+                return;
+            }
+            snapperRun('rollback', { id: snapId }, 'rollback');
         });
 
         if (b4) b4.addEventListener('click', function() {
@@ -25740,6 +26426,7 @@ generate_dashboard() {
         }).then(function(c) {
             _settingsConfig = c.config
             try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
+            try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
@@ -26014,6 +26701,7 @@ generate_dashboard() {
                     if (c && c.config) {
                         _settingsConfig = c.config;
                         try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
+                        try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
                         try { znhDebugUpdateToggleUi(); } catch (eDU) {}
 
                         // Only re-render the full form when the drawer is actually open.
@@ -27337,7 +28025,7 @@ generate_dashboard() {
             }
 
             // Take last N points
-            var N = 60;
+            var N = znhPerfChartPointsEffective();
             var slice = samples.slice(Math.max(0, samples.length - N));
 
             var cpuPts = [];
@@ -27520,7 +28208,7 @@ generate_dashboard() {
             }
         } catch (eB) {}
 
-        var tailed = tailLines(rawText || '', 220);
+        var tailed = tailLines(rawText || '', znhRecentLogTailLinesEffective());
         if (tailed === _lastLiveLog) return;
 
         var prev = _lastLiveLog;
@@ -27691,7 +28379,7 @@ generate_dashboard() {
             })
             .then(function(txt) {
                 if (txt === null || txt === undefined) return;
-                var tailed = tailLines(txt, 220);
+                var tailed = tailLines(txt, znhRecentLogTailLinesEffective());
                 if (tailed === _lastLiveLog) return;
 
                 var prev = _lastLiveLog;
@@ -27777,20 +28465,37 @@ generate_dashboard() {
 
     // Live poll loops (recursive setTimeout): avoids setInterval request pile-up
     // when fetch responses are slow.
-    function _startPollLoop(fn, intervalMs) {
+    function _startPollLoop(fn, intervalMsOrFn) {
+        function _interval() {
+            var v = intervalMsOrFn;
+            try {
+                if (typeof intervalMsOrFn === 'function') {
+                    v = intervalMsOrFn();
+                }
+            } catch (e0) {
+                v = intervalMsOrFn;
+            }
+
+            try { v = parseInt(v || 0, 10) || 0; } catch (e1) { v = 0; }
+            if (!isFinite(v) || v <= 0) v = 2000;
+            if (v < 200) v = 200;
+            if (v > 120000) v = 120000;
+            return v;
+        }
+
         function step() {
             Promise.resolve().then(fn).catch(function() { /* ignore */ }).finally(function() {
-                setTimeout(step, intervalMs);
+                setTimeout(step, _interval());
             });
         }
         setTimeout(step, 0);
     }
 
-    _startPollLoop(pollLive, 5000);
-    _startPollLoop(pollDownloaderStatus, 2000);
-    _startPollLoop(pollPerf, 2000);
-    _startPollLoop(pollRecentActivityLog, 2000);
-    _startPollLoop(pollDashboardMeta, 15000);
+    _startPollLoop(pollLive, function() { return znhPerfIntervalMs('live', 5000); });
+    _startPollLoop(pollDownloaderStatus, function() { return znhPerfIntervalMs('downloader', 2000); });
+    _startPollLoop(pollPerf, function() { return znhPerfIntervalMs('perf', 2000); });
+    _startPollLoop(pollRecentActivityLog, function() { return znhPerfIntervalMs('log', 2000); });
+    _startPollLoop(pollDashboardMeta, function() { return znhPerfIntervalMs('meta', 15000); });
 
     // Initial draws (some are useful even when live mode is off)
     try {
@@ -31858,13 +32563,49 @@ PY
             fi
         fi
 
-        # Start user sync worker (best-effort) so user dashboard dir stays up-to-date.
+        # Start user sync/perf workers (best-effort) so user dashboard dir stays up-to-date.
         if [ -n "${SUDO_USER:-}" ]; then
             local user_home
             user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
-            __znh_start_dashboard_sync_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" || true
+
+            # Apply performance mode (default powersaving) to worker cadence.
+            local perf_mode sync_interval sync_max_idle perf_interval perf_max_samples
+            perf_mode="${DASHBOARD_PERFORMANCE_MODE:-}"
+            if [ -z "${perf_mode:-}" ]; then
+                perf_mode="$(__znh_conf_peek_value DASHBOARD_PERFORMANCE_MODE 2>/dev/null || true)"
+            fi
+            perf_mode="$(printf '%s' "${perf_mode}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' 2>/dev/null || printf '%s' "${perf_mode}")"
+
+            sync_interval=8
+            sync_max_idle=120
+            perf_interval=8
+            perf_max_samples=120
+            case "${perf_mode}" in
+                performance)
+                    sync_interval=2
+                    sync_max_idle=30
+                    perf_interval=2
+                    perf_max_samples=240
+                    ;;
+                balanced)
+                    sync_interval=4
+                    sync_max_idle=60
+                    perf_interval=4
+                    perf_max_samples=180
+                    ;;
+                powersaving|"")
+                    ;;
+                *)
+                    ;;
+            esac
+
+            # Restart workers so the cadence change actually applies.
+            __znh_stop_dashboard_sync_worker "${dash_dir}" || true
+            __znh_stop_dashboard_perf_worker "${dash_dir}" || true
+
+            __znh_start_dashboard_sync_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" "${sync_interval}" "${sync_max_idle}" || true
             # Start perf worker for live service performance charts (best-effort)
-            __znh_start_dashboard_perf_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" || true
+            __znh_start_dashboard_perf_worker "${dash_dir}" "${SUDO_USER}" "${user_home}" "${perf_interval}" "${perf_max_samples}" || true
             # Ensure Desktop/app launcher exists (best-effort)
             __znh_ensure_dash_desktop_shortcut "${SUDO_USER}" "${user_home}" || true
         fi
@@ -32814,6 +33555,67 @@ run_snapper_menu_only() {
         fi
 
         printf '%s\n' "$out"
+        return "$rc"
+    }
+
+    __znh_snapper_rollback_to() {
+        # Usage:
+        #   zypper-auto-helper snapper rollback <ID>
+        #
+        # Safety:
+        # - Requires a typed confirmation phrase unless ZNH_NON_INTERACTIVE=1.
+        # - Does NOT reboot automatically (WebUI should prompt the user to reboot).
+        local snap_id="${1:-}"
+
+        if [ -z "${snap_id}" ] && [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+            read -p "Snapshot ID to rollback to > " -r snap_id
+        fi
+
+        if ! [[ "${snap_id:-}" =~ ^[0-9]+$ ]]; then
+            echo "Invalid snapshot ID: ${snap_id}"
+            return 1
+        fi
+
+        if pgrep -x snapper >/dev/null 2>&1; then
+            log_warn "Snapper appears to be running already; refusing rollback to avoid conflicts"
+            return 1
+        fi
+
+        echo ""
+        echo "=============================================="
+        echo " Snapper Rollback (non-interactive capable)"
+        echo "=============================================="
+        echo "About to run: snapper rollback ${snap_id}"
+        echo "WARNING: This changes your root filesystem state."
+        echo "After a successful rollback, you must reboot."
+
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+            echo "Non-interactive: proceeding (confirmation handled by caller)."
+        elif [ ! -t 0 ]; then
+            log_warn "Refusing snapper rollback without a TTY. (Set ZNH_NON_INTERACTIVE=1 to explicitly allow.)"
+            return 1
+        else
+            local confirm
+            read -p "Type ROLLBACK to confirm > " -r confirm
+            confirm="${confirm^^}"
+            if [ "${confirm}" != "ROLLBACK" ]; then
+                log_warn "Rollback cancelled (confirmation not entered)."
+                return 1
+            fi
+        fi
+
+        # Rollback can take time; guard it with a timeout.
+        __znh_snapper_cmd_timeout 600 -c root rollback "${snap_id}"
+        local rc=$?
+
+        echo ""
+        if [ "$rc" -eq 0 ] 2>/dev/null; then
+            echo "Rollback applied successfully."
+            echo "Reboot required. Example: sudo systemctl reboot"
+        else
+            echo "Rollback failed (rc=${rc})."
+        fi
+
         return "$rc"
     }
 
@@ -35026,6 +35828,7 @@ run_snapper_menu_only() {
     #   zypper-auto-helper snapper list [N]
     #   zypper-auto-helper snapper create [DESCRIPTION]
     #   zypper-auto-helper snapper cleanup [all|force-prune|number|timeline|empty-pre-post]
+    #   zypper-auto-helper snapper rollback <ID>
     #   zypper-auto-helper snapper auto   (enable timers)
     #   zypper-auto-helper snapper auto-off (disable timers)
     local sub="${1:-}"
@@ -35052,6 +35855,13 @@ run_snapper_menu_only() {
         cleanup)
             shift
             __znh_snapper_cleanup_now "${1:-all}"
+            local rc=$?
+            set -e
+            return $rc
+            ;;
+        rollback)
+            shift
+            __znh_snapper_rollback_to "${1:-}"
             local rc=$?
             set -e
             return $rc
@@ -46295,8 +47105,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, history, and streaming endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/") or path.startswith("/api/events/"):
+        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, history, AI, and streaming endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/") or path.startswith("/api/ai/") or path.startswith("/api/events/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -47931,6 +48741,14 @@ class Handler(BaseHTTPRequestHandler):
             if days > 90:
                 days = 90
 
+            job_type = ""
+            try:
+                job_type = str((qs.get("job_type") or [""])[0]).strip()
+            except Exception:
+                job_type = ""
+            if job_type and job_type not in ("system-dup", "self-update", "quick-action", "scrub-ghost", "snapper"):
+                job_type = ""
+
             since = time.time() - (float(days) * 86400.0)
 
             conn = _history_conn(self.server)
@@ -47940,20 +48758,24 @@ class Handler(BaseHTTPRequestHandler):
             per_day = []
             by_type = []
             try:
-                cur = conn.execute(
-                    """
+                where_sql = "started_ts >= ?"
+                args = [float(since)]
+                if job_type:
+                    where_sql += " AND job_type = ?"
+                    args.append(job_type)
+
+                q1 = f"""
                     SELECT date(started_ts, 'unixepoch') AS d,
                            COUNT(1) AS total,
                            SUM(CASE WHEN done=1 AND rc=0 THEN 1 ELSE 0 END) AS ok,
                            SUM(CASE WHEN done=1 AND rc IS NOT NULL AND rc!=0 THEN 1 ELSE 0 END) AS fail,
                            AVG(CASE WHEN done=1 AND finished_ts>0 AND started_ts>0 THEN (finished_ts-started_ts) ELSE NULL END) AS avg_sec
                       FROM jobs
-                     WHERE started_ts >= ?
+                     WHERE {where_sql}
                      GROUP BY d
                      ORDER BY d ASC
-                    """,
-                    (float(since),),
-                )
+                """
+                cur = conn.execute(q1, tuple(args))
                 for r in cur.fetchall() or []:
                     per_day.append({
                         "day": str(r[0] or ""),
@@ -47963,19 +48785,17 @@ class Handler(BaseHTTPRequestHandler):
                         "avg_duration_sec": float(r[4] or 0.0),
                     })
 
-                cur2 = conn.execute(
-                    """
+                q2 = f"""
                     SELECT job_type,
                            COUNT(1) AS total,
                            SUM(CASE WHEN done=1 AND rc=0 THEN 1 ELSE 0 END) AS ok,
                            SUM(CASE WHEN done=1 AND rc IS NOT NULL AND rc!=0 THEN 1 ELSE 0 END) AS fail
                       FROM jobs
-                     WHERE started_ts >= ?
+                     WHERE {where_sql}
                      GROUP BY job_type
                      ORDER BY total DESC
-                    """,
-                    (float(since),),
-                )
+                """
+                cur2 = conn.execute(q2, tuple(args))
                 for r2 in cur2.fetchall() or []:
                     by_type.append({
                         "type": str(r2[0] or ""),
@@ -47991,12 +48811,13 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "days": int(days),
                 "since_ts": float(since),
+                "job_type": str(job_type or ""),
                 "per_day": per_day,
                 "by_type": by_type,
             }, origin)
 
         # If we got here and the path is under an auth-required prefix, it's not implemented.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/history/"):
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/history/") or path.startswith("/api/ai/"):
             return _json_response(self, 404, {"error": "not found"}, origin)
 
         if path == "/api/ping":
@@ -48085,6 +48906,380 @@ class Handler(BaseHTTPRequestHandler):
                 "config_warnings": warnings,
                 "invalid_keys": invalid,
             }, origin)
+
+        # --- AI Smart Report (offline, bounded) ---
+        # Purpose: help users report issues by scanning recent log tails for ERROR/WARN/DEBUG patterns.
+        # This is NOT an LLM; it is a lightweight local classifier with strict limits.
+        if path == "/api/ai/smart-report":
+            body = _read_json(self)
+
+            days = 7
+            try:
+                days = int(str(body.get("days", 7) or "7").strip() or "7")
+            except Exception:
+                days = 7
+            if days < 1:
+                days = 1
+            if days > 90:
+                days = 90
+
+            include_debug = False
+            try:
+                include_debug = bool(body.get("include_debug", False))
+            except Exception:
+                include_debug = False
+
+            # Hard limits (keep CPU/RAM low)
+            max_files = 12
+            max_jobs = 14
+            max_chars_per_file = 25_000
+            max_job_tail_chars = 20_000
+            max_issue_lines_per_item = 80
+
+            since_ts = time.time() - (float(days) * 86400.0)
+
+            def _redact(s: str) -> str:
+                try:
+                    txt = str(s or "")
+                except Exception:
+                    return ""
+
+                # Basic redactions (best-effort). Keep this small and safe.
+                try:
+                    # Hide token-like values
+                    txt = re.sub(r"(?i)(X-ZNH-Token\s*[:=]\s*)([^\s]+)", r"\1<redacted>", txt)
+                    txt = re.sub(r"(?i)(dashboard[-_]?token\s*[:=]\s*)([^\s]+)", r"\1<redacted>", txt)
+
+                    # Hide webhook URL values
+                    txt = re.sub(r"(?i)(WEBHOOK_URL\s*=\s*)\"[^\"]+\"", r"\1\"<redacted>\"", txt)
+                    txt = re.sub(r"(?i)(WEBHOOK_URL\s*=\s*)[^\s]+", r"\1<redacted>", txt)
+
+                    # Generic bearer token / auth header patterns
+                    txt = re.sub(r"(?i)(authorization\s*:\s*)(.+)", r"\1<redacted>", txt)
+                except Exception:
+                    pass
+
+                return txt
+
+            def _classify_line(line: str) -> str:
+                l0 = str(line or "")
+                l = l0.lower()
+
+                # Common python tracebacks are high-signal errors.
+                if "traceback (most recent call last)" in l or "exception" in l:
+                    return "error"
+
+                # Try to avoid misclassifying "no errors".
+                if "no errors" in l or "no error" in l:
+                    return "info"
+
+                if re.search(r"\b(fatal|panic|error|failed|failure)\b", l):
+                    return "error"
+                if re.search(r"\b(warn|warning|deprecated)\b", l):
+                    return "warn"
+                if re.search(r"\b(debug|trace)\b", l):
+                    return "debug"
+
+                return "info"
+
+            def _extract_issues(text: str) -> dict:
+                out = {"error": [], "warn": [], "debug": []}
+                if not text:
+                    return out
+
+                try:
+                    lines = str(text).splitlines()
+                except Exception:
+                    lines = []
+
+                for ln in lines:
+                    try:
+                        kind = _classify_line(ln)
+                        if kind == "debug" and not include_debug:
+                            continue
+                        if kind in ("error", "warn", "debug"):
+                            v = ln.strip()
+                            if not v:
+                                continue
+                            # Bound line length
+                            if len(v) > 600:
+                                v = v[:600] + "…"
+                            out[kind].append(v)
+
+                            # Stop early (CPU safety)
+                            if (
+                                len(out["error"]) + len(out["warn"]) + len(out["debug"])
+                            ) >= max_issue_lines_per_item:
+                                break
+                    except Exception:
+                        continue
+
+                return out
+
+            def _read_recent_logs() -> list:
+                # Collect most-recent log files by mtime across known directories, plus
+                # the explicit log artifacts shown in the WebUI Recent Activity Log.
+
+                # Explicit WebUI log artifacts (these are the files the WebUI reads when you
+                # switch log views: Live / Install tail / Verify tail / Diagnostics / API / journalctl).
+                pinned = [
+                    "/var/log/zypper-auto/dashboard-live.log",
+                    "/var/log/zypper-auto/dashboard-install-tail.log",
+                    "/var/log/zypper-auto/dashboard-verify-tail.log",
+                    "/var/log/zypper-auto/dashboard-diag-tail.log",
+                    "/var/log/zypper-auto/dashboard-journal-tail.log",
+                    "/var/log/zypper-auto/dashboard-api.log",
+                ]
+
+                candidates = []
+                patterns = [
+                    "/var/log/zypper-auto/install-*.log",
+                    "/var/log/zypper-auto/service-logs/*.log",
+                    "/var/log/zypper-auto/diagnostics/diag-*.log",
+                ]
+                for pat in patterns:
+                    try:
+                        candidates.extend(glob.glob(pat) or [])
+                    except Exception:
+                        continue
+
+                # Deduplicate + stat
+                seen = set()
+                pinned_rows = []
+                other_rows = []
+
+                def _consider_path(p: str, *, is_pinned: bool) -> None:
+                    try:
+                        if not p:
+                            return
+                        if p in seen:
+                            return
+                        seen.add(p)
+                        if not os.path.isfile(p):
+                            return
+
+                        st = os.stat(p)
+                        mtime = float(getattr(st, "st_mtime", 0.0) or 0.0)
+                        if mtime < since_ts:
+                            return
+
+                        row = (mtime, p, int(getattr(st, "st_size", 0) or 0))
+                        if is_pinned:
+                            pinned_rows.append(row)
+                        else:
+                            other_rows.append(row)
+                    except Exception:
+                        return
+
+                for p in pinned:
+                    _consider_path(p, is_pinned=True)
+
+                for p in candidates:
+                    # Do not treat pinned files as "other" duplicates.
+                    _consider_path(p, is_pinned=(p in pinned))
+
+                pinned_rows.sort(key=lambda r: r[0], reverse=True)
+                other_rows.sort(key=lambda r: r[0], reverse=True)
+
+                # Keep output bounded while still ensuring the WebUI log sources are represented.
+                max_pinned = 8
+                picked = []
+                picked.extend(pinned_rows[: min(max_pinned, max_files)])
+
+                remaining = max_files - len(picked)
+                if remaining > 0:
+                    picked.extend(other_rows[:remaining])
+
+                out = []
+                for (mtime, p, size) in picked:
+                    try:
+                        tail, truncated = _tail_file(p, max_chars_per_file)
+                    except Exception:
+                        tail, truncated = "", False
+                    tail = _redact(tail)
+                    issues = _extract_issues(tail)
+                    out.append({
+                        "path": p,
+                        "mtime": mtime,
+                        "size_bytes": int(size),
+                        "tail_truncated": bool(truncated),
+                        "tail_chars": int(len(tail or "")),
+                        "issues": issues,
+                    })
+                return out
+
+            def _read_failed_jobs() -> list:
+                conn = _history_conn(self.server)
+                if not conn:
+                    return []
+
+                try:
+                    cur = conn.execute(
+                        """
+                        SELECT job_id, job_type, action, title, started_ts, rc, stage, summary, log_tail
+                          FROM jobs
+                         WHERE started_ts >= ? AND done=1 AND rc IS NOT NULL AND rc != 0
+                         ORDER BY started_ts DESC
+                         LIMIT ?
+                        """,
+                        (float(since_ts), int(max_jobs)),
+                    )
+                except Exception:
+                    return []
+
+                out = []
+                try:
+                    for r in cur.fetchall() or []:
+                        job_tail = str(r[8] or "")
+                        if job_tail and len(job_tail) > max_job_tail_chars:
+                            job_tail = job_tail[-max_job_tail_chars:]
+
+                        job_tail = _redact(job_tail)
+                        issues = _extract_issues(job_tail)
+
+                        out.append({
+                            "job_id": str(r[0] or ""),
+                            "type": str(r[1] or ""),
+                            "action": str(r[2] or ""),
+                            "title": str(r[3] or ""),
+                            "started_ts": float(r[4] or 0.0),
+                            "rc": int(r[5] or 1),
+                            "stage": str(r[6] or ""),
+                            "summary": str(r[7] or ""),
+                            "issues": issues,
+                        })
+                except Exception:
+                    return out
+
+                return out
+
+            files = _read_recent_logs()
+            failed_jobs = _read_failed_jobs()
+
+            # Aggregate counts
+            total_err = 0
+            total_warn = 0
+            total_dbg = 0
+            try:
+                for it in files:
+                    iss = it.get("issues") or {}
+                    total_err += len(iss.get("error") or [])
+                    total_warn += len(iss.get("warn") or [])
+                    total_dbg += len(iss.get("debug") or [])
+                for j in failed_jobs:
+                    iss2 = j.get("issues") or {}
+                    total_err += len(iss2.get("error") or [])
+                    total_warn += len(iss2.get("warn") or [])
+                    total_dbg += len(iss2.get("debug") or [])
+            except Exception:
+                pass
+
+            # Human-readable report text (bounded)
+            lines = []
+            try:
+                now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            except Exception:
+                now_iso = ""
+
+            lines.append("== Zypper Auto: AI Smart Report (offline) ==")
+            if now_iso:
+                lines.append(f"generated_at_utc: {now_iso}")
+            lines.append(f"range_days: {days}")
+            lines.append(f"include_debug: {1 if include_debug else 0}")
+            lines.append(f"counts: errors={total_err} warnings={total_warn} debug={total_dbg}")
+            lines.append("")
+
+            if failed_jobs:
+                lines.append("-- Recent failed jobs (SQLite) --")
+                for j in failed_jobs[:max_jobs]:
+                    try:
+                        ts = ""
+                        try:
+                            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(float(j.get("started_ts") or 0.0))) + "Z"
+                        except Exception:
+                            ts = ""
+
+                        lines.append(
+                            f"* {j.get('type')} rc={j.get('rc')} job_id={j.get('job_id')} {('ts=' + ts) if ts else ''}"
+                        )
+                        if j.get("title"):
+                            lines.append(f"  title: {j.get('title')}")
+                        if j.get("stage"):
+                            lines.append(f"  stage: {j.get('stage')}")
+                        if j.get("summary"):
+                            s0 = str(j.get("summary") or "")
+                            if len(s0) > 240:
+                                s0 = s0[:240] + "…"
+                            lines.append(f"  summary: {s0}")
+
+                        iss = j.get("issues") or {}
+                        if iss.get("error"):
+                            lines.append("  errors:")
+                            for ln in (iss.get("error") or [])[:12]:
+                                lines.append(f"    - {ln}")
+                        if iss.get("warn"):
+                            lines.append("  warnings:")
+                            for ln in (iss.get("warn") or [])[:10]:
+                                lines.append(f"    - {ln}")
+                        if include_debug and iss.get("debug"):
+                            lines.append("  debug:")
+                            for ln in (iss.get("debug") or [])[:6]:
+                                lines.append(f"    - {ln}")
+                    except Exception:
+                        continue
+                lines.append("")
+
+            lines.append("-- Recent log scan (tails) --")
+            if not files:
+                lines.append("(no recent log files found in /var/log/zypper-auto/*)")
+            else:
+                for f in files[:max_files]:
+                    try:
+                        p = str(f.get("path") or "")
+                        lines.append(f"* {p}")
+                        iss = f.get("issues") or {}
+                        if iss.get("error"):
+                            lines.append("  errors:")
+                            for ln in (iss.get("error") or [])[:10]:
+                                lines.append(f"    - {ln}")
+                        if iss.get("warn"):
+                            lines.append("  warnings:")
+                            for ln in (iss.get("warn") or [])[:8]:
+                                lines.append(f"    - {ln}")
+                        if include_debug and iss.get("debug"):
+                            lines.append("  debug:")
+                            for ln in (iss.get("debug") or [])[:4]:
+                                lines.append(f"    - {ln}")
+                    except Exception:
+                        continue
+
+            report_text = "\n".join(lines)
+            if len(report_text) > 120_000:
+                report_text = report_text[:120_000] + "\n…(truncated)"
+
+            payload = {
+                "ok": True,
+                "ts": time.time(),
+                "range_days": int(days),
+                "include_debug": bool(include_debug),
+                "limits": {
+                    "max_files": int(max_files),
+                    "max_jobs": int(max_jobs),
+                    "max_chars_per_file": int(max_chars_per_file),
+                    "max_job_tail_chars": int(max_job_tail_chars),
+                    "max_issue_lines_per_item": int(max_issue_lines_per_item),
+                },
+                "counts": {
+                    "errors": int(total_err),
+                    "warnings": int(total_warn),
+                    "debug": int(total_dbg),
+                },
+                "failed_jobs": failed_jobs,
+                "files": files,
+                "text": report_text,
+            }
+
+            return _json_response(self, 200, payload, origin)
 
         # --- Confirmation token cache (shared) ---
         def _confirm_purge(now_ts: float):
@@ -49452,6 +50647,7 @@ class Handler(BaseHTTPRequestHandler):
             allowed = {
                 "create": "Type SNAPSHOT to confirm snapshot creation.",
                 "cleanup": "Type CLEANUP to confirm Snapper cleanup (may delete snapshots).",
+                "rollback": "Type ROLLBACK to confirm Snapper rollback (danger: changes root filesystem; reboot required).",
                 "auto-enable": "Type ENABLE to confirm enabling Snapper timers.",
                 "auto-disable": "Type DISABLE to confirm disabling Snapper timers.",
             }
@@ -49480,6 +50676,8 @@ class Handler(BaseHTTPRequestHandler):
                 phrase = "SNAPSHOT"
             elif action == "cleanup":
                 phrase = "CLEANUP"
+            elif action == "rollback":
+                phrase = "ROLLBACK"
             elif action == "auto-enable":
                 phrase = "ENABLE"
             elif action == "auto-disable":
@@ -49515,7 +50713,7 @@ class Handler(BaseHTTPRequestHandler):
                 params = {}
 
             # Determine if action requires confirmation.
-            needs_confirm = action in ("create", "cleanup", "auto-enable", "auto-disable")
+            needs_confirm = action in ("create", "cleanup", "rollback", "auto-enable", "auto-disable")
             if action in ("status", "list"):
                 needs_confirm = False
 
@@ -49536,6 +50734,7 @@ class Handler(BaseHTTPRequestHandler):
                     required_phrase = {
                         "create": "SNAPSHOT",
                         "cleanup": "CLEANUP",
+                        "rollback": "ROLLBACK",
                         "auto-enable": "ENABLE",
                         "auto-disable": "DISABLE",
                     }.get(action, "")
@@ -49588,6 +50787,13 @@ class Handler(BaseHTTPRequestHandler):
                 cmd = [HELPER_BIN, "snapper", "cleanup", mode]
                 timeout_s = 60 * 60
                 title = f"snapper cleanup ({mode})"
+            elif action == "rollback":
+                sid = str(params.get("id", "") or "").strip()
+                if not re.fullmatch(r"[0-9]+", sid or ""):
+                    return _json_response(self, 400, {"error": "invalid snapshot id"}, origin)
+                cmd = [HELPER_BIN, "snapper", "rollback", sid]
+                timeout_s = 30 * 60
+                title = f"snapper rollback #{sid}"
             elif action == "auto-enable":
                 cmd = [HELPER_BIN, "snapper", "auto"]
                 timeout_s = 20 * 60
@@ -49754,7 +50960,7 @@ class Handler(BaseHTTPRequestHandler):
                 params = {}
 
             # Determine if action requires confirmation.
-            needs_confirm = action in ("create", "cleanup", "auto-enable", "auto-disable")
+            needs_confirm = action in ("create", "cleanup", "rollback", "auto-enable", "auto-disable")
             if action in ("status", "list"):
                 needs_confirm = False
 
@@ -49775,6 +50981,7 @@ class Handler(BaseHTTPRequestHandler):
                     required_phrase = {
                         "create": "SNAPSHOT",
                         "cleanup": "CLEANUP",
+                        "rollback": "ROLLBACK",
                         "auto-enable": "ENABLE",
                         "auto-disable": "DISABLE",
                     }.get(action, "")
@@ -49823,6 +51030,12 @@ class Handler(BaseHTTPRequestHandler):
                     mode = "all"
                 cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "cleanup", mode]
                 timeout_s = 600
+            elif action == "rollback":
+                sid = str(params.get("id", "") or "").strip()
+                if not re.fullmatch(r"[0-9]+", sid or ""):
+                    return _json_response(self, 400, {"error": "invalid snapshot id"}, origin)
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "rollback", sid]
+                timeout_s = 20 * 60
             elif action == "auto-enable":
                 cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "auto"]
                 timeout_s = 120
