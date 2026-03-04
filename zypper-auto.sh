@@ -37113,11 +37113,12 @@ run_self_update_only() {
         return 1
     fi
 
-    # Args: [rolling|stable] [--force] [--dry-run]
-    local requested_channel channel force dry_run
+    # Args: [rolling|stable] [--force] [--dry-run] [--switchs]
+    local requested_channel channel force dry_run switchs_ok
     requested_channel=""
     force=0
     dry_run=0
+    switchs_ok=0
 
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
@@ -37130,9 +37131,14 @@ run_self_update_only() {
             --dry-run)
                 dry_run=1
                 ;;
+            --switchs)
+                # Explicit channel-switch unlock (for non-interactive usage and WebUI job runner).
+                # Equivalent to typing the phrase SWITCHS at the prompt.
+                switchs_ok=1
+                ;;
             *)
                 log_error "Unknown argument for --self-update: $1"
-                log_info "Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force] [--dry-run]"
+                log_info "Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force] [--dry-run] [--switchs]"
                 return 1
                 ;;
         esac
@@ -37150,6 +37156,46 @@ run_self_update_only() {
             channel="stable"
             ;;
     esac
+
+    # Channel-switch lock (user-requested): when switching stable <-> rolling,
+    # require an explicit confirmation phrase (SWITCHS) to avoid misinterpretation.
+    #
+    # Notes:
+    # - Interactive CLI: prompts for typing SWITCHS unless --switchs was provided.
+    # - Non-interactive: require --switchs (so WebUI/API jobs can pass it safely).
+    local last_channel
+    last_channel="$(__znh_self_update_state_get last_update_channel 2>/dev/null || true)"
+    last_channel="${last_channel,,}"
+
+    if [ "${dry_run}" -ne 1 ] 2>/dev/null \
+        && { [ "${last_channel}" = "stable" ] || [ "${last_channel}" = "rolling" ]; } 2>/dev/null \
+        && [ "${last_channel}" != "${channel}" ]; then
+
+        if [ "${switchs_ok}" -ne 1 ] 2>/dev/null; then
+            if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then
+                log_error "[self-update] Channel switch ${last_channel} -> ${channel} requires confirmation."
+                log_info "Re-run with: sudo zypper-auto-helper --self-update ${channel} --switchs"
+                return 1
+            fi
+
+            echo ""
+            echo "SELF-UPDATE CHANNEL SWITCH DETECTED: ${last_channel} -> ${channel}"
+            echo "This may upgrade or downgrade your installed helper." 
+            echo ""
+            echo "To confirm, type: SWITCHS"
+            echo -n "> "
+            local got_switch
+            got_switch=""
+            IFS= read -r got_switch || got_switch=""
+            got_switch="${got_switch^^}"
+            if [ "${got_switch}" != "SWITCHS" ]; then
+                log_error "[self-update] Aborted (channel switch not confirmed)."
+                return 1
+            fi
+
+            log_info "[self-update] Channel switch confirmed (SWITCHS)."
+        fi
+    fi
 
     # If user requested --dry-run, prefer the WebUI simulation flow.
     # This shows the full disclosure + MIT license, then runs a dry-run job
@@ -38939,7 +38985,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --soar                  Install/upgrade optional Soar CLI helper for the user"
     echo "  --brew                  Install/upgrade Homebrew (brew) for the user"
     echo "  --self-update            Self-update the installed helper script from GitHub (rolling/stable channel)"
-    echo "                         Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force]"
+    echo "                         Usage: sudo zypper-auto-helper --self-update [rolling|stable] [--force] [--dry-run] [--switchs]"
     echo "  --self-update-rollback   Roll back to the most recent self-update backup (script + config snapshot)"
     echo "  --rollback               Open Snapper rollback wizard (DANGEROUS: reverts system snapshot and reboots)"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
@@ -47912,7 +47958,29 @@ class Handler(BaseHTTPRequestHandler):
                 msg = "Updates managed by system package manager"
             elif channel_switch:
                 action_type = "switch"
+
+                # Make it explicit that this is a channel switch (not a normal update check)
+                # and show best-effort refs so users can understand "old vs new".
                 msg = f"Switch channel {active_channel or 'unknown'} → {ch}"
+                try:
+                    from_ref = str(active_ref or installed_ref or "").strip()
+                    to_ref = str(remote_ref or "").strip()
+                    if from_ref:
+                        msg += f" (installed={from_ref[:12]})"
+                    if to_ref:
+                        msg += f" (target={to_ref[:12]})"
+                except Exception:
+                    pass
+
+                # Downgrade hint: if the helper's VERSION header is newer than the latest stable tag,
+                # switching to stable will be a downgrade.
+                try:
+                    if ch == "stable" and installed_ver and remote_ref:
+                        rv = _tag_to_int(remote_ref)
+                        if rv is not None and int(installed_ver) > int(rv):
+                            msg += f" (NOTE: stable {remote_ref} is older than installed v{installed_ver}; this is a downgrade)"
+                except Exception:
+                    pass
             elif remote_is_older and ch == "stable":
                 action_type = "none"
                 msg = "Remote stable tag is older (downgrade blocked by default)"
@@ -49631,6 +49699,19 @@ class Handler(BaseHTTPRequestHandler):
             now_ts = time.time()
             _confirm_purge(now_ts)
 
+            # Channel-switch lock: when the user switches between stable <-> rolling,
+            # require a different confirmation phrase so it is harder to misinterpret.
+            required_phrase = "UPDATE"
+            hint = "Type UPDATE to confirm self-update (downloads code and replaces /usr/local/bin/zypper-auto-helper)."
+            try:
+                state = _read_self_update_state()
+                active_channel = str(state.get("last_update_channel", "") or "").strip().lower()
+                if active_channel in ("stable", "rolling") and active_channel != ch:
+                    required_phrase = "SWITCHS"  # user-requested phrase (case-insensitive)
+                    hint = f"Type SWITCHS to confirm switching channel {active_channel} → {ch} (this may upgrade or downgrade your installed helper)."
+            except Exception:
+                pass
+
             token = secrets.token_urlsafe(24)
             exp = now_ts + 120.0
             try:
@@ -49641,6 +49722,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "self-update",
                         "channel": ch,
                         "exp": exp,
+                        "phrase": required_phrase,
                     }
             except Exception:
                 return _json_response(self, 500, {"error": "failed to store confirm token"}, origin)
@@ -49648,8 +49730,8 @@ class Handler(BaseHTTPRequestHandler):
             return _json_response(self, 200, {
                 "confirm_token": token,
                 "expires_in_seconds": 120,
-                "phrase": "UPDATE",
-                "hint": "Type UPDATE to confirm self-update (downloads code and replaces /usr/local/bin/zypper-auto-helper).",
+                "phrase": required_phrase,
+                "hint": hint,
             }, origin)
 
         if path == "/api/self-update/start":
@@ -49701,8 +49783,16 @@ class Handler(BaseHTTPRequestHandler):
                     return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
                 if float(meta.get("exp", 0)) < now_ts:
                     return _json_response(self, 400, {"error": "confirm token expired"}, origin)
-                if confirm_phrase != "UPDATE":
-                    return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+
+                required = str(meta.get("phrase", "UPDATE") or "UPDATE").strip().upper()
+                if required not in ("UPDATE", "SWITCHS"):
+                    required = "UPDATE"
+                if confirm_phrase != required:
+                    return _json_response(self, 400, {"error": f"confirmation phrase incorrect (expected {required})"}, origin)
+
+                # If required phrase is SWITCHS, we are switching channels; pass an explicit flag so
+                # non-interactive CLI self-update does not hang on a prompt.
+                switchs_ok = (required == "SWITCHS")
 
                 # One-time token.
                 try:
@@ -49734,6 +49824,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
             su_cmd = f"{HELPER_BIN} --self-update {ch}".strip()
+            if switchs_ok:
+                su_cmd = (su_cmd + " --switchs").strip()
             if dry_run:
                 su_cmd = (su_cmd + " --dry-run").strip()
 
@@ -49921,8 +50013,14 @@ class Handler(BaseHTTPRequestHandler):
                     return _json_response(self, 400, {"error": "confirm token does not match channel"}, origin)
                 if float(meta.get("exp", 0)) < now_ts:
                     return _json_response(self, 400, {"error": "confirm token expired"}, origin)
-                if confirm_phrase != "UPDATE":
-                    return _json_response(self, 400, {"error": "confirmation phrase incorrect"}, origin)
+
+                required = str(meta.get("phrase", "UPDATE") or "UPDATE").strip().upper()
+                if required not in ("UPDATE", "SWITCHS"):
+                    required = "UPDATE"
+                if confirm_phrase != required:
+                    return _json_response(self, 400, {"error": f"confirmation phrase incorrect (expected {required})"}, origin)
+
+                switchs_ok = (required == "SWITCHS")
 
                 # One-time token.
                 try:
@@ -49931,6 +50029,8 @@ class Handler(BaseHTTPRequestHandler):
                     pass
 
             cmd = [HELPER_BIN, "--self-update", ch]
+            if switchs_ok:
+                cmd.append("--switchs")
             if dry_run:
                 cmd.append("--dry-run")
             rc, out = _run_cmd(cmd, timeout_s=300, log=getattr(self.server, "_znh_log", None), extra_env={"ZNH_SELF_UPDATE_NO_UI": "1"})

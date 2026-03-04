@@ -1926,6 +1926,7 @@ systemctl status zypper-autodownload.service
     - Tunes WebUI polling cadence + bounded UI buffers (Recent Activity tail size + perf chart points) to avoid CPU/RAM hogging in long-lived tabs.
     - Also adjusts `--dash-open` sync/perf worker cadence so background dashboard workers are lower-impact in PowerSaving mode.
   - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
+  - 🔒 **IMPROVED:** Switching self-update channel (**stable ↔ rolling**) now requires typing **`switchs`** (confirmation phrase **SWITCHS**) so you don’t accidentally downgrade/upgrade when changing channels.
   - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
   - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots while keeping the newest snapshots per snapper config.
     - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
