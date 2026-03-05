@@ -1674,6 +1674,7 @@ The dashboard also writes small sidecar files alongside the HTML:
 - `~/.local/share/zypper-notify/dashboard-live.log` (realtime log stream for Live mode)
   - **Safety/UX:** the sync worker keeps this bounded by copying only the most recent ~2500 lines into the user dashboard directory, so long-lived tabs don’t end up pulling a multi-megabyte log forever.
 - `~/.local/share/zypper-notify/dashboard-verify-tail.log` (tail of auto-repair/verification service log for the Recent Activity view)
+- `~/.local/share/zypper-notify/dashboard-run-install-tail.log` (tail of the Ready-to-Install helper log so lock failures are visible in the WebUI)
 - `~/.local/share/zypper-notify/dashboard-api.log` (Settings API log mirror for the UI)
 - `/var/log/zypper-auto/last-verify-summary.txt` (key=value summary so the dashboard can show the last verify/auto-repair counts)
 
@@ -1761,7 +1762,10 @@ systemctl status zypper-autodownload.service
 
 **Problem: Interactive update failed ("Update failed. Capturing system state...")**
 - The Ready-to-Install update window prints the log destinations (including clickable `file://...` links).
+- In the WebUI, open **Recent Activity Log** and switch to: **View: Install helper** (shows a bounded tail of the Ready-to-Install helper log).
 - Check the Ready-to-Install helper log: `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+  - If the failure is a zypp lock, the log should include the lock file path + PID + process name (best-effort) and retry attempts.
+  - The log also includes the full `pkexec zypper dup` output so you can see the exact error.
 - For full system helper logs (may require sudo): `/var/log/zypper-auto/`
 - Easy opener (file manager): `zypper-auto-helper --show-logs`
 
@@ -1854,6 +1858,8 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🧰 **IMPROVED:** Ready-to-Install (`zypper-run-install`) now writes clearer zypp lock diagnostics into `run-install.log` (lock file/PID/process) and streams full `zypper dup` output into the log for easier debugging.
+  - 🧿 **NEW:** WebUI Recent Activity Log now includes **View: Install helper** (shows `dashboard-run-install-tail.log`) so Ready-to-Install failures are visible in the dashboard.
   - 🧿 **IMPROVED:** WebUI scrub-ghost Smart Analyze (AUTO) readability:
     - Larger log/report windows (stretches much closer to full overlay height)
     - Colored status overview scorecard (Boot Storage / Redundancy / Default Entry / GRUB config + key counts)
@@ -1883,6 +1889,8 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** Rocket Update Wizard now **streams zypper output live** into the WebUI log (instead of buffering until the command finishes), so it no longer looks “stuck” at 0% during long runs.
   - 🧰 **IMPROVED:** Rocket preview now retries `systemd-run` without `--pipe` and captures output via a log file on transient-unit start failures (improves compatibility on some systems).
   - 🧰 **IMPROVED:** Dashboard API systemd unit now includes `/run` and `/var/run` in `ReadWritePaths` (helps `systemd-run` reliability under hardening).
+  - 🧾 **IMPROVED:** Rocket Update Wizard Result view now shows `zypper ps -s` output in a separate, taller, scrollable window.
+  - 🎨 **IMPROVED:** Rocket header icon glow is now stronger when updates are available (pending updates > 0), and remains strongest in the "downloads complete" state.
   - 🧿 **NEW:** WebUI **Quick Actions** can now run allowlisted helper commands directly from the dashboard in a terminal-like overlay (with **minimize/close** and live log output), instead of only copying commands.
     - Dangerous state-changing actions require a typed confirmation phrase (server-side enforced).
     - Confirmation dialogs now include a Rocket-style explanation block (**What this will do** + **Warning**) for state-changing actions.
@@ -1940,6 +1948,13 @@ systemctl status zypper-autodownload.service
     - This prevented a bug where WebUI cleanup could get stuck in “busy wait” for the full timeout and then refuse, even when no other Snapper cleanup was actually running.
   - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
     - WebUI now shows a small **Kernel purge: true/false** status indicator (green/red) so it’s obvious whether the setting is enabled.
+    - New config: `KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE` (default: true) can run kernel cleanup automatically in Snapper cleanup mode `force-prune` even when `KERNEL_PURGE_ENABLED=false`.
+    - New config: `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED` (default: true) can run a safe `scrub-ghost` boot-menu hygiene pass after Snapper cleanup in mode `force-prune` (quarantines duplicates/stale snapshot entries; optional GRUB rebuild).
+  - 🧨 **NEW (danger):** Snapper Full Cleanup now supports removing an entire kernel <em>family</em> (flavor) via `KERNEL_FAMILY_PURGE_*` (force-prune only by default).
+    - The running kernel package provider is protected.
+    - Safety guard: kernel purge/family purge will refuse to run if it could leave the system with only one installed kernel.
+    - WebUI: Snapper Option 4 panel now includes a **Customize cleanup behavior** section to configure kernel purge / scrub-ghost hygiene / kernel family purge settings.
+    - WebUI Settings drawer also includes the `KERNEL_FAMILY_PURGE_*` keys (Advanced + Danger zone).
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:
     - EFI/Boot usage: used% + (used/total) + a progress bar
     - BLS entry file counts (total + snapper subset)

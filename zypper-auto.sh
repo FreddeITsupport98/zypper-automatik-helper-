@@ -228,6 +228,7 @@ DENY_SUFFIXES = (".pid", ".err", ".port", ".token", ".env")
 LOG_VIEW_FILES = {
     "live": "dashboard-live.log",
     "install": "dashboard-install-tail.log",
+    "runinstall": "dashboard-run-install-tail.log",
     "verify": "dashboard-verify-tail.log",
     "diag": "dashboard-diag-tail.log",
     "api": "dashboard-api.log",
@@ -2268,11 +2269,27 @@ __znh_write_dashboard_schema_json() {
     "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX": {"type": "string", "max_len": 200, "default": "aborted|failed", "presets": ["aborted|failed", "aborted", "failed", "error", "aborted|failed|error"]},
     "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM": {"type": "bool", "default": "true"},
 
+    "BOOT_ENTRY_CLEANUP_ENABLED": {"type": "bool", "default": "true"},
+    "BOOT_ENTRY_CLEANUP_KEEP_LATEST": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
+    "BOOT_ENTRY_CLEANUP_ENTRIES_DIR": {"type": "string", "max_len": 200, "default": ""},
+    "BOOT_ENTRY_CLEANUP_CONFIRM": {"type": "bool", "default": "true"},
+    "SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED": {"type": "bool", "default": "true"},
+    "SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB": {"type": "bool", "default": "true"},
+
     "KERNEL_PURGE_ENABLED": {"type": "bool", "default": "false"},
+    "KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE": {"type": "bool", "default": "true"},
     "KERNEL_PURGE_MODE": {"type": "enum", "allowed": ["auto","zypper","systemd"], "default": "auto"},
     "KERNEL_PURGE_CONFIRM": {"type": "bool", "default": "true"},
     "KERNEL_PURGE_DRY_RUN": {"type": "bool", "default": "false"},
-    "KERNEL_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900"}
+    "KERNEL_PURGE_DETAILS": {"type": "bool", "default": "false"},
+    "KERNEL_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900"},
+
+    "KERNEL_FAMILY_PURGE_ENABLED": {"type": "bool", "default": "false"},
+    "KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY": {"type": "bool", "default": "true"},
+    "KERNEL_FAMILY_PURGE_TARGETS": {"type": "string", "max_len": 400, "default": ""},
+    "KERNEL_FAMILY_PURGE_CONFIRM": {"type": "bool", "default": "true"},
+    "KERNEL_FAMILY_PURGE_DRY_RUN": {"type": "bool", "default": "false"},
+    "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900"}
   }
 }
 EOF
@@ -8670,6 +8687,30 @@ BTRFS_MAINTENANCE_TUNE_CONFIRM=true
 # This does NOT delete kernel images; it only reduces clutter in the boot menu.
 BOOT_ENTRY_CLEANUP_ENABLED=true
 
+# SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED
+# When true (default), Snapper cleanup mode "force-prune" will ALSO run
+# `scrub-ghost` in SAFE mode (backup move; no hard delete) to reduce boot menu
+# clutter further.
+#
+# Why this exists:
+# - Kernel updates can leave behind "afterimages" in the boot menu:
+#     kernel-default NEW
+#     kernel-default OLD
+#     modded-kernel NEW
+#     modded-kernel OLD
+#   plus stale Snapper snapshot boot entries.
+# - scrub-ghost can safely quarantine duplicate/stale entries (with backups).
+#
+# What it runs (high level):
+# - scrub-ghost --force --prune-duplicates --prune-stale-snapshots
+# - optional: --rebuild-grub (if enabled below)
+SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED=true
+
+# SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB
+# When true (default), add --rebuild-grub so grub.cfg is regenerated after
+# scrub-ghost changes (helps GRUB menus that read BLS entries).
+SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB=true
+
 # BOOT_ENTRY_CLEANUP_KEEP_LATEST
 # How many latest installed kernels to keep in the boot menu (in addition to the
 # currently running kernel, which is always kept). Minimum: 1. Default: 2.
@@ -8707,6 +8748,19 @@ BOOT_ENTRY_CLEANUP_CONFIRM=true
 # - Disabled by default for safety.
 KERNEL_PURGE_ENABLED=false
 
+# KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE
+# When true (default), Snapper cleanup mode "force-prune" will also run kernel
+# package cleanup (purge-kernels) even if KERNEL_PURGE_ENABLED=false.
+#
+# Why:
+# - FORCE-PRUNE is an explicit advanced cleanup mode (keep newest snapshots).
+# - Users often expect "keep newest" hygiene to include old kernel packages.
+#
+# Notes:
+# - This still respects /etc/zypp/zypp.conf:multiversion.kernels.
+# - In WebUI/non-interactive runs, KERNEL_PURGE_CONFIRM is treated as confirmed.
+KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=true
+
 # KERNEL_PURGE_MODE
 # How to run purge-kernels:
 #   auto    - prefer direct `zypper purge-kernels`, fallback to systemd unit
@@ -8729,6 +8783,54 @@ KERNEL_PURGE_DETAILS=false
 # KERNEL_PURGE_TIMEOUT_SECONDS
 # Best-effort timeout for the purge-kernels run. Default: 900 seconds.
 KERNEL_PURGE_TIMEOUT_SECONDS=900
+
+# ---------------------------------------------------------------------
+# DANGEROUS: Kernel *family* purge (remove a whole kernel flavor)
+# ---------------------------------------------------------------------
+# This is different from `zypper purge-kernels`:
+# - purge-kernels removes *old versions* while keeping newest+fallback per
+#   /etc/zypp/zypp.conf:multiversion.kernels.
+# - family purge removes an entire kernel flavor/package family, e.g. removing
+#   "modded-kernel" entirely if you no longer want it installed.
+#
+# KERNEL_FAMILY_PURGE_ENABLED
+# When true, Snapper cleanup mode "force-prune" may remove the configured target
+# kernel families (packages) completely.
+#
+# WARNING:
+# - High-stakes. If you remove the wrong family, you can end up with fewer boot
+#   options.
+# - The running kernel is always protected (the purge will refuse if a target
+#   appears to match the running kernel provider).
+KERNEL_FAMILY_PURGE_ENABLED=false
+
+# KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY
+# Safety: when true (default), only run family purge during Snapper cleanup mode
+# "force-prune" (explicit advanced cleanup mode).
+KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY=true
+
+# KERNEL_FAMILY_PURGE_TARGETS
+# Space/comma separated list of package names to remove entirely.
+# Examples (ONLY if you know what you’re doing):
+#   KERNEL_FAMILY_PURGE_TARGETS="kernel-rt"
+#   KERNEL_FAMILY_PURGE_TARGETS="modded-kernel"
+#
+# Leave empty to disable removal even if KERNEL_FAMILY_PURGE_ENABLED=true.
+KERNEL_FAMILY_PURGE_TARGETS=""
+
+# KERNEL_FAMILY_PURGE_CONFIRM
+# When true (default), ask once in CLI mode before removing packages.
+# In WebUI/non-interactive runs, confirmation is treated as already handled by
+# the typed phrase in the UI.
+KERNEL_FAMILY_PURGE_CONFIRM=true
+
+# KERNEL_FAMILY_PURGE_DRY_RUN
+# When true, show a zypper --dry-run removal plan only.
+KERNEL_FAMILY_PURGE_DRY_RUN=false
+
+# KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS
+# Best-effort timeout for family purge removal run.
+KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS=900
 
 # ---------------------------------------------------------------------
 # Installer log retention
@@ -9240,6 +9342,8 @@ EOF
     # Boot entry cleanup (boot menu hygiene)
     validate_bool_flag BOOT_ENTRY_CLEANUP_ENABLED true
     validate_nonneg_int_optional BOOT_ENTRY_CLEANUP_KEEP_LATEST 2
+    validate_bool_flag SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED true
+    validate_bool_flag SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB true
     if [ "${BOOT_ENTRY_CLEANUP_KEEP_LATEST:-2}" -lt 1 ] 2>/dev/null; then
         BOOT_ENTRY_CLEANUP_KEEP_LATEST=1
     fi
@@ -9249,11 +9353,20 @@ EOF
 
     # Kernel package cleanup (purge-kernels)
     validate_bool_flag KERNEL_PURGE_ENABLED false
+    validate_bool_flag KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE true
     validate_mode KERNEL_PURGE_MODE auto "auto|zypper|systemd"
     validate_bool_flag KERNEL_PURGE_CONFIRM true
     validate_bool_flag KERNEL_PURGE_DRY_RUN false
     validate_bool_flag KERNEL_PURGE_DETAILS false
     validate_pos_int_optional KERNEL_PURGE_TIMEOUT_SECONDS 900
+
+    # DANGEROUS: kernel family purge (remove a whole kernel flavor/package)
+    validate_bool_flag KERNEL_FAMILY_PURGE_ENABLED false
+    validate_bool_flag KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY true
+    KERNEL_FAMILY_PURGE_TARGETS="${KERNEL_FAMILY_PURGE_TARGETS:-}"
+    validate_bool_flag KERNEL_FAMILY_PURGE_CONFIRM true
+    validate_bool_flag KERNEL_FAMILY_PURGE_DRY_RUN false
+    validate_pos_int_optional KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS 900
 
     # DASHBOARD_BROWSER is an optional command name; keep empty by default.
     DASHBOARD_BROWSER="${DASHBOARD_BROWSER:-}"
@@ -9326,12 +9439,22 @@ EOF
     log_debug "  BOOT_ENTRY_CLEANUP_MODE=${BOOT_ENTRY_CLEANUP_MODE:-backup}"
     log_debug "  BOOT_ENTRY_CLEANUP_ENTRIES_DIR=${BOOT_ENTRY_CLEANUP_ENTRIES_DIR:-<auto>}"
     log_debug "  BOOT_ENTRY_CLEANUP_CONFIRM=${BOOT_ENTRY_CLEANUP_CONFIRM:-true}"
+    log_debug "  SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED=${SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED:-true}"
+    log_debug "  SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB=${SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB:-true}"
     log_debug "  KERNEL_PURGE_ENABLED=${KERNEL_PURGE_ENABLED:-false}"
+    log_debug "  KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=${KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE:-true}"
     log_debug "  KERNEL_PURGE_MODE=${KERNEL_PURGE_MODE:-auto}"
     log_debug "  KERNEL_PURGE_CONFIRM=${KERNEL_PURGE_CONFIRM:-true}"
     log_debug "  KERNEL_PURGE_DRY_RUN=${KERNEL_PURGE_DRY_RUN:-false}"
     log_debug "  KERNEL_PURGE_DETAILS=${KERNEL_PURGE_DETAILS:-false}"
     log_debug "  KERNEL_PURGE_TIMEOUT_SECONDS=${KERNEL_PURGE_TIMEOUT_SECONDS:-900}"
+
+    log_debug "  KERNEL_FAMILY_PURGE_ENABLED=${KERNEL_FAMILY_PURGE_ENABLED:-false}"
+    log_debug "  KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY=${KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY:-true}"
+    log_debug "  KERNEL_FAMILY_PURGE_TARGETS=${KERNEL_FAMILY_PURGE_TARGETS:-}"
+    log_debug "  KERNEL_FAMILY_PURGE_CONFIRM=${KERNEL_FAMILY_PURGE_CONFIRM:-true}"
+    log_debug "  KERNEL_FAMILY_PURGE_DRY_RUN=${KERNEL_FAMILY_PURGE_DRY_RUN:-false}"
+    log_debug "  KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS=${KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS:-900}"
     if [ -n "${WEBHOOK_URL:-}" ]; then
         log_debug "  WEBHOOK_URL=<configured>"
     else
@@ -9448,14 +9571,25 @@ EOF
     _mark_missing_key "BOOT_ENTRY_CLEANUP_MODE"
     _mark_missing_key "BOOT_ENTRY_CLEANUP_ENTRIES_DIR"
     _mark_missing_key "BOOT_ENTRY_CLEANUP_CONFIRM"
+    _mark_missing_key "SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED"
+    _mark_missing_key "SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB"
 
     # Kernel package cleanup (purge-kernels)
     _mark_missing_key "KERNEL_PURGE_ENABLED"
+    _mark_missing_key "KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE"
     _mark_missing_key "KERNEL_PURGE_MODE"
     _mark_missing_key "KERNEL_PURGE_CONFIRM"
     _mark_missing_key "KERNEL_PURGE_DRY_RUN"
     _mark_missing_key "KERNEL_PURGE_DETAILS"
     _mark_missing_key "KERNEL_PURGE_TIMEOUT_SECONDS"
+
+    # DANGEROUS: kernel family purge
+    _mark_missing_key "KERNEL_FAMILY_PURGE_ENABLED"
+    _mark_missing_key "KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY"
+    _mark_missing_key "KERNEL_FAMILY_PURGE_TARGETS"
+    _mark_missing_key "KERNEL_FAMILY_PURGE_CONFIRM"
+    _mark_missing_key "KERNEL_FAMILY_PURGE_DRY_RUN"
+    _mark_missing_key "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS"
 
     if [ "${#missing_keys[@]}" -gt 0 ]; then
         local keys_joined
@@ -9656,8 +9790,17 @@ EOF
                 BOOT_ENTRY_CLEANUP_CONFIRM)
                     log_info "  - BOOT_ENTRY_CLEANUP_CONFIRM: when true, asks once for confirmation before pruning boot entries."
                     ;;
+                SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED)
+                    log_info "  - SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED: when true (default), Snapper cleanup mode 'force-prune' also runs scrub-ghost to quarantine duplicate/stale boot entries (safe backup mode)."
+                    ;;
+                SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB)
+                    log_info "  - SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB: when true (default), scrub-ghost also runs grub2-mkconfig after changes."
+                    ;;
                 KERNEL_PURGE_ENABLED)
                     log_info "  - KERNEL_PURGE_ENABLED: when true, snapper cleanup also runs 'zypper purge-kernels' to auto-remove old kernel packages (respects /etc/zypp/zypp.conf:multiversion.kernels)."
+                    ;;
+                KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE)
+                    log_info "  - KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE: when true (default), Snapper cleanup mode 'force-prune' can trigger kernel purge even when KERNEL_PURGE_ENABLED=false."
                     ;;
                 KERNEL_PURGE_MODE)
                     log_info "  - KERNEL_PURGE_MODE: selects how to run purge-kernels (direct zypper vs systemd service)."
@@ -9673,6 +9816,25 @@ EOF
                     ;;
                 KERNEL_PURGE_TIMEOUT_SECONDS)
                     log_info "  - KERNEL_PURGE_TIMEOUT_SECONDS: best-effort timeout for purge-kernels (seconds)."
+                    ;;
+
+                KERNEL_FAMILY_PURGE_ENABLED)
+                    log_info "  - KERNEL_FAMILY_PURGE_ENABLED: DANGEROUS. When true, Snapper cleanup can remove whole kernel package families listed in KERNEL_FAMILY_PURGE_TARGETS (force-prune only by default)."
+                    ;;
+                KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY)
+                    log_info "  - KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY: when true (default), only run family purge during Snapper cleanup mode force-prune."
+                    ;;
+                KERNEL_FAMILY_PURGE_TARGETS)
+                    log_info "  - KERNEL_FAMILY_PURGE_TARGETS: list of package names to remove entirely (space/comma separated). Leave empty to disable." 
+                    ;;
+                KERNEL_FAMILY_PURGE_CONFIRM)
+                    log_info "  - KERNEL_FAMILY_PURGE_CONFIRM: when true, asks once before removing kernel family packages (CLI only)."
+                    ;;
+                KERNEL_FAMILY_PURGE_DRY_RUN)
+                    log_info "  - KERNEL_FAMILY_PURGE_DRY_RUN: when true, shows a removal plan only (no changes)."
+                    ;;
+                KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS)
+                    log_info "  - KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS: best-effort timeout for the family purge removal run (seconds)."
                     ;;
                 *)
                     log_info "  - ${key}: (no description available)"
@@ -9864,8 +10026,17 @@ EOF
                 BOOT_ENTRY_CLEANUP_CONFIRM)
                     BOOT_ENTRY_CLEANUP_CONFIRM="true"
                     ;;
+                SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED)
+                    SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED="true"
+                    ;;
+                SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB)
+                    SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB="true"
+                    ;;
                 KERNEL_PURGE_ENABLED)
                     KERNEL_PURGE_ENABLED="false"
+                    ;;
+                KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE)
+                    KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE="true"
                     ;;
                 KERNEL_PURGE_MODE)
                     KERNEL_PURGE_MODE="auto"
@@ -9881,6 +10052,25 @@ EOF
                     ;;
                 KERNEL_PURGE_TIMEOUT_SECONDS)
                     KERNEL_PURGE_TIMEOUT_SECONDS=900
+                    ;;
+
+                KERNEL_FAMILY_PURGE_ENABLED)
+                    KERNEL_FAMILY_PURGE_ENABLED="false"
+                    ;;
+                KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY)
+                    KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY="true"
+                    ;;
+                KERNEL_FAMILY_PURGE_TARGETS)
+                    KERNEL_FAMILY_PURGE_TARGETS=""
+                    ;;
+                KERNEL_FAMILY_PURGE_CONFIRM)
+                    KERNEL_FAMILY_PURGE_CONFIRM="true"
+                    ;;
+                KERNEL_FAMILY_PURGE_DRY_RUN)
+                    KERNEL_FAMILY_PURGE_DRY_RUN="false"
+                    ;;
+                KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS)
+                    KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS=900
                     ;;
             esac
         done
@@ -10754,9 +10944,21 @@ generate_dashboard() {
         100% { transform: translateY(0) rotate(-1deg); filter: saturate(1); }
     }
     @keyframes rocketReady {
-        0% { transform: translateY(0); filter: drop-shadow(0 0 0 rgba(34,197,94,0.0)); }
-        50% { transform: translateY(-1px); filter: drop-shadow(0 0 10px rgba(34,197,94,0.35)); }
-        100% { transform: translateY(0); filter: drop-shadow(0 0 0 rgba(34,197,94,0.0)); }
+        0% {
+            transform: translateY(0);
+            filter: drop-shadow(0 0 0 rgba(34,197,94,0.0)) saturate(1);
+        }
+        50% {
+            transform: translateY(-1px);
+            filter:
+                drop-shadow(0 0 18px rgba(34,197,94,0.75))
+                drop-shadow(0 0 32px rgba(34,197,94,0.22))
+                saturate(1.35);
+        }
+        100% {
+            transform: translateY(0);
+            filter: drop-shadow(0 0 0 rgba(34,197,94,0.0)) saturate(1);
+        }
     }
     @keyframes rocketShake {
         0% { transform: translateX(0) rotate(0deg); }
@@ -10767,7 +10969,29 @@ generate_dashboard() {
     }
 
     .rocket-btn.rocket-downloading { animation: rocketThrust 850ms ease-in-out infinite; }
-    .rocket-btn.rocket-complete { animation: rocketReady 1600ms ease-in-out infinite; }
+    .rocket-btn.rocket-complete {
+        animation: rocketReady 1600ms ease-in-out infinite;
+        background: rgba(34,197,94,0.14);
+        border-color: rgba(34,197,94,0.44);
+        box-shadow: 0 0 0 0 rgba(34,197,94,0.0);
+    }
+    .rocket-btn.rocket-complete:hover {
+        background: rgba(34,197,94,0.20);
+        border-color: rgba(34,197,94,0.62);
+    }
+
+    /* Updates available (pending_count > 0): give the Rocket a "ready" glow even
+       before the downloader finishes (but don't override downloading/error/complete). */
+    .rocket-btn.rocket-available:not(.rocket-downloading):not(.rocket-error):not(.rocket-complete) {
+        animation: rocketReady 2200ms ease-in-out infinite;
+        background: rgba(34,197,94,0.10);
+        border-color: rgba(34,197,94,0.34);
+    }
+    .rocket-btn.rocket-available:not(.rocket-downloading):not(.rocket-error):not(.rocket-complete):hover {
+        background: rgba(34,197,94,0.16);
+        border-color: rgba(34,197,94,0.52);
+    }
+
     .rocket-btn.rocket-error { animation: rocketShake 420ms ease-in-out infinite; }
 
     /* Rocket emoji wrapper: lets us anchor the flame to the actual emoji glyph
@@ -11415,8 +11639,21 @@ generate_dashboard() {
         padding: 12px;
         backdrop-filter: blur(2px) saturate(0.9);
         -webkit-backdrop-filter: blur(2px) saturate(0.9);
+
+        /* Responsive safety: if the user resizes the window smaller while an overlay is open,
+           allow the overlay to scroll instead of "cropping" the dialog (which looks corrupt). */
+        overflow-y: auto;
+        overscroll-behavior: contain;
     }
     .overlay.hidden { display: none; }
+
+    /* When the viewport is short, top-align the dialog so the header is always reachable
+       and the user can scroll down to the footer. */
+    @media (max-height: 740px) {
+        .overlay {
+            align-items: flex-start;
+        }
+    }
     .overlay-card {
         width: min(920px, calc(100vw - 24px));
         max-height: calc(100vh - 24px);
@@ -11498,14 +11735,16 @@ generate_dashboard() {
         overflow-y: auto;
     }
 
-    /* Bigger overlay log/report windows (scrub-ghost wizard UX) */
+    /* Bigger overlay log/report windows (scrub-ghost wizard UX)
+       IMPORTANT: keep these responsive so resizing the browser smaller doesn't
+       force the dialog to exceed the viewport (which looks like a broken layout). */
     .overlay-pre-lg {
-        max-height: min(56vh, calc(100vh - 420px));
-        min-height: 240px;
+        max-height: clamp(160px, 52vh, 560px);
+        min-height: clamp(120px, 22vh, 240px);
     }
     .overlay-pre-xl {
-        max-height: min(74vh, calc(100vh - 340px));
-        min-height: 360px;
+        max-height: clamp(220px, 70vh, 820px);
+        min-height: clamp(140px, 30vh, 360px);
     }
 
     /* scrub-ghost Smart Analyze scorecard (WebUI colors like CLI menu) */
@@ -11954,13 +12193,61 @@ generate_dashboard() {
           <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
             Warning: cleanup may delete snapshots. Mode <code>force-prune</code> deletes older snapshots but keeps the newest snapshots per config.
             Kernel cleanup runs when <code>KERNEL_PURGE_ENABLED=true</code>.
+            In <code>force-prune</code> mode, kernel cleanup can also run implicitly when <code>KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=true</code> (default).
+            In <code>force-prune</code> mode, a safe boot menu cleanup pass can also run via <code>scrub-ghost</code> when <code>SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED=true</code> (default).
+            DANGEROUS: you can also configure a kernel <em>family</em> purge (remove a whole kernel flavor) via <code>KERNEL_FAMILY_PURGE_*</code>.
           </div>
-          <div style="margin-top:10px;">
+          <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <div class="feat-badge" id="kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">
               <span class="feat-dot" id="kernel-purge-dot" style="color: rgba(148,163,184,0.9);">●</span>
               Kernel purge: <strong id="kernel-purge-val">(loading)</strong>
             </div>
+            <div class="feat-badge" id="scrub-ghost-badge" title="Reflects Settings: SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED">
+              <span class="feat-dot" id="scrub-ghost-dot" style="color: rgba(148,163,184,0.9);">●</span>
+              scrub-ghost hygiene: <strong id="scrub-ghost-val">(loading)</strong>
+            </div>
+            <div class="feat-badge" id="kernel-family-purge-badge" title="Reflects Settings: KERNEL_FAMILY_PURGE_*">
+              <span class="feat-dot" id="kernel-family-purge-dot" style="color: rgba(148,163,184,0.9);">●</span>
+              Kernel family purge: <strong id="kernel-family-purge-val">(loading)</strong>
+            </div>
           </div>
+
+          <details id="snapper-cleanup-customize" style="margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">
+            <summary style="cursor:pointer; font-weight: 950; color: var(--text);">Customize cleanup behavior (Option 4 settings)</summary>
+            <div style="margin-top:10px; color: var(--muted); font-size:0.88rem;">
+              These controls update <code>/etc/zypper-auto.conf</code> via the local Settings API (persistent). For safety, enabling kernel family purge requires a typed confirmation.
+            </div>
+
+            <div style="margin-top:12px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
+              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-kp-enabled" /> kernel purge enabled</label>
+              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-kp-implicit" /> implicit kernel purge on force-prune</label>
+            </div>
+
+            <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
+              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-sg-enabled" /> force-prune scrub-ghost hygiene</label>
+              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-sg-grub" /> rebuild grub.cfg after scrub-ghost</label>
+            </div>
+
+            <div style="margin-top:12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06);">
+              <div style="font-weight: 950;">Kernel family purge (danger)</div>
+              <div style="margin-top:8px; color: var(--muted); font-size:0.88rem;">
+                Removes an entire kernel <em>package family</em> (flavor), e.g. removing <code>modded-kernel</code> entirely. The running kernel is protected and the helper refuses to leave you with only one installed kernel.
+              </div>
+              <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
+                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-enabled" /> enable family purge</label>
+                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-force-only" /> force-prune only (recommended)</label>
+                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-dry-run" /> dry-run only</label>
+              </div>
+              <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
+                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);">targets: <input id="snopt-family-targets" type="text" placeholder="e.g. modded-kernel" style="width:340px; padding:6px 8px; border-radius: 12px;" /></label>
+              </div>
+            </div>
+
+            <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+              <button class="pill" type="button" id="snopt-apply" style="border-color: rgba(250,204,21,0.35);">Apply settings</button>
+              <button class="pill" type="button" id="snopt-refresh">Refresh from config</button>
+            </div>
+          </details>
         </div>
 
         <div class="stat-box">
@@ -12155,6 +12442,7 @@ generate_dashboard() {
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 10px 0;">
         <button class="pill log-tab" type="button" data-view="live">View: Live</button>
         <button class="pill log-tab" type="button" data-view="install">View: Logs (tail)</button>
+        <button class="pill log-tab" type="button" data-view="runinstall">View: Install helper</button>
         <button class="pill log-tab" type="button" data-view="verify">View: Verify/Repair</button>
         <button class="pill log-tab" type="button" data-view="diag">View: Diagnostics</button>
         <button class="pill log-tab" type="button" data-view="api">View: API</button>
@@ -17364,10 +17652,19 @@ generate_dashboard() {
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM', type: 'bool', label: 'Deep clean: confirm before delete' },
 
         { key: 'KERNEL_PURGE_ENABLED', type: 'bool', label: 'DANGEROUS: kernel package purge (zypper purge-kernels)', danger: true, danger_phrase: 'KERNEL', advanced: true, help: 'Runs during Snapper Full Cleanup. Purges old kernel packages using zypper purge-kernels (respects /etc/zypp/zypp.conf:multiversion.kernels). Requires danger zone unlock.' },
+        { key: 'KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE', type: 'bool', label: 'Kernel purge: implicit on force-prune cleanup', advanced: true, help: 'When true (default), Snapper cleanup mode "force-prune" can trigger kernel purge even if KERNEL_PURGE_ENABLED=false. This still respects /etc/zypp/zypp.conf:multiversion.kernels.' },
         { key: 'KERNEL_PURGE_MODE', type: 'enum', label: 'Kernel purge mode', advanced: true, help: 'auto (recommended), zypper (direct), systemd (purge-kernels.service if available).' },
         { key: 'KERNEL_PURGE_CONFIRM', type: 'bool', label: 'Kernel purge: ask before purging (CLI only)', advanced: true, help: 'When running from WebUI / non-interactive, this is treated as already confirmed.' },
         { key: 'KERNEL_PURGE_DRY_RUN', type: 'bool', label: 'Kernel purge: dry-run only (no changes)', advanced: true },
+        { key: 'KERNEL_PURGE_DETAILS', type: 'bool', label: 'Kernel purge: details output', advanced: true, help: 'Adds --details to purge-kernels dry-run preview (more verbose output).' },
         { key: 'KERNEL_PURGE_TIMEOUT_SECONDS', type: 'int', label: 'Kernel purge timeout (seconds)', advanced: true },
+
+        { key: 'KERNEL_FAMILY_PURGE_ENABLED', type: 'bool', label: 'DANGEROUS: kernel family purge enabled (remove whole kernel flavor)', danger: true, danger_phrase: 'FAMILY', advanced: true, help: 'Removes entire kernel package families listed below (e.g. modded-kernel). Running kernel is protected; helper refuses to leave only one installed kernel. Requires danger zone unlock + typing FAMILY on change.' },
+        { key: 'KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY', type: 'bool', label: 'Kernel family purge: force-prune only (recommended)', danger: true, danger_phrase: 'FAMILY', advanced: true, help: 'When true (default), only runs during Snapper cleanup mode force-prune.' },
+        { key: 'KERNEL_FAMILY_PURGE_TARGETS', type: 'string', label: 'Kernel family purge targets (package names)', danger: true, danger_phrase: 'FAMILY', advanced: true, help: 'Space/comma separated package names to remove entirely. Example: modded-kernel' },
+        { key: 'KERNEL_FAMILY_PURGE_DRY_RUN', type: 'bool', label: 'Kernel family purge: dry-run only (no changes)', danger: true, danger_phrase: 'FAMILY', advanced: true },
+        { key: 'KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS', type: 'int', label: 'Kernel family purge timeout (seconds)', danger: true, danger_phrase: 'FAMILY', advanced: true },
+        { key: 'KERNEL_FAMILY_PURGE_CONFIRM', type: 'bool', label: 'Kernel family purge: ask before purging (CLI only)', danger: true, danger_phrase: 'FAMILY', advanced: true, help: 'CLI only. WebUI confirmation is still handled by typed phrases in the UI.' },
 
         { key: 'DL_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Downloader interval (min)' },
         { key: 'NT_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Notifier interval (min)' },
@@ -17376,6 +17673,8 @@ generate_dashboard() {
         { key: 'DOWNLOADER_DOWNLOAD_MODE', type: 'enum', label: 'Downloader mode' },
         { key: 'AUTO_DUPLICATE_RPM_MODE', type: 'enum', label: 'Duplicate RPM cleanup mode' },
         { key: 'CLEANUP_REPORT_FORMAT', type: 'enum', label: 'Cleanup report format' },
+        { key: 'SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED', type: 'bool', label: 'DANGEROUS: force-prune boot menu hygiene (scrub-ghost)', danger: true, danger_phrase: 'BOOT', advanced: true, help: 'When true (default), Snapper cleanup mode "force-prune" also runs scrub-ghost in safe backup mode to quarantine duplicate/stale boot entries. Can rebuild grub.cfg if enabled.' },
+        { key: 'SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB', type: 'bool', label: 'DANGEROUS: scrub-ghost rebuild grub.cfg after force-prune', danger: true, danger_phrase: 'BOOT', advanced: true, help: 'When true (default), scrub-ghost adds --rebuild-grub after pruning boot entries. Requires danger zone unlock.' },
         { key: 'BOOT_ENTRY_CLEANUP_MODE', type: 'enum', label: 'Boot entry cleanup mode' }
     ];
 
@@ -18736,34 +19035,338 @@ generate_dashboard() {
     function znhKernelPurgeRefreshUI() {
         // Reflect Settings -> Snapper UI state.
         // Requested UX: show green "true" / red "false".
-        var raw = '';
+        // NOTE: force-prune cleanup can implicitly enable kernel purge even when
+        // KERNEL_PURGE_ENABLED=false.
+
+        var rawEnabled = '';
         try {
-            raw = (_settingsConfig && _settingsConfig.KERNEL_PURGE_ENABLED != null) ? String(_settingsConfig.KERNEL_PURGE_ENABLED) : '';
+            rawEnabled = (_settingsConfig && _settingsConfig.KERNEL_PURGE_ENABLED != null) ? String(_settingsConfig.KERNEL_PURGE_ENABLED) : '';
         } catch (e0) {
-            raw = '';
+            rawEnabled = '';
         }
-        var on = String(raw || '').trim().toLowerCase() === 'true';
-        var label = raw ? (on ? 'true' : 'false') : '(Settings not loaded)';
-        var dot = on ? 'rgba(34,197,94,0.90)' : (raw ? 'rgba(239,68,68,0.90)' : 'rgba(148,163,184,0.90)');
+
+        var enabledKnown = !!String(rawEnabled || '').trim();
+        var enabledOn = String(rawEnabled || '').trim().toLowerCase() === 'true';
+
+        var rawImplicit = '';
+        try {
+            rawImplicit = (_settingsConfig && _settingsConfig.KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE != null) ? String(_settingsConfig.KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE) : '';
+        } catch (e1) {
+            rawImplicit = '';
+        }
+
+        // Default for legacy configs where the key doesn't exist yet.
+        var implicitKnown = !!String(rawImplicit || '').trim();
+        var implicitOn = implicitKnown ? (String(rawImplicit || '').trim().toLowerCase() === 'true') : true;
+
+        // FORCE-PRUNE is only meaningful for Snapper cleanup, so we only apply the
+        // implicit override when we're (a) about to run cleanup, or (b) the user has
+        // selected force-prune in the Snapper panel.
+        var inCleanupFlow = false;
+        var cleanupMode = '';
+        try {
+            inCleanupFlow = !!(_sn && (_sn.action === 'cleanup' || _sn.confirm_action === 'cleanup'));
+            if (inCleanupFlow) cleanupMode = String(((_sn.params || {}) || {}).mode || '');
+        } catch (e2) {
+            inCleanupFlow = false;
+            cleanupMode = '';
+        }
+
+        var panelMode = '';
+        try { panelMode = String((document.getElementById('snapper-cleanup-mode') || {}).value || ''); } catch (e3) { panelMode = ''; }
+
+        var forcePruneSelected = false;
+        if (inCleanupFlow) {
+            forcePruneSelected = String(cleanupMode || '').trim() === 'force-prune';
+        } else {
+            forcePruneSelected = String(panelMode || '').trim() === 'force-prune';
+        }
+
+        var effectiveOn = enabledOn || (forcePruneSelected && implicitOn);
+
+        var label = '';
+        if (!enabledKnown) {
+            label = '(Settings not loaded)';
+        } else if (effectiveOn && !enabledOn && forcePruneSelected && implicitOn) {
+            label = 'true (force-prune override; setting=false)';
+        } else {
+            label = enabledOn ? 'true' : 'false';
+        }
+
+        var dot = effectiveOn ? 'rgba(34,197,94,0.90)' : (enabledKnown ? 'rgba(239,68,68,0.90)' : 'rgba(148,163,184,0.90)');
+        var valColor = effectiveOn ? 'rgba(34,197,94,0.92)' : (enabledKnown ? 'rgba(239,68,68,0.92)' : 'rgba(148,163,184,0.92)');
 
         function apply(dotId, valId) {
             var d = null;
             var v = null;
-            try { d = document.getElementById(dotId); } catch (e1) { d = null; }
-            try { v = document.getElementById(valId); } catch (e2) { v = null; }
+            try { d = document.getElementById(dotId); } catch (e3) { d = null; }
+            try { v = document.getElementById(valId); } catch (e4) { v = null; }
             if (d) {
-                try { d.style.color = dot; } catch (e3) {}
+                try { d.style.color = dot; } catch (e5) {}
             }
             if (v) {
-                try { v.textContent = String(label); } catch (e4) {}
-                try { v.style.color = on ? 'rgba(34,197,94,0.92)' : (raw ? 'rgba(239,68,68,0.92)' : 'rgba(148,163,184,0.92)'); } catch (e5) {}
+                try { v.textContent = String(label); } catch (e6) {}
+                try { v.style.color = valColor; } catch (e7) {}
             }
         }
 
         apply('kernel-purge-dot', 'kernel-purge-val');
         apply('sn-kernel-purge-dot', 'sn-kernel-purge-val');
+
+        function applyKV(dotId, valId, dotColor2, valText2, valColor2) {
+            var d2 = null;
+            var v2 = null;
+            try { d2 = document.getElementById(dotId); } catch (e0) { d2 = null; }
+            try { v2 = document.getElementById(valId); } catch (e1) { v2 = null; }
+            if (d2) {
+                try { d2.style.color = String(dotColor2 || 'rgba(148,163,184,0.90)'); } catch (e2) {}
+            }
+            if (v2) {
+                try { v2.textContent = String(valText2 || ''); } catch (e3) {}
+                try { v2.style.color = String(valColor2 || 'rgba(148,163,184,0.92)'); } catch (e4) {}
+            }
+        }
+
+        // --- scrub-ghost hygiene badge ---
+        var sgRaw = '';
+        try {
+            sgRaw = (_settingsConfig && _settingsConfig.SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED != null) ? String(_settingsConfig.SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED) : '';
+        } catch (eSg0) {
+            sgRaw = '';
+        }
+        var sgKnown = !!String(sgRaw || '').trim();
+        var sgOn = sgKnown ? (String(sgRaw || '').trim().toLowerCase() === 'true') : true; // default true
+
+        var sgGrubRaw = '';
+        try {
+            sgGrubRaw = (_settingsConfig && _settingsConfig.SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB != null) ? String(_settingsConfig.SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB) : '';
+        } catch (eSg1) {
+            sgGrubRaw = '';
+        }
+        var sgGrubKnown = !!String(sgGrubRaw || '').trim();
+        var sgGrubOn = sgGrubKnown ? (String(sgGrubRaw || '').trim().toLowerCase() === 'true') : true;
+
+        var sgEffective = forcePruneSelected && sgOn;
+        var sgLabel = '';
+        if (!enabledKnown) {
+            sgLabel = '(Settings not loaded)';
+        } else if (!forcePruneSelected) {
+            sgLabel = sgOn ? 'armed (force-prune only)' : 'off';
+        } else {
+            if (sgOn && sgGrubOn) sgLabel = 'true (rebuild grub)';
+            else if (sgOn) sgLabel = 'true';
+            else sgLabel = 'false';
+        }
+
+        var sgDot = 'rgba(148,163,184,0.90)';
+        var sgValColor = 'rgba(148,163,184,0.92)';
+        if (!enabledKnown) {
+            sgDot = 'rgba(148,163,184,0.90)';
+            sgValColor = 'rgba(148,163,184,0.92)';
+        } else if (sgEffective) {
+            sgDot = 'rgba(34,197,94,0.90)';
+            sgValColor = 'rgba(34,197,94,0.92)';
+        } else if (!forcePruneSelected && sgOn) {
+            sgDot = 'rgba(250,204,21,0.85)';
+            sgValColor = 'rgba(250,204,21,0.92)';
+        } else if (forcePruneSelected && !sgOn) {
+            sgDot = 'rgba(239,68,68,0.90)';
+            sgValColor = 'rgba(239,68,68,0.92)';
+        } else {
+            sgDot = 'rgba(148,163,184,0.90)';
+            sgValColor = 'rgba(148,163,184,0.92)';
+        }
+
+        applyKV('scrub-ghost-dot', 'scrub-ghost-val', sgDot, sgLabel, sgValColor);
+        applyKV('sn-scrub-ghost-dot', 'sn-scrub-ghost-val', sgDot, sgLabel, sgValColor);
+
+        // --- kernel family purge badge ---
+        var famRaw = '';
+        var famTargets = '';
+        var famForceOnlyRaw = '';
+        var famDryRaw = '';
+        try { famRaw = (_settingsConfig && _settingsConfig.KERNEL_FAMILY_PURGE_ENABLED != null) ? String(_settingsConfig.KERNEL_FAMILY_PURGE_ENABLED) : ''; } catch (eF0) { famRaw = ''; }
+        try { famTargets = (_settingsConfig && _settingsConfig.KERNEL_FAMILY_PURGE_TARGETS != null) ? String(_settingsConfig.KERNEL_FAMILY_PURGE_TARGETS) : ''; } catch (eF1) { famTargets = ''; }
+        try { famForceOnlyRaw = (_settingsConfig && _settingsConfig.KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY != null) ? String(_settingsConfig.KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY) : ''; } catch (eF2) { famForceOnlyRaw = ''; }
+        try { famDryRaw = (_settingsConfig && _settingsConfig.KERNEL_FAMILY_PURGE_DRY_RUN != null) ? String(_settingsConfig.KERNEL_FAMILY_PURGE_DRY_RUN) : ''; } catch (eF3) { famDryRaw = ''; }
+
+        var famKnown = !!String(famRaw || '').trim();
+        var famEnabled = famKnown ? (String(famRaw || '').trim().toLowerCase() === 'true') : false;
+        var famForceOnlyKnown = !!String(famForceOnlyRaw || '').trim();
+        var famForceOnly = famForceOnlyKnown ? (String(famForceOnlyRaw || '').trim().toLowerCase() === 'true') : true;
+        var famDryKnown = !!String(famDryRaw || '').trim();
+        var famDry = famDryKnown ? (String(famDryRaw || '').trim().toLowerCase() === 'true') : false;
+
+        var famTargetsTrim = '';
+        try { famTargetsTrim = String(famTargets || '').trim(); } catch (eFT) { famTargetsTrim = ''; }
+
+        var famConfigured = famEnabled && !!famTargetsTrim;
+        var famEffective = famConfigured && (!famForceOnly || forcePruneSelected);
+
+        var famLabel = '';
+        if (!enabledKnown) {
+            famLabel = '(Settings not loaded)';
+        } else if (!famEnabled) {
+            famLabel = 'false';
+        } else if (!famTargetsTrim) {
+            famLabel = 'true (no targets)';
+        } else if (famForceOnly && !forcePruneSelected) {
+            famLabel = 'armed (force-prune only)';
+        } else {
+            famLabel = famDry ? ('true (dry-run)') : 'true';
+        }
+
+        var famDot = 'rgba(148,163,184,0.90)';
+        var famValColor = 'rgba(148,163,184,0.92)';
+        if (!enabledKnown) {
+            famDot = 'rgba(148,163,184,0.90)';
+            famValColor = 'rgba(148,163,184,0.92)';
+        } else if (famEffective) {
+            famDot = 'rgba(34,197,94,0.90)';
+            famValColor = 'rgba(34,197,94,0.92)';
+        } else if (famEnabled && (!famTargetsTrim || (famForceOnly && !forcePruneSelected))) {
+            famDot = 'rgba(250,204,21,0.85)';
+            famValColor = 'rgba(250,204,21,0.92)';
+        } else if (!famEnabled) {
+            famDot = 'rgba(239,68,68,0.90)';
+            famValColor = 'rgba(239,68,68,0.92)';
+        }
+
+        applyKV('kernel-family-purge-dot', 'kernel-family-purge-val', famDot, famLabel, famValColor);
+        applyKV('sn-kernel-family-purge-dot', 'sn-kernel-family-purge-val', famDot, famLabel, famValColor);
     }
     window.znhKernelPurgeRefreshUI = znhKernelPurgeRefreshUI;
+
+    function znhSnapperCleanupSettingsPanelSyncFromConfig() {
+        // Reflect current Settings -> Snapper Option 4 customization controls.
+        var cfg = null;
+        try { cfg = _settingsConfig || null; } catch (e) { cfg = null; }
+
+        function _bool(key, defVal) {
+            var raw = '';
+            try { raw = (cfg && cfg[key] != null) ? String(cfg[key]) : ''; } catch (e0) { raw = ''; }
+            raw = String(raw || '').trim().toLowerCase();
+            if (raw === 'true') return true;
+            if (raw === 'false') return false;
+            return !!defVal;
+        }
+
+        function _str(key, defVal) {
+            try {
+                if (cfg && cfg[key] != null) return String(cfg[key]);
+            } catch (e1) {}
+            return String(defVal || '');
+        }
+
+        function _setCb(id, on) {
+            var el = null;
+            try { el = document.getElementById(id); } catch (e2) { el = null; }
+            if (!el) return;
+            try { el.checked = !!on; } catch (e3) {}
+        }
+
+        function _setTxt(id, v) {
+            var el = null;
+            try { el = document.getElementById(id); } catch (e4) { el = null; }
+            if (!el) return;
+            try { el.value = String(v || ''); } catch (e5) {}
+        }
+
+        _setCb('snopt-kp-enabled', _bool('KERNEL_PURGE_ENABLED', false));
+        _setCb('snopt-kp-implicit', _bool('KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE', true));
+        _setCb('snopt-sg-enabled', _bool('SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED', true));
+        _setCb('snopt-sg-grub', _bool('SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB', true));
+
+        _setCb('snopt-family-enabled', _bool('KERNEL_FAMILY_PURGE_ENABLED', false));
+        _setCb('snopt-family-force-only', _bool('KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY', true));
+        _setCb('snopt-family-dry-run', _bool('KERNEL_FAMILY_PURGE_DRY_RUN', false));
+        _setTxt('snopt-family-targets', _str('KERNEL_FAMILY_PURGE_TARGETS', ''));
+
+        try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (e6) {}
+    }
+    window.znhSnapperCleanupSettingsPanelSyncFromConfig = znhSnapperCleanupSettingsPanelSyncFromConfig;
+
+    function znhSnapperCleanupSettingsPanelApply() {
+        // Applies Option 4 customization settings via /api/config patch.
+        // Persistent (writes /etc/zypper-auto.conf managed block).
+
+        // Ensure we have a config snapshot.
+        try {
+            if (!_settingsConfig) {
+                return settingsLoad(false).then(function() {
+                    return znhSnapperCleanupSettingsPanelApply();
+                });
+            }
+        } catch (e0) {}
+
+        function _getCb(id, defVal) {
+            var el = null;
+            try { el = document.getElementById(id); } catch (e1) { el = null; }
+            if (!el) return !!defVal;
+            try { return !!el.checked; } catch (e2) { return !!defVal; }
+        }
+
+        function _getTxt(id) {
+            var el = null;
+            try { el = document.getElementById(id); } catch (e3) { el = null; }
+            if (!el) return '';
+            try { return String(el.value || ''); } catch (e4) { return ''; }
+        }
+
+        var patch = {
+            KERNEL_PURGE_ENABLED: _getCb('snopt-kp-enabled', false) ? 'true' : 'false',
+            KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE: _getCb('snopt-kp-implicit', true) ? 'true' : 'false',
+            SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED: _getCb('snopt-sg-enabled', true) ? 'true' : 'false',
+            SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB: _getCb('snopt-sg-grub', true) ? 'true' : 'false',
+
+            KERNEL_FAMILY_PURGE_ENABLED: _getCb('snopt-family-enabled', false) ? 'true' : 'false',
+            KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY: _getCb('snopt-family-force-only', true) ? 'true' : 'false',
+            KERNEL_FAMILY_PURGE_DRY_RUN: _getCb('snopt-family-dry-run', false) ? 'true' : 'false',
+            KERNEL_FAMILY_PURGE_TARGETS: _getTxt('snopt-family-targets')
+        };
+
+        // Basic safety UX: require explicit typed confirmation when enabling or changing family purge.
+        try {
+            var beforeEnabled = String((_settingsConfig || {}).KERNEL_FAMILY_PURGE_ENABLED || '').trim().toLowerCase() === 'true';
+            var beforeTargets = String((_settingsConfig || {}).KERNEL_FAMILY_PURGE_TARGETS || '').trim();
+
+            var afterEnabled = String(patch.KERNEL_FAMILY_PURGE_ENABLED || '').trim().toLowerCase() === 'true';
+            var afterTargets = String(patch.KERNEL_FAMILY_PURGE_TARGETS || '').trim();
+
+            if (afterEnabled && !afterTargets) {
+                toast('Refused', 'Kernel family purge enabled but targets is empty', 'err');
+                return Promise.resolve(null);
+            }
+
+            var needsPhrase = afterEnabled && (!beforeEnabled || beforeTargets !== afterTargets);
+            if (needsPhrase) {
+                var got = prompt('DANGEROUS: Type FAMILY to enable/modify kernel family purge', '');
+                got = String(got || '').trim().toUpperCase();
+                if (got !== 'FAMILY') {
+                    toast('Cancelled', 'Kernel family purge not modified', 'err');
+                    return Promise.resolve(null);
+                }
+            }
+        } catch (e5) {}
+
+        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: patch }) }).then(function(r) {
+            try {
+                if (r && r.config) {
+                    _settingsConfig = r.config;
+                }
+            } catch (e6) {}
+
+            toast('Cleanup settings applied', 'Saved to /etc/zypper-auto.conf', 'ok');
+            try { znhSnapperCleanupSettingsPanelSyncFromConfig(); } catch (e7) {}
+            try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (e8) {}
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'unknown error';
+            toast('Apply failed', msg, 'err');
+            return null;
+        });
+    }
+    window.znhSnapperCleanupSettingsPanelApply = znhSnapperCleanupSettingsPanelApply;
 
     function _fmtKb(kb) {
         var n = 0;
@@ -19795,6 +20398,12 @@ generate_dashboard() {
                     '<div class="feat-badge" id="sn-kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">',
                     '  <span class="feat-dot" id="sn-kernel-purge-dot" style="color: rgba(148,163,184,0.9);">●</span> Kernel purge: <strong id="sn-kernel-purge-val">(loading)</strong>',
                     '</div>',
+                    '<div class="feat-badge" id="sn-scrub-ghost-badge" title="Reflects Settings: SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED">',
+                    '  <span class="feat-dot" id="sn-scrub-ghost-dot" style="color: rgba(148,163,184,0.9);">●</span> scrub-ghost hygiene: <strong id="sn-scrub-ghost-val">(loading)</strong>',
+                    '</div>',
+                    '<div class="feat-badge" id="sn-kernel-family-purge-badge" title="Reflects Settings: KERNEL_FAMILY_PURGE_*">',
+                    '  <span class="feat-dot" id="sn-kernel-family-purge-dot" style="color: rgba(148,163,184,0.9);">●</span> Kernel family purge: <strong id="sn-kernel-family-purge-val">(loading)</strong>',
+                    '</div>',
                     '<div style="margin-top: 8px;" class="overlay-kv">',
                     '  <div class="feat-badge"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> Confirmation phrase: <strong>' + _snEscapeHtml(phrase || 'CONFIRM') + '</strong></div>',
                     '</div>',
@@ -20231,6 +20840,50 @@ generate_dashboard() {
         if (b6) b6.addEventListener('click', function() {
             snapperRun('auto-disable', {}, 'auto-disable');
         });
+
+        // Option 4 customization panel (persistent settings)
+        var applyBtn = document.getElementById('snopt-apply');
+        var refreshBtn = document.getElementById('snopt-refresh');
+        var modeSel = document.getElementById('snapper-cleanup-mode');
+
+        if (applyBtn && !applyBtn._znh_bound) {
+            applyBtn._znh_bound = true;
+            applyBtn.addEventListener('click', function() {
+                try {
+                    if (typeof znhSnapperCleanupSettingsPanelApply === 'function') {
+                        znhSnapperCleanupSettingsPanelApply();
+                    }
+                } catch (e0) {
+                    toast('Apply failed', (e0 && e0.message) ? e0.message : 'failed', 'err');
+                }
+            });
+        }
+
+        if (refreshBtn && !refreshBtn._znh_bound) {
+            refreshBtn._znh_bound = true;
+            refreshBtn.addEventListener('click', function() {
+                try {
+                    if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') {
+                        znhSnapperCleanupSettingsPanelSyncFromConfig();
+                        toast('Refreshed', 'Loaded from /etc/zypper-auto.conf', 'ok');
+                    }
+                } catch (e1) {}
+            });
+        }
+
+        if (modeSel && !modeSel._znh_bound) {
+            modeSel._znh_bound = true;
+            modeSel.addEventListener('change', function() {
+                try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (e2) {}
+            });
+        }
+
+        // Initial populate
+        try {
+            if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') {
+                znhSnapperCleanupSettingsPanelSyncFromConfig();
+            }
+        } catch (e3) {}
     }
 
     // --- scrub-ghost Manager (dashboard -> root API) ---
@@ -25327,14 +25980,29 @@ generate_dashboard() {
         _ruSetHeader('Result', 'Complete', String(title || 'Done'));
         if (e.title) e.title.textContent = String(title || 'Done');
 
+        var installPanel = [
+            '<div style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">',
+            '  <div style="font-weight:950; margin-bottom: 8px;">Install log (tail)</div>',
+            '  <pre class="overlay-pre overlay-pre-lg" style="margin-top: 10px;">' + safe(logText || '(no output)') + '</pre>',
+            '</div>'
+        ].join('\n');
+
         var restartBlock = '';
         if (restartText && String(restartText).trim()) {
             restartBlock = [
-                '<div style="font-weight:950; margin-top: 14px; margin-bottom: 8px;">Restart check (<code>zypper ps -s</code>)</div>',
-                '<pre class="overlay-pre" style="max-height: 260px;">' + safe(restartText) + '</pre>'
+                '<div style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">',
+                '  <div style="font-weight:950;">Restart check (<code>zypper ps -s</code>)</div>',
+                '  <div style="margin-top:4px; color: var(--muted); font-size:0.88rem; font-weight:800;">This output is in a separate scroll window. Use your mouse wheel inside the box.</div>',
+                '  <pre class="overlay-pre overlay-pre-xl" style="margin-top: 10px;">' + safe(restartText) + '</pre>',
+                '</div>'
             ].join('\n');
         } else {
-            restartBlock = '<div style="color: var(--muted); font-size:0.9rem; margin-top: 12px;">No restart-check output captured.</div>';
+            restartBlock = [
+                '<div style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">',
+                '  <div style="font-weight:950;">Restart check (<code>zypper ps -s</code>)</div>',
+                '  <div style="margin-top:6px; color: var(--muted); font-size:0.9rem; font-weight:800;">No restart-check output captured.</div>',
+                '</div>'
+            ].join('\n');
         }
 
         var conflictDetected = false;
@@ -25370,11 +26038,8 @@ generate_dashboard() {
         e.body.innerHTML = [
             '<div style="font-weight:950;">' + safe(subtitle || '') + '</div>',
             hintBlock,
-            '<div class="overlay-scroll">',
-            '  <div style="font-weight:950; margin-bottom: 8px;">Install log (tail)</div>',
-            '  <pre class="overlay-pre" style="max-height: 240px;">' + safe(logText || '(no output)') + '</pre>',
+            installPanel,
             restartBlock,
-            '</div>',
             '<div style="color: var(--muted); font-size:0.88rem;">Click OK to close this dialog.</div>'
         ].join('\n');
 
@@ -26433,6 +27098,7 @@ generate_dashboard() {
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
+            try { if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') znhSnapperCleanupSettingsPanelSyncFromConfig(); } catch (eSC0) {}
             try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(false); } catch (eBS) {}
             try { selfUpdateRender(); } catch (e) {}
             try { selfUpdatePostSuccessInit(); } catch (e) {}
@@ -26619,6 +27285,7 @@ generate_dashboard() {
                         try { znhDebugUpdateToggleUi(); } catch (eDU2) {}
                         try { if (_settingsSchema) _renderSettingsForm(_settingsSchema, _settingsConfig); } catch (eRF) {}
                         try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP0) {}
+                        try { if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') znhSnapperCleanupSettingsPanelSyncFromConfig(); } catch (eSC1) {}
                         try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(false); } catch (eBS0) {}
 
                         // Lightweight diff log for key safety toggles.
@@ -26715,6 +27382,7 @@ generate_dashboard() {
                         } catch (eR) {}
 
                         try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
+                        try { if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') znhSnapperCleanupSettingsPanelSyncFromConfig(); } catch (eSC2) {}
                         try { if (typeof znhBootStatsRefreshUI === 'function') znhBootStatsRefreshUI(false); } catch (eBS) {}
                     }
                 } catch (e2) {}
@@ -26830,6 +27498,14 @@ generate_dashboard() {
     _wireScrubUI();
     // Wire rocket button (system update wizard).
     _wireRocketUI();
+
+    // Initial Rocket "updates available" glow (works even without Live mode).
+    try {
+        var pc0 = 0;
+        var pcEl0 = document.getElementById('pending-count');
+        pc0 = pcEl0 ? (parseInt(String(pcEl0.textContent || '0'), 10) || 0) : 0;
+        _rocketSetAvailable(pc0 > 0);
+    } catch (eRA0) {}
 
     // Ripple click effect on buttons
     function addRipple(el, x, y) {
@@ -27415,6 +28091,9 @@ generate_dashboard() {
         } catch (e_pc_ov) {}
         setText('pending-count', pc);
 
+        // Rocket header glow: highlight when updates are pending.
+        try { _rocketSetAvailable((parseInt(pc || 0, 10) || 0) > 0); } catch (eR0) {}
+
         setText('kernel-ver', d.kernel_ver);
         setText('uptime-info', d.uptime_info);
         setText('mem-usage', d.mem_usage);
@@ -27794,6 +28473,14 @@ generate_dashboard() {
 
     // Rocket (header) animation state driven by downloader status.
     var _rocketLastClass = '';
+
+    function _rocketSetAvailable(on) {
+        var btn = document.getElementById('rocket-btn');
+        if (!btn) return;
+        if (on) btn.classList.add('rocket-available');
+        else btn.classList.remove('rocket-available');
+    }
+
     function _rocketSetClass(kind) {
         // kind: '' | 'downloading' | 'complete' | 'error'
         var btn = document.getElementById('rocket-btn');
@@ -28139,6 +28826,7 @@ generate_dashboard() {
                 if (hint) {
                     var txt = 'dashboard-live.log';
                     if (logView === 'install') txt = 'dashboard-install-tail.log';
+                    else if (logView === 'runinstall') txt = 'dashboard-run-install-tail.log';
                     else if (logView === 'verify') txt = 'dashboard-verify-tail.log';
                     else if (logView === 'diag') txt = 'dashboard-diag-tail.log';
                     else if (logView === 'api') txt = 'dashboard-api.log';
@@ -28351,6 +29039,7 @@ generate_dashboard() {
         var base = 'dashboard-live.log';
         var rangeBytes = 60000;
         if (logView === 'install') base = 'dashboard-install-tail.log';
+        else if (logView === 'runinstall') base = 'dashboard-run-install-tail.log';
         else if (logView === 'verify') base = 'dashboard-verify-tail.log';
         else if (logView === 'diag') base = 'dashboard-diag-tail.log';
         else if (logView === 'api') base = 'dashboard-api.log';
@@ -28358,7 +29047,7 @@ generate_dashboard() {
 
         var url = base + '?ts=' + Date.now();
         var headers = {};
-        if (logView === 'live' || logView === 'verify' || logView === 'diag' || logView === 'api' || logView === 'journal') {
+        if (logView === 'live' || logView === 'runinstall' || logView === 'verify' || logView === 'diag' || logView === 'api' || logView === 'journal') {
             headers['Range'] = 'bytes=-' + String(rangeBytes);
         }
 
@@ -28735,6 +29424,16 @@ JSON_EOF
         copy_atomic "${out_journal_tail_root}" "${out_user_dir}/dashboard-journal-tail.log" 2>/dev/null || true
         copy_atomic "${out_api_tail_root}" "${out_user_dir}/dashboard-api.log" 2>/dev/null || true
 
+        # Also mirror the Ready-to-Install helper log into a bounded tail file so it is visible
+        # in the WebUI Recent Activity Log (View: Install helper).
+        local run_install_log
+        run_install_log="${out_user_dir}/run-install.log"
+        if [ -f "${run_install_log}" ]; then
+            tail -n 520 "${run_install_log}" 2>/dev/null | write_atomic "${out_user_dir}/dashboard-run-install-tail.log" 2>/dev/null || true
+        else
+            write_atomic "${out_user_dir}/dashboard-run-install-tail.log" <<<"(run-install.log not found yet: ${run_install_log})" 2>/dev/null || true
+        fi
+
         # Live mode polls download-status.txt; ensure it exists in the served user dir.
         if [ -f "${LOG_DIR}/download-status.txt" ]; then
             copy_atomic "${LOG_DIR}/download-status.txt" "${out_user_dir}/download-status.txt" 2>/dev/null || true
@@ -28748,6 +29447,7 @@ JSON_EOF
             "${out_user_dir}/dashboard-verify-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
+            "${out_user_dir}/dashboard-run-install-tail.log" \
             "${out_user_dir}/dashboard-api.log" \
             "${out_user_dir}/download-status.txt" \
             2>/dev/null || true
@@ -28756,6 +29456,7 @@ JSON_EOF
             "${out_user_dir}/dashboard-verify-tail.log" \
             "${out_user_dir}/dashboard-diag-tail.log" \
             "${out_user_dir}/dashboard-journal-tail.log" \
+            "${out_user_dir}/dashboard-run-install-tail.log" \
             "${out_user_dir}/dashboard-api.log" \
             "${out_user_dir}/download-status.txt" \
             2>/dev/null || true
@@ -33645,6 +34346,26 @@ run_snapper_menu_only() {
             __keep_n=3
         fi
 
+        # Kernel purge effective state for this cleanup run.
+        # FORCE-PRUNE can implicitly trigger kernel purge (configurable) even when
+        # KERNEL_PURGE_ENABLED=false.
+        local __kp_effective __kp_forced
+
+        # scrub-ghost boot entry hygiene effective state (force-prune only)
+        local __sg_effective
+        __sg_effective="false"
+        if [ "${force_prune}" -eq 1 ] 2>/dev/null && [ "${SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED:-true}" = "true" ]; then
+            __sg_effective="true"
+        fi
+        __kp_effective="${KERNEL_PURGE_ENABLED:-false}"
+        __kp_forced=0
+        if [ "${force_prune}" -eq 1 ] 2>/dev/null && [ "${KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE:-true}" = "true" ]; then
+            if [ "${__kp_effective}" != "true" ]; then
+                __kp_forced=1
+            fi
+            __kp_effective="true"
+        fi
+
         # --- Professional Edition: audit report (text + JSON) ---
         local report_enabled report_dir report_format report_max
         report_enabled="${CLEANUP_REPORT_ENABLED:-true}"
@@ -33669,6 +34390,9 @@ run_snapper_menu_only() {
             __audit_actions+=("${msg}")
             return 0
         }
+
+        __znh_audit_record "kernel-purge:effective=${__kp_effective}:forced=${__kp_forced}"
+        __znh_audit_record "scrub-ghost:effective=${__sg_effective}"
 
         __znh_cleanup_report_init() {
             if [ "${report_enabled}" != "true" ]; then
@@ -33840,6 +34564,17 @@ run_snapper_menu_only() {
         echo "  - Coredump vacuum (crash dumps)"
         echo "  - Journal vacuum, zypper cache clean, thumbnails cleanup"
         echo "  - Kernel package purge + boot entry pruning"
+        echo ""
+        echo "Kernel purge (effective for this run): ${__kp_effective} (setting KERNEL_PURGE_ENABLED=${KERNEL_PURGE_ENABLED:-false})"
+        if [ "${__kp_forced}" -eq 1 ] 2>/dev/null; then
+            echo "  NOTE: enabled implicitly by force-prune (KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=true)"
+        fi
+        echo ""
+
+        echo "scrub-ghost boot-entry hygiene (force-prune only): ${__sg_effective} (SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED=${SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED:-true})"
+        if [ "${__sg_effective}" = "true" ] && [ "${SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB:-true}" = "true" ]; then
+            echo "  - Will rebuild GRUB config (SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB=true)"
+        fi
         echo ""
 
         if [ "${mode}" = "all" ]; then
@@ -34949,17 +35684,251 @@ run_snapper_menu_only() {
         __znh_system_deep_scrub || true
         __znh_audit_record "deep-scrub:done"
 
+        # Optional: DANGEROUS kernel *family* purge (remove a whole kernel flavor/package)
+        # This is different from purge-kernels (which only removes old versions).
+        __znh_kernel_family_purge() {
+            if [ "${KERNEL_FAMILY_PURGE_ENABLED:-false}" != "true" ]; then
+                return 0
+            fi
+
+            local targets_raw
+            targets_raw="${KERNEL_FAMILY_PURGE_TARGETS:-}"
+            targets_raw="${targets_raw//,/ }"
+
+            # Parse targets into array
+            local -a targets=()
+            local t
+            for t in ${targets_raw}; do
+                t="$(printf '%s' "${t}" | tr -d '\r' | sed -E 's/^\s+|\s+$//g' 2>/dev/null)"
+                [ -n "${t}" ] || continue
+                if [[ ! "${t}" =~ ^[A-Za-z0-9_.+-]+$ ]]; then
+                    log_warn "[kernel-family-purge] Skipping invalid target token: '${t}'"
+                    continue
+                fi
+                targets+=("${t}")
+            done
+
+            if [ "${#targets[@]}" -eq 0 ] 2>/dev/null; then
+                log_warn "[kernel-family-purge] Enabled but KERNEL_FAMILY_PURGE_TARGETS is empty; skipping"
+                return 0
+            fi
+
+            # Safety default: only run during force-prune
+            if [ "${KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY:-true}" = "true" ] && [ "${force_prune}" -ne 1 ] 2>/dev/null; then
+                log_info "[kernel-family-purge] force-prune only is enabled; skipping (mode is not force-prune)"
+                return 0
+            fi
+
+            if ! command -v zypper >/dev/null 2>&1 || ! command -v rpm >/dev/null 2>&1; then
+                log_warn "[kernel-family-purge] zypper/rpm not found; skipping"
+                return 0
+            fi
+
+            # --- SAFETY: determine installed kernel versions ---
+            __znh_installed_kernel_versions_list() {
+                find /lib/modules /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -uV || true
+            }
+
+            local installed_kvers installed_count
+            installed_kvers="$(__znh_installed_kernel_versions_list)"
+            installed_count=$(printf '%s\n' "${installed_kvers}" | grep -c '.' 2>/dev/null || echo 0)
+            installed_count="${installed_count:-0}"
+
+            if ! [[ "${installed_count}" =~ ^[0-9]+$ ]]; then
+                installed_count=0
+            fi
+
+            # Hard safety: if you only have one installed kernel, refuse any kernel removal.
+            if [ "${installed_count}" -lt 2 ] 2>/dev/null; then
+                log_warn "[kernel-family-purge] Refusing: installed kernels=${installed_count} (<2). Install a fallback kernel first."
+                echo "[kernel-family-purge] REFUSED: only ${installed_count} installed kernel(s) detected. (Safety: must have at least 2.)"
+                __znh_audit_record "kernel-family-purge:refused:installed_kernels_lt_2"
+                return 0
+            fi
+
+            __znh_kernel_owner_name_for_kver() {
+                local kver="$1"
+                local f
+                f="/lib/modules/${kver}/modules.dep"
+                if [ ! -f "${f}" ]; then
+                    f="/usr/lib/modules/${kver}/modules.dep"
+                fi
+                if [ ! -f "${f}" ]; then
+                    printf '%s' ""
+                    return 1
+                fi
+                rpm -qf --qf '%{NAME}\n' "${f}" 2>/dev/null | head -n 1 || true
+                return 0
+            }
+
+            __znh_in_targets() {
+                local name="$1"
+                local x
+                for x in "${targets[@]}"; do
+                    if [ "${name}" = "${x}" ]; then
+                        return 0
+                    fi
+                done
+                return 1
+            }
+
+            # Protect running kernel provider
+            local running_kver running_owner
+            running_kver=$(uname -r 2>/dev/null || echo "")
+            running_owner=""
+            if [ -n "${running_kver:-}" ]; then
+                running_owner="$(__znh_kernel_owner_name_for_kver "${running_kver}" 2>/dev/null || true)"
+                running_owner="$(printf '%s' "${running_owner}" | tr -d '\r\n' | head -n 1)"
+            fi
+
+            if [ -z "${running_owner:-}" ]; then
+                log_warn "[kernel-family-purge] Refusing: could not determine running kernel owner package (kver=${running_kver})"
+                echo "[kernel-family-purge] REFUSED: cannot determine running kernel package owner (safety)."
+                __znh_audit_record "kernel-family-purge:refused:running_owner_unknown"
+                return 0
+            fi
+
+            if __znh_in_targets "${running_owner}"; then
+                log_warn "[kernel-family-purge] Refusing: target list includes running kernel provider '${running_owner}' (kver=${running_kver})"
+                echo "[kernel-family-purge] REFUSED: running kernel package '${running_owner}' is in targets."
+                __znh_audit_record "kernel-family-purge:refused:running_kernel_targeted:${running_owner}"
+                return 0
+            fi
+
+            # Estimate how many installed kernel versions would be removed
+            local -a remove_kvers=()
+            local kver owner
+            while read -r kver; do
+                [ -n "${kver:-}" ] || continue
+                owner="$(__znh_kernel_owner_name_for_kver "${kver}" 2>/dev/null || true)"
+                owner="$(printf '%s' "${owner}" | tr -d '\r\n' | head -n 1)"
+                if [ -n "${owner:-}" ] && __znh_in_targets "${owner}"; then
+                    remove_kvers+=("${kver}")
+                fi
+            done <<<"${installed_kvers}"
+
+            local remove_count remaining_count
+            remove_count=${#remove_kvers[@]}
+            remaining_count=$((installed_count - remove_count))
+
+            if [ "${remaining_count}" -lt 2 ] 2>/dev/null; then
+                log_warn "[kernel-family-purge] Refusing: would leave <2 installed kernels (installed=${installed_count} remove=${remove_count} remain=${remaining_count})"
+                echo "[kernel-family-purge] REFUSED: this purge would leave only ${remaining_count} installed kernel(s)."
+                __znh_audit_record "kernel-family-purge:refused:remain_lt_2:installed=${installed_count}:remove=${remove_count}"
+                return 0
+            fi
+
+            local timeout_s
+            timeout_s="${KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS:-900}"
+            if ! [[ "${timeout_s}" =~ ^[0-9]+$ ]] || [ "${timeout_s}" -le 0 ] 2>/dev/null; then
+                timeout_s=900
+            fi
+
+            echo ""
+            echo "== Kernel family purge (danger) =="
+            echo "Targets: ${targets[*]}"
+            echo "Running kernel: ${running_kver} (owner package: ${running_owner})"
+            echo "Installed kernel versions detected: ${installed_count}"
+            echo "Estimated kernel versions removed by targets: ${remove_count}"
+            echo "Estimated remaining kernel versions: ${remaining_count}"
+            echo ""
+
+            __znh_audit_record "kernel-family-purge:targets=${targets[*]}"
+            __znh_audit_record "kernel-family-purge:installed_kernels=${installed_count}:remove_est=${remove_count}:remain_est=${remaining_count}"
+
+            local do_dry
+            do_dry="${KERNEL_FAMILY_PURGE_DRY_RUN:-false}"
+
+            # Confirmation (CLI only)
+            if [ "${KERNEL_FAMILY_PURGE_CONFIRM:-true}" = "true" ]; then
+                if [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+                    local phrase
+                    read -p "Type FAMILY to confirm removing kernel family packages now > " -r phrase
+                    phrase="${phrase^^}"
+                    if [ "${phrase}" != "FAMILY" ]; then
+                        echo "Skipping kernel family purge (not confirmed)."
+                        __znh_audit_record "kernel-family-purge:cancelled"
+                        return 0
+                    fi
+                elif [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+                    echo "[kernel-family-purge] Non-interactive: proceeding (confirmed by caller)."
+                else
+                    log_warn "[kernel-family-purge] Refusing without a TTY while KERNEL_FAMILY_PURGE_CONFIRM=true"
+                    __znh_audit_record "kernel-family-purge:refused:no-tty"
+                    return 0
+                fi
+            fi
+
+            local -a cmd
+            cmd=(zypper -n rm)
+            if [ "${do_dry}" = "true" ]; then
+                cmd+=(--dry-run)
+            fi
+            cmd+=("${targets[@]}")
+
+            __znh_audit_record "kernel-family-purge:run:${cmd[*]}"
+            if command -v timeout >/dev/null 2>&1; then
+                execute_guarded "Kernel family purge (zypper rm)" timeout "${timeout_s}" "${cmd[@]}" || true
+            else
+                execute_guarded "Kernel family purge (zypper rm)" "${cmd[@]}" || true
+            fi
+
+            # Post-check: ensure we did not end up with only one kernel
+            local after_kvers after_count
+            after_kvers="$(__znh_installed_kernel_versions_list)"
+            after_count=$(printf '%s\n' "${after_kvers}" | grep -c '.' 2>/dev/null || echo 0)
+            after_count="${after_count:-0}"
+            __znh_audit_record "kernel-family-purge:after_installed_kernels=${after_count}"
+
+            if [[ "${after_count}" =~ ^[0-9]+$ ]] && [ "${after_count}" -lt 2 ] 2>/dev/null; then
+                log_error "[kernel-family-purge] SAFETY ALERT: system now has <2 installed kernels (after_count=${after_count})."
+                echo "[kernel-family-purge] SAFETY ALERT: only ${after_count} kernel(s) detected after purge."
+            fi
+
+            return 0
+        }
+
+        __znh_audit_record "kernel-family-purge:maybe"
+        __znh_kernel_family_purge || true
+        __znh_audit_record "kernel-family-purge:done"
+
         # Optional: purge old kernel *packages* using openSUSE's official
         # `purge-kernels` (via zypper). This respects:
         #   /etc/zypp/zypp.conf:multiversion.kernels
         # and is disabled by default (see /etc/zypper-auto.conf).
         __znh_kernel_purge_old_kernels() {
-            if [ "${KERNEL_PURGE_ENABLED:-false}" != "true" ]; then
+            if [ "${__kp_effective:-false}" != "true" ]; then
                 return 0
+            fi
+
+            if [ "${__kp_forced:-0}" -eq 1 ] 2>/dev/null; then
+                echo "[kernel-purge] NOTE: KERNEL_PURGE_ENABLED=false but force-prune implicit purge is enabled (KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=true)"
             fi
 
             if ! command -v zypper >/dev/null 2>&1; then
                 log_warn "[kernel-purge] zypper not found; cannot run purge-kernels"
+                return 0
+            fi
+
+            # SAFETY: never risk leaving the system with only one installed kernel.
+            # If there are fewer than 3 installed kernel versions, skip the actual purge-kernels run.
+            # (With 2 kernels installed, purge-kernels *should* be a no-op anyway, but we hard-skip.)
+            local __kp_installed_count
+            __kp_installed_count=$(find /lib/modules /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -uV | grep -c '.' 2>/dev/null || echo 0)
+            __kp_installed_count="${__kp_installed_count:-0}"
+            if ! [[ "${__kp_installed_count}" =~ ^[0-9]+$ ]]; then
+                __kp_installed_count=0
+            fi
+            if [ "${__kp_installed_count}" -lt 2 ] 2>/dev/null; then
+                log_warn "[kernel-purge] REFUSED: only ${__kp_installed_count} installed kernel(s) detected (<2)"
+                echo "[kernel-purge] REFUSED: only ${__kp_installed_count} installed kernel(s) detected. (Safety: must have at least 2.)"
+                __znh_audit_record "kernel-purge:refused:installed_kernels_lt_2"
+                return 0
+            fi
+            if [ "${__kp_installed_count}" -lt 3 ] 2>/dev/null && [ "${KERNEL_PURGE_DRY_RUN:-false}" != "true" ]; then
+                log_info "[kernel-purge] Safety skip: installed kernels=${__kp_installed_count} (<3). Skipping purge-kernels to avoid leaving only one kernel."
+                echo "[kernel-purge] Safety: only ${__kp_installed_count} installed kernels detected; skipping purge-kernels."
+                __znh_audit_record "kernel-purge:skipped:installed_kernels_lt_3"
                 return 0
             fi
 
@@ -35353,9 +36322,45 @@ run_snapper_menu_only() {
             return 0
         }
 
-        __znh_audit_record "boot-entries:cleanup:maybe"
+        __znh_audit_record "boot-entry-clean:maybe"
         __znh_prune_old_kernel_boot_entries || true
-        __znh_audit_record "boot-entries:cleanup:done"
+        __znh_audit_record "boot-entry-clean:done"
+
+        # Optional: scrub-ghost pass to reduce GRUB/BLS clutter further (duplicates + stale snapshots)
+        __znh_scrub_ghost_force_prune_hygiene() {
+            if [ "${__sg_effective:-false}" != "true" ]; then
+                return 0
+            fi
+
+            if ! command -v scrub-ghost >/dev/null 2>&1 && ! command -v zypper-scrub-ghost >/dev/null 2>&1; then
+                log_info "[scrub-ghost][snapper] scrub-ghost command not found; skipping boot-entry hygiene"
+                return 0
+            fi
+
+            local cmd
+            cmd="scrub-ghost"
+            if ! command -v scrub-ghost >/dev/null 2>&1; then
+                cmd="zypper-scrub-ghost"
+            fi
+
+            echo ""
+            echo "== Boot menu hygiene (scrub-ghost) =="
+            echo "Mode: SAFE backup move (no hard delete)"
+
+            local -a args
+            args=("${cmd}" --force --prune-duplicates --prune-stale-snapshots)
+            if [ "${SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB:-true}" = "true" ]; then
+                args+=(--rebuild-grub)
+            fi
+
+            __znh_audit_record "scrub-ghost:run:${args[*]}"
+            execute_guarded "scrub-ghost (boot menu hygiene)" "${args[@]}" || true
+            __znh_audit_record "scrub-ghost:done"
+
+            return 0
+        }
+
+        __znh_scrub_ghost_force_prune_hygiene || true
 
         # --- SMART: Space tracking end ---
         end_space=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
@@ -37178,9 +38183,18 @@ run_self_update_only() {
                 return 1
             fi
 
+            local last_ref last_when state_file
+            last_ref="$(__znh_self_update_state_get last_update_ref 2>/dev/null || true)"
+            last_when="$(__znh_self_update_state_get last_update_at_utc 2>/dev/null || true)"
+            state_file="$(__znh_self_update_state_file 2>/dev/null || echo /var/lib/zypper-auto/self-update-state.json)"
+
             echo ""
-            echo "SELF-UPDATE CHANNEL SWITCH DETECTED: ${last_channel} -> ${channel}"
-            echo "This may upgrade or downgrade your installed helper." 
+            echo "SELF-UPDATE CHANNEL SWITCH DETECTED"
+            echo "  From: ${last_channel}${last_ref:+ (ref=${last_ref:0:12})}${last_when:+ at ${last_when}}"
+            echo "  To  : ${channel}"
+            echo ""
+            echo "NOTE: Switching channel is an explicit action and may upgrade OR downgrade your installed helper."
+            echo "State file: ${state_file}"
             echo ""
             echo "To confirm, type: SWITCHS"
             echo -n "> "
@@ -43862,6 +44876,38 @@ log() {
     } || true
 }
 
+__znh_write_run_install_tail() {
+    # Mirror a bounded tail of run-install.log into a dashboard-visible file.
+    # The WebUI reads this as: dashboard-run-install-tail.log
+    # Always best-effort; never break the install helper.
+    local had_errexit src dst tmp
+    had_errexit=0
+    [[ "$-" == *e* ]] && had_errexit=1
+
+    src="${LOG_FILE}"
+    dst="${LOG_DIR}/dashboard-run-install-tail.log"
+    tmp="${dst}.tmp.$$"
+
+    set +e
+    if [ -f "${src}" ]; then
+        tail -n 520 "${src}" >"${tmp}" 2>/dev/null || true
+    else
+        printf '%s\n' "(run-install.log not found yet: ${src})" >"${tmp}" 2>/dev/null || true
+    fi
+    mv -f "${tmp}" "${dst}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null || true
+    chmod 644 "${dst}" 2>/dev/null || true
+
+    [ "$had_errexit" -eq 1 ] 2>/dev/null && set -e
+}
+
+say() {
+    # Print to terminal AND persist the same line into the Ready-to-Install log.
+    # This ensures important failures (like lock blocks) are visible in run-install.log.
+    echo "$*"
+    log "CONSOLE: $*"
+    __znh_write_run_install_tail >/dev/null 2>&1 || true
+}
+
 execute_guarded() {
     local desc="$1"; shift
     local tmp
@@ -43983,20 +45029,23 @@ has_zypp_lock() {
         local pid
         pid=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
         if [ -n "$pid" ]; then
-            if kill -0 "$pid" 2>/dev/null; then
-                # Double-check that this PID really looks like a zypper/YaST
-                # style process so we don't treat a reused PID as a live lock.
+            # NOTE: If /run/zypp.pid points to a live PID, zypper will treat the
+            # system as locked (even if the PID looks "odd" to us). So for
+            # correctness, we treat ANY live PID in zypp.pid as a lock.
+            if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+                # Best-effort classification for logging only.
                 local comm cmd
                 comm=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
                 cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
                 if printf '%s\n%s\n' "$comm" "$cmd" | grep -qiE 'zypper|yast|y2base|zypp|packagekitd'; then
                     log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid (comm='$comm')"
-                    return 0
+                else
+                    log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid, but process does not look like zypp (comm='$comm'); treating as lock anyway"
                 fi
-                log "has_zypp_lock: ignoring non-zypp-looking process for lock file $ZYPP_LOCK_FILE (pid $pid, comm='$comm')"
-            else
-                log "has_zypp_lock: ignoring stale zypp lock file $ZYPP_LOCK_FILE with pid $pid"
+                return 0
             fi
+
+            log "has_zypp_lock: ignoring stale/invalid zypp lock file $ZYPP_LOCK_FILE with pid '$pid'"
         else
             log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE present but empty"
         fi
@@ -44026,13 +45075,168 @@ has_zypp_lock() {
     return 1
 }
 
+__znh_zypp_lock_file() {
+    if [ -f /run/zypp.pid ]; then
+        echo /run/zypp.pid
+        return 0
+    fi
+    if [ -f /var/run/zypp.pid ]; then
+        echo /var/run/zypp.pid
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
+__znh_log_zypp_lock_details() {
+    local lf pid comm args now mtime age
+
+    lf="$(__znh_zypp_lock_file 2>/dev/null || true)"
+    if [ -z "${lf}" ]; then
+        log "ZYPP_LOCK: no lock file detected"
+        return 0
+    fi
+
+    pid=$(cat "${lf}" 2>/dev/null || echo "")
+
+    comm=""
+    args=""
+    if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+        comm=$(ps -p "${pid}" -o comm= 2>/dev/null || echo "")
+        args=$(ps -p "${pid}" -o args= 2>/dev/null || echo "")
+    fi
+
+    now=$(date +%s 2>/dev/null || echo "")
+    mtime=$(stat -c %Y "${lf}" 2>/dev/null || echo "")
+    age=""
+    if [[ "${now:-}" =~ ^[0-9]+$ ]] && [[ "${mtime:-}" =~ ^[0-9]+$ ]]; then
+        age=$((now - mtime))
+    fi
+
+    log "ZYPP_LOCK: file=${lf} pid=${pid:-unknown} age_s=${age:-unknown} comm=${comm:-unknown}"
+    if [ -n "${args:-}" ]; then
+        # Avoid writing an unbounded command line into logs.
+        local args_short
+        args_short=$(printf '%s' "${args}" | head -c 300)
+        log "ZYPP_LOCK: args=${args_short}"
+    fi
+}
+
+__znh_wait_for_zypp_lock_smart() {
+    local max_wait_seconds="$1"
+
+    if [ -z "${max_wait_seconds}" ] || ! [[ "${max_wait_seconds}" =~ ^[0-9]+$ ]]; then
+        max_wait_seconds=0
+    fi
+    if [ "${max_wait_seconds}" -lt 0 ] 2>/dev/null; then
+        max_wait_seconds=0
+    fi
+
+    # No waiting requested.
+    if [ "${max_wait_seconds}" -le 0 ] 2>/dev/null; then
+        if has_zypp_lock; then
+            return 1
+        fi
+        return 0
+    fi
+
+    local start now elapsed backoff attempt
+    start="$(date +%s 2>/dev/null || echo 0)"
+    backoff=2
+    attempt=1
+
+    while has_zypp_lock; do
+        now="$(date +%s 2>/dev/null || echo 0)"
+        elapsed=0
+        if [[ "${start:-}" =~ ^[0-9]+$ ]] && [[ "${now:-}" =~ ^[0-9]+$ ]]; then
+            elapsed=$((now - start))
+        fi
+
+        if [ "${elapsed}" -ge "${max_wait_seconds}" ] 2>/dev/null; then
+            log "RUN_UPDATE: lock wait timed out after ${elapsed}s (timeout=${max_wait_seconds}s)"
+            __znh_log_zypp_lock_details
+            return 1
+        fi
+
+        say ""
+        say "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
+        say "Waiting for the other updater to finish... (attempt ${attempt}, elapsed ${elapsed}s, retry in ${backoff}s)"
+        __znh_log_zypp_lock_details
+
+        sleep "${backoff}"
+        backoff=$((backoff * 2))
+        if [ "${backoff}" -gt 30 ] 2>/dev/null; then
+            backoff=30
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return 0
+}
+
+__znh_run_zypper_dup_with_lock_retry() {
+    local lock_wait_seconds="$1"
+
+    # Safety: cap retries so we don't spam pkexec prompts forever.
+    local dup_max_attempts=3
+    if [[ "${LOCK_RETRY_MAX_ATTEMPTS:-}" =~ ^[0-9]+$ ]] && [ "${LOCK_RETRY_MAX_ATTEMPTS}" -gt 0 ] 2>/dev/null; then
+        dup_max_attempts="${LOCK_RETRY_MAX_ATTEMPTS}"
+    fi
+    if [ "${dup_max_attempts}" -gt 5 ] 2>/dev/null; then
+        dup_max_attempts=5
+    fi
+
+    local dup_attempt rc tmp_out locked
+    dup_attempt=1
+    while [ "${dup_attempt}" -le "${dup_max_attempts}" ] 2>/dev/null; do
+        tmp_out="$(mktemp /tmp/znh-run-install-dup.XXXXXX 2>/dev/null || mktemp)"
+
+        printf '\n===== zypper dup attempt %s/%s =====\n' "${dup_attempt}" "${dup_max_attempts}" | tee -a "${LOG_FILE}"
+        log "RUN_UPDATE: starting pkexec zypper dup (attempt ${dup_attempt}/${dup_max_attempts})"
+
+        # Stream full zypper output to BOTH the terminal and run-install.log.
+        pkexec zypper dup 2>&1 | tee -a "${LOG_FILE}" | tee "${tmp_out}"
+        rc=${PIPESTATUS[0]}
+        __znh_write_run_install_tail >/dev/null 2>&1 || true
+
+        log "RUN_UPDATE: pkexec zypper dup finished (attempt ${dup_attempt}/${dup_max_attempts}, rc=${rc})"
+
+        locked=0
+        if [ "${rc}" -ne 0 ] 2>/dev/null && grep -qiE 'system management is locked' "${tmp_out}" 2>/dev/null; then
+            locked=1
+        fi
+        rm -f "${tmp_out}" 2>/dev/null || true
+
+        if [ "${locked}" -eq 1 ] 2>/dev/null; then
+            LOCKED_DURING_UPDATE=1
+            say ""
+            say "⚠️  Zypper reported a lock while starting (attempt ${dup_attempt}/${dup_max_attempts})."
+            __znh_log_zypp_lock_details
+
+            if [ "${dup_attempt}" -lt "${dup_max_attempts}" ] 2>/dev/null; then
+                say "Waiting for the lock to clear, then retrying zypper dup..."
+                if ! __znh_wait_for_zypp_lock_smart "${lock_wait_seconds}"; then
+                    log "RUN_UPDATE: still locked after waiting; not retrying further"
+                    return "${rc}"
+                fi
+                dup_attempt=$((dup_attempt + 1))
+                continue
+            fi
+        fi
+
+        return "${rc}"
+    done
+
+    return 1
+}
+
 # Create a wrapper script that will run in the terminal
 RUN_UPDATE() {
-    echo ""
-    echo "=========================================="
-    echo "  Running System Update"
-    echo "=========================================="
-    echo ""
+    say ""
+    say "=========================================="
+    say "  Running System Update"
+    say "=========================================="
+    say ""
     
     # Track whether zypper failed specifically because of a lock so we can
     # show a clearer message later.
@@ -44045,34 +45249,39 @@ RUN_UPDATE() {
     execute_guarded "Stop background downloader (avoid lock conflicts)" pkexec systemctl stop zypper-autodownload.service zypper-autodownload.timer || true
     set -e
 
-    # If any other zypper process is still running at this point (for example
-    # an open YaST or another terminal zypper), retry a few times with
-    # increasing delays (1, 2, 3, ... seconds) before giving up and telling
-    # the user what to do. The number of attempts and base delay are
-    # controlled from /etc/zypper-auto.conf.
-    max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
-    base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
-    attempt=1
-    while has_zypp_lock && [ "$attempt" -le "$max_attempts" ]; do
-        delay=$((base_delay * attempt))
-        echo ""
-        echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
-        echo "Retry $attempt/$max_attempts: waiting $delay second(s) for the other updater to finish..."
-        log "RUN_UPDATE: lock still active before attempt $attempt/$max_attempts; sleeping ${delay}s"
-        sleep "$delay"
-        attempt=$((attempt + 1))
-    done
+    # Align lock waiting with Rocket install defaults where available (WebUI settings).
+    # Fallback to the classic LOCK_RETRY_* behaviour (roughly base_delay * sum(1..N)).
+    local LOCK_WAIT_SECONDS
+    LOCK_WAIT_SECONDS="${ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS:-}"
+    if [ -z "${LOCK_WAIT_SECONDS}" ] || ! [[ "${LOCK_WAIT_SECONDS}" =~ ^[0-9]+$ ]]; then
+        local max_attempts base_delay
+        max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
+        base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
+        if ! [[ "${max_attempts}" =~ ^[0-9]+$ ]]; then
+            max_attempts=10
+        fi
+        if ! [[ "${base_delay}" =~ ^[0-9]+$ ]]; then
+            base_delay=1
+        fi
+        LOCK_WAIT_SECONDS=$((base_delay * max_attempts * (max_attempts + 1) / 2))
+    fi
+    if [ "${LOCK_WAIT_SECONDS}" -gt 7200 ] 2>/dev/null; then
+        LOCK_WAIT_SECONDS=7200
+    fi
+    if [ "${LOCK_WAIT_SECONDS}" -lt 0 ] 2>/dev/null; then
+        LOCK_WAIT_SECONDS=0
+    fi
+    log "RUN_UPDATE: lock wait timeout seconds = ${LOCK_WAIT_SECONDS}"
 
-    # After retries, if a lock is still present, show a clear message and exit
-    # cleanly instead of letting pkexec/zypper print the raw lock error.
-    if has_zypp_lock; then
-        echo ""
-        echo "System management is still locked by another update tool."
-        echo "Close that other update tool (or wait for it to finish), then run"
-        echo "this 'Ready to Install' action again."
-        echo ""
-        log "RUN_UPDATE: aborting after $max_attempts lock retries because another updater is still holding the lock"
-        echo "Press Enter to close this window..."
+    if ! __znh_wait_for_zypp_lock_smart "${LOCK_WAIT_SECONDS}"; then
+        say ""
+        say "System management is still locked by another update tool."
+        say "Close that other update tool (or wait for it to finish), then run"
+        say "this 'Ready to Install' action again."
+        say ""
+        log "RUN_UPDATE: aborting because another updater is still holding the lock"
+        __znh_log_zypp_lock_details
+        say "Press Enter to close this window..."
         set +e
         if ! read -r _ </dev/tty 2>/dev/null; then
             # If /dev/tty is not available (or read fails instantly), pause briefly
@@ -44101,11 +45310,10 @@ RUN_UPDATE() {
     fi
 
     log "RUN_UPDATE: starting pkexec zypper dup..."
-    # Run the update, capturing stderr so we can detect a lock even if it
-    # appears after our pre-check.
+    log "RUN_UPDATE: streaming zypper output into ${LOG_FILE} (so lock/root-cause is visible in logs)"
+
     set +e
-    ZYPPER_ERR_FILE=$(mktemp)
-    pkexec zypper dup 2> >(tee "$ZYPPER_ERR_FILE" | sed -E '/System management is locked/d;/Close this application before trying again/d' >&2)
+    __znh_run_zypper_dup_with_lock_retry "${LOCK_WAIT_SECONDS}"
     rc=$?
     set -e
 
@@ -44118,21 +45326,21 @@ RUN_UPDATE() {
     # rich context without requiring the user to manually open the debug menu.
     if [ "$rc" -ne 0 ]; then
         log "RUN_UPDATE: Failure detected (rc=$rc). Triggering auto-snapshot via helper..."
-        echo ""
-        echo "⚠️  Update failed. Capturing system state for diagnostics..."
+        say ""
+        say "⚠️  Update failed. Capturing system state for diagnostics..."
 
         # On failure, print the log destination clearly so terminals can
         # hyperlink it (file://...). This makes it easy for users to click
         # straight into the folder and attach the right logs to bug reports.
-        echo ""
-        echo "Logs saved to:"
-        echo "  - Ready-to-Install log: ${LOG_FILE}"
-        echo "  - Ready-to-Install log folder: ${LOG_DIR}"
-        echo "    Clickable: file://${LOG_DIR}"
-        echo "  - System helper logs (root): /var/log/zypper-auto"
-        echo "    Clickable: file:///var/log/zypper-auto"
-        echo ""
-        echo "Tip: you can also open the diagnostics folder via: zypper-auto-helper --show-logs"
+        say ""
+        say "Logs saved to:"
+        say "  - Ready-to-Install log: ${LOG_FILE}"
+        say "  - Ready-to-Install log folder: ${LOG_DIR}"
+        say "    Clickable: file://${LOG_DIR}"
+        say "  - System helper logs (root): /var/log/zypper-auto"
+        say "    Clickable: file:///var/log/zypper-auto"
+        say ""
+        say "Tip: you can also open the diagnostics folder via: zypper-auto-helper --show-logs"
 
         set +e
         # Best-effort: propagate correlation IDs into the helper snapshot.
@@ -44142,10 +45350,7 @@ RUN_UPDATE() {
         log "RUN_UPDATE: Auto-snapshot helper invoked in background."
     fi
 
-    if [ "$rc" -ne 0 ] && grep -q "System management is locked" "$ZYPPER_ERR_FILE" 2>/dev/null; then
-        LOCKED_DURING_UPDATE=1
-    fi
-    rm -f "$ZYPPER_ERR_FILE"
+    # LOCKED_DURING_UPDATE is set inside __znh_run_zypper_dup_with_lock_retry when a lock is detected.
 
     # When the update completes successfully, capture a post-update snapshot
     # and compute a delta file describing exactly which packages changed.
@@ -44451,12 +45656,12 @@ RUN_UPDATE() {
         echo ""
         if [ "$rc" -ne 0 ]; then
             if [ "${LOCKED_DURING_UPDATE:-0}" -eq 1 ]; then
-                echo "ℹ️  Skipping optional updates because system management was locked; no system updates were applied."
+                say "ℹ️  Skipping optional updates because system management was locked; no system updates were applied."
             else
-                echo "ℹ️  Skipping optional updates because zypper dup failed (rc=$rc)."
+                say "ℹ️  Skipping optional updates because zypper dup failed (rc=$rc)."
             fi
         else
-            echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU."
+            say "ℹ️  No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU."
         fi
         echo ""
     fi
@@ -44488,11 +45693,11 @@ RUN_UPDATE() {
 
     if [ "$UPDATE_SUCCESS" = false ]; then
         if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
-            echo "⚠  Zypper could not run because system management is locked by another tool. No system packages were changed."
+            say "⚠  Zypper could not run because system management is locked by another tool. No system packages were changed."
         else
-            echo "⚠️  Zypper dup reported errors (see above). Optional app updates were skipped."
+            say "⚠️  Zypper dup reported errors (see above). Optional app updates were skipped."
         fi
-        echo ""
+        say ""
     fi
 
     log "RUN_UPDATE: finished (UPDATE_SUCCESS=$UPDATE_SUCCESS)"
