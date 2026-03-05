@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Uninstall (`--uninstall-zypper`): now removes the Fish sudo wrapper file `~/.config/fish/conf.d/sudo-handler.fish` and includes it in dry-run output.
+- Verify service: added adaptive low-impact mode for repeated background verification failures (fail-streak tracking + heavy-check cooldown state persisted in `verify-smart-state.env`).
+- Verify service: expensive deep checks can now be deferred during cooldown windows to reduce CPU/IO pressure when failures repeat.
+- Config/WebUI/validation: added `VERIFY_LOW_IMPACT_ENABLED`, `VERIFY_LOW_IMPACT_FAIL_STREAK`, `VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES`, and `VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES`.
+- Default verification cadence tuned: `VERIFY_TIMER_INTERVAL_MINUTES` now defaults to `15` (from `5`) for lower background impact.
+- WebUI Managers (Server/SQLite): quick-action entries now show explicit AI launch markers (`[AI launched]`) with persisted source metadata (`ai_triggered`, `ai_source`).
+- Quick action API/recovery/history: AI launch metadata is now carried through quick start/status/history flows so reopen/resume paths keep the AI marker.
+- Snapper WebUI API hardening: background jobs now run with lower-priority scheduling (`Nice=19`, idle I/O class) plus low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
+- Snapper direct run API (`/api/snapper/run`) now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
 - Snapper Full Cleanup: mode `force-prune` can implicitly run kernel package cleanup (`zypper purge-kernels`) even when `KERNEL_PURGE_ENABLED=false` (configurable via `KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE`, default true).
 - Snapper Full Cleanup: mode `force-prune` can also run a safe boot menu hygiene pass via `scrub-ghost` to quarantine duplicate/stale snapshot boot entries and optionally rebuild GRUB config (configurable via `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED`, default true).
 - Snapper Full Cleanup (danger): optional kernel family purge can remove whole kernel package families listed in `KERNEL_FAMILY_PURGE_TARGETS` (force-prune only by default; protects running kernel; refuses if it could leave only one installed kernel).

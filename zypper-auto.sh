@@ -1413,6 +1413,7 @@ PY
     fi
 fi
 
+
 # --- Logging / Configuration Defaults ---
 LOG_DIR="/var/log/zypper-auto"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
@@ -1435,6 +1436,14 @@ CONFIG_WARNINGS=()
 # Timer intervals (in minutes) for downloader and notifier (1,5,10,15,30,60)
 DL_TIMER_INTERVAL_MINUTES=1
 NT_TIMER_INTERVAL_MINUTES=1
+VERIFY_TIMER_INTERVAL_MINUTES=15
+
+# Smart low-impact verify mode (primarily for background/systemd verification
+# runs to reduce CPU/IO pressure during repeated failure periods).
+VERIFY_LOW_IMPACT_ENABLED="true"
+VERIFY_LOW_IMPACT_FAIL_STREAK=2
+VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES=45
+VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES=30
 
 # Global config file (optional but recommended for advanced users)
 CONFIG_FILE="/etc/zypper-auto.conf"
@@ -2242,7 +2251,11 @@ __znh_write_dashboard_schema_json() {
 
     "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
     "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
-    "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
+    "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "15"},
+    "VERIFY_LOW_IMPACT_ENABLED": {"type": "bool", "default": "true"},
+    "VERIFY_LOW_IMPACT_FAIL_STREAK": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
+    "VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES": {"type": "int", "min": 5, "max": 720, "step": 5, "default": "45"},
+    "VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES": {"type": "int", "min": 5, "max": 720, "step": 5, "default": "30"},
 
     "DOWNLOADER_DOWNLOAD_MODE": {"type": "enum", "allowed": ["full","detect-only"], "default": "full"},
     "AUTO_DUPLICATE_RPM_MODE": {"type": "enum", "allowed": ["whitelist","thirdparty","both"], "default": "whitelist"},
@@ -8437,8 +8450,35 @@ NT_TIMER_INTERVAL_MINUTES=1
 #   30 = every 30 minutes
 #   60 = every hour (hourly)
 # Any other value is treated as invalid and will be reset to a safe default.
-# Default: 5 (High Priority Mode default)
-VERIFY_TIMER_INTERVAL_MINUTES=5
+# Default: 15 (lower-impact baseline)
+VERIFY_TIMER_INTERVAL_MINUTES=15
+
+# VERIFY_LOW_IMPACT_ENABLED
+# Smart adaptive mode for background verification runs.
+# When true, repeated failing verify cycles become less aggressive:
+#   - lowers scheduling priority (CPU/IO)
+#   - heavy checks are rate-limited (cooldown)
+#   - follow-up verify runs are delayed more
+# Default: true
+VERIFY_LOW_IMPACT_ENABLED=true
+
+# VERIFY_LOW_IMPACT_FAIL_STREAK
+# Number of consecutive failed verification runs before low-impact mode activates.
+# Range: 1..20
+# Default: 2
+VERIFY_LOW_IMPACT_FAIL_STREAK=2
+
+# VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES
+# In low-impact mode, heavy checks are run at most once per cooldown window.
+# Range: 5..720
+# Default: 45
+VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES=45
+
+# VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES
+# Follow-up verify delay used while low-impact mode is active.
+# Range: 5..720
+# Default: 30
+VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES=30
 
 # ---------------------------------------------------------------------
 # Snapper safety: retention optimizer caps (prevent disk filling)
@@ -9162,11 +9202,15 @@ EOF
     validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
     validate_bool_flag VERIFY_JOURNAL_AUTO_VACUUM_ENABLED true
+    validate_bool_flag VERIFY_LOW_IMPACT_ENABLED true
+    validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_FAIL_STREAK 2 1 20
+    validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES 45 5 720
+    validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES 30 5 720
 
     # Timers: exact allowed list
     validate_allowed_set DL_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
     validate_allowed_set NT_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
-    validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 60 "1,5,10,15,30,60"
+    validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 15 "1,5,10,15,30,60"
 
     # Enums
     validate_allowed_set DOWNLOADER_DOWNLOAD_MODE full "full,detect-only"
@@ -9272,7 +9316,7 @@ EOF
 
     validate_interval DL_TIMER_INTERVAL_MINUTES 1
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
-    validate_interval VERIFY_TIMER_INTERVAL_MINUTES 60
+    validate_interval VERIFY_TIMER_INTERVAL_MINUTES 15
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
@@ -9376,6 +9420,10 @@ EOF
     log_debug "  DL_TIMER_INTERVAL_MINUTES=${DL_TIMER_INTERVAL_MINUTES}"
     log_debug "  NT_TIMER_INTERVAL_MINUTES=${NT_TIMER_INTERVAL_MINUTES}"
     log_debug "  VERIFY_TIMER_INTERVAL_MINUTES=${VERIFY_TIMER_INTERVAL_MINUTES}"
+    log_debug "  VERIFY_LOW_IMPACT_ENABLED=${VERIFY_LOW_IMPACT_ENABLED:-true}"
+    log_debug "  VERIFY_LOW_IMPACT_FAIL_STREAK=${VERIFY_LOW_IMPACT_FAIL_STREAK:-2}"
+    log_debug "  VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES=${VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES:-45}"
+    log_debug "  VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES=${VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES:-30}"
     log_debug "  CACHE_EXPIRY_MINUTES=${CACHE_EXPIRY_MINUTES}"
     log_debug "  SNOOZE_SHORT_HOURS=${SNOOZE_SHORT_HOURS}"
     log_debug "  SNOOZE_MEDIUM_HOURS=${SNOOZE_MEDIUM_HOURS}"
@@ -9508,6 +9556,10 @@ EOF
     _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
     _mark_missing_key "ZYPPER_TURBO_TUNER_ENABLED"
     _mark_missing_key "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED"
+    _mark_missing_key "VERIFY_LOW_IMPACT_ENABLED"
+    _mark_missing_key "VERIFY_LOW_IMPACT_FAIL_STREAK"
+    _mark_missing_key "VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES"
+    _mark_missing_key "VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES"
     _mark_missing_key "AUTO_REPAIR_TRY_REMOUNT_RW"
 
     # Snapper retention optimizer knobs
@@ -9645,6 +9697,18 @@ EOF
                     ;;
                 VERIFY_JOURNAL_AUTO_VACUUM_ENABLED)
                     log_info "  - VERIFY_JOURNAL_AUTO_VACUUM_ENABLED: when true, verification may vacuum systemd journal logs when /var/log/journal grows too large."
+                    ;;
+                VERIFY_LOW_IMPACT_ENABLED)
+                    log_info "  - VERIFY_LOW_IMPACT_ENABLED: enables smart low-impact mode for repeated failing background verification runs (lighter CPU/IO + deferred heavy checks)."
+                    ;;
+                VERIFY_LOW_IMPACT_FAIL_STREAK)
+                    log_info "  - VERIFY_LOW_IMPACT_FAIL_STREAK: number of consecutive failed verification runs before smart low-impact mode activates."
+                    ;;
+                VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES)
+                    log_info "  - VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES: minimum spacing between heavy verification checks while low-impact mode is active."
+                    ;;
+                VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES)
+                    log_info "  - VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES: follow-up verification delay used while low-impact mode is active."
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
@@ -15027,6 +15091,10 @@ generate_dashboard() {
                 if (!qjid) return;
                 var qact = String(action.action || '');
                 var qtitle = String(action.title || 'Quick action');
+                var qai = !!action.ai_triggered;
+                var qais = String(action.ai_source || '').trim();
+                if (qais && !qai) qai = true;
+                if (qai && !qais) qais = 'webui-ai';
 
                 try { _suReset(); } catch (e2qa) {}
                 try { _ruReset(); } catch (e3qa) {}
@@ -15034,10 +15102,12 @@ generate_dashboard() {
 
                 try { _qa.action = qact; } catch (e5qa) {}
                 try { _qa.title = qtitle; } catch (e6qa) {}
+                try { _qa.ai_triggered = !!qai; } catch (e6qb) {}
+                try { _qa.ai_source = String(qais || ''); } catch (e6qc) {}
 
                 try { _suShow(true); } catch (e7qa) {}
-                try { _qaRenderRunning({ type: 'quick-action', job_id: qjid, action: qact, title: qtitle }); } catch (e8qa) {}
-                try { _qaPollJob(qjid, qact, qtitle); } catch (e9qa) {}
+                try { _qaRenderRunning({ type: 'quick-action', job_id: qjid, action: qact, title: qtitle, ai_triggered: qai, ai_source: qais }); } catch (e8qa) {}
+                try { _qaPollJob(qjid, qact, qtitle, qai, qais); } catch (e9qa) {}
                 return;
             }
 
@@ -16412,6 +16482,10 @@ generate_dashboard() {
                         var sim = !!it.simulate;
                         var dr = !!it.dry_run;
                         var ch = String(it.channel || '');
+                        var aiTrig = !!it.ai_triggered;
+                        var aiSrc = String(it.ai_source || '').trim();
+                        if (aiSrc && !aiTrig) aiTrig = true;
+                        if (aiTrig && !aiSrc) aiSrc = 'webui-ai';
                         var rc = (it.rc != null) ? parseInt(it.rc, 10) : null;
                         if (rc != null && isNaN(rc)) rc = null;
                         var done = !!it.done;
@@ -16428,6 +16502,12 @@ generate_dashboard() {
                         try { summary = String(it.summary || ''); } catch (eSum) { summary = ''; }
                         if (!summary) summary = stage;
                         if (!summary) summary = done ? (ok2 ? 'Done' : 'Failed') : 'Running';
+                        var titleShown = String(title || '').replace(/</g,'&lt;');
+                        if (tp === 'quick-action' && aiTrig) titleShown += ' [AI launched]';
+                        var aiMeta = '';
+                        if (tp === 'quick-action' && aiTrig) {
+                            aiMeta = ' • ai=' + String(aiSrc || 'webui-ai');
+                        }
 
                         // Map job type -> open action
                         var canOpen = !!jid;
@@ -16435,9 +16515,9 @@ generate_dashboard() {
                         if (tp === 'system-dup') openLabel = 'Open log';
 
                         rows.push('<div class="' + cls + '">');
-                        rows.push('  <div class="hdr"><div class="t">' + String(title || '').replace(/</g,'&lt;') + '</div><div class="m">' + when + (rc != null ? (' • rc=' + String(rc)) : '') + (tp ? (' • ' + String(tp)) : '') + '</div></div>');
+                        rows.push('  <div class=\"hdr\"><div class=\"t\">' + titleShown + '</div><div class=\"m\">' + when + (rc != null ? (' • rc=' + String(rc)) : '') + (tp ? (' • ' + String(tp)) : '') + '</div></div>');
                         rows.push('  <div class="b">' + String(summary || '').replace(/</g,'&lt;') + '</div>');
-                        rows.push('  <div class="m">job_id=' + String(jid || '').replace(/</g,'&lt;') + (action ? (' • action=' + String(action).replace(/</g,'&lt;')) : '') + '</div>');
+                        rows.push('  <div class=\"m\">job_id=' + String(jid || '').replace(/</g,'&lt;') + (action ? (' • action=' + String(action).replace(/</g,'&lt;')) : '') + (aiMeta ? String(aiMeta).replace(/</g,'&lt;') : '') + '</div>');
 
                         if (canOpen) {
                             rows.push('  <div class="mgr-actions"><button class="pill" type="button" data-mgr-srv-open="1"'
@@ -16448,6 +16528,8 @@ generate_dashboard() {
                                 + ' data-channel="' + String(ch || '') + '"'
                                 + ' data-dry-run="' + String(dr ? '1' : '0') + '"'
                                 + ' data-simulate="' + String(sim ? '1' : '0') + '"'
+                                + ' data-ai-triggered=\"' + String(aiTrig ? '1' : '0') + '\"'
+                                + ' data-ai-source=\"' + String(aiSrc || '') + '\"'
                                 + '>' + String(openLabel) + '</button></div>');
                         }
 
@@ -16487,8 +16569,10 @@ generate_dashboard() {
                                 if (tp2 === 'quick-action') {
                                     var act2 = String(btn.getAttribute('data-action') || '');
                                     var tit2 = String(btn.getAttribute('data-title') || 'Quick action');
+                                    var qai2 = String(btn.getAttribute('data-ai-triggered') || '0') === '1';
+                                    var qaiSrc2 = String(btn.getAttribute('data-ai-source') || '');
                                     if (typeof window.znhNotifyRunAction === 'function') {
-                                        window.znhNotifyRunAction({ type: 'open-quick-action-job', job_id: jid2, action: act2, title: tit2 });
+                                        window.znhNotifyRunAction({ type: 'open-quick-action-job', job_id: jid2, action: act2, title: tit2, ai_triggered: qai2, ai_source: qaiSrc2 });
                                     }
                                     return;
                                 }
@@ -17512,7 +17596,7 @@ generate_dashboard() {
             } catch (e11) {}
             try {
                 if (typeof _qaPollJob === 'function') {
-                    _qaPollJob(String(t.job_id), String(t.action || ''), String(t.title || 'Quick action'));
+                    _qaPollJob(String(t.job_id), String(t.action || ''), String(t.title || 'Quick action'), !!t.ai_triggered, String(t.ai_source || ''));
                 }
             } catch (e12) {}
         } else if (t.type === 'scrub-ghost') {
@@ -17669,6 +17753,10 @@ generate_dashboard() {
         { key: 'DL_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Downloader interval (min)' },
         { key: 'NT_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Notifier interval (min)' },
         { key: 'VERIFY_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Verify interval (min)' },
+        { key: 'VERIFY_LOW_IMPACT_ENABLED', type: 'bool', label: 'Verify: smart low-impact mode (background failures)' },
+        { key: 'VERIFY_LOW_IMPACT_FAIL_STREAK', type: 'int', label: 'Verify: low-impact activation after consecutive failures' },
+        { key: 'VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES', type: 'int', label: 'Verify: heavy-check cooldown in low-impact mode (minutes)' },
+        { key: 'VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES', type: 'int', label: 'Verify: follow-up delay in low-impact mode (minutes)' },
 
         { key: 'DOWNLOADER_DOWNLOAD_MODE', type: 'enum', label: 'Downloader mode' },
         { key: 'AUTO_DUPLICATE_RPM_MODE', type: 'enum', label: 'Duplicate RPM cleanup mode' },
@@ -23896,6 +23984,8 @@ generate_dashboard() {
         title: '',
         desc: '',
         copy_cmd: '',
+        ai_triggered: false,
+        ai_source: '',
         danger: false,
         interactive: false,
         confirm: null,
@@ -23910,6 +24000,8 @@ generate_dashboard() {
         _qa.title = '';
         _qa.desc = '';
         _qa.copy_cmd = '';
+        _qa.ai_triggered = false;
+        _qa.ai_source = '';
         _qa.danger = false;
         _qa.interactive = false;
         _qa.confirm = null;
@@ -23985,6 +24077,10 @@ generate_dashboard() {
         _qa.title = String(opts.title || opts.action || 'Quick action').trim();
         _qa.desc = String(opts.desc || '').trim();
         _qa.copy_cmd = String(opts.copy_cmd || '').trim();
+        _qa.ai_triggered = !!opts.ai_triggered;
+        _qa.ai_source = String(opts.ai_source || '').trim();
+        if (_qa.ai_source && !_qa.ai_triggered) _qa.ai_triggered = true;
+        if (_qa.ai_triggered && !_qa.ai_source) _qa.ai_source = 'webui-ai';
         _qa.danger = !!opts.danger;
         _qa.interactive = !!opts.interactive;
 
@@ -24184,6 +24280,8 @@ generate_dashboard() {
             if (_qa.running) return;
 
             var body = { action: _qa.action };
+            if (_qa.ai_triggered) body.ai_triggered = true;
+            if (_qa.ai_source) body.ai_source = String(_qa.ai_source);
             if (needsConfirm) {
                 var got2 = '';
                 try { got2 = String((document.getElementById('qa-phrase') || {}).value || '').trim(); } catch (e) { got2 = ''; }
@@ -24196,7 +24294,13 @@ generate_dashboard() {
             toast('Starting…', _qa.title, 'ok');
             _api('/api/quick/start', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
                 if (!r || !r.job_id) throw new Error('missing job_id');
-                _qaPollJob(String(r.job_id), _qa.action, _qa.title);
+                var aiTrig = false;
+                var aiSrc = '';
+                try { aiTrig = !!r.ai_triggered; } catch (e4) { aiTrig = false; }
+                try { aiSrc = String(r.ai_source || ''); } catch (e5) { aiSrc = ''; }
+                if (!aiTrig && _qa.ai_triggered) aiTrig = true;
+                if (!aiSrc && _qa.ai_source) aiSrc = String(_qa.ai_source || '');
+                _qaPollJob(String(r.job_id), _qa.action, _qa.title, aiTrig, aiSrc);
             }).catch(function(err) {
                 var msg = (err && err.message) ? err.message : 'start failed';
                 toast('Quick Action failed to start', msg, 'err');
@@ -24212,13 +24316,24 @@ generate_dashboard() {
         var e = _suEls();
         if (!e.body) return;
         var title = '';
+        var aiTrig = false;
+        var aiSrc = '';
         try { title = String((taskInfo && (taskInfo.title || taskInfo.action)) || 'Quick action'); } catch (e0) { title = 'Quick action'; }
+        try { aiTrig = !!(taskInfo && taskInfo.ai_triggered); } catch (e1) { aiTrig = false; }
+        try { aiSrc = String((taskInfo && taskInfo.ai_source) || '').trim(); } catch (e2) { aiSrc = ''; }
+        if (aiSrc && !aiTrig) aiTrig = true;
+        if (aiTrig && !aiSrc) aiSrc = 'webui-ai';
+        var aiLine = '';
+        if (aiTrig) {
+            aiLine = '  <div style=\"margin-top:6px; color: var(--muted); font-weight:800;\">Launch source: AI' + (aiSrc ? (' (' + _qaEscapeHtml(aiSrc) + ')') : '') + '</div>';
+        }
 
         _suSetMinBtnVisible(true);
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
             '  <div style="font-weight:950;">Quick Action running</div>',
             '  <div style="margin-top:6px; font-weight:800;">This job is still running in the background. You can minimize this window and reopen it from the bottom-right bubble.</div>',
+            aiLine,
             '</div>',
             '<div class="overlay-progress">',
             '  <div class="overlay-progress-row"><span id="su-stage">Running</span><span id="su-percent">0%</span></div>',
@@ -24264,17 +24379,26 @@ generate_dashboard() {
         } catch (e1) {}
     }
 
-    function _qaPollJob(job_id, action, title) {
+    function _qaPollJob(job_id, action, title, aiTriggered, aiSource) {
         _qa.job_id = job_id;
         _qa.running = true;
         _suSetMinBtnVisible(true);
+
+        var aiTrig = false;
+        var aiSrc = '';
+        try { aiTrig = !!aiTriggered; } catch (eA0) { aiTrig = false; }
+        try { aiSrc = String(aiSource || '').trim(); } catch (eA1) { aiSrc = ''; }
+        if (aiSrc && !aiTrig) aiTrig = true;
+        if (aiTrig && !aiSrc) aiSrc = 'webui-ai';
 
         try {
             znhTaskSet({
                 type: 'quick-action',
                 job_id: String(job_id),
                 action: String(action || ''),
-                title: String(title || 'Quick action')
+                title: String(title || 'Quick action'),
+                ai_triggered: !!aiTrig,
+                ai_source: String(aiSrc || '')
             });
         } catch (e_task) {}
 
@@ -29977,6 +30101,80 @@ run_verification_only() {
     # If we have to perform a critical repair (e.g. restart the dashboard API),
     # schedule a one-off follow-up verification soon so we can confirm the fix held.
     FOLLOWUP_SOON=0
+    FOLLOWUP_DELAY_MINUTES=5
+
+    # Smart low-impact verification mode:
+    # - primarily targets repeated failing background/systemd verify cycles
+    # - lowers process priority
+    # - rate-limits heavy checks via a cooldown window
+    # - delays follow-up verify scheduling
+    local VERIFY_STATE_FILE VERIFY_PREV_FAIL_STREAK VERIFY_LAST_HEAVY_EPOCH VERIFY_NOW_EPOCH
+    local VERIFY_LOW_IMPACT_MODE VERIFY_RUN_HEAVY_CHECKS
+    local verify_fail_streak_threshold verify_heavy_cooldown_minutes verify_bg_mode
+
+    VERIFY_STATE_FILE="${LOG_DIR}/verify-smart-state.env"
+    VERIFY_PREV_FAIL_STREAK=0
+    VERIFY_LAST_HEAVY_EPOCH=0
+    VERIFY_NOW_EPOCH=$(date +%s 2>/dev/null || echo 0)
+    VERIFY_LOW_IMPACT_MODE=0
+    VERIFY_RUN_HEAVY_CHECKS=1
+    verify_bg_mode=0
+
+    if [ ! -t 1 ] 2>/dev/null; then
+        verify_bg_mode=1
+    fi
+
+    if [ -r "${VERIFY_STATE_FILE}" ]; then
+        VERIFY_PREV_FAIL_STREAK=$(grep -E '^fail_streak=' "${VERIFY_STATE_FILE}" 2>/dev/null | tail -n 1 | cut -d '=' -f2 || echo 0)
+        VERIFY_LAST_HEAVY_EPOCH=$(grep -E '^last_heavy_epoch=' "${VERIFY_STATE_FILE}" 2>/dev/null | tail -n 1 | cut -d '=' -f2 || echo 0)
+    fi
+
+    [[ "${VERIFY_PREV_FAIL_STREAK:-}" =~ ^[0-9]+$ ]] || VERIFY_PREV_FAIL_STREAK=0
+    [[ "${VERIFY_LAST_HEAVY_EPOCH:-}" =~ ^[0-9]+$ ]] || VERIFY_LAST_HEAVY_EPOCH=0
+    [[ "${VERIFY_NOW_EPOCH:-}" =~ ^[0-9]+$ ]] || VERIFY_NOW_EPOCH=0
+
+    verify_fail_streak_threshold="${VERIFY_LOW_IMPACT_FAIL_STREAK:-2}"
+    verify_heavy_cooldown_minutes="${VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES:-45}"
+    FOLLOWUP_DELAY_MINUTES="${VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES:-30}"
+
+    [[ "${verify_fail_streak_threshold:-}" =~ ^[0-9]+$ ]] || verify_fail_streak_threshold=2
+    [[ "${verify_heavy_cooldown_minutes:-}" =~ ^[0-9]+$ ]] || verify_heavy_cooldown_minutes=45
+    [[ "${FOLLOWUP_DELAY_MINUTES:-}" =~ ^[0-9]+$ ]] || FOLLOWUP_DELAY_MINUTES=30
+
+    if [[ "${VERIFY_LOW_IMPACT_ENABLED,,}" == "true" ]] \
+        && [ "${verify_bg_mode}" -eq 1 ] 2>/dev/null \
+        && [ "${VERIFY_PREV_FAIL_STREAK}" -ge "${verify_fail_streak_threshold}" ] 2>/dev/null; then
+        VERIFY_LOW_IMPACT_MODE=1
+
+        # Lower this verify process scheduling priority to reduce desktop impact.
+        renice +19 -p $$ >/dev/null 2>&1 || true
+        if command -v ionice >/dev/null 2>&1; then
+            ionice -c3 -p $$ >/dev/null 2>&1 || true
+        fi
+
+        log_warn "⚠ Smart low-impact verify mode active (previous fail streak: ${VERIFY_PREV_FAIL_STREAK})"
+        log_info "  → CPU/IO priority reduced for this verification run"
+
+        local verify_heavy_cooldown_seconds verify_heavy_age
+        verify_heavy_cooldown_seconds=$((verify_heavy_cooldown_minutes * 60))
+        verify_heavy_age=$((VERIFY_NOW_EPOCH - VERIFY_LAST_HEAVY_EPOCH))
+        if [ "${VERIFY_LAST_HEAVY_EPOCH}" -gt 0 ] 2>/dev/null \
+            && [ "${verify_heavy_age}" -lt "${verify_heavy_cooldown_seconds}" ] 2>/dev/null; then
+            VERIFY_RUN_HEAVY_CHECKS=0
+            log_info "  → Heavy verification checks deferred this cycle (cooldown active: ${verify_heavy_cooldown_minutes}m)"
+        fi
+    else
+        FOLLOWUP_DELAY_MINUTES=5
+    fi
+
+    verify_should_skip_heavy_check() {
+        local label="${1:-heavy check}"
+        if [ "${VERIFY_RUN_HEAVY_CHECKS:-1}" -eq 1 ] 2>/dev/null; then
+            return 1
+        fi
+        log_info "ℹ Low-impact mode: skipping ${label} this cycle"
+        return 0
+    }
 
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
@@ -30718,8 +30916,9 @@ else
 fi
 
 log_debug "[21/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; auto-fix)..."
-
-if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+if verify_should_skip_heavy_check "repository reachability refresh/deep repair"; then
+    log_info "  → Heavy repo refresh auto-repair deferred until cooldown expires"
+elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping repo refresh check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 else
     refresh_ok=0
@@ -30958,7 +31157,9 @@ fi
 
 # Check 29: Orphaned packages (best-effort)
 log_debug "[29/${TOTAL_CHECKS}] Checking for orphaned packages (no repository)..."
-if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+if verify_should_skip_heavy_check "orphaned package scan"; then
+    log_info "  → Orphaned package scan deferred until cooldown expires"
+elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping orphaned package check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
     set +e
@@ -30989,7 +31190,9 @@ fi
 
 # Check 30: Physical disk health (SMART) (best-effort)
 log_debug "[30/${TOTAL_CHECKS}] Checking SMART health (if smartctl is available)..."
-if command -v smartctl >/dev/null 2>&1; then
+if verify_should_skip_heavy_check "SMART disk health scan"; then
+    log_info "  → SMART scan deferred until cooldown expires"
+elif command -v smartctl >/dev/null 2>&1; then
     smart_failed=0
     smart_devices=$(smartctl --scan-open 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
 
@@ -31232,51 +31435,55 @@ fi
 
 # Check 36: Proactive disk space reclamation (auto-fix)
 log_debug "[36/${TOTAL_CHECKS}] Verifying disk space headroom..."
-disk_avail=""
-disk_avail=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
-if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -gt 2000 ] 2>/dev/null; then
-    log_success "✓ Disk space is healthy (${disk_avail}MB free)"
+if verify_should_skip_heavy_check "proactive disk-space reclamation"; then
+    log_info "  → Proactive disk cleanup deferred until cooldown expires"
 else
-    if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]]; then
-        log_warn "⚠ Disk space is low/critical (${disk_avail}MB free). Updates may fail."
+    disk_avail=""
+    disk_avail=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
+    if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -gt 2000 ] 2>/dev/null; then
+        log_success "✓ Disk space is healthy (${disk_avail}MB free)"
     else
-        log_warn "⚠ Unable to determine disk headroom reliably; attempting best-effort cleanup anyway"
-    fi
-
-    # Only run the aggressive cleanup if space is low OR earlier checks flagged it.
-    if [ "${DISK_SPACE_CRITICAL:-0}" -eq 1 ] 2>/dev/null || { [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -le 2000 ] 2>/dev/null; }; then
-        log_info "  → Attempting auto-repair: vacuum journals and clean caches/snapshots..."
-        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-
-        if command -v journalctl >/dev/null 2>&1; then
-            if command -v timeout >/dev/null 2>&1; then
-                execute_guarded "Vacuum system journals" timeout 30 journalctl --vacuum-size=50M >/dev/null 2>&1 || true
-            else
-                execute_guarded "Vacuum system journals" journalctl --vacuum-size=50M >/dev/null 2>&1 || true
-            fi
-        fi
-
-        # Skip repeating zypper clean if we already did it in Check 15, or if
-        # zypper appears to be running (lock held by a live process).
-        if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null && [ "${ZYPPER_LOCK_ACTIVE:-0}" -ne 1 ] 2>/dev/null; then
-            execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
-        fi
-
-        if command -v snapper >/dev/null 2>&1; then
-            if command -v timeout >/dev/null 2>&1; then
-                execute_guarded "Run snapper cleanup" timeout 60 snapper cleanup number >/dev/null 2>&1 || true
-            else
-                execute_guarded "Run snapper cleanup" snapper cleanup number >/dev/null 2>&1 || true
-            fi
-        fi
-
-        disk_avail_after=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
-        if [[ "${disk_avail_after:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail_after" -gt 1000 ] 2>/dev/null; then
-            log_success "  ✓ Space reclaimed! Now ${disk_avail_after}MB free."
-            DISK_SPACE_CRITICAL=0
+        if [[ "${disk_avail:-}" =~ ^[0-9]+$ ]]; then
+            log_warn "⚠ Disk space is low/critical (${disk_avail}MB free). Updates may fail."
         else
-            log_error "  ✗ Disk still too full after cleanup (currently ${disk_avail_after:-unknown}MB). Manual intervention needed."
-            VERIFICATION_FAILED=1
+            log_warn "⚠ Unable to determine disk headroom reliably; attempting best-effort cleanup anyway"
+        fi
+
+        # Only run the aggressive cleanup if space is low OR earlier checks flagged it.
+        if [ "${DISK_SPACE_CRITICAL:-0}" -eq 1 ] 2>/dev/null || { [[ "${disk_avail:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail" -le 2000 ] 2>/dev/null; }; then
+            log_info "  → Attempting auto-repair: vacuum journals and clean caches/snapshots..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+            if command -v journalctl >/dev/null 2>&1; then
+                if command -v timeout >/dev/null 2>&1; then
+                    execute_guarded "Vacuum system journals" timeout 30 journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+                else
+                    execute_guarded "Vacuum system journals" journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+                fi
+            fi
+
+            # Skip repeating zypper clean if we already did it in Check 15, or if
+            # zypper appears to be running (lock held by a live process).
+            if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null && [ "${ZYPPER_LOCK_ACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+                execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
+            fi
+
+            if command -v snapper >/dev/null 2>&1; then
+                if command -v timeout >/dev/null 2>&1; then
+                    execute_guarded "Run snapper cleanup" timeout 60 snapper cleanup number >/dev/null 2>&1 || true
+                else
+                    execute_guarded "Run snapper cleanup" snapper cleanup number >/dev/null 2>&1 || true
+                fi
+            fi
+
+            disk_avail_after=$(df -BM / 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'M' || echo "")
+            if [[ "${disk_avail_after:-}" =~ ^[0-9]+$ ]] && [ "$disk_avail_after" -gt 1000 ] 2>/dev/null; then
+                log_success "  ✓ Space reclaimed! Now ${disk_avail_after}MB free."
+                DISK_SPACE_CRITICAL=0
+            else
+                log_error "  ✗ Disk still too full after cleanup (currently ${disk_avail_after:-unknown}MB). Manual intervention needed."
+                VERIFICATION_FAILED=1
+            fi
         fi
     fi
 fi
@@ -31450,7 +31657,9 @@ fi
 
 # Check 39: Dependency & package consistency (deep repair)
 log_debug "[39/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
-if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+if verify_should_skip_heavy_check "zypper verify dependency consistency"; then
+    log_info "  → Dependency consistency deep-check deferred until cooldown expires"
+elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping dependency consistency check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
     set +e
@@ -31712,82 +31921,88 @@ fi
 
 # Check 41: Btrfs metadata health (advanced repair)
 log_debug "[41/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing empty chunks if needed)..."
-root_fstype2=""
-if command -v findmnt >/dev/null 2>&1; then
-    root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
-fi
-if [ "${root_fstype2:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
-    meta_total=""
-    meta_used=""
-    meta_line=$(btrfs filesystem df / 2>/dev/null | grep -E '^Metadata' | head -n 1 || true)
-    if [ -n "${meta_line:-}" ]; then
-        meta_total=$(printf '%s\n' "$meta_line" | sed -n 's/.*total=\([^,]*\),.*/\1/p')
-        meta_used=$(printf '%s\n' "$meta_line" | sed -n 's/.*used=\(.*\)$/\1/p')
+if verify_should_skip_heavy_check "btrfs metadata balance"; then
+    log_info "  → Btrfs metadata deep-check deferred until cooldown expires"
+else
+    root_fstype2=""
+    if command -v findmnt >/dev/null 2>&1; then
+        root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
     fi
+    if [ "${root_fstype2:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
+        meta_total=""
+        meta_used=""
+        meta_line=$(btrfs filesystem df / 2>/dev/null | grep -E '^Metadata' | head -n 1 || true)
+        if [ -n "${meta_line:-}" ]; then
+            meta_total=$(printf '%s\n' "$meta_line" | sed -n 's/.*total=\([^,]*\),.*/\1/p')
+            meta_used=$(printf '%s\n' "$meta_line" | sed -n 's/.*used=\(.*\)$/\1/p')
+        fi
 
-    # Convert size strings like 2.00GiB / 565.97MiB / 16.00KiB into MiB.
-    __znh_to_mib() {
-        local v="$1"
-        local num unit
-        num=$(printf '%s' "$v" | sed -E 's/^([0-9]+(\.[0-9]+)?).*/\1/')
-        unit=$(printf '%s' "$v" | sed -E 's/^[0-9]+(\.[0-9]+)?//')
-        case "$unit" in
-            KiB) awk -v n="$num" 'BEGIN{printf "%.2f", n/1024}' ;;
-            MiB) awk -v n="$num" 'BEGIN{printf "%.2f", n}' ;;
-            GiB) awk -v n="$num" 'BEGIN{printf "%.2f", n*1024}' ;;
-            TiB) awk -v n="$num" 'BEGIN{printf "%.2f", n*1024*1024}' ;;
-            B)   awk -v n="$num" 'BEGIN{printf "%.2f", n/1024/1024}' ;;
-            *)   echo "" ;;
-        esac
-    }
+        # Convert size strings like 2.00GiB / 565.97MiB / 16.00KiB into MiB.
+        __znh_to_mib() {
+            local v="$1"
+            local num unit
+            num=$(printf '%s' "$v" | sed -E 's/^([0-9]+(\.[0-9]+)?).*/\1/')
+            unit=$(printf '%s' "$v" | sed -E 's/^[0-9]+(\.[0-9]+)?//')
+            case "$unit" in
+                KiB) awk -v n="$num" 'BEGIN{printf "%.2f", n/1024}' ;;
+                MiB) awk -v n="$num" 'BEGIN{printf "%.2f", n}' ;;
+                GiB) awk -v n="$num" 'BEGIN{printf "%.2f", n*1024}' ;;
+                TiB) awk -v n="$num" 'BEGIN{printf "%.2f", n*1024*1024}' ;;
+                B)   awk -v n="$num" 'BEGIN{printf "%.2f", n/1024/1024}' ;;
+                *)   echo "" ;;
+            esac
+        }
 
-    meta_total_mib=$(__znh_to_mib "${meta_total:-}")
-    meta_used_mib=$(__znh_to_mib "${meta_used:-}")
+        meta_total_mib=$(__znh_to_mib "${meta_total:-}")
+        meta_used_mib=$(__znh_to_mib "${meta_used:-}")
 
-    meta_pct=""
-    if [ -n "${meta_total_mib:-}" ] && [ -n "${meta_used_mib:-}" ]; then
-        meta_pct=$(awk -v u="$meta_used_mib" -v t="$meta_total_mib" 'BEGIN{ if (t>0) printf "%d", (u/t)*100; else print "" }')
-    fi
+        meta_pct=""
+        if [ -n "${meta_total_mib:-}" ] && [ -n "${meta_used_mib:-}" ]; then
+            meta_pct=$(awk -v u="$meta_used_mib" -v t="$meta_total_mib" 'BEGIN{ if (t>0) printf "%d", (u/t)*100; else print "" }')
+        fi
 
-    if [[ "${meta_pct:-}" =~ ^[0-9]+$ ]] && [ "$meta_pct" -ge 85 ] 2>/dev/null; then
-        log_warn "⚠ Btrfs metadata usage is high (~${meta_pct}% used). Attempting balance of empty chunks..."
+        if [[ "${meta_pct:-}" =~ ^[0-9]+$ ]] && [ "$meta_pct" -ge 85 ] 2>/dev/null; then
+            log_warn "⚠ Btrfs metadata usage is high (~${meta_pct}% used). Attempting balance of empty chunks..."
 
-        # Avoid starting a balance if one is already running.
-        bal_out=$(btrfs balance status / 2>/dev/null || true)
-        if printf '%s\n' "$bal_out" | grep -qi 'is running'; then
-            log_warn "  ⚠ A btrfs balance is already running; skipping new balance start"
-        else
-            set +e
-            if command -v timeout >/dev/null 2>&1; then
-                timeout 180 btrfs balance start --enqueue --full-balance -dusage=0 -musage=0 / >/dev/null 2>&1
-                bal_rc=$?
+            # Avoid starting a balance if one is already running.
+            bal_out=$(btrfs balance status / 2>/dev/null || true)
+            if printf '%s\n' "$bal_out" | grep -qi 'is running'; then
+                log_warn "  ⚠ A btrfs balance is already running; skipping new balance start"
             else
-                btrfs balance start --enqueue --full-balance -dusage=0 -musage=0 / >/dev/null 2>&1
-                bal_rc=$?
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 180 btrfs balance start --enqueue --full-balance -dusage=0 -musage=0 / >/dev/null 2>&1
+                    bal_rc=$?
+                else
+                    btrfs balance start --enqueue --full-balance -dusage=0 -musage=0 / >/dev/null 2>&1
+                    bal_rc=$?
+                fi
+                set -e
+
+                if [ "$bal_rc" -eq 0 ] 2>/dev/null; then
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                    log_success "✓ Btrfs empty-chunk balance completed"
+                else
+                    log_warn "⚠ Btrfs balance failed or timed out (rc=${bal_rc}). Filesystem may be very full or read-only."
+                fi
             fi
-            set -e
-
-            if [ "$bal_rc" -eq 0 ] 2>/dev/null; then
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-                log_success "✓ Btrfs empty-chunk balance completed"
+        else
+            if [ -n "${meta_pct:-}" ]; then
+                log_success "✓ Btrfs metadata usage OK (~${meta_pct}% used)"
             else
-                log_warn "⚠ Btrfs balance failed or timed out (rc=${bal_rc}). Filesystem may be very full or read-only."
+                log_info "ℹ Unable to parse Btrfs metadata usage; skipping balance"
             fi
         fi
     else
-        if [ -n "${meta_pct:-}" ]; then
-            log_success "✓ Btrfs metadata usage OK (~${meta_pct}% used)"
-        else
-            log_info "ℹ Unable to parse Btrfs metadata usage; skipping balance"
-        fi
+        log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
     fi
-else
-    log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
 fi
 
 # Check 42: GPG keyring/signature handling (deep repair)
 log_debug "[42/${TOTAL_CHECKS}] Verifying repository signature/GPG handling..."
-if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+if verify_should_skip_heavy_check "deep GPG repository repair"; then
+    log_info "  → Deep GPG/signature repair deferred until cooldown expires"
+elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping deep GPG check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 elif command -v zypper >/dev/null 2>&1; then
     # Only do deeper GPG repair when repo refresh is failing or required key auto-import.
@@ -32105,73 +32320,77 @@ fi
 
 # Check 49: Repository metadata health (stale raw cache)
 log_debug "[49/${TOTAL_CHECKS}] Checking repository metadata health (raw cache age)..."
-if [ -d /var/cache/zypp/raw ]; then
-    cache_hit=$(find /var/cache/zypp/raw -maxdepth 1 -mindepth 1 -type d -mtime +14 -print -quit 2>/dev/null || true)
+if verify_should_skip_heavy_check "repository metadata stale-cache repair"; then
+    log_info "  → Repository metadata deep refresh deferred until cooldown expires"
+else
+    if [ -d /var/cache/zypp/raw ]; then
+        cache_hit=$(find /var/cache/zypp/raw -maxdepth 1 -mindepth 1 -type d -mtime +14 -print -quit 2>/dev/null || true)
 
-    if [ -z "${cache_hit:-}" ] 2>/dev/null && [ "${REPO_REFRESH_FAILED:-0}" -ne 1 ] 2>/dev/null; then
-        log_success "✓ Repository metadata seems fresh"
-    else
-        log_warn "⚠ Repository metadata cache looks stale (or refresh failed earlier)"
-
-        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
-            log_warn "  ⚠ Skipping metadata cleanup/refresh because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
-            VERIFICATION_FAILED=1
+        if [ -z "${cache_hit:-}" ] 2>/dev/null && [ "${REPO_REFRESH_FAILED:-0}" -ne 1 ] 2>/dev/null; then
+            log_success "✓ Repository metadata seems fresh"
         else
-            log_info "  → Auto-repair: forcing metadata cleanup and refresh..."
-            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            log_warn "⚠ Repository metadata cache looks stale (or refresh failed earlier)"
 
-            # Prefer targeted cache cleanup (raw metadata + solv) without wiping downloaded RPMs.
-            execute_optional "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
-            execute_optional "Clear zypp solv cache" rm -rf /var/cache/zypp/solv/* >/dev/null 2>&1 || true
-
-            if command -v timeout >/dev/null 2>&1; then
-                if execute_guarded "Refresh repos (forced)" timeout 90 zypper --non-interactive refresh --force; then
-                    log_success "  ✓ Repositories refreshed successfully"
-                    REPO_REFRESH_FAILED=0
-                else
-                    log_error "  ✗ Failed to refresh repositories"
-                    VERIFICATION_FAILED=1
-                fi
+            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+                log_warn "  ⚠ Skipping metadata cleanup/refresh because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+                VERIFICATION_FAILED=1
             else
-                if execute_guarded "Refresh repos (forced)" zypper --non-interactive refresh --force; then
-                    log_success "  ✓ Repositories refreshed successfully"
-                    REPO_REFRESH_FAILED=0
+                log_info "  → Auto-repair: forcing metadata cleanup and refresh..."
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+
+                # Prefer targeted cache cleanup (raw metadata + solv) without wiping downloaded RPMs.
+                execute_optional "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
+                execute_optional "Clear zypp solv cache" rm -rf /var/cache/zypp/solv/* >/dev/null 2>&1 || true
+
+                if command -v timeout >/dev/null 2>&1; then
+                    if execute_guarded "Refresh repos (forced)" timeout 90 zypper --non-interactive refresh --force; then
+                        log_success "  ✓ Repositories refreshed successfully"
+                        REPO_REFRESH_FAILED=0
+                    else
+                        log_error "  ✗ Failed to refresh repositories"
+                        VERIFICATION_FAILED=1
+                    fi
                 else
-                    log_error "  ✗ Failed to refresh repositories"
-                    VERIFICATION_FAILED=1
+                    if execute_guarded "Refresh repos (forced)" zypper --non-interactive refresh --force; then
+                        log_success "  ✓ Repositories refreshed successfully"
+                        REPO_REFRESH_FAILED=0
+                    else
+                        log_error "  ✗ Failed to refresh repositories"
+                        VERIFICATION_FAILED=1
+                    fi
                 fi
             fi
         fi
     fi
-else
-    log_info "ℹ /var/cache/zypp/raw not present; skipping metadata age check"
 fi
 
 # Check 50: Orphaned temporary files & cache garbage
 log_debug "[50/${TOTAL_CHECKS}] Checking for orphaned zypp cache garbage..."
-if [ -d /var/cache/zypp ]; then
-    garbage_count=$(find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) 2>/dev/null | wc -l | tr -d ' ')
-    if ! [[ "${garbage_count:-}" =~ ^[0-9]+$ ]]; then
-        garbage_count=0
-    fi
+if verify_should_skip_heavy_check "zypp cache garbage sweep"; then
+    log_info "  → Cache garbage deep sweep deferred until cooldown expires"
+else
+    if [ -d /var/cache/zypp ]; then
+        garbage_count=$(find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) 2>/dev/null | wc -l | tr -d ' ')
+        if ! [[ "${garbage_count:-}" =~ ^[0-9]+$ ]]; then
+            garbage_count=0
+        fi
 
-    if [ "${garbage_count}" -lt 50 ] 2>/dev/null; then
-        log_success "✓ Cache hygiene is good (${garbage_count} stale file(s))"
-    else
-        log_warn "⚠ Found ${garbage_count} stale cache file(s); cleaning best-effort..."
-
-        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
-            log_warn "  ⚠ Skipping cache garbage cleanup because zypper appears to be running"
+        if [ "${garbage_count}" -lt 50 ] 2>/dev/null; then
+            log_success "✓ Cache hygiene is good (${garbage_count} stale file(s))"
         else
-            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-            execute_optional "Remove stale .solv/cookies" find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) -delete 2>/dev/null || true
-            # Keep this narrow: only repodata metadata, not downloaded packages.
-            execute_optional "Prune repodata temp files" find /var/cache/zypp/raw -type f -path '*/repodata/*' -delete 2>/dev/null || true
-            log_success "  ✓ Cache garbage cleanup completed"
+            log_warn "⚠ Found ${garbage_count} stale cache file(s); cleaning best-effort..."
+
+            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+                log_warn "  ⚠ Skipping cache garbage cleanup because zypper appears to be running"
+            else
+                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                execute_optional "Remove stale .solv/cookies" find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) -delete 2>/dev/null || true
+                # Keep this narrow: only repodata metadata, not downloaded packages.
+                execute_optional "Prune repodata temp files" find /var/cache/zypp/raw -type f -path '*/repodata/*' -delete 2>/dev/null || true
+                log_success "  ✓ Cache garbage cleanup completed"
+            fi
         fi
     fi
-else
-    log_info "ℹ /var/cache/zypp not present; skipping cache garbage check"
 fi
 
 # Check 51: Zypper Turbo tuner (optional)
@@ -32253,12 +32472,57 @@ fi
 
 # If we performed a critical repair (e.g. restarted the dashboard API), run a
 # one-off follow-up verification soon so we can confirm the fix held.
+if ! [[ "${FOLLOWUP_DELAY_MINUTES:-}" =~ ^[0-9]+$ ]] || [ "${FOLLOWUP_DELAY_MINUTES:-0}" -lt 1 ] 2>/dev/null; then
+    FOLLOWUP_DELAY_MINUTES=5
+fi
 if [ "${FOLLOWUP_SOON:-0}" -eq 1 ] 2>/dev/null || [ "${VERIFICATION_FAILED}" -gt 0 ] 2>/dev/null || [ "${REPAIR_ATTEMPTS:-0}" -gt 0 ] 2>/dev/null; then
     if command -v systemd-run >/dev/null 2>&1 && [ -x /usr/local/bin/zypper-auto-helper ]; then
         # Use a fixed unit name so repeated calls don't create a spam storm.
-        log_info "Problems were found/fixed. Scheduling follow-up verification in 5 minutes..."
-        systemd-run --on-active=5m --unit=zypper-auto-verify-followup \
-            /usr/local/bin/zypper-auto-helper --verify >/dev/null 2>&1 || true
+        log_info "Problems were found/fixed. Scheduling follow-up verification in ${FOLLOWUP_DELAY_MINUTES} minute(s)..."
+        followup_run_args=(--on-active="${FOLLOWUP_DELAY_MINUTES}m" --unit=zypper-auto-verify-followup)
+        if [ "${VERIFY_LOW_IMPACT_MODE:-0}" -eq 1 ] 2>/dev/null; then
+            followup_run_args+=(--property=Nice=19 --property=IOSchedulingClass=idle)
+        fi
+        systemd-run "${followup_run_args[@]}" /usr/local/bin/zypper-auto-helper --verify >/dev/null 2>&1 || true
+    fi
+fi
+# Persist adaptive verify state so repeated failures can trigger low-impact mode.
+VERIFY_NEW_FAIL_STREAK=0
+if [ "${VERIFICATION_FAILED:-0}" -gt 0 ] 2>/dev/null; then
+    VERIFY_NEW_FAIL_STREAK=$((VERIFY_PREV_FAIL_STREAK + 1))
+fi
+
+VERIFY_STATE_LAST_HEAVY_EPOCH="${VERIFY_LAST_HEAVY_EPOCH:-0}"
+if [ "${VERIFY_RUN_HEAVY_CHECKS:-1}" -eq 1 ] 2>/dev/null; then
+    VERIFY_STATE_LAST_HEAVY_EPOCH="${VERIFY_NOW_EPOCH:-0}"
+fi
+
+VERIFY_MODE_LABEL="normal"
+if [ "${VERIFY_LOW_IMPACT_MODE:-0}" -eq 1 ] 2>/dev/null; then
+    VERIFY_MODE_LABEL="low_impact"
+fi
+
+VERIFY_RESULT_LABEL="success"
+if [ "${VERIFICATION_FAILED:-0}" -gt 0 ] 2>/dev/null; then
+    VERIFY_RESULT_LABEL="failed"
+fi
+
+if [ -n "${VERIFY_STATE_FILE:-}" ]; then
+    VERIFY_STATE_TMP_FILE="${VERIFY_STATE_FILE}.tmp.$$"
+    {
+        echo "fail_streak=${VERIFY_NEW_FAIL_STREAK}"
+        echo "last_heavy_epoch=${VERIFY_STATE_LAST_HEAVY_EPOCH}"
+        echo "last_mode=${VERIFY_MODE_LABEL}"
+        echo "last_result=${VERIFY_RESULT_LABEL}"
+        echo "last_run_epoch=${VERIFY_NOW_EPOCH:-0}"
+        echo "last_run_iso=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
+    } >"${VERIFY_STATE_TMP_FILE}" 2>/dev/null || true
+
+    if [ -s "${VERIFY_STATE_TMP_FILE}" ] 2>/dev/null; then
+        mv -f "${VERIFY_STATE_TMP_FILE}" "${VERIFY_STATE_FILE}" 2>/dev/null || true
+        chmod 600 "${VERIFY_STATE_FILE}" 2>/dev/null || true
+    else
+        rm -f "${VERIFY_STATE_TMP_FILE}" 2>/dev/null || true
     fi
 fi
 
@@ -32479,18 +32743,27 @@ __znh_snapper_cmd_timeout() {
     local t="$1"
     shift || true
 
-    if command -v timeout >/dev/null 2>&1 && [[ "${t:-}" =~ ^[0-9]+$ ]] && [ "${t}" -gt 0 ] 2>/dev/null; then
-        if __znh_snapper_supports_no_dbus; then
-            timeout "${t}" snapper --no-dbus "$@"
-        else
-            timeout "${t}" snapper "$@"
-        fi
+    local -a snap_cmd
+    snap_cmd=()
+    if __znh_snapper_supports_no_dbus; then
+        snap_cmd=(snapper --no-dbus "$@")
     else
-        if __znh_snapper_supports_no_dbus; then
-            snapper --no-dbus "$@"
-        else
-            snapper "$@"
-        fi
+        snap_cmd=(snapper "$@")
+    fi
+
+    # Low-impact defaults: run Snapper with best-effort idle IO + low CPU priority.
+    # This keeps verification/repair from causing short desktop stalls on busy systems.
+    if command -v ionice >/dev/null 2>&1; then
+        snap_cmd=(ionice -c3 "${snap_cmd[@]}")
+    fi
+    if command -v nice >/dev/null 2>&1; then
+        snap_cmd=(nice -n 19 "${snap_cmd[@]}")
+    fi
+
+    if command -v timeout >/dev/null 2>&1 && [[ "${t:-}" =~ ^[0-9]+$ ]] && [ "${t}" -gt 0 ] 2>/dev/null; then
+        timeout "${t}" "${snap_cmd[@]}"
+    else
+        "${snap_cmd[@]}"
     fi
 }
 
@@ -39147,6 +39420,8 @@ run_uninstall_helper_only() {
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
+        echo "  - Fish wrappers: $SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish," | tee -a "${LOG_FILE}"
+        echo "    $SUDO_USER_HOME/.config/fish/conf.d/sudo-handler.fish, zypper-auto-helper-alias.fish" | tee -a "${LOG_FILE}"
         echo "  - Desktop/menu shortcuts: $SUDO_USER_HOME/.local/share/applications/zypper-auto-dashboard.desktop" | tee -a "${LOG_FILE}"
         echo "    (and a Desktop shortcut if present: 'Zypper Auto Dashboard.desktop')" | tee -a "${LOG_FILE}"
 
@@ -39269,6 +39544,7 @@ run_uninstall_helper_only() {
             "$SUDO_USER_HOME/.local/bin/zypper-view-changes" \
             "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" \
+            "$SUDO_USER_HOME/.config/fish/conf.d/sudo-handler.fish" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish" \
             "$SUDO_USER_HOME/.config/fish/completions/zypper-auto-helper.fish" \
             "$SUDO_USER_HOME/.config/fish/completions/scrub-ghost.fish" \
@@ -46923,6 +47199,53 @@ def _history_meta_get(server, key: str, default: str = "") -> str:
         return default
 
 
+def _to_boolish(v) -> bool:
+    try:
+        if isinstance(v, bool):
+            return v
+        s = str(v or "").strip().lower()
+        if s in ("1", "true", "yes", "on", "y"):
+            return True
+        if s in ("0", "false", "no", "off", "n", ""):
+            return False
+        return bool(v)
+    except Exception:
+        return False
+
+
+def _sanitize_ai_source(v, max_len: int = 96) -> str:
+    try:
+        s = str(v or "").strip()
+    except Exception:
+        s = ""
+    if not s:
+        return ""
+    try:
+        s = re.sub(r"[^A-Za-z0-9._:+\\-]", "_", s)
+    except Exception:
+        pass
+    if len(s) > int(max_len):
+        s = s[: int(max_len)]
+    return s
+
+
+def _history_extract_ai_meta(extra_json_text: str) -> tuple[bool, str]:
+    ai_triggered = False
+    ai_source = ""
+    try:
+        raw = str(extra_json_text or "").strip()
+        if not raw:
+            return False, ""
+        meta = json.loads(raw)
+        if isinstance(meta, dict):
+            ai_triggered = _to_boolish(meta.get("ai_triggered", False))
+            ai_source = _sanitize_ai_source(meta.get("ai_source", ""))
+    except Exception:
+        ai_triggered = False
+        ai_source = ""
+    return bool(ai_triggered), str(ai_source or "")
+
+
 def _history_job_upsert(server, job: dict, *, summary: str = "", extra: dict | None = None) -> None:
     # job is a normalized payload with keys similar to existing /api/*/job responses.
     try:
@@ -46985,8 +47308,19 @@ def _history_job_upsert(server, job: dict, *, summary: str = "", extra: dict | N
 
         extra_json = ""
         try:
+            extra_payload = {}
             if extra and isinstance(extra, dict):
-                extra_json = json.dumps(extra, ensure_ascii=False)[:40_000]
+                extra_payload.update(extra)
+
+            ai_triggered = _to_boolish(job.get("ai_triggered", False))
+            ai_source = _sanitize_ai_source(job.get("ai_source", ""))
+            if ai_triggered:
+                extra_payload["ai_triggered"] = True
+            if ai_source:
+                extra_payload["ai_source"] = ai_source
+
+            if extra_payload:
+                extra_json = json.dumps(extra_payload, ensure_ascii=False)[:40_000]
         except Exception:
             extra_json = ""
 
@@ -47197,6 +47531,8 @@ def _recover_scrub_job(job_id: str) -> dict | None:
 
     action = str(status.get("action", "") or "").strip()
     title = str(status.get("title", "") or "").strip()
+    ai_triggered = _to_boolish(status.get("ai_triggered", False))
+    ai_source = _sanitize_ai_source(status.get("ai_source", ""))
 
     return {
         "job_id": jid,
@@ -47711,12 +48047,16 @@ def _recover_quick_job(job_id: str) -> dict | None:
 
     action = str(status.get("action", "") or "").strip()
     title = str(status.get("title", "") or "").strip()
+    ai_triggered = _to_boolish(status.get("ai_triggered", False))
+    ai_source = _sanitize_ai_source(status.get("ai_source", ""))
 
     return {
         "job_id": jid,
         "type": "quick-action",
         "action": action,
         "title": title,
+        "ai_triggered": bool(ai_triggered),
+        "ai_source": str(ai_source or ""),
         "running": bool(running),
         "done": bool(done),
         "rc": rc,
@@ -49887,7 +50227,7 @@ class Handler(BaseHTTPRequestHandler):
                 where.append("started_ts <= ?")
                 params.append(float(until_ts))
 
-            sql = "SELECT job_id, job_type, action, title, simulate, dry_run, channel, started_ts, updated_ts, finished_ts, rc, stage, running, done, unit, log_path, status_path, summary FROM jobs"
+            sql = "SELECT job_id, job_type, action, title, simulate, dry_run, channel, started_ts, updated_ts, finished_ts, rc, stage, running, done, unit, log_path, status_path, summary, extra_json FROM jobs"
             if where:
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY started_ts DESC LIMIT ? OFFSET ?"
@@ -49900,6 +50240,7 @@ class Handler(BaseHTTPRequestHandler):
                 if conn:
                     cur = conn.execute(sql, params)
                     for r in cur.fetchall() or []:
+                        ai_triggered, ai_source = _history_extract_ai_meta(str(r[18] or ""))
                         items.append({
                             "job_id": str(r[0] or ""),
                             "type": str(r[1] or ""),
@@ -49919,6 +50260,8 @@ class Handler(BaseHTTPRequestHandler):
                             "log_path": str(r[15] or ""),
                             "status_path": str(r[16] or ""),
                             "summary": str(r[17] or ""),
+                            "ai_triggered": bool(ai_triggered),
+                            "ai_source": str(ai_source or ""),
                         })
             except Exception as e:
                 return _json_response(self, 500, {"error": f"history query failed: {e}"}, origin)
@@ -49977,6 +50320,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 file_tail = ""
                 file_tail_truncated = False
+            ai_triggered, ai_source = _history_extract_ai_meta(str(row[19] or ""))
 
             return _json_response(self, 200, {
                 "ok": True,
@@ -50001,6 +50345,8 @@ class Handler(BaseHTTPRequestHandler):
                     "summary": str(row[17] or ""),
                     "log_tail": str(row[18] or ""),
                     "extra_json": str(row[19] or ""),
+                    "ai_triggered": bool(ai_triggered),
+                    "ai_source": str(ai_source or ""),
                 },
                 "file_tail": file_tail,
                 "file_tail_truncated": bool(file_tail_truncated),
@@ -50655,6 +51001,14 @@ class Handler(BaseHTTPRequestHandler):
 
             body = _read_json(self)
             action = str(body.get("action", "") or "").strip()
+            ai_triggered = _to_boolish(body.get("ai_triggered", False))
+            ai_source = _sanitize_ai_source(body.get("ai_source", ""))
+            if ai_source and not ai_triggered:
+                ai_triggered = True
+            if ai_triggered and not ai_source:
+                ai_source = "webui-ai"
+            if not ai_triggered:
+                ai_source = ""
 
             tbl = _quick_action_table()
             meta = tbl.get(action)
@@ -50733,6 +51087,8 @@ class Handler(BaseHTTPRequestHandler):
                     f.write("stage=starting\n")
                     f.write(f"action={action}\n")
                     f.write(f"title={title}\n")
+                    f.write(f"ai_triggered={1 if ai_triggered else 0}\n")
+                    f.write(f"ai_source={ai_source}\n")
             except Exception:
                 pass
 
@@ -50757,6 +51113,8 @@ class Handler(BaseHTTPRequestHandler):
                 f'STATUS={shlex.quote(status_path)}',
                 f'ACTION={shlex.quote(action)}',
                 f'TITLE={shlex.quote(title)}',
+                f'AI_TRIGGERED={1 if ai_triggered else 0}',
+                f'AI_SOURCE={shlex.quote(ai_source)}',
                 f'TIMEOUT_S={timeout_s}',
                 'mkdir -p /var/log/zypper-auto/service-logs || true',
                 'mkdir -p /var/lib/zypper-auto || true',
@@ -50770,6 +51128,8 @@ class Handler(BaseHTTPRequestHandler):
                 '    echo "stage=${stage}"',
                 '    echo "action=${ACTION:-}"',
                 '    echo "title=${TITLE:-}"',
+                '    echo "ai_triggered=${AI_TRIGGERED:-0}"',
+                '    echo "ai_source=${AI_SOURCE:-}"',
                 '    echo "started_at_utc=${STARTED_AT}"',
                 '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
                 '  } >"${tmp}" 2>/dev/null || true',
@@ -50783,6 +51143,7 @@ class Handler(BaseHTTPRequestHandler):
                 'echo "" >>"$LOG" || true',
                 'echo "ACTION: ${ACTION}" >>"$LOG" || true',
                 'echo "TITLE : ${TITLE}" >>"$LOG" || true',
+                'echo "AI_LAUNCHED: ${AI_TRIGGERED} (${AI_SOURCE:-none})" >>"$LOG" || true',
                 f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
                 'echo "" >>"$LOG" || true',
                 'export ZNH_NON_INTERACTIVE=1',
@@ -50826,6 +51187,8 @@ class Handler(BaseHTTPRequestHandler):
                 "--collect",
                 "--unit",
                 unit,
+                "--property=Nice=19",
+                "--property=IOSchedulingClass=idle",
                 "--",
                 "/usr/bin/bash",
                 script_file,
@@ -50855,6 +51218,8 @@ class Handler(BaseHTTPRequestHandler):
                     "type": "quick-action",
                     "action": action,
                     "title": title,
+                    "ai_triggered": bool(ai_triggered),
+                    "ai_source": str(ai_source or ""),
                     "simulate": False,
                     "dry_run": False,
                     "channel": "",
@@ -50872,7 +51237,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            return _json_response(self, 200, {"job_id": job_id}, origin)
+            return _json_response(self, 200, {
+                "job_id": job_id,
+                "ai_triggered": bool(ai_triggered),
+                "ai_source": str(ai_source or ""),
+            }, origin)
 
         # --- Self-update control (dashboard) ---
         if path == "/api/self-update/confirm":
@@ -52144,6 +52513,21 @@ class Handler(BaseHTTPRequestHandler):
                 'mkdir -p /var/log/zypper-auto/service-logs || true',
                 'mkdir -p /var/lib/zypper-auto || true',
                 'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                'run_low_impact() {',
+                '  if command -v ionice >/dev/null 2>&1; then',
+                '    if command -v nice >/dev/null 2>&1; then',
+                '      ionice -c3 nice -n 19 "$@"',
+                '      return $?',
+                '    fi',
+                '    ionice -c3 "$@"',
+                '    return $?',
+                '  fi',
+                '  if command -v nice >/dev/null 2>&1; then',
+                '    nice -n 19 "$@"',
+                '    return $?',
+                '  fi',
+                '  "$@"',
+                '}',
                 'write_status() {',
                 '  local done="$1"; local rc="$2"; local stage="$3"',
                 '  local tmp="${STATUS}.tmp.$$"',
@@ -52172,10 +52556,10 @@ class Handler(BaseHTTPRequestHandler):
                 'write_status 0 0 running',
                 'set +e',
                 'if command -v timeout >/dev/null 2>&1; then',
-                f'  ( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
+                f'  ( run_low_impact timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
                 '  rc=${PIPESTATUS[0]}',
                 'else',
-                f'  ( {cmd_str} ) 2>&1 | tee -a "$LOG"',
+                f'  ( run_low_impact {cmd_str} ) 2>&1 | tee -a "$LOG"',
                 '  rc=${PIPESTATUS[0]}',
                 'fi',
                 'set -e',
@@ -52212,6 +52596,8 @@ class Handler(BaseHTTPRequestHandler):
                 "--collect",
                 "--unit",
                 unit,
+                "--property=Nice=19",
+                "--property=IOSchedulingClass=idle",
                 "--",
                 "/usr/bin/bash",
                 script_file,
@@ -52362,7 +52748,19 @@ class Handler(BaseHTTPRequestHandler):
                 # Make the helper non-interactive so it won't block on read(1) prompts.
                 extra_env = {"ZNH_NON_INTERACTIVE": "1"}
 
-            rc, out = _run_cmd(cmd, timeout_s=timeout_s, log=getattr(self.server, "_znh_log", None), extra_env=extra_env)
+            cmd_eff = list(cmd)
+            try:
+                if shutil.which("ionice"):
+                    cmd_eff = ["ionice", "-c3"] + cmd_eff
+            except Exception:
+                pass
+            try:
+                if shutil.which("nice"):
+                    cmd_eff = ["nice", "-n", "19"] + cmd_eff
+            except Exception:
+                pass
+
+            rc, out = _run_cmd(cmd_eff, timeout_s=timeout_s, log=getattr(self.server, "_znh_log", None), extra_env=extra_env)
             # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
             return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out, "action": action}, origin)
 

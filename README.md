@@ -53,6 +53,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [Self-update (CLI + WebUI)](#self-update)
 - [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
+- [Verification low-impact mode](#cfg-verify-low-impact)
 - [Duplicate RPM cleanup](#duplicate-rpm-cleanup)
 - [Usage](#usage)
 - [Diagnostics](#diagnostics)
@@ -568,6 +569,23 @@ Key options include:
     service runs (again, allowed **only**: `1,5,10,15,30,60`).
 - The installer converts these into appropriate `OnCalendar` values, e.g.
   `*:0/10` for every 10 minutes or `hourly` for 60.
+<a id="cfg-verify-low-impact"></a>
+#### Verification low-impact mode (adaptive)
+
+- **Verification low-impact mode (adaptive)**
+  - `VERIFY_LOW_IMPACT_ENABLED` – enables adaptive low-impact behavior for
+    background verification runs (default: `true`).
+  - `VERIFY_LOW_IMPACT_FAIL_STREAK` – number of consecutive failed verify runs
+    before low-impact mode activates (default: `2`).
+  - `VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES` – cooldown window used to
+    defer expensive deep checks during repeated failure periods (default: `45`).
+  - `VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES` – delay for follow-up verify runs
+    while low-impact mode is active (default: `30`).
+- Behavior summary:
+  - Low-impact mode is intended for repeated background/systemd verify failures.
+  - It lowers verify CPU/IO priority and temporarily defers heavy deep-repair
+    checks until cooldown expires.
+  - Interactive/manual verify runs continue to use normal behavior.
 
 
 <a id="cfg-self-update"></a>
@@ -1858,6 +1876,11 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - ⚡ **NEW:** adaptive low-impact verification mode for repeated background verify failures.
+    - Tracks verify fail streak + heavy-check cooldown state in `verify-smart-state.env`.
+    - Defers expensive deep checks during cooldown windows and lowers verify CPU/IO priority.
+    - Adds configurable follow-up delay and exposes new `VERIFY_LOW_IMPACT_*` settings in config/WebUI.
+  - ⏱️ **CHANGED:** default `VERIFY_TIMER_INTERVAL_MINUTES` is now `15` (from `5`) to reduce repeated verify pressure on busy systems.
   - 🧰 **IMPROVED:** Ready-to-Install (`zypper-run-install`) now writes clearer zypp lock diagnostics into `run-install.log` (lock file/PID/process) and streams full `zypper dup` output into the log for easier debugging.
   - 🧿 **NEW:** WebUI Recent Activity Log now includes **View: Install helper** (shows `dashboard-run-install-tail.log`) so Ready-to-Install failures are visible in the dashboard.
   - 🧿 **IMPROVED:** WebUI scrub-ghost Smart Analyze (AUTO) readability:
@@ -1896,12 +1919,17 @@ systemctl status zypper-autodownload.service
     - Confirmation dialogs now include a Rocket-style explanation block (**What this will do** + **Warning**) for state-changing actions.
     - Interactive actions that need stdin (menus, live tails, etc.) remain copy-only for safety.
     - **Diag Logs ON/OFF** buttons now show the current service state (glow/disable) and auto-refresh after toggling so it’s obvious whether diagnostics logging is enabled.
+  - 🧠 **NEW:** Managers → Server (SQLite) now marks AI-launched quick actions clearly (`[AI launched]`) and shows AI launch source metadata.
+    - AI launch metadata is preserved in quick-action status/history (`ai_triggered`, `ai_source`) and survives resume/reopen flows.
   - 🐛 **FIXED:** Snapper Manager / cleanup now returns HTTP 200 with `rc` + output so the WebUI shows the full report even when Snapper returns non-zero (instead of a generic `HTTP 500`).
   - 🧿 **IMPROVED:** Snapper Manager confirmations (like Cleanup) now use an in-page wizard-style modal (typed phrase → Run button unlock) instead of a browser popup prompt.
     - Includes a **Copy output** button so the Snapper console log is easy to attach to bug reports.
   - 🧵 **IMPROVED:** WebUI Snapper cleanup now runs as a **background systemd job** with **live log polling** (so long cleanups no longer look “stuck” at `Running: cleanup ...`).
     - New localhost API endpoints: `/api/snapper/start` + `/api/snapper/job`.
     - Also reduces expensive syntax-highlighting on huge logs to prevent UI freezes.
+  - ⚡ **IMPROVED:** Snapper WebUI execution paths are now lower impact:
+    - `/api/snapper/start` background units run with low-priority scheduling (`Nice=19`, idle I/O class) and low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
+    - `/api/snapper/run` direct execution now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
   - 🧿 **NEW (danger):** WebUI Snapper Manager now supports **Rollback** (one-click recovery):
     - Enter a snapshot ID and click **Rollback**.
     - Confirmation phrase: **ROLLBACK** (typed in the in-page Snapper confirmation modal).
@@ -2215,7 +2243,7 @@ By default this will:
 - Stop and disable the root timers/services (`zypper-autodownload`, `zypper-cache-cleanup`, `zypper-auto-verify`)
 - Stop and disable the user notifier timer/service for your user
 - Remove all helper systemd unit files and helper binaries
-- Remove user helper scripts, shell aliases, and Fish config snippets
+- Remove user helper scripts, shell aliases, and Fish config snippets (including `~/.config/fish/conf.d/sudo-handler.fish`)
 - Remove custom hook scripts under `/etc/zypper-auto/hooks` (if present)
 - Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto` (including cleanup audit reports under `cleanup-reports/` and the generated `status.html` dashboard)
 - Remove helper-created backups under `/var/backups/zypper-auto` (boot-entry backups, btrfsmaintenance config backups)
@@ -2283,6 +2311,7 @@ rm -f $HOME/.local/bin/zypper-run-install
 rm -f $HOME/.local/bin/zypper-with-ps
 rm -f $HOME/.local/bin/zypper-view-changes
 rm -f $HOME/.config/fish/conf.d/zypper-wrapper.fish
+rm -f $HOME/.config/fish/conf.d/sudo-handler.fish
 rm -f $HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish
 
 # Remove shell aliases from config files
