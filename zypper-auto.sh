@@ -19551,6 +19551,80 @@ generate_dashboard() {
     }
     window.znhKernelPurgeRefreshUI = znhKernelPurgeRefreshUI;
 
+    function znhSnapperKernelFamilyTargetsSyncDropdown(currentTargets) {
+        var sel = null;
+        var inp = null;
+        try { sel = document.getElementById('snopt-family-targets-select'); } catch (e0) { sel = null; }
+        try { inp = document.getElementById('snopt-family-targets'); } catch (e1) { inp = null; }
+        if (!sel) return Promise.resolve(null);
+
+        if (sel && !sel._znh_bound) {
+            sel._znh_bound = true;
+            sel.addEventListener('change', function() {
+                var v = '';
+                try { v = String(sel.value || '').trim(); } catch (e2) { v = ''; }
+                if (!v || !inp) return;
+                try { inp.value = v; } catch (e3) {}
+            });
+        }
+
+        function _setOptions(names, selected) {
+            var list = [];
+            var seen = {};
+            var i = 0;
+            for (i = 0; i < (names || []).length; i++) {
+                var n = '';
+                try { n = String(names[i] || '').trim(); } catch (e4) { n = ''; }
+                if (!n) continue;
+                if (seen[n]) continue;
+                seen[n] = 1;
+                list.push(n);
+            }
+            list.sort();
+
+            try {
+                while (sel.options.length > 0) sel.remove(0);
+                var o0 = document.createElement('option');
+                o0.value = '';
+                o0.textContent = list.length ? '(choose detected kernel family)' : '(no detected families found)';
+                sel.appendChild(o0);
+
+                for (i = 0; i < list.length; i++) {
+                    var o = document.createElement('option');
+                    o.value = list[i];
+                    o.textContent = list[i];
+                    sel.appendChild(o);
+                }
+
+                var selVal = String(selected || '').trim();
+                if (selVal && list.indexOf(selVal) >= 0) sel.value = selVal;
+                else sel.value = '';
+            } catch (e5) {}
+
+            return list;
+        }
+
+        return _api('/api/boot/stats', { method: 'GET' }).then(function(s) {
+            var names = [];
+            try {
+                if (s && s.installed_kernels && Array.isArray(s.installed_kernels.names)) {
+                    names = s.installed_kernels.names;
+                }
+            } catch (e6) { names = []; }
+            return _setOptions(names, currentTargets);
+        }).catch(function() {
+            try {
+                while (sel.options.length > 0) sel.remove(0);
+                var o0 = document.createElement('option');
+                o0.value = '';
+                o0.textContent = '(failed to detect kernel families)';
+                sel.appendChild(o0);
+            } catch (e7) {}
+            return null;
+        });
+    }
+    window.znhSnapperKernelFamilyTargetsSyncDropdown = znhSnapperKernelFamilyTargetsSyncDropdown;
+
     function znhSnapperCleanupSettingsPanelSyncFromConfig() {
         // Reflect current Settings -> Snapper Option 4 customization controls.
         var cfg = null;
@@ -19594,7 +19668,9 @@ generate_dashboard() {
         _setCb('snopt-family-enabled', _bool('KERNEL_FAMILY_PURGE_ENABLED', false));
         _setCb('snopt-family-force-only', _bool('KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY', true));
         _setCb('snopt-family-dry-run', _bool('KERNEL_FAMILY_PURGE_DRY_RUN', false));
-        _setTxt('snopt-family-targets', _str('KERNEL_FAMILY_PURGE_TARGETS', ''));
+        var famTargets = _str('KERNEL_FAMILY_PURGE_TARGETS', '');
+        _setTxt('snopt-family-targets', famTargets);
+        try { if (typeof znhSnapperKernelFamilyTargetsSyncDropdown === 'function') znhSnapperKernelFamilyTargetsSyncDropdown(famTargets); } catch (e5) {}
 
         try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (e6) {}
     }
@@ -20821,6 +20897,13 @@ generate_dashboard() {
                     '    <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">',
                     '      <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);">targets: <input id="snopt-family-targets" type="text" placeholder="e.g. modded-kernel" style="width:340px; padding:6px 8px; border-radius: 12px;" /></label>',
                     '    </div>',
+                    '    <div style="margin-top:8px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">',
+                    '      <label style="display:flex; gap:8px; align-items:center; font-size:0.86rem; color: var(--muted);">detected installed families:',
+                    '        <select id="snopt-family-targets-select" style="padding:6px 8px; border-radius: 12px; min-width: 340px;">',
+                    '          <option value="">(choose detected kernel family)</option>',
+                    '        </select>',
+                    '      </label>',
+                    '    </div>',
                     '  </div>',
                     '  <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
                     '    <button class="pill" type="button" id="snopt-apply" style="border-color: rgba(250,204,21,0.35);">Apply settings</button>',
@@ -21194,6 +21277,19 @@ generate_dashboard() {
         });
     }
 
+    function znhSnapperRefreshTimerBadges() {
+        return _api('/api/snapper/timers', { method: 'GET' }).then(function(r) {
+            if (!r) return null;
+            try { if (r.snapper_timeline_timer !== undefined) setTimerState('snapper-timeline-timer', r.snapper_timeline_timer); } catch (e0) {}
+            try { if (r.snapper_cleanup_timer !== undefined) setTimerState('snapper-cleanup-timer', r.snapper_cleanup_timer); } catch (e1) {}
+            try { if (r.snapper_boot_timer !== undefined) setTimerState('snapper-boot-timer', r.snapper_boot_timer); } catch (e2) {}
+            return r;
+        }).catch(function() {
+            return null;
+        });
+    }
+    window.znhSnapperRefreshTimerBadges = znhSnapperRefreshTimerBadges;
+
     function snapperRun(action, params, confirmAction) {
         params = params || {};
 
@@ -21208,20 +21304,28 @@ generate_dashboard() {
                 var msg = (r.rc === 0) ? 'OK' : ('rc=' + r.rc);
                 var toastKind = (r.rc === 0) ? 'ok' : 'err';
                 var actionStr = String(action || '');
+                var didTimerToggle = false;
                 if (r.rc === 0 && String(action || '') === 'rollback') msg = 'OK (reboot required)';
                 if (r.rc === 0 && String(action || '') === 'auto-disable') {
                     msg = '✓ Disabled (timers intentionally off)';
                     toastKind = 'warn';
+                    didTimerToggle = true;
                 } else if (r.rc === 0 && String(action || '') === 'auto-enable') {
                     msg = '✓ Enabled';
+                    didTimerToggle = true;
                 } else if (r.rc === 0 && actionStr.indexOf('timer-disable-') === 0) {
                     msg = '✓ Timer disabled';
                     toastKind = 'warn';
+                    didTimerToggle = true;
                 } else if (r.rc === 0 && actionStr.indexOf('timer-enable-') === 0) {
                     msg = '✓ Timer enabled';
+                    didTimerToggle = true;
                 }
                 toast('Snapper: ' + action, msg, toastKind);
                 _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
+                if (didTimerToggle) {
+                    try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (eR0) {}
+                }
                 return r;
             }).catch(function(e) {
                 var msg = (e && e.message) ? e.message : 'unknown error';
@@ -21483,6 +21587,11 @@ generate_dashboard() {
                 znhKernelPurgeRefreshUI();
             }
         } catch (e3) {}
+        try {
+            if (typeof znhSnapperRefreshTimerBadges === 'function') {
+                znhSnapperRefreshTimerBadges();
+            }
+        } catch (e4) {}
     }
 
     // --- scrub-ghost Manager (dashboard -> root API) ---
@@ -50577,6 +50686,70 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         # --- Snapper (dashboard) ---
+        if path == "/api/snapper/timers":
+            def _snapper_timer_exists(unit: str) -> bool:
+                u = str(unit or "").strip()
+                if not u:
+                    return False
+                try:
+                    p = subprocess.run(
+                        ["systemctl", "list-unit-files", "--no-legend", u],
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=8,
+                    )
+                    lines = [ln for ln in str(p.stdout or "").splitlines() if str(ln or "").strip()]
+                    if not lines:
+                        return False
+                    first = str(lines[0]).split()
+                    return bool(first and first[0] == u)
+                except Exception:
+                    return False
+
+            def _snapper_timer_state(unit: str) -> str:
+                u = str(unit or "").strip()
+                if not _snapper_timer_exists(u):
+                    return "missing"
+                en = False
+                act = False
+                try:
+                    p1 = subprocess.run(
+                        ["systemctl", "is-enabled", "--quiet", u],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=8,
+                    )
+                    en = (int(p1.returncode or 1) == 0)
+                except Exception:
+                    en = False
+                try:
+                    p2 = subprocess.run(
+                        ["systemctl", "is-active", "--quiet", u],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=8,
+                    )
+                    act = (int(p2.returncode or 1) == 0)
+                except Exception:
+                    act = False
+                if en and act:
+                    return "enabled"
+                if en or act:
+                    return "partial"
+                return "disabled"
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "snapper_timeline_timer": _snapper_timer_state("snapper-timeline.timer"),
+                "snapper_cleanup_timer": _snapper_timer_state("snapper-cleanup.timer"),
+                "snapper_boot_timer": _snapper_timer_state("snapper-boot.timer"),
+            }, origin)
         if path == "/api/snapper/status":
             cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "status"]
             rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))

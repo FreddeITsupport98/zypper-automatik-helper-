@@ -11,6 +11,9 @@ Usage: ./test_snapper_timer_controls_regression.sh [path/to/zypper-auto.sh]
 Regression smoke test for Snapper per-timer controls:
   - Option 5/6 UI contains individual timer buttons (timeline/cleanup/boot)
   - _wireSnapperUI binds per-timer button clicks to timer-enable/timer-disable actions
+  - frontend has a timer-badge refresh helper and uses it after timer toggles
+  - frontend does an initial timer-badge refresh on Snapper UI wire-up
+  - backend exposes /api/snapper/timers for immediate badge state fetches
   - helper has __znh_snapper_single_timer and timer-enable/timer-disable subcommands
   - /api/snapper/confirm allows per-timer actions with ENABLE/DISABLE phrases
   - /api/snapper/start and /api/snapper/run map per-timer actions to helper commands
@@ -93,6 +96,26 @@ run_api_block="$(
 )"
 [ -n "${run_api_block}" ] || fail "Could not locate /api/snapper/run block"
 
+timers_api_block="$(
+    awk '
+        /if path == "\/api\/snapper\/timers":/ {inblk=1}
+        inblk {
+            if ($0 ~ /if path == "\/api\/snapper\/status":/) {exit}
+            print
+        }
+    ' "${TARGET_FILE}"
+)"
+[ -n "${timers_api_block}" ] || fail "Could not locate /api/snapper/timers block"
+
+snapper_run_block="$(
+    awk '
+        /function snapperRun\(action, params, confirmAction\) \{/ {inblk=1}
+        inblk {print}
+        /function _snCleanupPreflightSummaryText\(pf, mode\) \{/ && inblk {exit}
+    ' "${TARGET_FILE}"
+)"
+[ -n "${snapper_run_block}" ] || fail "Could not locate snapperRun block"
+
 # UI/markup assertions
 require_contains "${source_text}" "id=\"snapper-auto-enable-btn\">Enable all" "Option 5 all-enable button label missing"
 require_contains "${source_text}" "id=\"snapper-enable-timeline-btn\"" "Option 5 per-timer timeline button missing"
@@ -116,6 +139,13 @@ require_contains "${wire_snapper_block}" "snapperRun('timer-enable-boot', {}, 't
 require_contains "${wire_snapper_block}" "snapperRun('timer-disable-timeline', {}, 'timer-disable-timeline');" "timer-disable-timeline click binding missing"
 require_contains "${wire_snapper_block}" "snapperRun('timer-disable-cleanup', {}, 'timer-disable-cleanup');" "timer-disable-cleanup click binding missing"
 require_contains "${wire_snapper_block}" "snapperRun('timer-disable-boot', {}, 'timer-disable-boot');" "timer-disable-boot click binding missing"
+require_contains "${source_text}" "function znhSnapperRefreshTimerBadges() {" "znhSnapperRefreshTimerBadges helper function missing"
+require_contains "${source_text}" "_api('/api/snapper/timers', { method: 'GET' })" "timer badge refresh helper must call /api/snapper/timers"
+require_contains "${wire_snapper_block}" "if (typeof znhSnapperRefreshTimerBadges === 'function') {" "initial timer refresh guard missing in _wireSnapperUI"
+require_contains "${wire_snapper_block}" "znhSnapperRefreshTimerBadges();" "initial timer refresh call missing in _wireSnapperUI"
+require_contains "${snapper_run_block}" "var didTimerToggle = false;" "snapperRun must track timer-toggle actions for refresh"
+require_contains "${snapper_run_block}" "if (didTimerToggle) {" "snapperRun missing post-toggle refresh gate"
+require_contains "${snapper_run_block}" "if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges();" "snapperRun missing timer badge refresh call"
 
 # Helper/subcommand assertions
 require_contains "${helper_snapper_block}" "__znh_snapper_single_timer() {" "__znh_snapper_single_timer helper missing"
@@ -165,5 +195,15 @@ require_contains "${run_api_block}" "cmd = [\"/usr/local/bin/zypper-auto-helper\
 require_contains "${run_api_block}" "cmd = [\"/usr/local/bin/zypper-auto-helper\", \"snapper\", \"timer-disable\", \"timeline\"]" "run action mapping missing helper command for timer-disable-timeline"
 require_contains "${run_api_block}" "cmd = [\"/usr/local/bin/zypper-auto-helper\", \"snapper\", \"timer-disable\", \"cleanup\"]" "run action mapping missing helper command for timer-disable-cleanup"
 require_contains "${run_api_block}" "cmd = [\"/usr/local/bin/zypper-auto-helper\", \"snapper\", \"timer-disable\", \"boot\"]" "run action mapping missing helper command for timer-disable-boot"
+# /api/snapper/timers assertions
+require_contains "${timers_api_block}" "def _snapper_timer_exists(unit: str) -> bool:" "timers endpoint missing _snapper_timer_exists helper"
+require_contains "${timers_api_block}" "def _snapper_timer_state(unit: str) -> str:" "timers endpoint missing _snapper_timer_state helper"
+require_contains "${timers_api_block}" "return \"missing\"" "timers endpoint missing missing-state handling"
+require_contains "${timers_api_block}" "return \"enabled\"" "timers endpoint missing enabled-state handling"
+require_contains "${timers_api_block}" "return \"partial\"" "timers endpoint missing partial-state handling"
+require_contains "${timers_api_block}" "return \"disabled\"" "timers endpoint missing disabled-state handling"
+require_contains "${timers_api_block}" "\"snapper_timeline_timer\": _snapper_timer_state(\"snapper-timeline.timer\")," "timers endpoint missing timeline timer field"
+require_contains "${timers_api_block}" "\"snapper_cleanup_timer\": _snapper_timer_state(\"snapper-cleanup.timer\")," "timers endpoint missing cleanup timer field"
+require_contains "${timers_api_block}" "\"snapper_boot_timer\": _snapper_timer_state(\"snapper-boot.timer\")," "timers endpoint missing boot timer field"
 
 pass "Snapper per-timer controls regression checks passed"

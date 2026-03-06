@@ -45,6 +45,8 @@
 - Snapper Manager Option 5/6 now includes per-timer controls for `snapper-timeline.timer`, `snapper-cleanup.timer`, and `snapper-boot.timer` (individual enable/disable buttons in addition to enable-all/disable-all).
 - Boot/EFI stats now include installed kernel inventory in Snapper Manager (kernel count plus per-kernel package/version labels).
 - Added regression smoke test `test_snapper_timer_controls_regression.sh` to assert per-timer Snapper controls are wired across WebUI buttons, API actions, and helper subcommands.
+- Snapper Manager timer badges now refresh immediately after successful timer enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, instead of waiting for stale dashboard polling state.
+- Snapper Option 4 cleanup confirmation modal now includes a detected installed-kernel-family dropdown (populated from `/api/boot/stats`) to help set `KERNEL_FAMILY_PURGE_TARGETS` quickly while preserving manual input.
 
 ## v70 (2026-02-18)
 - See `README.md` → Version History for full release notes.

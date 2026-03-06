@@ -2049,7 +2049,9 @@ systemctl status zypper-autodownload.service
     - WebUI layout update: Option 4 card now stays compact (mode selector + run button + status badges), and the full cleanup description/customization controls are shown in the cleanup confirmation modal.
     - Added regression smoke test: `test_snapper_option4_modal_layout.sh` verifies Option 4 card stays compact and that `snopt-*` customization controls are modal-only.
     - Snapper Manager Option 5/6 now also includes per-timer controls for `snapper-timeline.timer`, `snapper-cleanup.timer`, and `snapper-boot.timer` (individual enable/disable in addition to all-at-once).
+    - Snapper Manager timer badges now refresh immediately after successful enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, so status changes appear without waiting for dashboard sync polling.
     - Snapper Manager Boot/EFI stats now show installed kernel inventory (kernel count + per-kernel package/version labels).
+    - Snapper Option 4 cleanup modal now includes a detected installed-kernel-family dropdown (`KERNEL_FAMILY_PURGE_TARGETS` helper) populated from `/api/boot/stats`, while keeping manual target input available.
     - Added regression smoke test: `test_snapper_timer_controls_regression.sh` verifies per-timer Snapper controls are wired across WebUI, API, and helper subcommands.
     - WebUI Settings drawer also includes the `KERNEL_FAMILY_PURGE_*` keys (Advanced + Danger zone).
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:

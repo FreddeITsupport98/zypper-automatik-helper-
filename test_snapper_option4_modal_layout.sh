@@ -12,6 +12,7 @@ Regression smoke test for Snapper Option 4 WebUI layout:
   - Option 4 card stays compact (mode selector + run button + status badges)
   - Option 4 card does NOT contain snopt-* customization controls
   - Cleanup confirmation modal contains snopt-* customization controls
+  - Cleanup modal includes detected installed-kernel-family dropdown wiring
   - Cleanup modal wiring uses existing settings helper functions
   - _wireSnapperUI no longer binds static snopt-* controls
 EOF
@@ -81,8 +82,12 @@ require_contains "${source_text}" "id=\"snopt-family-enabled\"" "Modal missing s
 require_contains "${source_text}" "id=\"snopt-family-force-only\"" "Modal missing snopt-family-force-only"
 require_contains "${source_text}" "id=\"snopt-family-dry-run\"" "Modal missing snopt-family-dry-run"
 require_contains "${source_text}" "id=\"snopt-family-targets\"" "Modal missing snopt-family-targets"
+require_contains "${source_text}" "id=\"snopt-family-targets-select\"" "Modal missing detected-family dropdown select"
 require_contains "${source_text}" "id=\"snopt-apply\"" "Modal missing snopt-apply"
 require_contains "${source_text}" "id=\"snopt-refresh\"" "Modal missing snopt-refresh"
+require_contains "${source_text}" "function znhSnapperKernelFamilyTargetsSyncDropdown(currentTargets) {" "Kernel-family dropdown sync helper missing"
+require_contains "${source_text}" "_api('/api/boot/stats', { method: 'GET' })" "Kernel-family dropdown helper must call /api/boot/stats"
+require_contains "${source_text}" "znhSnapperKernelFamilyTargetsSyncDropdown(famTargets);" "Modal config sync should refresh detected-family dropdown"
 
 require_contains "${source_text}" "function _wireCleanupCustomizePanel() {" "Modal cleanup wiring function missing"
 require_contains "${source_text}" "znhSnapperCleanupSettingsPanelApply();" "Modal apply binding missing"
