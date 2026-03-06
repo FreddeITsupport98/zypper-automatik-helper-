@@ -2276,6 +2276,10 @@ __znh_write_dashboard_schema_json() {
     "SNAP_CLEANUP_BUSY_POLL_SECONDS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "2"},
     "SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE": {"type": "bool", "default": "false"},
     "SNAP_CLEANUP_CRITICAL_FREE_MB": {"type": "int", "min": 0, "max": 5000, "step": 50, "default": "300"},
+    "SNAP_CLEANUP_HYSTERESIS_ENABLED": {"type": "bool", "default": "true"},
+    "SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB": {"type": "int", "min": 0, "max": 20000, "step": 50, "default": "700"},
+    "SNAP_CLEANUP_PHASE_PACING_SECONDS": {"type": "int", "min": 0, "max": 15, "step": 1, "default": "1"},
+    "SNAP_CLEANUP_CPU_QUOTA_PERCENT": {"type": "int", "min": 0, "max": 100, "step": 1, "default": "35"},
     "SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST": {"type": "int", "min": 1, "max": 50, "step": 1, "default": "3"},
 
     "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED": {"type": "bool", "default": "false"},
@@ -8552,6 +8556,31 @@ SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE=false
 # Default: 300 (MB)
 SNAP_CLEANUP_CRITICAL_FREE_MB=300
 
+# SNAP_CLEANUP_HYSTERESIS_ENABLED
+# When true (default), low-space protection is sticky:
+# after the disk drops below SNAP_CLEANUP_CRITICAL_FREE_MB, cleanup stays
+# blocked until free space recovers above SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB.
+# This avoids repeated start/stop thrashing near the threshold.
+SNAP_CLEANUP_HYSTERESIS_ENABLED=true
+
+# SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB
+# Recovery threshold for the low-space hysteresis latch.
+# Must be >= SNAP_CLEANUP_CRITICAL_FREE_MB to be effective.
+# Default: 700 (MB)
+SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB=700
+
+# SNAP_CLEANUP_PHASE_PACING_SECONDS
+# Optional pause between heavy cleanup phases and force-prune delete batches.
+# Helps reduce IO/CPU burst spikes on weaker systems.
+# 0 = disabled. Default: 1
+SNAP_CLEANUP_PHASE_PACING_SECONDS=1
+
+# SNAP_CLEANUP_CPU_QUOTA_PERCENT
+# CPU quota for WebUI Snapper background jobs started via transient systemd-run.
+# 0 = disabled (no CPUQuota), otherwise 1..100 (%).
+# Default: 35
+SNAP_CLEANUP_CPU_QUOTA_PERCENT=35
+
 # ---------------------------------------------------------------------
 # Snapper cleanup: Deep Clean (emergency space recovery)
 # ---------------------------------------------------------------------
@@ -9235,6 +9264,10 @@ EOF
     validate_nonneg_int_bounded_optional SNAP_CLEANUP_BUSY_POLL_SECONDS 2 1 30
     validate_bool_flag SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE false
     validate_nonneg_int_bounded_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300 0 5000
+    validate_bool_flag SNAP_CLEANUP_HYSTERESIS_ENABLED true
+    validate_nonneg_int_bounded_optional SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB 700 0 20000
+    validate_nonneg_int_bounded_optional SNAP_CLEANUP_PHASE_PACING_SECONDS 1 0 15
+    validate_nonneg_int_bounded_optional SNAP_CLEANUP_CPU_QUOTA_PERCENT 35 0 100
 
     validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED false
     validate_string_max_len_optional SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX "aborted|failed" 200
@@ -9337,6 +9370,10 @@ EOF
     validate_nonneg_int_optional SNAP_CLEANUP_BUSY_POLL_SECONDS 2
     validate_bool_flag SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE false
     validate_nonneg_int_optional SNAP_CLEANUP_CRITICAL_FREE_MB 300
+    validate_bool_flag SNAP_CLEANUP_HYSTERESIS_ENABLED true
+    validate_nonneg_int_optional SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB 700
+    validate_nonneg_int_optional SNAP_CLEANUP_PHASE_PACING_SECONDS 1
+    validate_nonneg_int_optional SNAP_CLEANUP_CPU_QUOTA_PERCENT 35
 
     # Snapper cleanup Deep Clean (broken snapshot hunter)
     validate_bool_flag SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED false
@@ -9452,6 +9489,10 @@ EOF
     log_debug "  SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=${SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY:-0}"
     log_debug "  SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED=${SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED:-true}"
     log_debug "  SNAP_CLEANUP_CRITICAL_FREE_MB=${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
+    log_debug "  SNAP_CLEANUP_HYSTERESIS_ENABLED=${SNAP_CLEANUP_HYSTERESIS_ENABLED:-true}"
+    log_debug "  SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB=${SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB:-700}"
+    log_debug "  SNAP_CLEANUP_PHASE_PACING_SECONDS=${SNAP_CLEANUP_PHASE_PACING_SECONDS:-1}"
+    log_debug "  SNAP_CLEANUP_CPU_QUOTA_PERCENT=${SNAP_CLEANUP_CPU_QUOTA_PERCENT:-35}"
     log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED=${SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED:-false}"
     log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX=${SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX:-aborted|failed}"
     log_debug "  SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM=${SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM:-true}"
@@ -9578,6 +9619,10 @@ EOF
     _mark_missing_key "SNAP_CLEANUP_BUSY_POLL_SECONDS"
     _mark_missing_key "SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE"
     _mark_missing_key "SNAP_CLEANUP_CRITICAL_FREE_MB"
+    _mark_missing_key "SNAP_CLEANUP_HYSTERESIS_ENABLED"
+    _mark_missing_key "SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB"
+    _mark_missing_key "SNAP_CLEANUP_PHASE_PACING_SECONDS"
+    _mark_missing_key "SNAP_CLEANUP_CPU_QUOTA_PERCENT"
 
     # Snapper cleanup Deep Clean (broken snapshot hunter)
     _mark_missing_key "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED"
@@ -9748,6 +9793,18 @@ EOF
                     ;;
                 SNAP_CLEANUP_CRITICAL_FREE_MB)
                     log_info "  - SNAP_CLEANUP_CRITICAL_FREE_MB: minimum recommended free space on / before running snapper cleanup (btrfs metadata safety)."
+                    ;;
+                SNAP_CLEANUP_HYSTERESIS_ENABLED)
+                    log_info "  - SNAP_CLEANUP_HYSTERESIS_ENABLED: when true, low-space protection is sticky until free space recovers above SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB."
+                    ;;
+                SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB)
+                    log_info "  - SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB: free-space recovery threshold (MB) used by low-space hysteresis guard."
+                    ;;
+                SNAP_CLEANUP_PHASE_PACING_SECONDS)
+                    log_info "  - SNAP_CLEANUP_PHASE_PACING_SECONDS: optional pause (seconds) between heavy Snapper cleanup phases/batches to reduce burst load."
+                    ;;
+                SNAP_CLEANUP_CPU_QUOTA_PERCENT)
+                    log_info "  - SNAP_CLEANUP_CPU_QUOTA_PERCENT: CPUQuota (%) for WebUI Snapper background transient jobs (0 disables quota cap)."
                     ;;
                 SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED)
                     log_info "  - SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED: enables an optional Deep Clean step in Snapper menu cleanup to hunt for and delete obviously aborted/failed snapshots by description."
@@ -9984,6 +10041,18 @@ EOF
                     ;;
                 SNAP_CLEANUP_CRITICAL_FREE_MB)
                     SNAP_CLEANUP_CRITICAL_FREE_MB=300
+                    ;;
+                SNAP_CLEANUP_HYSTERESIS_ENABLED)
+                    SNAP_CLEANUP_HYSTERESIS_ENABLED="true"
+                    ;;
+                SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB)
+                    SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB=700
+                    ;;
+                SNAP_CLEANUP_PHASE_PACING_SECONDS)
+                    SNAP_CLEANUP_PHASE_PACING_SECONDS=1
+                    ;;
+                SNAP_CLEANUP_CPU_QUOTA_PERCENT)
+                    SNAP_CLEANUP_CPU_QUOTA_PERCENT=35
                     ;;
                 SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED)
                     SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED="false"
@@ -15482,8 +15551,66 @@ generate_dashboard() {
     // Used by Managers → Server tab.
     var _znhMgrServer = {
         inFlight: false,
-        limit: 60
+        limit: 60,
+        timer: null,
+        activeOpts: null,
+        pollVisibleMs: 4500,
+        pollHiddenMs: 16000,
+        visibilityBound: false
     };
+
+    function _znhMgrServerOverlayOpen() {
+        try {
+            var ov = document.getElementById('mgr-overlay');
+            return !!(ov && !ov.classList.contains('hidden'));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _znhMgrServerTabActive() {
+        try {
+            var t = String(localStorage.getItem('znh_mgr_tab') || 'all');
+            return t === 'server';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _znhMgrServerShouldPoll() {
+        return _znhMgrServerOverlayOpen() && _znhMgrServerTabActive();
+    }
+
+    function _znhMgrServerStopTimer() {
+        if (_znhMgrServer.timer) {
+            try { clearTimeout(_znhMgrServer.timer); } catch (e) {}
+            _znhMgrServer.timer = null;
+        }
+    }
+
+    function _znhMgrServerNextDelayMs() {
+        var ms = 4500;
+        try {
+            ms = document.hidden ? parseInt(_znhMgrServer.pollHiddenMs || 16000, 10) : parseInt(_znhMgrServer.pollVisibleMs || 4500, 10);
+            if (!ms || isNaN(ms) || ms < 1200) ms = document.hidden ? 16000 : 4500;
+        } catch (e) {
+            ms = 4500;
+        }
+        return ms;
+    }
+
+    function _znhMgrServerScheduleNext(delayMs) {
+        _znhMgrServerStopTimer();
+        if (!_znhMgrServerShouldPoll()) return;
+        var ms = parseInt(delayMs || 0, 10) || 0;
+        if (ms <= 0) ms = _znhMgrServerNextDelayMs();
+        _znhMgrServer.timer = setTimeout(function() {
+            _znhMgrServer.timer = null;
+            if (!_znhMgrServerShouldPoll()) return;
+            var o = _znhMgrServer.activeOpts || {};
+            _znhManagersServerFetchAndRender(o, false);
+        }, ms);
+    }
 
     function _znhJobsLoad() {
         try {
@@ -15575,6 +15702,7 @@ generate_dashboard() {
         try { ov.classList.add('hidden'); ov.setAttribute('aria-hidden', 'true'); } catch (e) {}
         try { localStorage.removeItem('znh_mgr_minimized'); } catch (e2) {}
         try { document.getElementById('znh-mgr-bubble').classList.add('hidden'); } catch (e3) {}
+        try { _znhMgrServerStopTimer(); } catch (e4) {}
     }
 
     function znhManagersMinimize() {
@@ -15583,6 +15711,7 @@ generate_dashboard() {
         try { ov.classList.add('hidden'); ov.setAttribute('aria-hidden', 'true'); } catch (e) {}
         try { localStorage.setItem('znh_mgr_minimized', '1'); } catch (e2) {}
         try { document.getElementById('znh-mgr-bubble').classList.remove('hidden'); } catch (e3) {}
+        try { _znhMgrServerStopTimer(); } catch (e4) {}
     }
 
     function znhManagersRender(tab) {
@@ -15611,6 +15740,7 @@ generate_dashboard() {
             }
             return;
         }
+        try { _znhMgrServerStopTimer(); } catch (eSrvStop) {}
 
         function _qMatch(it) {
             if (!q) return true;
@@ -16229,7 +16359,11 @@ generate_dashboard() {
 
         } catch (eAI) {}
 
-        // Initial fetch
+        // Initial fetch (and reset any prior poll timer from old server-tab state).
+        try {
+            _znhMgrServer.activeOpts = { q: String(q || ''), onlyFailed: !!onlyFailed, last24: !!last24, jobType: String(jobType || '') };
+        } catch (eA0) {}
+        try { _znhMgrServerStopTimer(); } catch (eS0) {}
         _znhManagersServerFetchAndRender({ q: String(q || ''), onlyFailed: !!onlyFailed, last24: !!last24, jobType: String(jobType || '') }, false);
     }
 
@@ -16268,6 +16402,14 @@ generate_dashboard() {
         var onlyFailed = !!opts.onlyFailed;
         var last24 = !!opts.last24;
         var jobType = String(opts.jobType || '').trim();
+        try {
+            _znhMgrServer.activeOpts = {
+                q: q,
+                onlyFailed: !!onlyFailed,
+                last24: !!last24,
+                jobType: jobType
+            };
+        } catch (eA) {}
 
         var since = 0;
         if (last24) {
@@ -16619,6 +16761,7 @@ generate_dashboard() {
             } catch (e2) {}
         }).finally(function() {
             _znhMgrServer.inFlight = false;
+            try { _znhMgrServerScheduleNext(); } catch (eP) {}
         });
     }
 
@@ -16753,6 +16896,28 @@ generate_dashboard() {
 
         // Load jobs initially
         try { _znhJobs.items = _znhJobsLoad() || []; } catch (e4) { _znhJobs.items = []; }
+
+        // Managers Server tab: visibility-aware poll pacing.
+        // - While hidden: keep a slower backoff timer.
+        // - When visible again: refresh immediately (force fetch) and restore fast cadence.
+        try {
+            if (!_znhMgrServer.visibilityBound) {
+                _znhMgrServer.visibilityBound = true;
+                document.addEventListener('visibilitychange', function() {
+                    if (!_znhMgrServerShouldPoll()) {
+                        _znhMgrServerStopTimer();
+                        return;
+                    }
+                    if (document.hidden) {
+                        _znhMgrServerScheduleNext(_znhMgrServer.pollHiddenMs || 16000);
+                    } else {
+                        try {
+                            _znhManagersServerFetchAndRender(_znhMgrServer.activeOpts || {}, false);
+                        } catch (eF0) {}
+                    }
+                });
+            }
+        } catch (eV0) {}
     }
 
     function znhNotifyInit() {
@@ -17730,6 +17895,10 @@ generate_dashboard() {
         { key: 'SNAP_CLEANUP_BUSY_POLL_SECONDS', type: 'int', label: 'Snapper cleanup: busy poll interval (seconds)', advanced: true, help: 'Polling interval used while waiting for Snapper to become idle.' },
         { key: 'SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE', type: 'bool', label: 'DANGEROUS: allow WebUI cleanup to run even if Snapper is still busy', danger: true, danger_phrase: 'BUSY', advanced: true, help: 'Not recommended. If Snapper is still busy after waiting, proceed anyway (risk: overlapping snapper cleanup runs). Requires danger zone unlock + typing BUSY on change.' },
         { key: 'SNAP_CLEANUP_CRITICAL_FREE_MB', type: 'int', label: 'Snapper cleanup critical free space (MB)' },
+        { key: 'SNAP_CLEANUP_HYSTERESIS_ENABLED', type: 'bool', label: 'Snapper cleanup: low-space hysteresis guard' },
+        { key: 'SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB', type: 'int', label: 'Snapper cleanup: hysteresis recovery free space (MB)', advanced: true, help: 'After low-space is detected, cleanup remains blocked until free space rises above this threshold.' },
+        { key: 'SNAP_CLEANUP_PHASE_PACING_SECONDS', type: 'int', label: 'Snapper cleanup: phase pacing delay (seconds)', advanced: true, help: 'Pause between heavy cleanup phases and force-prune batches to reduce IO/CPU spikes.' },
+        { key: 'SNAP_CLEANUP_CPU_QUOTA_PERCENT', type: 'int', label: 'Snapper cleanup: background CPU quota (%)', advanced: true, help: 'Applies to WebUI snapper transient jobs (systemd CPUQuota). 0 disables quota cap.' },
         { key: 'SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST', type: 'int', label: 'DANGEROUS: force-prune keep newest snapshots per config', danger: true, danger_phrase: 'CLEANUP', advanced: true, help: 'Only used by Snapper cleanup mode "force-prune". Deletes older snapshots and keeps this many newest per snapper config (root/home/etc.). Requires danger zone unlock.' },
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED', type: 'bool', label: 'Deep clean: broken snapshot hunter' },
         { key: 'SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX', type: 'string', label: 'Deep clean: broken snapshot regex' },
@@ -20474,6 +20643,25 @@ generate_dashboard() {
             _snSetHeader('Confirm', 'Type phrase to proceed', title);
 
             var cmd = _snBuildCopyCmd(_sn.action, _sn.params);
+            var isCleanupConfirm = false;
+            var forceLowSpaceChecked = false;
+            var cleanupForceHtml = '';
+            try {
+                var _ca = String(_sn.confirm_action || _sn.action || '').trim().toLowerCase();
+                isCleanupConfirm = (_ca === 'cleanup');
+            } catch (eCk0) { isCleanupConfirm = false; }
+            try {
+                forceLowSpaceChecked = !!((_sn.params || {}).force_low_space);
+            } catch (eCk1) { forceLowSpaceChecked = false; }
+            if (isCleanupConfirm) {
+                cleanupForceHtml = [
+                    '<label class=\"pill\" style=\"gap:10px; justify-content:flex-start; margin-top: 8px;\">',
+                    '  <input type=\"checkbox\" id=\"sn-force-low-space\" ' + (forceLowSpaceChecked ? 'checked' : '') + ' />',
+                    '  Force low-space guard override (sets <code>ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1</code>)',
+                    '</label>',
+                    '<div style=\"color: var(--muted); font-size:0.86rem; margin-top:6px;\">Use only when cleanup is blocked by low-space hysteresis/critical guard and you understand the risk.</div>'
+                ].join('\\n');
+            }
 
             var e = _snEls();
             if (e.body) {
@@ -20483,6 +20671,7 @@ generate_dashboard() {
                     '  <div style="margin-top:6px; font-weight:800;">This runs a root Snapper action via the localhost API. ' + _snEscapeHtml(hint || '') + '</div>',
                     '</div>',
                     '<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command (root): <code style="font-size:0.85rem;">' + _snEscapeHtml(cmd) + '</code></div>',
+                    cleanupForceHtml,
                     '<div class="feat-badge" id="sn-kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">',
                     '  <span class="feat-dot" id="sn-kernel-purge-dot" style="color: rgba(148,163,184,0.9);">●</span> Kernel purge: <strong id="sn-kernel-purge-val">(loading)</strong>',
                     '</div>',
@@ -20625,6 +20814,13 @@ generate_dashboard() {
 
                 var got2 = '';
                 try { got2 = String((document.getElementById('sn-phrase') || {}).value || '').trim(); } catch (eG) { got2 = ''; }
+                if (String(_sn.action || '').trim() === 'cleanup' || String(_sn.confirm_action || '').trim() === 'cleanup') {
+                    try {
+                        var fls = document.getElementById('sn-force-low-space');
+                        if (!_sn.params || typeof _sn.params !== 'object') _sn.params = {};
+                        _sn.params.force_low_space = !!(fls && fls.checked);
+                    } catch (eFls) {}
+                }
 
                 _sn.running = true;
                 _snSetButtons({ show_cancel: true, show_run: true, show_close: false, cancel_disabled: true, run_disabled: true });
@@ -34896,22 +35092,130 @@ run_snapper_menu_only() {
         __znh_cleanup_snapshot_tmpfiles() {
             rm -f "${before_csv}" "${after_csv}" "${removed_csv}" 2>/dev/null || true
         }
+        # Optional pacing between heavy cleanup phases.
+        local __cleanup_pace_s
+        __cleanup_pace_s="${SNAP_CLEANUP_PHASE_PACING_SECONDS:-1}"
+        if ! [[ "${__cleanup_pace_s}" =~ ^[0-9]+$ ]]; then
+            __cleanup_pace_s=1
+        fi
+        if [ "${__cleanup_pace_s}" -lt 0 ] 2>/dev/null; then
+            __cleanup_pace_s=0
+        fi
+        if [ "${__cleanup_pace_s}" -gt 15 ] 2>/dev/null; then
+            __cleanup_pace_s=15
+        fi
 
-        # --- SAFETY 2: Critical free space check ---
+        __znh_cleanup_phase_pace() {
+            local reason="${1:-phase}"
+            if ! [[ "${__cleanup_pace_s:-0}" =~ ^[0-9]+$ ]] || [ "${__cleanup_pace_s:-0}" -le 0 ] 2>/dev/null; then
+                return 0
+            fi
+            echo "[snapper][cleanup] pacing ${__cleanup_pace_s}s (${reason})"
+            __znh_audit_record "cleanup:pacing:${reason}:${__cleanup_pace_s}s"
+            sleep "${__cleanup_pace_s}" 2>/dev/null || sleep 1
+            return 0
+        }
+
+        # --- SAFETY 2: Critical free-space + hysteresis guard ---
         # Deleting btrfs snapshots can require metadata headroom.
-        local free_kb critical_kb critical_mb
+        # Hysteresis avoids flapping around the low-space threshold and requires
+        # explicit override until free space has recovered to the high watermark.
+        local free_kb free_mb critical_kb critical_mb high_mb
         local critical_low=0
+        local hysteresis_enabled=1
+        local hysteresis_state_dir="/var/lib/zypper-auto"
+        local hysteresis_state_file="${hysteresis_state_dir}/snapper-cleanup-hysteresis.state"
+        local hysteresis_state_low=0
+        local hysteresis_guard_active=0
+        local force_low_space_override=0
+        local low_space_guard_reason=""
+
+        case "$(printf '%s' "${SNAP_CLEANUP_HYSTERESIS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+            0|false|no|off|disabled)
+                hysteresis_enabled=0
+                ;;
+            *)
+                hysteresis_enabled=1
+                ;;
+        esac
+
+        case "$(printf '%s' "${ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE:-0}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+            1|true|yes|on|y)
+                force_low_space_override=1
+                ;;
+            *)
+                force_low_space_override=0
+                ;;
+        esac
+
         free_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' | tr -dc '0-9')
+        free_mb=0
+        if [[ "${free_kb:-}" =~ ^[0-9]+$ ]]; then
+            free_mb=$((free_kb / 1024))
+        fi
+
         critical_mb="${SNAP_CLEANUP_CRITICAL_FREE_MB:-300}"
         if ! [[ "${critical_mb}" =~ ^[0-9]+$ ]]; then
             critical_mb=300
         fi
         critical_kb=$((critical_mb * 1024))
 
+        high_mb="${SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB:-700}"
+        if ! [[ "${high_mb}" =~ ^[0-9]+$ ]]; then
+            high_mb=700
+        fi
+        if [ "${high_mb}" -le "${critical_mb}" ] 2>/dev/null; then
+            high_mb=$((critical_mb + 100))
+        fi
+
+        if [ "${hysteresis_enabled}" -eq 1 ] 2>/dev/null && [ -r "${hysteresis_state_file}" ]; then
+            if grep -q '^low=1$' "${hysteresis_state_file}" 2>/dev/null; then
+                hysteresis_state_low=1
+            fi
+        fi
+
+        if [[ "${free_mb:-}" =~ ^[0-9]+$ ]]; then
+            if [ "${free_mb}" -le "${critical_mb}" ] 2>/dev/null; then
+                hysteresis_state_low=1
+            elif [ "${hysteresis_state_low}" -eq 1 ] 2>/dev/null && [ "${free_mb}" -ge "${high_mb}" ] 2>/dev/null; then
+                hysteresis_state_low=0
+            fi
+        fi
+
+        if [ "${hysteresis_enabled}" -eq 1 ] 2>/dev/null; then
+            mkdir -p -- "${hysteresis_state_dir}" 2>/dev/null || true
+            {
+                local stmp
+                stmp="${hysteresis_state_file}.tmp.$$"
+                printf 'low=%s\n' "${hysteresis_state_low}" >"${stmp}" 2>/dev/null || true
+                mv -f "${stmp}" "${hysteresis_state_file}" 2>/dev/null || true
+            } || true
+        fi
+
         if [[ "${free_kb:-}" =~ ^[0-9]+$ ]] && [ "${free_kb}" -lt "${critical_kb}" ] 2>/dev/null; then
             critical_low=1
+        fi
+
+        if [ "${hysteresis_enabled}" -eq 1 ] 2>/dev/null && [ "${hysteresis_state_low}" -eq 1 ] 2>/dev/null && [ "${free_mb:-0}" -lt "${high_mb}" ] 2>/dev/null; then
+            hysteresis_guard_active=1
+            low_space_guard_reason="hysteresis-latch (free=${free_mb}MB, low<=${critical_mb}MB, clear>=${high_mb}MB)"
+            __znh_audit_record "disk:hysteresis:active:free=${free_mb}MB:low=${critical_mb}MB:high=${high_mb}MB"
+        fi
+
+        if [ "${critical_low}" -eq 1 ] 2>/dev/null; then
             echo "CRITICAL WARNING: Disk is extremely full (<${critical_mb}MB free)."
             echo "Deleting btrfs snapshots may require free space for metadata and can hang the system."
+            if [ -z "${low_space_guard_reason}" ]; then
+                low_space_guard_reason="critical-low (free=${free_mb}MB < ${critical_mb}MB)"
+            fi
+        elif [ "${hysteresis_guard_active}" -eq 1 ] 2>/dev/null; then
+            echo "LOW-SPACE HYSTERESIS GUARD: Free space has not recovered to ${high_mb}MB yet (currently ${free_mb}MB)."
+            echo "Cleanup is guarded to avoid repeated risky runs while disk pressure is still high."
+        fi
+
+        if [ "${force_low_space_override}" -eq 1 ] 2>/dev/null && { [ "${critical_low}" -eq 1 ] 2>/dev/null || [ "${hysteresis_guard_active}" -eq 1 ] 2>/dev/null; }; then
+            echo "[snapper][cleanup] Force low-space override enabled (ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1)."
+            __znh_audit_record "disk:low-space-override:true"
         fi
 
         __znh_snapper_dump_snapshot_csv() {
@@ -35331,28 +35635,41 @@ run_snapper_menu_only() {
 
         __znh_snapper_preview_candidates || true
 
-        # If critically low, ask once more before proceeding.
-        if [ "${critical_low}" -eq 1 ] 2>/dev/null; then
-            __znh_audit_record "disk:critical-low"
-            if [ -t 0 ]; then
-                read -p "Are you ABSOLUTELY sure you want to continue? [y/N]: " -r ans_full
-                if [[ ! "${ans_full:-}" =~ ^[Yy]$ ]]; then
-                    echo "Cleanup cancelled (low disk space)."
-                    __audit_status="cancelled"
-                    __znh_audit_record "cleanup:cancelled:critical-low"
-                    __znh_cleanup_snapshot_tmpfiles
-                    __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
-                    return 1
-                fi
-                __znh_audit_record "critical-low-override:true"
-            else
-                log_warn "[snapper][cleanup] Refusing to run cleanup without a TTY while free space is critically low"
+        # Low-space guard (critical + hysteresis latch).
+        local low_space_guard_required=0
+        if [ "${critical_low}" -eq 1 ] 2>/dev/null || [ "${hysteresis_guard_active}" -eq 1 ] 2>/dev/null; then
+            low_space_guard_required=1
+            __znh_audit_record "disk:low-space-guard:reason=${low_space_guard_reason:-unknown}"
+        fi
+
+        if [ "${low_space_guard_required}" -eq 1 ] 2>/dev/null && [ "${force_low_space_override}" -ne 1 ] 2>/dev/null; then
+            if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then
+                log_warn "[snapper][cleanup] Refusing low-space cleanup without explicit force override (set ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1)"
+                echo "Cleanup refused by low-space guard: ${low_space_guard_reason:-low space}."
+                echo "Use explicit force override to continue: ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1"
                 __audit_status="refused"
-                __znh_audit_record "cleanup:refused:no-tty:critical-low"
+                __znh_audit_record "cleanup:refused:low-space-guard:no-force"
                 __znh_cleanup_snapshot_tmpfiles
                 __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
                 return 1
             fi
+
+            echo ""
+            echo "LOW-SPACE GUARD: ${low_space_guard_reason:-low space}"
+            read -p "Force cleanup anyway under low-space guard? [y/N]: " -r ans_full
+            if [[ ! "${ans_full:-}" =~ ^[Yy]$ ]]; then
+                echo "Cleanup cancelled (low-space guard)."
+                __audit_status="cancelled"
+                __znh_audit_record "cleanup:cancelled:low-space-guard"
+                __znh_cleanup_snapshot_tmpfiles
+                __znh_cleanup_report_write_final "${free_kb:-}" "${free_kb:-}" 0 "${removed_csv}" 0 || true
+                return 1
+            fi
+            __znh_audit_record "cleanup:low-space-guard:interactive-override:true"
+        fi
+
+        if [ "${low_space_guard_required}" -eq 1 ] 2>/dev/null && [ "${force_low_space_override}" -eq 1 ] 2>/dev/null; then
+            __znh_audit_record "cleanup:low-space-guard:force-override:true"
         fi
 
         echo ""
@@ -35434,6 +35751,7 @@ run_snapper_menu_only() {
                         "${SNAPPER_CMD[@]}" -c "${conf}" cleanup "${alg}" || true
                 fi
                 __znh_audit_record "snapper:cleanup:${conf}:${alg}:done"
+                __znh_cleanup_phase_pace "snapper:${conf}:${alg}" || true
             done
         done
 
@@ -35485,6 +35803,7 @@ run_snapper_menu_only() {
                         else
                             execute_guarded "Force prune snapshots (${conf})" "${SNAPPER_CMD[@]}" -c "${conf}" delete "${batch[@]}" || true
                         fi
+                        __znh_cleanup_phase_pace "force-prune:${conf}:batch" || true
                         batch=()
                     fi
                 done
@@ -35495,6 +35814,7 @@ run_snapper_menu_only() {
                     else
                         execute_guarded "Force prune snapshots (${conf})" "${SNAPPER_CMD[@]}" -c "${conf}" delete "${batch[@]}" || true
                     fi
+                    __znh_cleanup_phase_pace "force-prune:${conf}:batch" || true
                 fi
             done
 
@@ -47633,6 +47953,7 @@ def _scrub_any_running() -> dict:
         is_running = (active == "active") or (age < 30 * 60)
         if is_running:
             out["running"] = True
+            out["job_id"] = str(prefix or "").strip()
             out["action"] = str(st.get("action", "") or "").strip()
             out["title"] = str(st.get("title", "") or "").strip()
             out["unit"] = unit
@@ -47761,6 +48082,7 @@ def _snapper_any_running() -> dict:
     """Best-effort: detect if any snapper unit is currently running."""
     out = {
         "running": False,
+        "job_id": "",
         "action": "",
         "title": "",
         "unit": "",
@@ -47834,6 +48156,7 @@ def _snapper_any_running() -> dict:
         is_running = (active == "active") or (age < 30 * 60)
         if is_running:
             out["running"] = True
+            out["job_id"] = prefix
             out["action"] = str(st.get("action", "") or "").strip()
             out["title"] = str(st.get("title", "") or "").strip()
             out["unit"] = unit
@@ -52368,10 +52691,43 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         if path == "/api/snapper/start":
-            # Best-effort concurrency guard: avoid clobbering the single-task UX.
+
+            body = _read_json(self)
+            action = str(body.get("action", "") or "").strip()
+            params = body.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            force_low_space = False
+            try:
+                force_low_space = _to_boolish(params.get("force_low_space", False))
+            except Exception:
+                force_low_space = False
+
+            # Best-effort coalescing/concurrency guard:
+            # - same action -> reuse currently running job
+            # - different action -> reject to avoid clobbering single-task UX
             try:
                 ri = _snapper_any_running()
                 if ri.get("running"):
+                    run_action = str(ri.get("action", "") or "").strip()
+                    req_action = str(action or "").strip()
+                    same_action = bool(req_action) and (req_action == run_action)
+                    if req_action == "cleanup" and run_action in ("", "cleanup"):
+                        same_action = True
+
+                    if same_action:
+                        existing_jid = str(ri.get("job_id", "") or "").strip()
+                        if existing_jid:
+                            return _json_response(self, 200, {
+                                "job_id": existing_jid,
+                                "coalesced": True,
+                                "job_running": True,
+                                "unit": ri.get("unit"),
+                                "status_path": ri.get("status_path"),
+                                "action": ri.get("action"),
+                                "title": ri.get("title"),
+                            }, origin)
+
                     return _json_response(self, 409, {
                         "error": "a snapper job is already running",
                         "job_running": True,
@@ -52382,12 +52738,6 @@ class Handler(BaseHTTPRequestHandler):
                     }, origin)
             except Exception:
                 pass
-
-            body = _read_json(self)
-            action = str(body.get("action", "") or "").strip()
-            params = body.get("params", {})
-            if not isinstance(params, dict):
-                params = {}
 
             # Determine if action requires confirmation.
             needs_confirm = action in ("create", "cleanup", "rollback", "auto-enable", "auto-disable")
@@ -52482,6 +52832,18 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 
+            # Read current config so runtime controls are deterministic for this job.
+            eff_conf, _warnings_conf, _invalid_conf = _read_conf(self.server.conf_path)
+            cpu_quota_pct = 35
+            try:
+                cpu_quota_pct = int(str(eff_conf.get("SNAP_CLEANUP_CPU_QUOTA_PERCENT", "35") or "35").strip() or "35")
+            except Exception:
+                cpu_quota_pct = 35
+            if cpu_quota_pct < 0:
+                cpu_quota_pct = 0
+            if cpu_quota_pct > 100:
+                cpu_quota_pct = 100
+
             # Run via systemd-run (persist across API/browser restarts)
             job_id = secrets.token_urlsafe(18)
             unit, log_path, status_path, script_file = _snapper_paths(job_id)
@@ -52553,6 +52915,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
                 'echo "" >>"$LOG" || true',
                 'export ZNH_NON_INTERACTIVE=1',
+                f'export ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE={"1" if (action == "cleanup" and force_low_space) else "0"}',
                 'write_status 0 0 running',
                 'set +e',
                 'if command -v timeout >/dev/null 2>&1; then',
@@ -52602,6 +52965,11 @@ class Handler(BaseHTTPRequestHandler):
                 "/usr/bin/bash",
                 script_file,
             ]
+            if cpu_quota_pct > 0:
+                try:
+                    sys_cmd.insert(5, f"--property=CPUQuota={int(cpu_quota_pct)}%")
+                except Exception:
+                    pass
 
             try:
                 p = subprocess.run(
@@ -52652,6 +53020,11 @@ class Handler(BaseHTTPRequestHandler):
             params = body.get("params", {})
             if not isinstance(params, dict):
                 params = {}
+            force_low_space = False
+            try:
+                force_low_space = _to_boolish(params.get("force_low_space", False))
+            except Exception:
+                force_low_space = False
 
             # Determine if action requires confirmation.
             needs_confirm = action in ("create", "cleanup", "rollback", "auto-enable", "auto-disable")
@@ -52747,6 +53120,10 @@ class Handler(BaseHTTPRequestHandler):
                 # The WebUI already enforced a typed confirmation phrase.
                 # Make the helper non-interactive so it won't block on read(1) prompts.
                 extra_env = {"ZNH_NON_INTERACTIVE": "1"}
+            if action == "cleanup":
+                if extra_env is None:
+                    extra_env = {}
+                extra_env["ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE"] = "1" if force_low_space else "0"
 
             cmd_eff = list(cmd)
             try:

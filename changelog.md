@@ -10,6 +10,11 @@
 - Quick action API/recovery/history: AI launch metadata is now carried through quick start/status/history flows so reopen/resume paths keep the AI marker.
 - Snapper WebUI API hardening: background jobs now run with lower-priority scheduling (`Nice=19`, idle I/O class) plus low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
 - Snapper direct run API (`/api/snapper/run`) now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
+- Snapper cleanup WebUI confirmation now includes an explicit force-low-space override toggle (`force_low_space`) that maps to helper env `ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1`.
+- Snapper direct run API (`/api/snapper/run`) now propagates cleanup `force_low_space` into helper environment (in addition to non-interactive confirmation flow).
+- Snapper cleanup now supports configurable pacing between heavy phases and force-prune delete batches (`SNAP_CLEANUP_PHASE_PACING_SECONDS`) to reduce burst IO/CPU load.
+- Snapper start API coalescing improved: repeated same-action requests now reuse an existing running Snapper `job_id` instead of launching duplicate jobs.
+- Managers → Server (SQLite) tab now uses visibility-aware polling/backoff: faster while visible, slower while hidden, and polling stops when overlay/tab is not active.
 - Snapper Full Cleanup: mode `force-prune` can implicitly run kernel package cleanup (`zypper purge-kernels`) even when `KERNEL_PURGE_ENABLED=false` (configurable via `KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE`, default true).
 - Snapper Full Cleanup: mode `force-prune` can also run a safe boot menu hygiene pass via `scrub-ghost` to quarantine duplicate/stale snapshot boot entries and optionally rebuild GRUB config (configurable via `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED`, default true).
 - Snapper Full Cleanup (danger): optional kernel family purge can remove whole kernel package families listed in `KERNEL_FAMILY_PURGE_TARGETS` (force-prune only by default; protects running kernel; refuses if it could leave only one installed kernel).
