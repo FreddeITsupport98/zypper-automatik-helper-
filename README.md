@@ -2046,6 +2046,8 @@ systemctl status zypper-autodownload.service
     - The running kernel package provider is protected.
     - Safety guard: kernel purge/family purge will refuse to run if it could leave the system with only one installed kernel.
     - WebUI: Snapper Option 4 panel now includes a **Customize cleanup behavior** section to configure kernel purge / scrub-ghost hygiene / kernel family purge settings.
+    - WebUI layout update: Option 4 card now stays compact (mode selector + run button + status badges), and the full cleanup description/customization controls are shown in the cleanup confirmation modal.
+    - Added regression smoke test: `test_snapper_option4_modal_layout.sh` verifies Option 4 card stays compact and that `snopt-*` customization controls are modal-only.
     - WebUI Settings drawer also includes the `KERNEL_FAMILY_PURGE_*` keys (Advanced + Danger zone).
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:
     - EFI/Boot usage: used% + (used/total) + a progress bar

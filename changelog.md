@@ -38,6 +38,9 @@
 - Snapper Full Cleanup: mode `force-prune` can also run a safe boot menu hygiene pass via `scrub-ghost` to quarantine duplicate/stale snapshot boot entries and optionally rebuild GRUB config (configurable via `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED`, default true).
 - Snapper Full Cleanup (danger): optional kernel family purge can remove whole kernel package families listed in `KERNEL_FAMILY_PURGE_TARGETS` (force-prune only by default; protects running kernel; refuses if it could leave only one installed kernel).
 - WebUI: Snapper Option 4 panel includes cleanup customization controls for kernel purge / scrub-ghost hygiene / kernel family purge.
+- WebUI: Snapper Option 4 layout refactor keeps the card compact (mode selector + run button + status badges) and moves the full cleanup description/customization controls into the cleanup confirmation modal only.
+- Cleanup confirmation modal now hosts the Option 4 settings actions directly (`Apply settings` / `Refresh from config`) via the existing Settings API helpers.
+- Added regression smoke test `test_snapper_option4_modal_layout.sh` to assert Option 4 stays compact and `snopt-*` customization controls remain modal-only.
 - WebUI Settings drawer includes `KERNEL_FAMILY_PURGE_*` configuration fields (Advanced + Danger zone).
 
 ## v70 (2026-02-18)

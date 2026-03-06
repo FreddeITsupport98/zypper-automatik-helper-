@@ -12363,11 +12363,7 @@ generate_dashboard() {
             <button class="pill" type="button" id="snapper-cleanup-btn" style="border-color: rgba(239,68,68,0.30);">Run cleanup</button>
           </div>
           <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);">
-            Warning: cleanup may delete snapshots. Mode <code>force-prune</code> deletes older snapshots but keeps the newest snapshots per config.
-            Kernel cleanup runs when <code>KERNEL_PURGE_ENABLED=true</code>.
-            In <code>force-prune</code> mode, kernel cleanup can also run implicitly when <code>KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=true</code> (default).
-            In <code>force-prune</code> mode, a safe boot menu cleanup pass can also run via <code>scrub-ghost</code> when <code>SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED=true</code> (default).
-            DANGEROUS: you can also configure a kernel <em>family</em> purge (remove a whole kernel flavor) via <code>KERNEL_FAMILY_PURGE_*</code>.
+            Details + customization moved into the cleanup confirmation dialog to keep this panel compact.
           </div>
           <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <div class="feat-badge" id="kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">
@@ -12383,43 +12379,6 @@ generate_dashboard() {
               Kernel family purge: <strong id="kernel-family-purge-val">(loading)</strong>
             </div>
           </div>
-
-          <details id="snapper-cleanup-customize" style="margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">
-            <summary style="cursor:pointer; font-weight: 950; color: var(--text);">Customize cleanup behavior (Option 4 settings)</summary>
-            <div style="margin-top:10px; color: var(--muted); font-size:0.88rem;">
-              These controls update <code>/etc/zypper-auto.conf</code> via the local Settings API (persistent). For safety, enabling kernel family purge requires a typed confirmation.
-            </div>
-
-            <div style="margin-top:12px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
-              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-kp-enabled" /> kernel purge enabled</label>
-              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-kp-implicit" /> implicit kernel purge on force-prune</label>
-            </div>
-
-            <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
-              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-sg-enabled" /> force-prune scrub-ghost hygiene</label>
-              <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-sg-grub" /> rebuild grub.cfg after scrub-ghost</label>
-            </div>
-
-            <div style="margin-top:12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06);">
-              <div style="font-weight: 950;">Kernel family purge (danger)</div>
-              <div style="margin-top:8px; color: var(--muted); font-size:0.88rem;">
-                Removes an entire kernel <em>package family</em> (flavor), e.g. removing <code>modded-kernel</code> entirely. The running kernel is protected and the helper refuses to leave you with only one installed kernel.
-              </div>
-              <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
-                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-enabled" /> enable family purge</label>
-                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-force-only" /> force-prune only (recommended)</label>
-                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-dry-run" /> dry-run only</label>
-              </div>
-              <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
-                <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);">targets: <input id="snopt-family-targets" type="text" placeholder="e.g. modded-kernel" style="width:340px; padding:6px 8px; border-radius: 12px;" /></label>
-              </div>
-            </div>
-
-            <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-              <button class="pill" type="button" id="snopt-apply" style="border-color: rgba(250,204,21,0.35);">Apply settings</button>
-              <button class="pill" type="button" id="snopt-refresh">Refresh from config</button>
-            </div>
-          </details>
         </div>
 
         <div class="stat-box">
@@ -20741,6 +20700,7 @@ generate_dashboard() {
             var isCleanupConfirm = false;
             var forceLowSpaceChecked = false;
             var cleanupForceHtml = '';
+            var cleanupDetailsHtml = '';
             try {
                 var _ca = String(_sn.confirm_action || _sn.action || '').trim().toLowerCase();
                 isCleanupConfirm = (_ca === 'cleanup');
@@ -20756,6 +20716,39 @@ generate_dashboard() {
                     '</label>',
                     '<div style=\"color: var(--muted); font-size:0.86rem; margin-top:6px;\">Use only when cleanup is blocked by low-space hysteresis/critical guard and you understand the risk.</div>'
                 ].join('\\n');
+                cleanupDetailsHtml = [
+                    '<div id="snapper-cleanup-customize" style="margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03);">',
+                    '  <div style="font-weight: 950; color: var(--text);">Cleanup details + customization (Option 4)</div>',
+                    '  <div style="margin-top:10px; color: var(--muted); font-size:0.88rem;">Warning: cleanup may delete snapshots. Mode <code>force-prune</code> deletes older snapshots but keeps the newest snapshots per config.</div>',
+                    '  <div style="margin-top:8px; color: var(--muted); font-size:0.88rem;">Kernel cleanup runs when <code>KERNEL_PURGE_ENABLED=true</code>. In <code>force-prune</code> mode, kernel cleanup can also run implicitly when <code>KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE=true</code> (default).</div>',
+                    '  <div style="margin-top:8px; color: var(--muted); font-size:0.88rem;">In <code>force-prune</code> mode, a safe boot menu cleanup pass can also run via <code>scrub-ghost</code> when <code>SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED=true</code> (default). DANGEROUS: you can also configure a kernel <em>family</em> purge (remove a whole kernel flavor) via <code>KERNEL_FAMILY_PURGE_*</code>.</div>',
+                    '  <div style="margin-top:10px; color: var(--muted); font-size:0.88rem;">These controls update <code>/etc/zypper-auto.conf</code> via the local Settings API (persistent). For safety, enabling kernel family purge requires a typed confirmation.</div>',
+                    '  <div style="margin-top:12px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">',
+                    '    <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-kp-enabled" /> kernel purge enabled</label>',
+                    '    <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-kp-implicit" /> implicit kernel purge on force-prune</label>',
+                    '  </div>',
+                    '  <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">',
+                    '    <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-sg-enabled" /> force-prune scrub-ghost hygiene</label>',
+                    '    <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-sg-grub" /> rebuild grub.cfg after scrub-ghost</label>',
+                    '  </div>',
+                    '  <div style="margin-top:12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06);">',
+                    '    <div style="font-weight: 950;">Kernel family purge (danger)</div>',
+                    '    <div style="margin-top:8px; color: var(--muted); font-size:0.88rem;">Removes an entire kernel <em>package family</em> (flavor), e.g. removing <code>modded-kernel</code> entirely. The running kernel is protected and the helper refuses to leave you with only one installed kernel.</div>',
+                    '    <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">',
+                    '      <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-enabled" /> enable family purge</label>',
+                    '      <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-force-only" /> force-prune only (recommended)</label>',
+                    '      <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);"><input type="checkbox" id="snopt-family-dry-run" /> dry-run only</label>',
+                    '    </div>',
+                    '    <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">',
+                    '      <label style="display:flex; gap:8px; align-items:center; font-size:0.9rem; color: var(--muted);">targets: <input id="snopt-family-targets" type="text" placeholder="e.g. modded-kernel" style="width:340px; padding:6px 8px; border-radius: 12px;" /></label>',
+                    '    </div>',
+                    '  </div>',
+                    '  <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+                    '    <button class="pill" type="button" id="snopt-apply" style="border-color: rgba(250,204,21,0.35);">Apply settings</button>',
+                    '    <button class="pill" type="button" id="snopt-refresh">Refresh from config</button>',
+                    '  </div>',
+                    '</div>',
+                ].join('\n');
             }
 
             var e = _snEls();
@@ -20767,6 +20760,7 @@ generate_dashboard() {
                     '</div>',
                     '<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Command (root): <code style="font-size:0.85rem;">' + _snEscapeHtml(cmd) + '</code></div>',
                     cleanupForceHtml,
+                    cleanupDetailsHtml,
                     '<div class="feat-badge" id="sn-kernel-purge-badge" title="Reflects Settings: KERNEL_PURGE_ENABLED">',
                     '  <span class="feat-dot" id="sn-kernel-purge-dot" style="color: rgba(148,163,184,0.9);">●</span> Kernel purge: <strong id="sn-kernel-purge-val">(loading)</strong>',
                     '</div>',
@@ -20842,10 +20836,48 @@ generate_dashboard() {
                     }
                 };
             }
+            function _wireCleanupCustomizePanel() {
+                if (!isCleanupConfirm) return;
+
+                var applyBtn = document.getElementById('snopt-apply');
+                var refreshBtn = document.getElementById('snopt-refresh');
+
+                if (applyBtn && !applyBtn._znh_bound) {
+                    applyBtn._znh_bound = true;
+                    applyBtn.addEventListener('click', function() {
+                        try {
+                            if (typeof znhSnapperCleanupSettingsPanelApply === 'function') {
+                                znhSnapperCleanupSettingsPanelApply();
+                            }
+                        } catch (e0) {
+                            toast('Apply failed', (e0 && e0.message) ? e0.message : 'failed', 'err');
+                        }
+                    });
+                }
+
+                if (refreshBtn && !refreshBtn._znh_bound) {
+                    refreshBtn._znh_bound = true;
+                    refreshBtn.addEventListener('click', function() {
+                        try {
+                            if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') {
+                                znhSnapperCleanupSettingsPanelSyncFromConfig();
+                                toast('Refreshed', 'Loaded from /etc/zypper-auto.conf', 'ok');
+                            }
+                        } catch (e1) {}
+                    });
+                }
+
+                try {
+                    if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') {
+                        znhSnapperCleanupSettingsPanelSyncFromConfig();
+                    }
+                } catch (e2) {}
+            }
 
             setProg('Waiting', 0);
             setLog('');
             _wireCopyOutput();
+            _wireCleanupCustomizePanel();
             try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP0) {}
 
             // Minimize button (only meaningful once a job starts)
@@ -21321,35 +21353,9 @@ generate_dashboard() {
             snapperRun('auto-disable', {}, 'auto-disable');
         });
 
-        // Option 4 customization panel (persistent settings)
-        var applyBtn = document.getElementById('snopt-apply');
-        var refreshBtn = document.getElementById('snopt-refresh');
+        // Option 4 card remains compact; only mode selector is present here.
+        // Customization controls are rendered/bound inside the cleanup confirmation modal.
         var modeSel = document.getElementById('snapper-cleanup-mode');
-
-        if (applyBtn && !applyBtn._znh_bound) {
-            applyBtn._znh_bound = true;
-            applyBtn.addEventListener('click', function() {
-                try {
-                    if (typeof znhSnapperCleanupSettingsPanelApply === 'function') {
-                        znhSnapperCleanupSettingsPanelApply();
-                    }
-                } catch (e0) {
-                    toast('Apply failed', (e0 && e0.message) ? e0.message : 'failed', 'err');
-                }
-            });
-        }
-
-        if (refreshBtn && !refreshBtn._znh_bound) {
-            refreshBtn._znh_bound = true;
-            refreshBtn.addEventListener('click', function() {
-                try {
-                    if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') {
-                        znhSnapperCleanupSettingsPanelSyncFromConfig();
-                        toast('Refreshed', 'Loaded from /etc/zypper-auto.conf', 'ok');
-                    }
-                } catch (e1) {}
-            });
-        }
 
         if (modeSel && !modeSel._znh_bound) {
             modeSel._znh_bound = true;
@@ -21357,11 +21363,10 @@ generate_dashboard() {
                 try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (e2) {}
             });
         }
-
-        // Initial populate
+        // Initial badge refresh
         try {
-            if (typeof znhSnapperCleanupSettingsPanelSyncFromConfig === 'function') {
-                znhSnapperCleanupSettingsPanelSyncFromConfig();
+            if (typeof znhKernelPurgeRefreshUI === 'function') {
+                znhKernelPurgeRefreshUI();
             }
         } catch (e3) {}
     }
