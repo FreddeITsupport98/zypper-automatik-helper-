@@ -2052,6 +2052,7 @@ systemctl status zypper-autodownload.service
     - Snapper Manager timer badges now refresh immediately after successful enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, so status changes appear without waiting for dashboard sync polling.
     - Snapper Manager Boot/EFI stats now show installed kernel inventory (kernel count + per-kernel package/version labels).
     - Snapper Option 4 cleanup modal now includes a detected installed-kernel-family dropdown (`KERNEL_FAMILY_PURGE_TARGETS` helper) populated from `/api/boot/stats`, while keeping manual target input available.
+    - Snapper confirmation modal now auto-refreshes confirm tokens when they expire while the dialog is open (for both direct run and background start paths), preventing `missing/expired confirm token` failures after longer review/customization time.
     - Added regression smoke test: `test_snapper_timer_controls_regression.sh` verifies per-timer Snapper controls are wired across WebUI, API, and helper subcommands.
     - WebUI Settings drawer also includes the `KERNEL_FAMILY_PURGE_*` keys (Advanced + Danger zone).
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:

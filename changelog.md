@@ -47,6 +47,7 @@
 - Added regression smoke test `test_snapper_timer_controls_regression.sh` to assert per-timer Snapper controls are wired across WebUI buttons, API actions, and helper subcommands.
 - Snapper Manager timer badges now refresh immediately after successful timer enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, instead of waiting for stale dashboard polling state.
 - Snapper Option 4 cleanup confirmation modal now includes a detected installed-kernel-family dropdown (populated from `/api/boot/stats`) to help set `KERNEL_FAMILY_PURGE_TARGETS` quickly while preserving manual input.
+- Snapper WebUI confirm modal now auto-refreshes expired confirmation tokens and retries once (both `/api/snapper/run` and `/api/snapper/start` paths), reducing `missing/expired confirm token` failures when users spend longer in the dialog.
 
 ## v70 (2026-02-18)
 - See `README.md` → Version History for full release notes.

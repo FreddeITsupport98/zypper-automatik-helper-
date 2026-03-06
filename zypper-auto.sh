@@ -21184,56 +21184,85 @@ generate_dashboard() {
                     setProg('Starting', 5);
                     setLog('Starting Snapper job...');
 
-                    var bodyJob = { action: _sn.action, params: _sn.params };
-                    bodyJob.confirm_token = confirmToken;
-                    bodyJob.confirm_phrase = got2;
+                    function _startSnapperJobWithToken(tok, phr, didRetry) {
+                        var bodyJob = { action: _sn.action, params: _sn.params };
+                        bodyJob.confirm_token = tok;
+                        bodyJob.confirm_phrase = phr;
 
-                    _api('/api/snapper/start', { method: 'POST', body: JSON.stringify(bodyJob) }).then(function(r0) {
-                        if (!r0 || !r0.job_id) throw new Error('missing job_id');
-                        var jobId = String(r0.job_id);
-                        var wasCoalesced = !!(r0 && r0.coalesced);
+                        return _api('/api/snapper/start', { method: 'POST', body: JSON.stringify(bodyJob) }).then(function(r0) {
+                            if (!r0 || !r0.job_id) throw new Error('missing job_id');
+                            var jobId = String(r0.job_id);
+                            var wasCoalesced = !!(r0 && r0.coalesced);
 
-                        // Switch UI into a resumable, minimizable running view.
-                        var jobTitle = 'Snapper job';
-                        try {
-                            if (String(_sn.action || '') === 'cleanup') {
-                                jobTitle = 'Snapper cleanup';
-                            } else if (String(_sn.action || '') === 'rollback') {
-                                var rid = '';
-                                try { rid = String((_sn.params || {}).id || '').trim(); } catch (eRid) { rid = ''; }
-                                jobTitle = 'Snapper rollback' + (rid ? (' #' + rid) : '');
+                            // Switch UI into a resumable, minimizable running view.
+                            var jobTitle = 'Snapper job';
+                            try {
+                                if (String(_sn.action || '') === 'cleanup') {
+                                    jobTitle = 'Snapper cleanup';
+                                } else if (String(_sn.action || '') === 'rollback') {
+                                    var rid = '';
+                                    try { rid = String((_sn.params || {}).id || '').trim(); } catch (eRid) { rid = ''; }
+                                    jobTitle = 'Snapper rollback' + (rid ? (' #' + rid) : '');
+                                }
+                            } catch (eT0) { jobTitle = 'Snapper job'; }
+                            _snRenderRunning({ title: jobTitle, job_id: jobId, coalesced: wasCoalesced });
+                            _snShow(true);
+                            if (wasCoalesced) {
+                                try { setLog('[coalesced] Reusing running Snapper job: ' + jobId + '\nOpening existing log stream…'); } catch (eL0) {}
+                                toast('Snapper already running', 'Reused existing job', 'ok');
                             }
-                        } catch (eT0) { jobTitle = 'Snapper job'; }
-                        _snRenderRunning({ title: jobTitle, job_id: jobId, coalesced: wasCoalesced });
-                        _snShow(true);
-                        if (wasCoalesced) {
-                            try { setLog('[coalesced] Reusing running Snapper job: ' + jobId + '\nOpening existing log stream…'); } catch (eL0) {}
-                            toast('Snapper already running', 'Reused existing job', 'ok');
-                        }
 
-                        // Begin polling + bubble support.
-                        _snPollJob(jobId, jobTitle, String(_sn.action || ''));
-                        return r0;
-                    }).catch(function(err0) {
-                        var msg0 = (err0 && err0.message) ? err0.message : 'start failed';
-                        _sn.running = false;
-                        toast('Snapper failed to start', msg0, 'err');
-                        setProg('Failed', 100);
-                        setLog('ERROR: ' + msg0);
-                        _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
-
-                        try {
-                            if (typeof _sn.resolve === 'function') {
-                                _sn.resolve(null);
-                                _sn.resolve = null;
+                            // Begin polling + bubble support.
+                            _snPollJob(jobId, jobTitle, String(_sn.action || ''));
+                            return r0;
+                        }).catch(function(err0) {
+                            var shouldRetry = false;
+                            try { shouldRetry = (!didRetry) && _snIsConfirmTokenError(err0); } catch (eTok) { shouldRetry = false; }
+                            if (shouldRetry) {
+                                var confirmAct = '';
+                                try { confirmAct = String(_sn.confirm_action || _sn.action || '').trim(); } catch (eCA0) { confirmAct = ''; }
+                                if (confirmAct) {
+                                    setProg('Refreshing confirmation', 8);
+                                    setLog('Confirm token expired while dialog was open. Refreshing token and retrying...');
+                                    return _snRequestFreshConfirmToken(confirmAct, _sn.params || {}).then(function(cr) {
+                                        var tok2 = '';
+                                        var phr2 = '';
+                                        try { tok2 = String((cr && cr.confirm_token) || '').trim(); } catch (eT1) { tok2 = ''; }
+                                        try { phr2 = String(phr || '').trim(); } catch (eP1) { phr2 = ''; }
+                                        if (!phr2) {
+                                            try { phr2 = String((cr && cr.phrase) || '').trim(); } catch (eP2) { phr2 = ''; }
+                                        }
+                                        if (!tok2) throw new Error('missing confirm token (refresh failed)');
+                                        confirmToken = tok2;
+                                        toast('Confirmation refreshed', 'Token expired while dialog was open; retrying.', 'warn');
+                                        return _startSnapperJobWithToken(tok2, phr2, true);
+                                    });
+                                }
                             }
-                        } catch (eRes3) {}
 
-                        if (e.close) {
-                            e.close.textContent = 'OK';
-                            e.close.onclick = function() { _snClose(null); };
-                        }
-                    });
+                            var msg0 = (err0 && err0.message) ? err0.message : 'start failed';
+                            _sn.running = false;
+                            toast('Snapper failed to start', msg0, 'err');
+                            setProg('Failed', 100);
+                            setLog('ERROR: ' + msg0);
+                            _snSetButtons({ show_cancel: false, show_run: false, show_close: true, close_disabled: false });
+
+                            try {
+                                if (typeof _sn.resolve === 'function') {
+                                    _sn.resolve(null);
+                                    _sn.resolve = null;
+                                }
+                            } catch (eRes3) {}
+
+                            if (e.close) {
+                                e.close.textContent = 'OK';
+                                e.close.onclick = function() { _snClose(null); };
+                            }
+                            return null;
+                        });
+                    }
+
+                    _startSnapperJobWithToken(confirmToken, got2, false);
 
                     return;
                 }
@@ -21290,43 +21319,98 @@ generate_dashboard() {
     }
     window.znhSnapperRefreshTimerBadges = znhSnapperRefreshTimerBadges;
 
+    function _snConfirmTokenErrorText(errObj) {
+        var parts = [];
+        try {
+            var m = (errObj && errObj.message != null) ? String(errObj.message) : '';
+            if (m) parts.push(m);
+        } catch (e0) {}
+        try {
+            var pe = (errObj && errObj.payload && errObj.payload.error != null) ? String(errObj.payload.error) : '';
+            if (pe) parts.push(pe);
+        } catch (e1) {}
+        try {
+            return String(parts.join(' ') || '').toLowerCase();
+        } catch (e2) {
+            return '';
+        }
+    }
+
+    function _snIsConfirmTokenError(errObj) {
+        var txt = '';
+        try { txt = _snConfirmTokenErrorText(errObj); } catch (e0) { txt = ''; }
+        if (!txt) return false;
+        if (txt.indexOf('missing/expired confirm token') >= 0) return true;
+        if (txt.indexOf('confirm token expired') >= 0) return true;
+        if (txt.indexOf('confirm token') >= 0) return true;
+        return false;
+    }
+
+    function _snRequestFreshConfirmToken(action, params) {
+        var a = '';
+        try { a = String(action || '').trim(); } catch (e0) { a = ''; }
+        if (!a) return Promise.reject(new Error('missing confirm action'));
+        return _api('/api/snapper/confirm', { method: 'POST', body: JSON.stringify({ action: a, params: (params || {}) }) });
+    }
+
     function snapperRun(action, params, confirmAction) {
         params = params || {};
 
         function doRun(confirm_token, confirm_phrase) {
-            var body = { action: action, params: params };
-            if (confirm_token) body.confirm_token = confirm_token;
-            if (confirm_phrase) body.confirm_phrase = confirm_phrase;
+            function _runOnce(tok, phr) {
+                var body = { action: action, params: params };
+                if (tok) body.confirm_token = tok;
+                if (phr) body.confirm_phrase = phr;
 
-            _snapperSetOut('Running: ' + action + ' ...');
-            return _api('/api/snapper/run', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
-                _snapperSetOut(r.output || '(no output)');
-                var msg = (r.rc === 0) ? 'OK' : ('rc=' + r.rc);
-                var toastKind = (r.rc === 0) ? 'ok' : 'err';
-                var actionStr = String(action || '');
-                var didTimerToggle = false;
-                if (r.rc === 0 && String(action || '') === 'rollback') msg = 'OK (reboot required)';
-                if (r.rc === 0 && String(action || '') === 'auto-disable') {
-                    msg = '✓ Disabled (timers intentionally off)';
-                    toastKind = 'warn';
-                    didTimerToggle = true;
-                } else if (r.rc === 0 && String(action || '') === 'auto-enable') {
-                    msg = '✓ Enabled';
-                    didTimerToggle = true;
-                } else if (r.rc === 0 && actionStr.indexOf('timer-disable-') === 0) {
-                    msg = '✓ Timer disabled';
-                    toastKind = 'warn';
-                    didTimerToggle = true;
-                } else if (r.rc === 0 && actionStr.indexOf('timer-enable-') === 0) {
-                    msg = '✓ Timer enabled';
-                    didTimerToggle = true;
-                }
-                toast('Snapper: ' + action, msg, toastKind);
-                _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
-                if (didTimerToggle) {
-                    try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (eR0) {}
-                }
-                return r;
+                _snapperSetOut('Running: ' + action + ' ...');
+                return _api('/api/snapper/run', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
+                    _snapperSetOut(r.output || '(no output)');
+                    var msg = (r.rc === 0) ? 'OK' : ('rc=' + r.rc);
+                    var toastKind = (r.rc === 0) ? 'ok' : 'err';
+                    var actionStr = String(action || '');
+                    var didTimerToggle = false;
+                    if (r.rc === 0 && String(action || '') === 'rollback') msg = 'OK (reboot required)';
+                    if (r.rc === 0 && String(action || '') === 'auto-disable') {
+                        msg = '✓ Disabled (timers intentionally off)';
+                        toastKind = 'warn';
+                        didTimerToggle = true;
+                    } else if (r.rc === 0 && String(action || '') === 'auto-enable') {
+                        msg = '✓ Enabled';
+                        didTimerToggle = true;
+                    } else if (r.rc === 0 && actionStr.indexOf('timer-disable-') === 0) {
+                        msg = '✓ Timer disabled';
+                        toastKind = 'warn';
+                        didTimerToggle = true;
+                    } else if (r.rc === 0 && actionStr.indexOf('timer-enable-') === 0) {
+                        msg = '✓ Timer enabled';
+                        didTimerToggle = true;
+                    }
+                    toast('Snapper: ' + action, msg, toastKind);
+                    _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
+                    if (didTimerToggle) {
+                        try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (eR0) {}
+                    }
+                    return r;
+                });
+            }
+
+            return _runOnce(confirm_token, confirm_phrase).catch(function(e0) {
+                var needsRefresh = false;
+                try { needsRefresh = !!confirmAction && _snIsConfirmTokenError(e0); } catch (e1) { needsRefresh = false; }
+                if (!needsRefresh) throw e0;
+
+                return _snRequestFreshConfirmToken(confirmAction, params).then(function(cr) {
+                    var tok2 = '';
+                    var phr2 = '';
+                    try { tok2 = String((cr && cr.confirm_token) || '').trim(); } catch (e2) { tok2 = ''; }
+                    try { phr2 = String(confirm_phrase || '').trim(); } catch (e3) { phr2 = ''; }
+                    if (!phr2) {
+                        try { phr2 = String((cr && cr.phrase) || '').trim(); } catch (e4) { phr2 = ''; }
+                    }
+                    if (!tok2) throw new Error('missing confirm token (refresh failed)');
+                    toast('Confirmation refreshed', 'Token expired while dialog was open; retrying.', 'warn');
+                    return _runOnce(tok2, phr2);
+                });
             }).catch(function(e) {
                 var msg = (e && e.message) ? e.message : 'unknown error';
                 var payload = (e && e.payload) ? JSON.stringify(e.payload) : '';
