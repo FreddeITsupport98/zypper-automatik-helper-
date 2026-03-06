@@ -2234,6 +2234,8 @@ __znh_write_dashboard_schema_json() {
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
     "DASHBOARD_PERFORMANCE_MODE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
+    "MANAGERS_SERVER_POLL_VISIBLE_MS": {"type": "int", "min": 1200, "max": 60000, "step": 100, "default": "4500"},
+    "MANAGERS_SERVER_POLL_HIDDEN_MS": {"type": "int", "min": 2000, "max": 180000, "step": 100, "default": "16000"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
@@ -8348,6 +8350,22 @@ DASHBOARD_JS_VERBOSE_DEBUG=false
 #   zypper-auto-helper --dash-open
 DASHBOARD_PERFORMANCE_MODE="powersaving"
 
+# MANAGERS_SERVER_POLL_VISIBLE_MS
+# Managers overlay → Server (SQLite) tab polling interval in milliseconds while
+# the browser tab is visible.
+# Lower = more responsive but higher API/CPU usage.
+# Range: 1200..60000
+# Default: 4500
+MANAGERS_SERVER_POLL_VISIBLE_MS=4500
+
+# MANAGERS_SERVER_POLL_HIDDEN_MS
+# Managers overlay → Server (SQLite) tab polling interval in milliseconds while
+# the browser tab is hidden/backgrounded.
+# Keep this higher than visible polling to reduce idle background load.
+# Range: 2000..180000
+# Default: 16000
+MANAGERS_SERVER_POLL_HIDDEN_MS=16000
+
 # SELF_UPDATE_CHANNEL
 # Controls which update channel is used by default when you run:
 #   sudo zypper-auto-helper --self-update
@@ -9227,6 +9245,8 @@ EOF
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_allowed_set DASHBOARD_PERFORMANCE_MODE powersaving "powersaving,balanced,performance"
+    validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_VISIBLE_MS 4500 1200 60000
+    validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_HIDDEN_MS 16000 2000 180000
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
@@ -9478,6 +9498,8 @@ EOF
     log_debug "  HOOKS_ENABLED=${HOOKS_ENABLED:-true}"
     log_debug "  DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-true}"
     log_debug "  DASHBOARD_BROWSER=${DASHBOARD_BROWSER:-<default>}"
+    log_debug "  MANAGERS_SERVER_POLL_VISIBLE_MS=${MANAGERS_SERVER_POLL_VISIBLE_MS:-4500}"
+    log_debug "  MANAGERS_SERVER_POLL_HIDDEN_MS=${MANAGERS_SERVER_POLL_HIDDEN_MS:-16000}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
     log_debug "  SNAP_RETENTION_OPTIMIZER_ENABLED=${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}"
     log_debug "  SNAP_RETENTION_MAX_NUMBER_LIMIT=${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}"
@@ -9593,6 +9615,8 @@ EOF
     _mark_missing_key "HOOKS_BASE_DIR"
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
+    _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
+    _mark_missing_key "MANAGERS_SERVER_POLL_HIDDEN_MS"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
     _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
     _mark_missing_key "ZYPPER_TURBO_TUNER_ENABLED"
@@ -9733,6 +9757,12 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
+                    ;;
+                MANAGERS_SERVER_POLL_VISIBLE_MS)
+                    log_info "  - MANAGERS_SERVER_POLL_VISIBLE_MS: Managers Server tab polling interval (ms) when browser tab is visible."
+                    ;;
+                MANAGERS_SERVER_POLL_HIDDEN_MS)
+                    log_info "  - MANAGERS_SERVER_POLL_HIDDEN_MS: Managers Server tab polling interval (ms) when browser tab is hidden/backgrounded."
                     ;;
                 SELF_UPDATE_CHANNEL)
                     log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
@@ -10002,6 +10032,12 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     DASHBOARD_BROWSER=""
+                    ;;
+                MANAGERS_SERVER_POLL_VISIBLE_MS)
+                    MANAGERS_SERVER_POLL_VISIBLE_MS=4500
+                    ;;
+                MANAGERS_SERVER_POLL_HIDDEN_MS)
+                    MANAGERS_SERVER_POLL_HIDDEN_MS=16000
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     SNAP_RETENTION_OPTIMIZER_ENABLED="true"
@@ -15556,8 +15592,32 @@ generate_dashboard() {
         activeOpts: null,
         pollVisibleMs: 4500,
         pollHiddenMs: 16000,
+        jitterPct: 0.12,
         visibilityBound: false
     };
+
+    function _znhMgrServerBoundInt(v, dflt, min, max) {
+        var n = dflt;
+        try { n = parseInt(String(v == null ? '' : v), 10); } catch (e0) { n = dflt; }
+        if (!isFinite(n) || isNaN(n)) n = dflt;
+        if (n < min) n = min;
+        if (n > max) n = max;
+        return n;
+    }
+
+    function _znhMgrServerApplyPollingConfig(cfg) {
+        // Keep this lightweight: safe clamping + no side effects.
+        try {
+            var vis = _znhMgrServerBoundInt((cfg && cfg.MANAGERS_SERVER_POLL_VISIBLE_MS != null) ? cfg.MANAGERS_SERVER_POLL_VISIBLE_MS : '', 4500, 1200, 60000);
+            var hid = _znhMgrServerBoundInt((cfg && cfg.MANAGERS_SERVER_POLL_HIDDEN_MS != null) ? cfg.MANAGERS_SERVER_POLL_HIDDEN_MS : '', 16000, 2000, 180000);
+            if (hid < vis) hid = vis;
+            _znhMgrServer.pollVisibleMs = vis;
+            _znhMgrServer.pollHiddenMs = hid;
+        } catch (e0) {
+            _znhMgrServer.pollVisibleMs = 4500;
+            _znhMgrServer.pollHiddenMs = 16000;
+        }
+    }
 
     function _znhMgrServerOverlayOpen() {
         try {
@@ -15590,12 +15650,29 @@ generate_dashboard() {
 
     function _znhMgrServerNextDelayMs() {
         var ms = 4500;
+        var hidden = false;
         try {
-            ms = document.hidden ? parseInt(_znhMgrServer.pollHiddenMs || 16000, 10) : parseInt(_znhMgrServer.pollVisibleMs || 4500, 10);
-            if (!ms || isNaN(ms) || ms < 1200) ms = document.hidden ? 16000 : 4500;
+            hidden = !!document.hidden;
+            ms = hidden ? parseInt(_znhMgrServer.pollHiddenMs || 16000, 10) : parseInt(_znhMgrServer.pollVisibleMs || 4500, 10);
+            if (!ms || isNaN(ms) || ms < 1200) ms = hidden ? 16000 : 4500;
         } catch (e) {
             ms = 4500;
         }
+        // Add bounded jitter so multiple tabs/clients don't synchronize exactly.
+        try {
+            var jitterPct = parseFloat(_znhMgrServer.jitterPct || 0.12);
+            if (!isFinite(jitterPct) || jitterPct < 0) jitterPct = 0;
+            if (jitterPct > 0.5) jitterPct = 0.5;
+            if (jitterPct > 0) {
+                var win = Math.round(ms * jitterPct);
+                if (win > 0) {
+                    ms = ms + Math.round((Math.random() * (win * 2)) - win);
+                }
+            }
+        } catch (e2) {}
+        var minMs = hidden ? 2000 : 1200;
+        if (ms < minMs) ms = minMs;
+        if (ms > 180000) ms = 180000;
         return ms;
     }
 
@@ -17866,6 +17943,8 @@ generate_dashboard() {
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
         { key: 'DASHBOARD_PERFORMANCE_MODE', type: 'enum', label: 'Dashboard: performance mode (PowerSaving/Balanced/Performance)', help: 'Controls WebUI polling cadence and dash-open worker intervals. Default is powersaving to avoid CPU/RAM hogging. Tip: after changing this, re-open the dashboard (zypper-auto-helper --dash-open) to restart background workers with the new mode.' },
+        { key: 'MANAGERS_SERVER_POLL_VISIBLE_MS', type: 'int', label: 'Managers (Server tab): visible poll interval (ms)', advanced: true, help: 'Polling interval while the browser tab is visible. Lower values are more responsive but use more API/CPU.' },
+        { key: 'MANAGERS_SERVER_POLL_HIDDEN_MS', type: 'int', label: 'Managers (Server tab): hidden poll interval (ms)', advanced: true, help: 'Polling interval while browser tab is hidden/backgrounded. Use a higher value to reduce idle load.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
@@ -20217,16 +20296,29 @@ generate_dashboard() {
         if (!e.body) return;
 
         var title = 'Snapper cleanup';
+        var coalesced = false;
         try { title = String(taskInfo.title || 'Snapper cleanup'); } catch (e0) { title = 'Snapper cleanup'; }
+        try { coalesced = !!taskInfo.coalesced; } catch (e1) { coalesced = false; }
 
         _snSetHeader('Running', 'In progress', title);
         _snSetMinBtnVisible(true);
+
+        var coalescedHtml = '';
+        if (coalesced) {
+            coalescedHtml = [
+                '<div class=\"overlay-alert overlay-alert-ok\">',
+                '  <div style=\"font-weight:950;\">Reused running Snapper job</div>',
+                '  <div style=\"margin-top:6px; font-weight:800;\">A matching Snapper job was already active, so this view is attached to the existing job stream.</div>',
+                '</div>'
+            ].join('\\n');
+        }
 
         e.body.innerHTML = [
             '<div class="overlay-alert overlay-alert-warn">',
             '  <div style="font-weight:950;">Snapper job running</div>',
             '  <div style="margin-top:6px; font-weight:800;">This job runs in the background. You can minimize and reopen from the bottom-right bubble.</div>',
             '</div>',
+            coalescedHtml,
             '<div class="overlay-progress">',
             '  <div class="overlay-progress-row"><span id="sn-stage">Running</span><span id="sn-percent">0%</span></div>',
             '  <div class="progress-track"><div class="progress-fill" id="sn-progress-bar" style="width:0%;"></div></div>',
@@ -20902,6 +20994,7 @@ generate_dashboard() {
                     _api('/api/snapper/start', { method: 'POST', body: JSON.stringify(bodyJob) }).then(function(r0) {
                         if (!r0 || !r0.job_id) throw new Error('missing job_id');
                         var jobId = String(r0.job_id);
+                        var wasCoalesced = !!(r0 && r0.coalesced);
 
                         // Switch UI into a resumable, minimizable running view.
                         var jobTitle = 'Snapper job';
@@ -20914,9 +21007,12 @@ generate_dashboard() {
                                 jobTitle = 'Snapper rollback' + (rid ? (' #' + rid) : '');
                             }
                         } catch (eT0) { jobTitle = 'Snapper job'; }
-
-                        _snRenderRunning({ title: jobTitle, job_id: jobId });
+                        _snRenderRunning({ title: jobTitle, job_id: jobId, coalesced: wasCoalesced });
                         _snShow(true);
+                        if (wasCoalesced) {
+                            try { setLog('[coalesced] Reusing running Snapper job: ' + jobId + '\nOpening existing log stream…'); } catch (eL0) {}
+                            toast('Snapper already running', 'Reused existing job', 'ok');
+                        }
 
                         // Begin polling + bubble support.
                         _snPollJob(jobId, jobTitle, String(_sn.action || ''));
@@ -21032,6 +21128,64 @@ generate_dashboard() {
         });
     }
 
+    function _snCleanupPreflightSummaryText(pf, mode) {
+        var p = pf || {};
+        var lines = [];
+        var freeMb = null;
+        var criticalMb = null;
+        var highMb = null;
+        var hystOn = false;
+        var hystLatched = false;
+        var guardReq = false;
+        var guardReason = '';
+
+        try { freeMb = (p && p.free_mb != null) ? parseInt(p.free_mb, 10) : null; } catch (e0) { freeMb = null; }
+        try { criticalMb = (p && p.critical_mb != null) ? parseInt(p.critical_mb, 10) : null; } catch (e1) { criticalMb = null; }
+        try { highMb = (p && p.high_mb != null) ? parseInt(p.high_mb, 10) : null; } catch (e2) { highMb = null; }
+        try { hystOn = !!(p && p.hysteresis_enabled); } catch (e3) { hystOn = false; }
+        try { hystLatched = !!(p && p.hysteresis_latched); } catch (e4) { hystLatched = false; }
+        try { guardReq = !!(p && p.low_space_guard_required); } catch (e5) { guardReq = false; }
+        try { guardReason = String((p && p.low_space_guard_reason) || ''); } catch (e6) { guardReason = ''; }
+
+        lines.push('[preflight] Snapper cleanup');
+        lines.push('[preflight] mode=' + String(mode || 'all'));
+
+        var freeTxt = (freeMb != null && !isNaN(freeMb)) ? (String(freeMb) + 'MB') : 'unknown';
+        var critTxt = (criticalMb != null && !isNaN(criticalMb)) ? (String(criticalMb) + 'MB') : 'unknown';
+        var highTxt = (highMb != null && !isNaN(highMb)) ? (String(highMb) + 'MB') : 'unknown';
+        lines.push('[preflight] free=' + freeTxt + ' critical<=' + critTxt + ' clear>=' + highTxt + ' hysteresis=' + (hystOn ? 'on' : 'off') + ' latched=' + (hystLatched ? 'yes' : 'no'));
+
+        if (guardReq) {
+            lines.push('[preflight] low-space guard: ACTIVE' + (guardReason ? (' (' + guardReason + ')') : ''));
+            lines.push('[preflight] cleanup may require force override checkbox in confirmation dialog');
+        } else {
+            lines.push('[preflight] low-space guard: clear');
+        }
+
+        try {
+            var busy = (p && p.busy) ? p.busy : {};
+            var anyBusy = !!busy.any_busy;
+            var snapBusy = !!busy.snapper_job_running;
+            var zyppBusy = !!busy.zypp_lock_active;
+            if (!anyBusy) {
+                lines.push('[preflight] busy: none detected');
+            } else {
+                if (snapBusy) {
+                    var bj = String(busy.snapper_job_id || '');
+                    var bt = String(busy.snapper_title || '');
+                    lines.push('[preflight] busy: snapper job already running' + (bj ? (' (job_id=' + bj + ')') : '') + (bt ? (' [' + bt + ']') : ''));
+                }
+                if (zyppBusy) {
+                    var lf = String(busy.zypp_lock_file || '');
+                    var lp = String(busy.zypp_lock_pid || '');
+                    lines.push('[preflight] busy: zypp lock active' + (lf ? (' (' + lf + ')') : '') + (lp ? (' pid=' + lp) : ''));
+                }
+            }
+        } catch (e7) {}
+
+        return lines.join('\n');
+    }
+
     function _wireSnapperUI() {
         var b1 = document.getElementById('snapper-status-btn');
         var b2 = document.getElementById('snapper-list-btn');
@@ -21091,6 +21245,9 @@ generate_dashboard() {
         if (b4) b4.addEventListener('click', function() {
             var mode = 'all';
             try { mode = String((document.getElementById('snapper-cleanup-mode') || {}).value || 'all'); } catch (e) { mode = 'all'; }
+            if (mode !== 'all' && mode !== 'force-prune' && mode !== 'number' && mode !== 'timeline' && mode !== 'empty-pre-post') {
+                mode = 'all';
+            }
 
             function doRunCleanup() {
                 var p = null;
@@ -21105,15 +21262,44 @@ generate_dashboard() {
                 } catch (e4) {}
             }
 
+            function runCleanupAfterPreflight() {
+                _api('/api/snapper/preflight?action=cleanup', { method: 'GET' }).then(function(pf) {
+                    try { _snapperSetOut(_snCleanupPreflightSummaryText(pf || {}, mode)); } catch (e0) {}
+
+                    try {
+                        var busy = (pf && pf.busy) ? pf.busy : {};
+                        if (busy && busy.snapper_job_running) {
+                            var runningJid = String(busy.snapper_job_id || '').trim();
+                            var runningTitle = String(busy.snapper_title || 'Snapper job');
+                            toast('Snapper already running', 'Reusing existing running job', 'ok');
+                            if (runningJid && typeof snapperTaskOpenOverlay === 'function') {
+                                snapperTaskOpenOverlay({ job_id: runningJid, title: runningTitle });
+                            }
+                            return;
+                        }
+                        if (busy && busy.zypp_lock_active) {
+                            toast('Zypp lock active', 'Cleanup may wait for package manager lock', 'warn');
+                        }
+                    } catch (e1) {}
+
+                    doRunCleanup();
+                }).catch(function(errPf) {
+                    var msgPf = (errPf && errPf.message) ? errPf.message : 'preflight failed';
+                    toast('Preflight failed', msgPf, 'err');
+                    try { _snapperSetOut('ERROR: Snapper preflight failed: ' + msgPf); } catch (e2) {}
+                    doRunCleanup();
+                });
+            }
+
             // Capture BEFORE so we can show "affected by prune" deltas after cleanup completes.
             try {
                 if (typeof znhBootStatsCaptureBaseline === 'function') {
-                    znhBootStatsCaptureBaseline('snapper-cleanup').then(doRunCleanup).catch(doRunCleanup);
+                    znhBootStatsCaptureBaseline('snapper-cleanup').then(runCleanupAfterPreflight).catch(runCleanupAfterPreflight);
                 } else {
-                    doRunCleanup();
+                    runCleanupAfterPreflight();
                 }
             } catch (eB) {
-                doRunCleanup();
+                runCleanupAfterPreflight();
             }
         });
 
@@ -27413,6 +27599,7 @@ generate_dashboard() {
             return _api('/api/config', { method: 'GET' });
         }).then(function(c) {
             _settingsConfig = c.config
+            try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
             try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
             try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
@@ -27690,6 +27877,7 @@ generate_dashboard() {
                 try {
                     if (c && c.config) {
                         _settingsConfig = c.config;
+                        try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
                         try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
                         try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
                         try { znhDebugUpdateToggleUi(); } catch (eDU) {}
@@ -47566,6 +47754,53 @@ def _history_extract_ai_meta(extra_json_text: str) -> tuple[bool, str]:
     return bool(ai_triggered), str(ai_source or "")
 
 
+def _history_extract_snapper_guard_meta(extra_json_text: str) -> dict:
+    out = {
+        "force_low_space": False,
+        "low_space_guard_required": False,
+        "low_space_guard_reason": "",
+        "low_space_hysteresis_enabled": False,
+        "low_space_hysteresis_latched": False,
+        "low_space_free_mb": None,
+        "low_space_critical_mb": None,
+        "low_space_high_mb": None,
+    }
+    try:
+        raw = str(extra_json_text or "").strip()
+        if not raw:
+            return out
+        meta = json.loads(raw)
+        if not isinstance(meta, dict):
+            return out
+
+        out["force_low_space"] = _to_boolish(meta.get("force_low_space", False))
+        out["low_space_guard_required"] = _to_boolish(meta.get("low_space_guard_required", False))
+        out["low_space_hysteresis_enabled"] = _to_boolish(meta.get("low_space_hysteresis_enabled", False))
+        out["low_space_hysteresis_latched"] = _to_boolish(meta.get("low_space_hysteresis_latched", False))
+
+        try:
+            reason = str(meta.get("low_space_guard_reason", "") or "").strip()
+            reason = re.sub(r"[\r\n\t]+", " ", reason)
+            if len(reason) > 240:
+                reason = reason[:240]
+            out["low_space_guard_reason"] = reason
+        except Exception:
+            out["low_space_guard_reason"] = ""
+
+        for key in ("low_space_free_mb", "low_space_critical_mb", "low_space_high_mb"):
+            try:
+                v = meta.get(key, None)
+                if v is None:
+                    out[key] = None
+                    continue
+                out[key] = int(str(v).strip())
+            except Exception:
+                out[key] = None
+    except Exception:
+        return out
+    return out
+
+
 def _history_job_upsert(server, job: dict, *, summary: str = "", extra: dict | None = None) -> None:
     # job is a normalized payload with keys similar to existing /api/*/job responses.
     try:
@@ -47638,6 +47873,61 @@ def _history_job_upsert(server, job: dict, *, summary: str = "", extra: dict | N
                 extra_payload["ai_triggered"] = True
             if ai_source:
                 extra_payload["ai_source"] = ai_source
+
+            # Snapper low-space guard telemetry (for Managers Server visibility).
+            try:
+                force_low_space = _to_boolish(job.get("force_low_space", False))
+                if force_low_space:
+                    extra_payload["force_low_space"] = True
+            except Exception:
+                pass
+            try:
+                guard_required = _to_boolish(job.get("low_space_guard_required", False))
+                if guard_required:
+                    extra_payload["low_space_guard_required"] = True
+            except Exception:
+                pass
+            try:
+                guard_reason = str(job.get("low_space_guard_reason", "") or "").strip()
+                if guard_reason:
+                    if len(guard_reason) > 240:
+                        guard_reason = guard_reason[:240]
+                    extra_payload["low_space_guard_reason"] = guard_reason
+            except Exception:
+                pass
+            try:
+                h_enabled = _to_boolish(job.get("low_space_hysteresis_enabled", False))
+                if h_enabled:
+                    extra_payload["low_space_hysteresis_enabled"] = True
+            except Exception:
+                pass
+            try:
+                h_latched = _to_boolish(job.get("low_space_hysteresis_latched", False))
+                if h_latched:
+                    extra_payload["low_space_hysteresis_latched"] = True
+            except Exception:
+                pass
+            try:
+                free_mb_raw = job.get("low_space_free_mb", None)
+                if free_mb_raw is not None:
+                    free_mb = int(str(free_mb_raw).strip())
+                    extra_payload["low_space_free_mb"] = int(free_mb)
+            except Exception:
+                pass
+            try:
+                critical_raw = job.get("low_space_critical_mb", None)
+                if critical_raw is not None:
+                    critical_mb = int(str(critical_raw).strip())
+                    extra_payload["low_space_critical_mb"] = int(critical_mb)
+            except Exception:
+                pass
+            try:
+                high_raw = job.get("low_space_high_mb", None)
+                if high_raw is not None:
+                    high_mb = int(str(high_raw).strip())
+                    extra_payload["low_space_high_mb"] = int(high_mb)
+            except Exception:
+                pass
 
             if extra_payload:
                 extra_json = json.dumps(extra_payload, ensure_ascii=False)[:40_000]
@@ -47870,6 +48160,14 @@ def _recover_scrub_job(job_id: str) -> dict | None:
         "unit": unit,
         "log_path": log_path,
         "status_path": status_path,
+        "force_low_space": bool(force_low_space),
+        "low_space_guard_required": bool(low_space_guard_required),
+        "low_space_guard_reason": str(low_space_guard_reason or ""),
+        "low_space_hysteresis_enabled": bool(low_space_hysteresis_enabled),
+        "low_space_hysteresis_latched": bool(low_space_hysteresis_latched),
+        "low_space_free_mb": low_space_free_mb,
+        "low_space_critical_mb": low_space_critical_mb,
+        "low_space_high_mb": low_space_high_mb,
     }
 
 
@@ -47967,6 +48265,8 @@ def _scrub_any_running() -> dict:
 # Runs Snapper helper operations (cleanup/auto-enable/etc.) in a transient systemd unit.
 SNAPPER_LOG_DIR = DUP_LOG_DIR
 SNAPPER_STATUS_DIR = DUP_STATUS_DIR
+SNAPPER_STALE_ARTIFACT_MAX_AGE_SECONDS = 48 * 3600
+SNAPPER_ACTIVE_GRACE_SECONDS = 30 * 60
 
 
 def _snapper_paths(job_id: str) -> tuple[str, str, str, str]:
@@ -47976,6 +48276,272 @@ def _snapper_paths(job_id: str) -> tuple[str, str, str, str]:
     status_path = f"{SNAPPER_STATUS_DIR}/webui-snapper-{jid[:10]}.status"
     script_path = f"{SNAPPER_STATUS_DIR}/webui-snapper-{jid[:10]}.sh"
     return unit, log_path, status_path, script_path
+
+
+def _snapper_artifact_prefix(path: str) -> str:
+    try:
+        b = os.path.basename(path or "")
+    except Exception:
+        return ""
+    m = re.match(r"^webui-snapper-([A-Za-z0-9_-]+)\.(?:status|log|sh)$", b or "")
+    if not m:
+        return ""
+    return str(m.group(1) or "").strip()
+
+
+def _snapper_collect_active_prefixes(max_scan: int = 80) -> set[str]:
+    active: set[str] = set()
+    try:
+        paths = glob.glob(os.path.join(SNAPPER_STATUS_DIR, "webui-snapper-*.status"))
+    except Exception:
+        paths = []
+    try:
+        paths = sorted(paths, key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+
+    now = time.time()
+    for p in (paths or [])[: int(max_scan)]:
+        prefix = _snapper_artifact_prefix(p)
+        if not prefix:
+            continue
+
+        st = {}
+        try:
+            st = _read_kv_status(p)
+        except Exception:
+            st = {}
+
+        done = False
+        try:
+            done = str(st.get("done", "")).strip() in ("1", "true", "yes")
+        except Exception:
+            done = False
+        if done:
+            continue
+
+        age = 0.0
+        try:
+            age = float(now - os.path.getmtime(p))
+        except Exception:
+            age = 0.0
+
+        unit = f"znh-webui-snapper-{prefix[:8]}"
+        active_state = ""
+        if unit:
+            try:
+                rc_show, out_show = _run_cmd(
+                    ["systemctl", "show", unit, "-p", "ActiveState"],
+                    timeout_s=2,
+                    log=None,
+                )
+                if rc_show == 0:
+                    for line in (out_show or "").splitlines():
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            if k.strip() == "ActiveState":
+                                active_state = v.strip()
+            except Exception:
+                pass
+
+        if (active_state == "active") or (age < float(SNAPPER_ACTIVE_GRACE_SECONDS)):
+            active.add(prefix)
+    return active
+
+
+def _snapper_gc_stale_artifacts(max_age_seconds: int = SNAPPER_STALE_ARTIFACT_MAX_AGE_SECONDS) -> dict:
+    out = {
+        "ok": True,
+        "deleted": 0,
+        "deleted_status": 0,
+        "deleted_logs": 0,
+        "deleted_scripts": 0,
+        "kept_active": 0,
+        "scanned": 0,
+        "errors": 0,
+        "max_age_seconds": int(max_age_seconds),
+    }
+
+    try:
+        age_cutoff = int(max_age_seconds)
+    except Exception:
+        age_cutoff = int(SNAPPER_STALE_ARTIFACT_MAX_AGE_SECONDS)
+    if age_cutoff < 1800:
+        age_cutoff = 1800
+
+    active_prefixes = set()
+    try:
+        active_prefixes = _snapper_collect_active_prefixes()
+    except Exception:
+        active_prefixes = set()
+
+    now = time.time()
+    patterns = [
+        os.path.join(SNAPPER_STATUS_DIR, "webui-snapper-*.status"),
+        os.path.join(SNAPPER_LOG_DIR, "webui-snapper-*.log"),
+        os.path.join(SNAPPER_STATUS_DIR, "webui-snapper-*.sh"),
+    ]
+
+    candidates: list[str] = []
+    for pat in patterns:
+        try:
+            candidates.extend(glob.glob(pat) or [])
+        except Exception:
+            continue
+
+    # De-duplicate while preserving order.
+    seen = set()
+    uniq: list[str] = []
+    for p in candidates:
+        if p in seen:
+            continue
+        seen.add(p)
+        uniq.append(p)
+
+    for p in uniq:
+        out["scanned"] = int(out.get("scanned", 0)) + 1
+        prefix = _snapper_artifact_prefix(p)
+        if prefix and prefix in active_prefixes:
+            out["kept_active"] = int(out.get("kept_active", 0)) + 1
+            continue
+
+        age = 0.0
+        try:
+            age = float(now - os.path.getmtime(p))
+        except Exception:
+            age = 0.0
+        if age < float(age_cutoff):
+            continue
+
+        try:
+            os.remove(p)
+            out["deleted"] = int(out.get("deleted", 0)) + 1
+            if p.endswith(".status"):
+                out["deleted_status"] = int(out.get("deleted_status", 0)) + 1
+            elif p.endswith(".log"):
+                out["deleted_logs"] = int(out.get("deleted_logs", 0)) + 1
+            elif p.endswith(".sh"):
+                out["deleted_scripts"] = int(out.get("deleted_scripts", 0)) + 1
+        except Exception:
+            out["errors"] = int(out.get("errors", 0)) + 1
+            continue
+
+    return out
+
+
+def _conf_int_bounded(eff_conf: dict, key: str, default: int, min_v: int, max_v: int) -> int:
+    try:
+        raw = str((eff_conf or {}).get(key, default) or default).strip()
+        val = int(raw or default)
+    except Exception:
+        val = int(default)
+    if val < int(min_v):
+        val = int(min_v)
+    if val > int(max_v):
+        val = int(max_v)
+    return int(val)
+
+
+def _conf_bool(eff_conf: dict, key: str, default: bool) -> bool:
+    try:
+        raw = (eff_conf or {}).get(key, default)
+    except Exception:
+        raw = default
+    return _to_boolish(raw)
+
+
+def _free_space_kb(path: str = "/") -> int:
+    try:
+        st = os.statvfs(path)
+        return int((int(st.f_bavail) * int(st.f_frsize)) // 1024)
+    except Exception:
+        pass
+    try:
+        rc, out = _run_cmd(["df", "-Pk", path], timeout_s=3, log=None)
+        if rc == 0:
+            for ln in (out or "").splitlines():
+                s = str(ln or "").strip()
+                if not s or s.lower().startswith("filesystem"):
+                    continue
+                parts = re.split(r"\s+", s)
+                if len(parts) >= 4 and re.fullmatch(r"[0-9]+", parts[3] or ""):
+                    return int(parts[3])
+    except Exception:
+        pass
+    return -1
+
+
+def _snapper_cleanup_preflight(eff_conf: dict) -> dict:
+    critical_mb = _conf_int_bounded(eff_conf, "SNAP_CLEANUP_CRITICAL_FREE_MB", 300, 0, 5000)
+    high_mb = _conf_int_bounded(eff_conf, "SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB", 700, 0, 20000)
+    if high_mb <= critical_mb:
+        high_mb = critical_mb + 100
+    hysteresis_enabled = _conf_bool(eff_conf, "SNAP_CLEANUP_HYSTERESIS_ENABLED", True)
+
+    free_kb = _free_space_kb("/")
+    free_mb = int(free_kb // 1024) if free_kb >= 0 else -1
+
+    hysteresis_state_file = "/var/lib/zypper-auto/snapper-cleanup-hysteresis.state"
+    hysteresis_latched = False
+    if hysteresis_enabled and os.path.exists(hysteresis_state_file):
+        try:
+            with open(hysteresis_state_file, "r", encoding="utf-8", errors="replace") as f:
+                txt = f.read()
+            hysteresis_latched = bool(re.search(r"(?m)^\s*low\s*=\s*1\s*$", txt or ""))
+        except Exception:
+            hysteresis_latched = False
+
+    # Mirror helper logic (without mutating state file): entering low latches, high clears.
+    if free_mb >= 0:
+        if free_mb <= critical_mb:
+            hysteresis_latched = True
+        elif hysteresis_latched and free_mb >= high_mb:
+            hysteresis_latched = False
+
+    critical_low = bool(free_kb >= 0 and free_kb < (critical_mb * 1024))
+    hysteresis_guard_active = bool(hysteresis_enabled and hysteresis_latched and free_mb >= 0 and free_mb < high_mb)
+    guard_required = bool(critical_low or hysteresis_guard_active)
+
+    guard_reason = ""
+    if critical_low:
+        guard_reason = f"critical-low (free={free_mb}MB < {critical_mb}MB)"
+    elif hysteresis_guard_active:
+        guard_reason = f"hysteresis-latch (free={free_mb}MB, low<={critical_mb}MB, clear>={high_mb}MB)"
+
+    running_info = {}
+    try:
+        running_info = _snapper_any_running() or {}
+    except Exception:
+        running_info = {}
+
+    zypp_lock_file, zypp_lock_pid, zypp_lock_active = _zypp_lock_info()
+
+    busy = {
+        "any_busy": bool(running_info.get("running")) or bool(zypp_lock_active),
+        "snapper_job_running": bool(running_info.get("running")),
+        "snapper_job_id": str(running_info.get("job_id", "") or "").strip(),
+        "snapper_action": str(running_info.get("action", "") or "").strip(),
+        "snapper_title": str(running_info.get("title", "") or "").strip(),
+        "snapper_unit": str(running_info.get("unit", "") or "").strip(),
+        "zypp_lock_active": bool(zypp_lock_active),
+        "zypp_lock_file": str(zypp_lock_file or ""),
+        "zypp_lock_pid": str(zypp_lock_pid or ""),
+    }
+
+    return {
+        "ts": time.time(),
+        "free_kb": int(free_kb) if free_kb >= 0 else -1,
+        "free_mb": int(free_mb) if free_mb >= 0 else -1,
+        "critical_mb": int(critical_mb),
+        "high_mb": int(high_mb),
+        "hysteresis_enabled": bool(hysteresis_enabled),
+        "hysteresis_latched": bool(hysteresis_latched),
+        "low_space_guard_required": bool(guard_required),
+        "low_space_guard_reason": str(guard_reason or ""),
+        "force_override_needed": bool(guard_required),
+        "can_run_without_force": not bool(guard_required),
+        "busy": busy,
+    }
 
 
 def _recover_snapper_job(job_id: str) -> dict | None:
@@ -48058,6 +48624,29 @@ def _recover_snapper_job(job_id: str) -> dict | None:
 
     action = str(status.get("action", "") or "").strip()
     title = str(status.get("title", "") or "").strip()
+    force_low_space = _to_boolish(status.get("force_low_space", False))
+    low_space_guard_required = _to_boolish(status.get("low_space_guard_required", False))
+    low_space_guard_reason = str(status.get("low_space_guard_reason", "") or "").strip()
+    low_space_hysteresis_enabled = _to_boolish(status.get("low_space_hysteresis_enabled", False))
+    low_space_hysteresis_latched = _to_boolish(status.get("low_space_hysteresis_latched", False))
+    low_space_free_mb = None
+    low_space_critical_mb = None
+    low_space_high_mb = None
+    try:
+        if re.fullmatch(r"-?[0-9]+", str(status.get("low_space_free_mb", "") or "").strip()):
+            low_space_free_mb = int(str(status.get("low_space_free_mb", "")).strip())
+    except Exception:
+        low_space_free_mb = None
+    try:
+        if re.fullmatch(r"-?[0-9]+", str(status.get("low_space_critical_mb", "") or "").strip()):
+            low_space_critical_mb = int(str(status.get("low_space_critical_mb", "")).strip())
+    except Exception:
+        low_space_critical_mb = None
+    try:
+        if re.fullmatch(r"-?[0-9]+", str(status.get("low_space_high_mb", "") or "").strip()):
+            low_space_high_mb = int(str(status.get("low_space_high_mb", "")).strip())
+    except Exception:
+        low_space_high_mb = None
 
     return {
         "job_id": jid,
@@ -49603,6 +50192,22 @@ class Handler(BaseHTTPRequestHandler):
             rc, out = _run_cmd(cmd, timeout_s=30, log=getattr(self.server, "_znh_log", None))
             # Always return HTTP 200 so the WebUI can render output even on non-zero rc.
             return _json_response(self, 200, {"ok": (rc == 0), "rc": rc, "output": out}, origin)
+        if path == "/api/snapper/preflight":
+            action = ""
+            try:
+                action = str((qs.get("action") or ["cleanup"])[0] or "cleanup").strip().lower()
+            except Exception:
+                action = "cleanup"
+            if action != "cleanup":
+                return _json_response(self, 400, {"error": "unsupported preflight action"}, origin)
+
+            eff_conf, warnings, invalid = _read_conf(self.server.conf_path)
+            payload = _snapper_cleanup_preflight(eff_conf)
+            payload["ok"] = True
+            payload["action"] = "cleanup"
+            payload["config_warnings"] = warnings
+            payload["invalid_keys"] = invalid
+            return _json_response(self, 200, payload, origin)
 
         # --- Snapper job status (dashboard) ---
         if path == "/api/snapper/job":
@@ -50563,7 +51168,9 @@ class Handler(BaseHTTPRequestHandler):
                 if conn:
                     cur = conn.execute(sql, params)
                     for r in cur.fetchall() or []:
-                        ai_triggered, ai_source = _history_extract_ai_meta(str(r[18] or ""))
+                        exj = str(r[18] or "")
+                        ai_triggered, ai_source = _history_extract_ai_meta(exj)
+                        guard_meta = _history_extract_snapper_guard_meta(exj)
                         items.append({
                             "job_id": str(r[0] or ""),
                             "type": str(r[1] or ""),
@@ -50585,6 +51192,14 @@ class Handler(BaseHTTPRequestHandler):
                             "summary": str(r[17] or ""),
                             "ai_triggered": bool(ai_triggered),
                             "ai_source": str(ai_source or ""),
+                            "force_low_space": bool(guard_meta.get("force_low_space", False)),
+                            "low_space_guard_required": bool(guard_meta.get("low_space_guard_required", False)),
+                            "low_space_guard_reason": str(guard_meta.get("low_space_guard_reason", "") or ""),
+                            "low_space_hysteresis_enabled": bool(guard_meta.get("low_space_hysteresis_enabled", False)),
+                            "low_space_hysteresis_latched": bool(guard_meta.get("low_space_hysteresis_latched", False)),
+                            "low_space_free_mb": guard_meta.get("low_space_free_mb", None),
+                            "low_space_critical_mb": guard_meta.get("low_space_critical_mb", None),
+                            "low_space_high_mb": guard_meta.get("low_space_high_mb", None),
                         })
             except Exception as e:
                 return _json_response(self, 500, {"error": f"history query failed: {e}"}, origin)
@@ -50643,7 +51258,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 file_tail = ""
                 file_tail_truncated = False
-            ai_triggered, ai_source = _history_extract_ai_meta(str(row[19] or ""))
+            exj = str(row[19] or "")
+            ai_triggered, ai_source = _history_extract_ai_meta(exj)
+            guard_meta = _history_extract_snapper_guard_meta(exj)
 
             return _json_response(self, 200, {
                 "ok": True,
@@ -50667,9 +51284,17 @@ class Handler(BaseHTTPRequestHandler):
                     "status_path": str(row[16] or ""),
                     "summary": str(row[17] or ""),
                     "log_tail": str(row[18] or ""),
-                    "extra_json": str(row[19] or ""),
+                    "extra_json": exj,
                     "ai_triggered": bool(ai_triggered),
                     "ai_source": str(ai_source or ""),
+                    "force_low_space": bool(guard_meta.get("force_low_space", False)),
+                    "low_space_guard_required": bool(guard_meta.get("low_space_guard_required", False)),
+                    "low_space_guard_reason": str(guard_meta.get("low_space_guard_reason", "") or ""),
+                    "low_space_hysteresis_enabled": bool(guard_meta.get("low_space_hysteresis_enabled", False)),
+                    "low_space_hysteresis_latched": bool(guard_meta.get("low_space_hysteresis_latched", False)),
+                    "low_space_free_mb": guard_meta.get("low_space_free_mb", None),
+                    "low_space_critical_mb": guard_meta.get("low_space_critical_mb", None),
+                    "low_space_high_mb": guard_meta.get("low_space_high_mb", None),
                 },
                 "file_tail": file_tail,
                 "file_tail_truncated": bool(file_tail_truncated),
@@ -52703,6 +53328,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 force_low_space = False
 
+            # Best-effort stale artifact GC (status/log/script) before checking active jobs.
+            snapper_gc = {}
+            try:
+                snapper_gc = _snapper_gc_stale_artifacts()
+            except Exception:
+                snapper_gc = {}
+
             # Best-effort coalescing/concurrency guard:
             # - same action -> reuse currently running job
             # - different action -> reject to avoid clobbering single-task UX
@@ -52726,6 +53358,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "status_path": ri.get("status_path"),
                                 "action": ri.get("action"),
                                 "title": ri.get("title"),
+                                "artifact_gc": snapper_gc,
                             }, origin)
 
                     return _json_response(self, 409, {
@@ -52735,6 +53368,7 @@ class Handler(BaseHTTPRequestHandler):
                         "status_path": ri.get("status_path"),
                         "action": ri.get("action"),
                         "title": ri.get("title"),
+                        "artifact_gc": snapper_gc,
                     }, origin)
             except Exception:
                 pass
@@ -52834,6 +53468,41 @@ class Handler(BaseHTTPRequestHandler):
 
             # Read current config so runtime controls are deterministic for this job.
             eff_conf, _warnings_conf, _invalid_conf = _read_conf(self.server.conf_path)
+            snapper_preflight = {}
+            if action == "cleanup":
+                try:
+                    snapper_preflight = _snapper_cleanup_preflight(eff_conf)
+                except Exception:
+                    snapper_preflight = {}
+
+            low_space_guard_required = bool(snapper_preflight.get("low_space_guard_required", False)) if action == "cleanup" else False
+            low_space_hysteresis_enabled = bool(snapper_preflight.get("hysteresis_enabled", False)) if action == "cleanup" else False
+            low_space_hysteresis_latched = bool(snapper_preflight.get("hysteresis_latched", False)) if action == "cleanup" else False
+            low_space_free_mb = -1
+            low_space_critical_mb = -1
+            low_space_high_mb = -1
+            try:
+                low_space_free_mb = int(snapper_preflight.get("free_mb", -1)) if action == "cleanup" else -1
+            except Exception:
+                low_space_free_mb = -1
+            try:
+                low_space_critical_mb = int(snapper_preflight.get("critical_mb", -1)) if action == "cleanup" else -1
+            except Exception:
+                low_space_critical_mb = -1
+            try:
+                low_space_high_mb = int(snapper_preflight.get("high_mb", -1)) if action == "cleanup" else -1
+            except Exception:
+                low_space_high_mb = -1
+
+            low_space_guard_reason = ""
+            if action == "cleanup":
+                try:
+                    low_space_guard_reason = str(snapper_preflight.get("low_space_guard_reason", "") or "").strip()
+                    low_space_guard_reason = re.sub(r"[\r\n\t]+", " ", low_space_guard_reason)
+                    if len(low_space_guard_reason) > 240:
+                        low_space_guard_reason = low_space_guard_reason[:240]
+                except Exception:
+                    low_space_guard_reason = ""
             cpu_quota_pct = 35
             try:
                 cpu_quota_pct = int(str(eff_conf.get("SNAP_CLEANUP_CPU_QUOTA_PERCENT", "35") or "35").strip() or "35")
@@ -52860,6 +53529,14 @@ class Handler(BaseHTTPRequestHandler):
                     f.write("stage=starting\n")
                     f.write(f"action={action}\n")
                     f.write(f"title={title}\n")
+                    f.write(f"force_low_space={1 if force_low_space else 0}\n")
+                    f.write(f"low_space_guard_required={1 if low_space_guard_required else 0}\n")
+                    f.write(f"low_space_guard_reason={low_space_guard_reason}\n")
+                    f.write(f"low_space_hysteresis_enabled={1 if low_space_hysteresis_enabled else 0}\n")
+                    f.write(f"low_space_hysteresis_latched={1 if low_space_hysteresis_latched else 0}\n")
+                    f.write(f"low_space_free_mb={int(low_space_free_mb)}\n")
+                    f.write(f"low_space_critical_mb={int(low_space_critical_mb)}\n")
+                    f.write(f"low_space_high_mb={int(low_space_high_mb)}\n")
             except Exception:
                 pass
 
@@ -52872,6 +53549,14 @@ class Handler(BaseHTTPRequestHandler):
                 f'ACTION={shlex.quote(action)}',
                 f'TITLE={shlex.quote(title)}',
                 f'TIMEOUT_S={int(timeout_s)}',
+                f'FORCE_LOW_SPACE={"1" if (action == "cleanup" and force_low_space) else "0"}',
+                f'LOW_SPACE_GUARD_REQUIRED={"1" if (action == "cleanup" and low_space_guard_required) else "0"}',
+                f'LOW_SPACE_GUARD_REASON={shlex.quote(low_space_guard_reason)}',
+                f'LOW_SPACE_HYSTERESIS_ENABLED={"1" if (action == "cleanup" and low_space_hysteresis_enabled) else "0"}',
+                f'LOW_SPACE_HYSTERESIS_LATCHED={"1" if (action == "cleanup" and low_space_hysteresis_latched) else "0"}',
+                f'LOW_SPACE_FREE_MB={int(low_space_free_mb)}',
+                f'LOW_SPACE_CRITICAL_MB={int(low_space_critical_mb)}',
+                f'LOW_SPACE_HIGH_MB={int(low_space_high_mb)}',
                 'mkdir -p /var/log/zypper-auto/service-logs || true',
                 'mkdir -p /var/lib/zypper-auto || true',
                 'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
@@ -52899,6 +53584,14 @@ class Handler(BaseHTTPRequestHandler):
                 '    echo "stage=${stage}"',
                 '    echo "action=${ACTION:-}"',
                 '    echo "title=${TITLE:-}"',
+                '    echo "force_low_space=${FORCE_LOW_SPACE:-0}"',
+                '    echo "low_space_guard_required=${LOW_SPACE_GUARD_REQUIRED:-0}"',
+                '    echo "low_space_guard_reason=${LOW_SPACE_GUARD_REASON:-}"',
+                '    echo "low_space_hysteresis_enabled=${LOW_SPACE_HYSTERESIS_ENABLED:-0}"',
+                '    echo "low_space_hysteresis_latched=${LOW_SPACE_HYSTERESIS_LATCHED:-0}"',
+                '    echo "low_space_free_mb=${LOW_SPACE_FREE_MB:-}"',
+                '    echo "low_space_critical_mb=${LOW_SPACE_CRITICAL_MB:-}"',
+                '    echo "low_space_high_mb=${LOW_SPACE_HIGH_MB:-}"',
                 '    echo "started_at_utc=${STARTED_AT}"',
                 '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
                 '  } >"${tmp}" 2>/dev/null || true',
@@ -52915,7 +53608,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
                 'echo "" >>"$LOG" || true',
                 'export ZNH_NON_INTERACTIVE=1',
-                f'export ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE={"1" if (action == "cleanup" and force_low_space) else "0"}',
+                'export ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE="${FORCE_LOW_SPACE:-0}"',
                 'write_status 0 0 running',
                 'set +e',
                 'if command -v timeout >/dev/null 2>&1; then',
@@ -53008,11 +53701,23 @@ class Handler(BaseHTTPRequestHandler):
                     "started_at": time.time(),
                     "finished_at": 0,
                     "output": "",
+                    "force_low_space": bool(action == "cleanup" and force_low_space),
+                    "low_space_guard_required": bool(action == "cleanup" and low_space_guard_required),
+                    "low_space_guard_reason": str(low_space_guard_reason or ""),
+                    "low_space_hysteresis_enabled": bool(action == "cleanup" and low_space_hysteresis_enabled),
+                    "low_space_hysteresis_latched": bool(action == "cleanup" and low_space_hysteresis_latched),
+                    "low_space_free_mb": int(low_space_free_mb),
+                    "low_space_critical_mb": int(low_space_critical_mb),
+                    "low_space_high_mb": int(low_space_high_mb),
                 }, summary=f"{title} (starting)")
             except Exception:
                 pass
-
-            return _json_response(self, 200, {"job_id": job_id}, origin)
+            return _json_response(self, 200, {
+                "job_id": job_id,
+                "coalesced": False,
+                "artifact_gc": snapper_gc,
+                "preflight": snapper_preflight if action == "cleanup" else {},
+            }, origin)
 
         if path == "/api/snapper/run":
             body = _read_json(self)

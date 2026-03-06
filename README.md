@@ -1978,6 +1978,11 @@ systemctl status zypper-autodownload.service
     - When enabled for cleanup, WebUI sends `force_low_space=true`, and backend jobs export `ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1`.
     - This provides an explicit, user-visible override path for low-space hysteresis/critical guard scenarios.
   - 🧵 **IMPROVED:** repeated WebUI Snapper start requests are now **coalesced** onto an existing running Snapper job (same action), returning the existing `job_id` instead of spawning duplicate jobs.
+  - 🧹 **IMPROVED:** Snapper WebUI start now performs best-effort stale artifact cleanup (old `snapper-web-*.status/.log/.sh` files) and surfaces cleanup stats via `artifact_gc` in API responses.
+  - 🧿 **NEW:** Snapper cleanup now supports an explicit **preflight API** (`GET /api/snapper/preflight?action=cleanup`) used by the WebUI before running cleanup.
+    - Preflight reports free-space thresholds, hysteresis latch state, and busy/zypp-lock signals.
+    - If cleanup is already running, the WebUI now reuses/reopens the active Snapper overlay instead of starting a duplicate job.
+  - 🗄️ **IMPROVED:** Snapper cleanup jobs now persist low-space guard telemetry into server history (force flag, guard reason, hysteresis flags, free/critical/high MB), and Managers → Server (SQLite) receives the same fields via history APIs.
   - 🧰 **IMPROVED:** direct Snapper API runs (`/api/snapper/run`) now also honor cleanup `force_low_space` and propagate it into helper environment.
   - ⚡ **IMPROVED:** Snapper cleanup now supports configurable **phase pacing** between heavy cleanup phases and force-prune delete batches (`SNAP_CLEANUP_PHASE_PACING_SECONDS`) to reduce burst load.
   - 🧿 **NEW:** Managers → **Server (SQLite)** tab now uses visibility-aware auto-refresh pacing:
