@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Snapper WebUI/CLI status semantics updated: disabled Snapper timers are now shown as intentional warning/checkmark states (`✓ disabled`) instead of error-style states.
+- Snapper auto-disable now persists explicit user intent via `/var/lib/zypper-auto/snapper-auto-disabled.intent`.
+- Verify check 48 now honors the Snapper disable-intent marker and skips auto-enabling `snapper-cleanup.timer` when the timer is intentionally disabled.
+- Verify check 48 also removes stale disable-intent marker files when `snapper-cleanup.timer` is active again.
+- Uninstaller cleanup now removes the Snapper disable-intent marker file (`/var/lib/zypper-auto/snapper-auto-disabled.intent`).
+- Added root-only regression smoke test helper `test_snapper_disable_verify_guard.sh` to validate `snapper auto-off` marker persistence and verify guard behavior (with automatic timer/marker state restore by default).
 - Uninstall (`--uninstall-zypper`): now removes the Fish sudo wrapper file `~/.config/fish/conf.d/sudo-handler.fish` and includes it in dry-run output.
 - Verify service: added adaptive low-impact mode for repeated background verification failures (fail-streak tracking + heavy-check cooldown state persisted in `verify-smart-state.env`).
 - Verify service: expensive deep checks can now be deferred during cooldown windows to reduce CPU/IO pressure when failures repeat.

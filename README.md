@@ -1121,6 +1121,44 @@ Config validation test:
 The integration script writes a concise, timestamped console log and is safe to
 run repeatedly on development systems.
 
+### 3. Snapper Disable-Intent Guard Regression Smoke Test (`test_snapper_disable_verify_guard.sh`)
+
+Located in the repo root, this root-only smoke test validates the exact
+regression path for Snapper disable intent:
+
+1. Runs `snapper auto-off` through the helper.
+2. Confirms marker creation at
+   `/var/lib/zypper-auto/snapper-auto-disabled.intent`.
+3. Runs helper verification (`--verify`).
+4. Confirms verification did **not** re-enable `snapper-cleanup.timer` while
+   the marker exists.
+
+Run it as root:
+
+```bash
+cd /path/to/zypper-automatik-helper-
+sudo ./test_snapper_disable_verify_guard.sh
+```
+
+Useful options:
+
+```bash
+# Skip the verify step (quick pre/post auto-off check)
+sudo ./test_snapper_disable_verify_guard.sh --skip-verify
+
+# Keep resulting timer/marker state after the test (no automatic restore)
+sudo ./test_snapper_disable_verify_guard.sh --keep-state
+
+# Override helper path or verify timeout
+sudo ./test_snapper_disable_verify_guard.sh --helper /usr/local/bin/zypper-auto-helper --verify-timeout 1800
+```
+
+Safety behavior:
+- By default, the script captures baseline state and restores timer + marker
+  state automatically on exit.
+- It tracks Snapper + related maintenance timers so running the test does not
+  leave side effects unless `--keep-state` is used.
+
 -----
 
 <a id="diagnostics"></a>
@@ -1878,6 +1916,10 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
+  - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
+  - 🧰 **IMPROVED:** verify check 48 now removes stale disable markers when `snapper-cleanup.timer` is active again, keeping timer state + intent metadata consistent.
+  - 🧹 **IMPROVED:** uninstaller cleanup now removes the Snapper disable-intent marker file from `/var/lib/zypper-auto/`.
   - ⚡ **NEW:** adaptive low-impact verification mode for repeated background verify failures.
     - Tracks verify fail streak + heavy-check cooldown state in `verify-smart-state.env`.
     - Defers expensive deep checks during cooldown windows and lowers verify CPU/IO priority.

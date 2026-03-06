@@ -1418,6 +1418,7 @@ fi
 LOG_DIR="/var/log/zypper-auto"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 STATUS_FILE="${LOG_DIR}/last-status.txt"
+SNAPPER_AUTO_DISABLE_MARKER="/var/lib/zypper-auto/snapper-auto-disabled.intent"
 MAX_LOG_FILES=10  # Keep only the last 10 log files (overridable via /etc/zypper-auto.conf)
 MAX_LOG_SIZE_MB=50  # Maximum size for a single log file in MB (overridable)
 
@@ -10873,6 +10874,7 @@ generate_dashboard() {
         case "${state}" in
             enabled) printf '%s' "timer-active" ;;
             partial) printf '%s' "timer-partial" ;;
+            disabled) printf '%s' "timer-disabled" ;;
             *) printf '%s' "timer-inactive" ;;
         esac
         return 0
@@ -11696,6 +11698,7 @@ generate_dashboard() {
 
     .timer-active { color: #2ecc71; font-weight: 800; }
     .timer-partial { color: #f59e0b; font-weight: 800; }
+    .timer-disabled { color: #f59e0b; font-weight: 800; }
     .timer-inactive { color: #e74c3c; font-weight: 800; }
 
     /* Disk usage bar */
@@ -21092,8 +21095,15 @@ generate_dashboard() {
             return _api('/api/snapper/run', { method: 'POST', body: JSON.stringify(body) }).then(function(r) {
                 _snapperSetOut(r.output || '(no output)');
                 var msg = (r.rc === 0) ? 'OK' : ('rc=' + r.rc);
+                var toastKind = (r.rc === 0) ? 'ok' : 'err';
                 if (r.rc === 0 && String(action || '') === 'rollback') msg = 'OK (reboot required)';
-                toast('Snapper: ' + action, msg, (r.rc === 0) ? 'ok' : 'err');
+                if (r.rc === 0 && String(action || '') === 'auto-disable') {
+                    msg = '✓ Disabled (timers intentionally off)';
+                    toastKind = 'warn';
+                } else if (r.rc === 0 && String(action || '') === 'auto-enable') {
+                    msg = '✓ Enabled';
+                }
+                toast('Snapper: ' + action, msg, toastKind);
                 _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
                 return r;
             }).catch(function(e) {
@@ -28498,18 +28508,37 @@ generate_dashboard() {
     function setTimerState(id, state) {
         var el = document.getElementById(id);
         if (!el) return;
-        var s = (state === undefined || state === null) ? '' : String(state);
-        if (el.textContent !== s) {
-            el.textContent = s;
+        var raw = (state === undefined || state === null) ? '' : String(state);
+        var s = String(raw || '').trim().toLowerCase();
+        var label = raw;
+        if (s === 'enabled') label = '✓ enabled';
+        else if (s === 'partial') label = '⚠ partial';
+        else if (s === 'disabled') label = '✓ disabled';
+        if (el.textContent !== label) {
+            el.textContent = label;
             try { _znhMarkUpdated(el); } catch (e) {}
         }
         el.classList.remove('timer-active');
         el.classList.remove('timer-partial');
+        el.classList.remove('timer-disabled');
         el.classList.remove('timer-inactive');
         if (s === 'enabled') el.classList.add('timer-active');
         else if (s === 'partial') el.classList.add('timer-partial');
+        else if (s === 'disabled') el.classList.add('timer-disabled');
         else el.classList.add('timer-inactive');
     }
+
+    // Normalize static Snapper timer badges on first load (before Live mode updates).
+    (function() {
+        var ids = ['snapper-timeline-timer', 'snapper-cleanup-timer', 'snapper-boot-timer'];
+        var i = 0;
+        for (i = 0; i < ids.length; i++) {
+            var id = ids[i];
+            var el = document.getElementById(id);
+            if (!el) continue;
+            setTimerState(id, String(el.textContent || '').trim());
+        }
+    })();
 
     function updateZyppLockBadge(d) {
         var el = document.getElementById('zypp-lock-badge');
@@ -32703,16 +32732,26 @@ fi
 # Check 48: Snapper cleanup timers
 log_debug "[48/${TOTAL_CHECKS}] Verifying Snapper cleanup timers..."
 if __znh_unit_file_exists_system snapper-cleanup.timer; then
+    local _snap_disable_marker
+    _snap_disable_marker="${SNAPPER_AUTO_DISABLE_MARKER:-/var/lib/zypper-auto/snapper-auto-disabled.intent}"
     if systemctl is-active --quiet snapper-cleanup.timer 2>/dev/null; then
         log_success "✓ Snapper cleanup timer is active"
+        if [ -f "${_snap_disable_marker}" ]; then
+            rm -f -- "${_snap_disable_marker}" 2>/dev/null || true
+            log_info "ℹ Removed stale Snapper disable marker (cleanup timer is active)"
+        fi
     else
-        log_warn "⚠ Snapper cleanup timer is INACTIVE (disk may fill over time)"
-        if attempt_repair "enable snapper cleanup timer" \
-            "systemctl enable --now snapper-cleanup.timer" \
-            "systemctl is-active snapper-cleanup.timer"; then
-            log_success "  ✓ Snapper cleanup timer enabled"
+        if [ -f "${_snap_disable_marker}" ]; then
+            log_info "ℹ Snapper cleanup timer intentionally disabled by user; skipping auto-enable repair"
         else
-            log_warn "  ⚠ Failed to enable snapper-cleanup.timer (non-fatal but risky)"
+            log_warn "⚠ Snapper cleanup timer is INACTIVE (disk may fill over time)"
+            if attempt_repair "enable snapper cleanup timer" \
+                "systemctl enable --now snapper-cleanup.timer" \
+                "systemctl is-active snapper-cleanup.timer"; then
+                log_success "  ✓ Snapper cleanup timer enabled"
+            else
+                log_warn "  ⚠ Failed to enable snapper-cleanup.timer (non-fatal but risky)"
+            fi
         fi
     fi
 else
@@ -37427,6 +37466,26 @@ run_snapper_menu_only() {
             fi
         done
 
+        # Persist explicit user intent for auto-disable so verification does not
+        # silently re-enable snapper-cleanup.timer later.
+        local _snap_disable_marker
+        _snap_disable_marker="${SNAPPER_AUTO_DISABLE_MARKER:-/var/lib/zypper-auto/snapper-auto-disabled.intent}"
+        if [ "${action}" = "disable" ]; then
+            mkdir -p "$(dirname "${_snap_disable_marker}")" 2>/dev/null || true
+            {
+                printf 'disabled_at=%s\n' "$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
+                printf 'run_id=%s\n' "${RUN_ID:-unknown}"
+                printf 'source=snapper-auto-off\n'
+            } >"${_snap_disable_marker}" 2>/dev/null || true
+            chmod 644 "${_snap_disable_marker}" 2>/dev/null || true
+            log_info "[snapper][auto] disable marker written: ${_snap_disable_marker}"
+        elif [ "${action}" = "enable" ]; then
+            if [ -f "${_snap_disable_marker}" ]; then
+                rm -f -- "${_snap_disable_marker}" 2>/dev/null || true
+                log_info "[snapper][auto] disable marker cleared: ${_snap_disable_marker}"
+            fi
+        fi
+
         # 2) Smart config sync + preventative optimization
         # Shared helper also used by option 4 cleanup.
         if command -v snapper >/dev/null 2>&1; then
@@ -37726,6 +37785,7 @@ run_snapper_menu_only() {
         case "${state}" in
             enabled) printf '%s' "${C_GREEN}" ;;
             partial) printf '%s' "${C_YELLOW}" ;;
+            disabled) printf '%s' "${C_YELLOW}" ;;
             *) printf '%s' "${C_RED}" ;;
         esac
         return 0
@@ -37734,18 +37794,25 @@ run_snapper_menu_only() {
     __znh_print_snapper_timer_status_block() {
         # Compact timer status so users can see at a glance whether automation is active.
         # Printed on menu load and on each re-render.
-        local u state color prefix suffix
+        local u state state_label color prefix suffix
         echo ""
         echo "Snapper timers (systemd):"
         for u in snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer; do
             state="$(__znh_timer_state "${u}" 2>/dev/null || echo "unknown")"
+            state_label="${state}"
+            case "${state}" in
+                enabled) state_label="✓ enabled" ;;
+                partial) state_label="⚠ partial" ;;
+                disabled) state_label="✓ disabled" ;;
+                *) : ;;
+            esac
             if [ "${USE_COLOR:-0}" -eq 1 ] 2>/dev/null; then
                 color="$(__znh_timer_state_color "${state}" 2>/dev/null || echo "")"
                 prefix="${color}"
                 suffix="${C_RESET}"
-                printf "  - %s: %b%s%b\n" "${u}" "${prefix}" "${state}" "${suffix}"
+                printf "  - %s: %b%s%b\n" "${u}" "${prefix}" "${state_label}" "${suffix}"
             else
-                printf "  - %s: %s\n" "${u}" "${state}"
+                printf "  - %s: %s\n" "${u}" "${state_label}"
             fi
         done
         return 0
@@ -37794,7 +37861,7 @@ run_snapper_menu_only() {
             elif [ "${_s_state}" = "partial" ]; then
                 _s_color="${C_YELLOW}"
             else
-                _s_color="${C_RED}"
+                _s_color="${C_YELLOW}"
             fi
             _s_prefix="${_s_color}"
             _s_suffix="${C_RESET}"
@@ -40172,6 +40239,7 @@ run_uninstall_helper_only() {
                 /var/lib/zypper-auto/dashboard-api.env \
                 /var/lib/zypper-auto/dashboard-schema.json \
                 /var/lib/zypper-auto/self-update-state.json \
+                /var/lib/zypper-auto/snapper-auto-disabled.intent \
                 /var/lib/zypper-auto/dashboard-history.sqlite3 \
                 /var/lib/zypper-auto/dashboard-history.sqlite3-wal \
                 /var/lib/zypper-auto/dashboard-history.sqlite3-shm \
