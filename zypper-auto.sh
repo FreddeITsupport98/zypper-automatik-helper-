@@ -28740,8 +28740,9 @@ generate_dashboard() {
     })();
     try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'wired live toggle'); } catch (e) {}
 
-    function pollLive() {
-        if (!liveEnabled) return Promise.resolve(null);
+    function pollLive(forceOnce) {
+        var _forceOnce = !!forceOnce;
+        if (!liveEnabled && !_forceOnce) return Promise.resolve(null);
         if (_pollLiveInFlight) return Promise.resolve(null);
         _pollLiveInFlight = true;
 
@@ -28789,6 +28790,16 @@ generate_dashboard() {
                 return d;
             })
             .catch(function(err) {
+                // One-shot refreshes used while Live mode is OFF (on initial page load
+                // and focus/visibility resume) should fail quietly. These are best-effort
+                // sync attempts to avoid stale static cards.
+                if (!liveEnabled && _forceOnce) {
+                    if (ZNH_DEBUG) {
+                        var em0 = (err && err.message) ? err.message : 'pollLive(one-shot) failed';
+                        try { znhDebugWarn('pollLive(one-shot) failed:', em0); } catch (e0) {}
+                    }
+                    return null;
+                }
                 // When opened as file://, many browsers block fetch().
                 liveFailures++;
                 var msg = (err && err.message) ? err.message : 'pollLive failed';
@@ -29734,12 +29745,29 @@ generate_dashboard() {
         if (sb) _znhSetHeaderStatusBadge(String(sb.textContent || ''));
     } catch (e0) {}
 
-    pollLive();
+    // Initial one-shot status sync (even when Live mode is off) so stale
+    // static dashboard cards self-correct automatically.
+    pollLive(true);
     pollDownloaderStatus();
     pollPerf(true);
     try { _znhRecentLogStreamEnsure(false); } catch (eSSE0) {}
     pollRecentActivityLog();
     pollDashboardMeta();
+
+    // Also refresh once when the tab becomes visible/focused, so users who keep
+    // the dashboard open in the background don't have to hard-refresh manually.
+    (function() {
+        function _refreshWhenResumed() {
+            if (liveEnabled) return;
+            pollLive(true);
+            pollDownloaderStatus();
+            pollDashboardMeta();
+        }
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) _refreshWhenResumed();
+        });
+        window.addEventListener('focus', _refreshWhenResumed);
+    })();
 
     // Mark dashboard JS as booted (updates the header badge).
     try { if (typeof window.znhJsHealthOk === 'function') window.znhJsHealthOk(); } catch (e) {}

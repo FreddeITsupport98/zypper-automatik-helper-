@@ -2,6 +2,7 @@
 
 ## Unreleased
 - Snapper WebUI/CLI status semantics updated: disabled Snapper timers are now shown as intentional warning/checkmark states (`✓ disabled`) instead of error-style states.
+- Dashboard status UI now performs one-shot `status-data.json` auto-sync on page load even with Live mode OFF, and refreshes again on tab focus/visibility resume to self-correct stale Snapper timer cards.
 - Snapper auto-disable now persists explicit user intent via `/var/lib/zypper-auto/snapper-auto-disabled.intent`.
 - Verify check 48 now honors the Snapper disable-intent marker and skips auto-enabling `snapper-cleanup.timer` when the timer is intentionally disabled.
 - Verify check 48 also removes stale disable-intent marker files when `snapper-cleanup.timer` is active again.

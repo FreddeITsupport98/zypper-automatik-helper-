@@ -1917,6 +1917,7 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
+  - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.
   - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
   - 🧰 **IMPROVED:** verify check 48 now removes stale disable markers when `snapper-cleanup.timer` is active again, keeping timer state + intent metadata consistent.
   - 🧹 **IMPROVED:** uninstaller cleanup now removes the Snapper disable-intent marker file from `/var/lib/zypper-auto/`.
