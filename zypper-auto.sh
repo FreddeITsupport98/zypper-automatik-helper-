@@ -1436,7 +1436,7 @@ CONFIG_WARNINGS=()
 # Timer intervals (in minutes) for downloader and notifier (1,5,10,15,30,60)
 DL_TIMER_INTERVAL_MINUTES=1
 NT_TIMER_INTERVAL_MINUTES=1
-VERIFY_TIMER_INTERVAL_MINUTES=15
+VERIFY_TIMER_INTERVAL_MINUTES=30
 
 # Smart low-impact verify mode (primarily for background/systemd verification
 # runs to reduce CPU/IO pressure during repeated failure periods).
@@ -2253,7 +2253,7 @@ __znh_write_dashboard_schema_json() {
 
     "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
     "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
-    "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "15"},
+    "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "30"},
     "VERIFY_LOW_IMPACT_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_LOW_IMPACT_FAIL_STREAK": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
     "VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES": {"type": "int", "min": 5, "max": 720, "step": 5, "default": "45"},
@@ -8472,8 +8472,8 @@ NT_TIMER_INTERVAL_MINUTES=1
 #   30 = every 30 minutes
 #   60 = every hour (hourly)
 # Any other value is treated as invalid and will be reset to a safe default.
-# Default: 15 (lower-impact baseline)
-VERIFY_TIMER_INTERVAL_MINUTES=15
+# Default: 30 (lower-impact baseline)
+VERIFY_TIMER_INTERVAL_MINUTES=30
 
 # VERIFY_LOW_IMPACT_ENABLED
 # Smart adaptive mode for background verification runs.
@@ -9259,7 +9259,7 @@ EOF
     # Timers: exact allowed list
     validate_allowed_set DL_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
     validate_allowed_set NT_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
-    validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 15 "1,5,10,15,30,60"
+    validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 30 "1,5,10,15,30,60"
 
     # Enums
     validate_allowed_set DOWNLOADER_DOWNLOAD_MODE full "full,detect-only"
@@ -9369,7 +9369,7 @@ EOF
 
     validate_interval DL_TIMER_INTERVAL_MINUTES 1
     validate_interval NT_TIMER_INTERVAL_MINUTES 1
-    validate_interval VERIFY_TIMER_INTERVAL_MINUTES 15
+    validate_interval VERIFY_TIMER_INTERVAL_MINUTES 30
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
@@ -30424,6 +30424,24 @@ NOTIFY_SCRIPT_PATH="$USER_BIN_DIR/${NT_SCRIPT_NAME}"
 INSTALL_SCRIPT_PATH="$USER_BIN_DIR/${INSTALL_SCRIPT_NAME}"
 VIEW_CHANGES_SCRIPT_PATH="$USER_BIN_DIR/${VIEW_CHANGES_SCRIPT_NAME}"
 
+python_ast_syntax_check() {
+    # Read-only-safe Python syntax check (does not create __pycache__/pyc files).
+    # Returns 0 when syntax is valid, non-zero otherwise.
+    local target="$1"
+    [ -n "${target:-}" ] || return 1
+    [ -f "${target}" ] || return 1
+
+    python3 - "$target" <<'PY'
+import ast
+import pathlib
+import sys
+
+p = pathlib.Path(sys.argv[1]).expanduser()
+src = p.read_text(encoding="utf-8")
+ast.parse(src, filename=str(p))
+PY
+}
+
 # --- Helper: Self-check syntax for this script and the notifier ---
 run_self_check() {
     log_info ">>> Running self-check (syntax)..."
@@ -30437,12 +30455,12 @@ run_self_check() {
         exit 1
     fi
 
-    # Check Python notifier syntax if it already exists
-    # NOTE: use -B so this still works under systemd services with ProtectHome=read-only
-    # (py_compile normally tries to write __pycache__/*.pyc next to the source file).
+    # Check Python notifier syntax if it already exists.
+    # NOTE: use ast.parse through python_ast_syntax_check so this stays compatible with
+    # systemd hardening (ProtectHome=read-only) and never writes __pycache__.
     if [ -f "$NOTIFY_SCRIPT_PATH" ]; then
         log_debug "Checking Python syntax of $NOTIFY_SCRIPT_PATH"
-        if ! execute_guarded "Python syntax check for notifier" python3 -B -m py_compile "$NOTIFY_SCRIPT_PATH"; then
+        if ! execute_guarded "Python syntax check for notifier" python_ast_syntax_check "$NOTIFY_SCRIPT_PATH"; then
             log_error "Self-check FAILED: Python syntax error in $NOTIFY_SCRIPT_PATH"
             update_status "FAILED: Python syntax error in notifier script"
             exit 1
@@ -30757,13 +30775,12 @@ fi
 log_debug "Checking Python notifier script..."
 if [ -x "${NOTIFY_SCRIPT_PATH}" ]; then
     log_success "✓ Python notifier script is executable"
-    # Check Python syntax.
-    # IMPORTANT: use -B so this works under systemd hardening (ProtectHome=read-only).
-    if python3 -B -m py_compile "${NOTIFY_SCRIPT_PATH}" &>/dev/null; then
+    # Check Python syntax in a read-only-safe way (no pyc writes).
+    if python_ast_syntax_check "${NOTIFY_SCRIPT_PATH}" &>/dev/null; then
         log_success "✓ Python script syntax is valid"
     else
-        log_error "✗ Python script failed to compile (syntax error or environment issue)"
-        log_error "  → Cannot auto-fix: inspect the file and run: python3 -B -m py_compile ${NOTIFY_SCRIPT_PATH}"
+        log_error "✗ Python script failed syntax parsing (syntax error or environment issue)"
+        log_error "  → Cannot auto-fix: inspect the file and run: python_ast_syntax_check ${NOTIFY_SCRIPT_PATH}"
         VERIFICATION_FAILED=1
     fi
 else
@@ -45590,8 +45607,8 @@ log_success "Python notifier script created and made executable"
 
 # Hard fail early if the generated notifier script is syntactically invalid.
 # This avoids later noisy verification failures in diagnostics logs.
-log_debug "Validating generated notifier script syntax via py_compile"
-if ! execute_guarded "Python syntax check for generated notifier" python3 -B -m py_compile "${NOTIFY_SCRIPT_PATH}"; then
+log_debug "Validating generated notifier script syntax via AST parser"
+if ! execute_guarded "Python syntax check for generated notifier" python_ast_syntax_check "${NOTIFY_SCRIPT_PATH}"; then
     log_error "Generated notifier script failed syntax validation: ${NOTIFY_SCRIPT_PATH}"
     update_status "FAILED: Generated notifier Python syntax check failed"
     exit 1
@@ -51449,6 +51466,242 @@ class Handler(BaseHTTPRequestHandler):
             # Fallback for older/misconfigured servers.
             self.server.tokens_lock = threading.Lock()
             tokens_lock = self.server.tokens_lock
+        def _launch_quick_action(
+            quick_action: str,
+            meta: dict,
+            *,
+            ai_triggered: bool = False,
+            ai_source: str = "",
+            log_banner: str = "WebUI Quick Action job",
+            log_prefix: str = "[webui]",
+        ) -> dict:
+            cmd = meta.get("cmd")
+            if not isinstance(cmd, list) or not cmd:
+                return {
+                    "ok": False,
+                    "error": "invalid action command",
+                    "http_status": 500,
+                }
+
+            needs_dash_user_env = bool(meta.get("needs_dash_user_env"))
+            dash_user = str(os.environ.get("DASH_API_USER", "") or "").strip()
+            dash_home = str(os.environ.get("DASH_API_USER_HOME", "") or "").strip()
+            if needs_dash_user_env and not dash_user:
+                return {
+                    "ok": False,
+                    "error": "dashboard API missing DASH_API_USER; re-open dashboard via --dash-open",
+                    "http_status": 400,
+                }
+
+            timeout_s = 300
+            try:
+                timeout_s = int(meta.get("timeout_s", 300) or 300)
+            except Exception:
+                timeout_s = 300
+            if timeout_s < 10:
+                timeout_s = 10
+            if timeout_s > 2 * 3600:
+                timeout_s = 2 * 3600
+
+            src = _sanitize_ai_source(ai_source)
+            if src and not ai_triggered:
+                ai_triggered = True
+            if ai_triggered and not src:
+                src = "webui-ai"
+            if not ai_triggered:
+                src = ""
+
+            title = str(meta.get("title", quick_action) or quick_action)
+            job_id = secrets.token_urlsafe(18)
+            unit, log_path, status_path, script_file = _quick_paths(job_id)
+
+            # Precreate log + status so the first poll can't race before the unit writes anything.
+            try:
+                os.makedirs(QUICK_LOG_DIR, exist_ok=True)
+                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+                with open(status_path, "w", encoding="utf-8") as f:
+                    f.write("done=0\n")
+                    f.write("rc=0\n")
+                    f.write("stage=starting\n")
+                    f.write(f"action={quick_action}\n")
+                    f.write(f"title={title}\n")
+                    f.write(f"ai_triggered={1 if ai_triggered else 0}\n")
+                    f.write(f"ai_source={src}\n")
+            except Exception:
+                pass
+
+            cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
+
+            inject_user = ""
+            try:
+                if needs_dash_user_env and dash_user:
+                    # Inject SUDO_USER so helper subcommands that expect sudo still work.
+                    # SUDO_USER_HOME is optional but improves behavior for a few paths.
+                    inject_user = "\n".join([
+                        f'export SUDO_USER={shlex.quote(dash_user)}',
+                        f'export SUDO_USER_HOME={shlex.quote(dash_home)}' if dash_home else 'true',
+                    ])
+            except Exception:
+                inject_user = ""
+
+            banner = str(log_banner or "WebUI Quick Action job").replace('"', "'")
+            pfx = str(log_prefix or "[webui]").replace('"', "'")
+
+            script_text = "\n".join([
+                'set -euo pipefail',
+                f'LOG={shlex.quote(log_path)}',
+                f'STATUS={shlex.quote(status_path)}',
+                f'ACTION={shlex.quote(quick_action)}',
+                f'TITLE={shlex.quote(title)}',
+                f'AI_TRIGGERED={1 if ai_triggered else 0}',
+                f'AI_SOURCE={shlex.quote(src)}',
+                f'TIMEOUT_S={timeout_s}',
+                'mkdir -p /var/log/zypper-auto/service-logs || true',
+                'mkdir -p /var/lib/zypper-auto || true',
+                'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                'write_status() {',
+                '  local done="$1"; local rc="$2"; local stage="$3"',
+                '  local tmp="${STATUS}.tmp.$$"',
+                '  {',
+                '    echo "done=${done}"',
+                '    echo "rc=${rc}"',
+                '    echo "stage=${stage}"',
+                '    echo "action=${ACTION:-}"',
+                '    echo "title=${TITLE:-}"',
+                '    echo "ai_triggered=${AI_TRIGGERED:-0}"',
+                '    echo "ai_source=${AI_SOURCE:-}"',
+                '    echo "started_at_utc=${STARTED_AT}"',
+                '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                '  } >"${tmp}" 2>/dev/null || true',
+                '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
+                '}',
+                'write_status 0 0 starting',
+                'echo "==========================================" >>"$LOG" || true',
+                f'echo " {banner} " >>"$LOG" || true',
+                'echo "==========================================" >>"$LOG" || true',
+                'date >>"$LOG" 2>/dev/null || true',
+                'echo "" >>"$LOG" || true',
+                'echo "ACTION: ${ACTION}" >>"$LOG" || true',
+                'echo "TITLE : ${TITLE}" >>"$LOG" || true',
+                'echo "AI_LAUNCHED: ${AI_TRIGGERED} (${AI_SOURCE:-none})" >>"$LOG" || true',
+                f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
+                'echo "" >>"$LOG" || true',
+                'export ZNH_NON_INTERACTIVE=1',
+                inject_user if inject_user else 'true',
+                'write_status 0 0 running',
+                'set +e',
+                f'( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
+                'rc=${PIPESTATUS[0]}',
+                'set -e',
+                'echo "" >>"$LOG" || true',
+                f'echo "{pfx} quick action rc=${{rc}}" >>"$LOG" || true',
+                'if [ ${rc} -eq 124 ] 2>/dev/null; then',
+                '  write_status 1 ${rc} timed-out',
+                f'  echo "{pfx} ERROR: timed out" >>"$LOG" || true',
+                '  rm -f "$0" >/dev/null 2>&1 || true',
+                '  exit ${rc}',
+                'fi',
+                'if [ ${rc} -eq 0 ]; then',
+                '  write_status 1 ${rc} done',
+                'else',
+                '  write_status 1 ${rc} failed',
+                'fi',
+                'rm -f "$0" >/dev/null 2>&1 || true',
+                'exit ${rc}',
+            ])
+
+            # Write unit script to disk (inside the API service sandbox).
+            try:
+                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
+                with open(script_file, "w", encoding="utf-8") as f:
+                    f.write("#!/usr/bin/env bash\n")
+                    f.write(script_text)
+                    f.write("\n")
+                os.chmod(script_file, 0o700)
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": f"failed to write quick-action unit script: {e}",
+                    "http_status": 500,
+                }
+
+            sys_cmd = [
+                "systemd-run",
+                "--quiet",
+                "--collect",
+                "--unit",
+                unit,
+                "--property=Nice=19",
+                "--property=IOSchedulingClass=idle",
+                "--",
+                "/usr/bin/bash",
+                script_file,
+            ]
+
+            try:
+                p = subprocess.run(
+                    sys_cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                if p.returncode != 0:
+                    out = (p.stdout or "").strip()
+                    return {
+                        "ok": False,
+                        "error": f"systemd-run failed rc={p.returncode}",
+                        "output": out,
+                        "http_status": 500,
+                    }
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": f"systemd-run exception: {e}",
+                    "http_status": 500,
+                }
+
+            # Persist job metadata into history DB (best-effort)
+            try:
+                _history_job_upsert(self.server, {
+                    "job_id": job_id,
+                    "type": "quick-action",
+                    "action": quick_action,
+                    "title": title,
+                    "ai_triggered": bool(ai_triggered),
+                    "ai_source": str(src or ""),
+                    "simulate": False,
+                    "dry_run": False,
+                    "channel": "",
+                    "running": True,
+                    "done": False,
+                    "rc": None,
+                    "stage": "Starting",
+                    "unit": unit,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "started_at": time.time(),
+                    "finished_at": 0,
+                    "output": "",
+                }, summary=f"{title} (starting)")
+            except Exception:
+                pass
+
+            return {
+                "ok": True,
+                "job_id": job_id,
+                "action": quick_action,
+                "unit": unit,
+                "status_path": status_path,
+                "log_path": log_path,
+                "ai_triggered": bool(ai_triggered),
+                "ai_source": str(src or ""),
+            }
 
         # --- Dashboard maintenance (safe) ---
         if path == "/api/dashboard/refresh":
@@ -51516,6 +51769,18 @@ class Handler(BaseHTTPRequestHandler):
                 include_debug = bool(body.get("include_debug", False))
             except Exception:
                 include_debug = False
+
+            initiate_repair = False
+            try:
+                initiate_repair = bool(body.get("initiate_repair", False))
+            except Exception:
+                initiate_repair = False
+
+            repair_action_override = ""
+            try:
+                repair_action_override = str(body.get("repair_action", "") or "").strip()
+            except Exception:
+                repair_action_override = ""
 
             # Hard limits (keep CPU/RAM low)
             max_files = 12
@@ -51744,6 +52009,313 @@ class Handler(BaseHTTPRequestHandler):
             files = _read_recent_logs()
             failed_jobs = _read_failed_jobs()
 
+            def _collect_issue_lines() -> list[str]:
+                out = []
+                try:
+                    for j in failed_jobs or []:
+                        jt = str(j.get("type") or "").strip()
+                        ja = str(j.get("action") or "").strip()
+                        js = str(j.get("stage") or "").strip()
+                        jsum = str(j.get("summary") or "").strip()
+                        hdr = " ".join(x for x in (jt, ja, js, jsum) if x)
+                        if hdr:
+                            out.append(hdr)
+                        iss = j.get("issues") or {}
+                        for k in ("error", "warn", "debug"):
+                            for ln in (iss.get(k) or []):
+                                v = str(ln or "").strip()
+                                if v:
+                                    out.append(v)
+                except Exception:
+                    pass
+
+                try:
+                    for f in files or []:
+                        p = str(f.get("path") or "").strip()
+                        if p:
+                            out.append(p)
+                        iss = f.get("issues") or {}
+                        for k in ("error", "warn", "debug"):
+                            for ln in (iss.get(k) or []):
+                                v = str(ln or "").strip()
+                                if v:
+                                    out.append(v)
+                except Exception:
+                    pass
+
+                # Keep bounded for CPU safety.
+                if len(out) > 1400:
+                    out = out[:1400]
+                return out
+
+            def _build_repair_plan(issue_lines: list[str]) -> dict:
+                tbl = _quick_action_table()
+                catalog = [
+                    {
+                        "id": "notifier-syntax",
+                        "action": "self-check",
+                        "reason": "Notifier Python syntax/compile failures detected.",
+                        "priority": 120,
+                        "patterns": [
+                            "python script failed to compile",
+                            "python syntax error in",
+                            "zypper-notify-updater.py",
+                            "py_compile",
+                        ],
+                    },
+                    {
+                        "id": "repo-or-rpm-integrity",
+                        "action": "verify",
+                        "reason": "Repository/rpm integrity errors detected; run full verify & auto-repair.",
+                        "priority": 110,
+                        "patterns": [
+                            "signature verification failed",
+                            "gpg",
+                            "repo refresh failed",
+                            "zypper refresh failed",
+                            "rpm database structural check failed",
+                            "rpmdb",
+                        ],
+                    },
+                    {
+                        "id": "duplicate-rpm-conflict",
+                        "action": "rm-conflict",
+                        "reason": "Duplicate/conflicting RPM patterns detected.",
+                        "priority": 105,
+                        "patterns": [
+                            "conflicting requests",
+                            "duplicate rpm",
+                            "has inferior architecture",
+                            "problem:",
+                            "conflicts with",
+                        ],
+                    },
+                    {
+                        "id": "download-state-reset",
+                        "action": "reset-downloads",
+                        "reason": "Downloader/notifier cache-state inconsistency patterns detected.",
+                        "priority": 95,
+                        "patterns": [
+                            "download-status",
+                            "cached state",
+                            "stuck",
+                            "reset downloads",
+                            "inconsistent cached status",
+                        ],
+                    },
+                    {
+                        "id": "dashboard-api-health",
+                        "action": "verify",
+                        "reason": "Dashboard API/token health issue patterns detected.",
+                        "priority": 90,
+                        "patterns": [
+                            "dashboard api",
+                            "dashboard settings api",
+                            "dashboard-api.token",
+                            "unauthorized",
+                        ],
+                    },
+                    {
+                        "id": "zypp-lock-contention",
+                        "action": "health",
+                        "reason": "zypper lock contention detected; collect health context first.",
+                        "priority": 80,
+                        "patterns": [
+                            "zypp lock",
+                            "system management is locked",
+                            "lock is held by",
+                            "another process is currently using zypp",
+                        ],
+                    },
+                    {
+                        "id": "disk-pressure",
+                        "action": "health",
+                        "reason": "Disk-pressure/low-space errors detected.",
+                        "priority": 70,
+                        "patterns": [
+                            "no space left on device",
+                            "disk full",
+                            "critical free space",
+                            "free space",
+                        ],
+                    },
+                ]
+
+                matches = []
+                for item in catalog:
+                    pats = [str(p or "").strip().lower() for p in (item.get("patterns") or []) if str(p or "").strip()]
+                    if not pats:
+                        continue
+
+                    line_hits = 0
+                    pat_hits = set()
+                    evidence = []
+
+                    for raw in (issue_lines or []):
+                        try:
+                            line = str(raw or "").strip()
+                        except Exception:
+                            line = ""
+                        if not line:
+                            continue
+                        low = line.lower()
+                        matched = False
+                        for pat in pats:
+                            if pat and pat in low:
+                                matched = True
+                                pat_hits.add(pat)
+                        if not matched:
+                            continue
+
+                        line_hits += 1
+                        if len(evidence) < 6:
+                            ev = line
+                            if len(ev) > 280:
+                                ev = ev[:280] + "…"
+                            if ev not in evidence:
+                                evidence.append(ev)
+
+                    if not pat_hits:
+                        continue
+
+                    action = str(item.get("action") or "").strip()
+                    meta = tbl.get(action) or {}
+                    title = str(meta.get("title", action) or action).strip()
+                    needs_confirm = bool(meta.get("needs_confirm", False))
+                    priority = int(item.get("priority", 0) or 0)
+                    score = int(len(pat_hits) * 100 + min(line_hits, 30) + priority)
+
+                    matches.append({
+                        "id": str(item.get("id") or ""),
+                        "action": action,
+                        "label": title,
+                        "reason": str(item.get("reason") or "").strip(),
+                        "needs_confirm": bool(needs_confirm),
+                        "pattern_hits": int(len(pat_hits)),
+                        "line_hits": int(line_hits),
+                        "score": int(score),
+                        "priority": int(priority),
+                        "evidence": evidence,
+                    })
+
+                if not matches and issue_lines:
+                    fallback_line_hits = len(issue_lines)
+                    meta = tbl.get("verify") or {}
+                    matches.append({
+                        "id": "generic-errors",
+                        "action": "verify",
+                        "label": str(meta.get("title", "verify") or "verify"),
+                        "reason": "Generic error lines detected; run full verify & auto-repair.",
+                        "needs_confirm": bool(meta.get("needs_confirm", False)),
+                        "pattern_hits": 1,
+                        "line_hits": int(fallback_line_hits),
+                        "score": 101,
+                        "priority": 1,
+                        "evidence": [],
+                    })
+
+                try:
+                    matches.sort(key=lambda m: (int(m.get("score", 0)), int(m.get("priority", 0))), reverse=True)
+                except Exception:
+                    pass
+
+                selected = matches[0] if matches else {}
+                sel_score = int(selected.get("score", 0) or 0) if selected else 0
+                sel_hits = int(selected.get("pattern_hits", 0) or 0) if selected else 0
+                conf = "low"
+                if sel_hits >= 3 or sel_score >= 320:
+                    conf = "high"
+                elif sel_hits >= 2 or sel_score >= 220:
+                    conf = "medium"
+
+                return {
+                    "selected_action": str(selected.get("action", "") or ""),
+                    "selected_label": str(selected.get("label", "") or ""),
+                    "selected_reason": str(selected.get("reason", "") or ""),
+                    "confidence": conf,
+                    "needs_confirm": bool(selected.get("needs_confirm", False)) if selected else False,
+                    "can_auto_start": bool(selected and not bool(selected.get("needs_confirm", False))),
+                    "matches": matches[:8],
+                    "override_error": "",
+                    "overridden": False,
+                }
+
+            def _ai_start_quick_action(ai_action: str, meta: dict) -> dict:
+                return _launch_quick_action(
+                    ai_action,
+                    meta,
+                    ai_triggered=True,
+                    ai_source="webui-ai-smart-report",
+                    log_banner="AI Smart-Report Quick Action job",
+                    log_prefix="[webui-ai]",
+                )
+
+            issue_lines = _collect_issue_lines()
+            repair_plan = _build_repair_plan(issue_lines)
+            if repair_action_override:
+                tbl_override = _quick_action_table()
+                meta_override = tbl_override.get(repair_action_override) or {}
+                if meta_override:
+                    repair_plan["selected_action"] = str(repair_action_override)
+                    repair_plan["selected_label"] = str(meta_override.get("title", repair_action_override) or repair_action_override)
+                    repair_plan["selected_reason"] = f"Client override requested action '{repair_action_override}'."
+                    repair_plan["needs_confirm"] = bool(meta_override.get("needs_confirm", False))
+                    repair_plan["can_auto_start"] = bool(not repair_plan["needs_confirm"])
+                    repair_plan["confidence"] = "override"
+                    repair_plan["overridden"] = True
+                else:
+                    repair_plan["override_error"] = f"unsupported action override: {repair_action_override}"
+
+            initiated_repair = {
+                "requested": bool(initiate_repair),
+                "started": False,
+                "action": str(repair_plan.get("selected_action", "") or ""),
+                "needs_confirm": bool(repair_plan.get("needs_confirm", False)),
+                "blocked_reason": "",
+                "job_id": "",
+                "unit": "",
+                "status_path": "",
+                "log_path": "",
+                "running_job": {},
+            }
+
+            if initiate_repair:
+                sel_action = str(repair_plan.get("selected_action", "") or "").strip()
+                if not sel_action:
+                    initiated_repair["blocked_reason"] = "no-mapped-action"
+                else:
+                    tbl_start = _quick_action_table()
+                    meta_start = tbl_start.get(sel_action) or {}
+                    if not meta_start:
+                        initiated_repair["blocked_reason"] = "selected-action-not-allowlisted"
+                    elif bool(meta_start.get("needs_confirm", False)):
+                        initiated_repair["blocked_reason"] = "action-requires-confirmation"
+                    else:
+                        ri = {}
+                        try:
+                            ri = _quick_any_running()
+                        except Exception:
+                            ri = {}
+
+                        if bool(ri.get("running", False)):
+                            initiated_repair["blocked_reason"] = "quick-action-already-running"
+                            initiated_repair["running_job"] = {
+                                "unit": ri.get("unit"),
+                                "status_path": ri.get("status_path"),
+                                "action": ri.get("action"),
+                                "title": ri.get("title"),
+                            }
+                        else:
+                            started = _ai_start_quick_action(sel_action, meta_start)
+                            if bool(started.get("ok", False)):
+                                initiated_repair["started"] = True
+                                initiated_repair["job_id"] = str(started.get("job_id", "") or "")
+                                initiated_repair["unit"] = str(started.get("unit", "") or "")
+                                initiated_repair["status_path"] = str(started.get("status_path", "") or "")
+                                initiated_repair["log_path"] = str(started.get("log_path", "") or "")
+                            else:
+                                initiated_repair["blocked_reason"] = str(started.get("error", "") or "start-failed")
+
             # Aggregate counts
             total_err = 0
             total_warn = 0
@@ -51841,6 +52413,32 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         continue
 
+            lines.append("")
+            lines.append("-- AI repair mapping --")
+            if str(repair_plan.get("selected_action", "") or "").strip():
+                lines.append(
+                    "selected_action: "
+                    + f"{repair_plan.get('selected_action')} "
+                    + f"(confidence={repair_plan.get('confidence')}, needs_confirm={1 if repair_plan.get('needs_confirm') else 0})"
+                )
+                if repair_plan.get("selected_reason"):
+                    lines.append(f"reason: {repair_plan.get('selected_reason')}")
+            else:
+                lines.append("selected_action: none")
+            if repair_plan.get("override_error"):
+                lines.append(f"override_error: {repair_plan.get('override_error')}")
+            if initiate_repair:
+                if initiated_repair.get("started"):
+                    lines.append(
+                        "initiated_repair: "
+                        + f"started action={initiated_repair.get('action')} job_id={initiated_repair.get('job_id')}"
+                    )
+                else:
+                    lines.append(
+                        "initiated_repair: "
+                        + f"not-started reason={initiated_repair.get('blocked_reason') or 'unknown'}"
+                    )
+
             report_text = "\n".join(lines)
             if len(report_text) > 120_000:
                 report_text = report_text[:120_000] + "\n…(truncated)"
@@ -51864,6 +52462,8 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "failed_jobs": failed_jobs,
                 "files": files,
+                "repair_plan": repair_plan,
+                "initiated_repair": initiated_repair,
                 "text": report_text,
             }
 
@@ -51981,20 +52581,6 @@ class Handler(BaseHTTPRequestHandler):
             if not meta:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 
-            cmd = meta.get("cmd")
-            if not isinstance(cmd, list) or not cmd:
-                return _json_response(self, 500, {"error": "invalid action command"}, origin)
-
-            # Some helper actions expect to be invoked via sudo and use SUDO_USER.
-            # The API service can store the desktop user identity via its EnvironmentFile.
-            dash_user = str(os.environ.get("DASH_API_USER", "") or "").strip()
-            dash_home = str(os.environ.get("DASH_API_USER_HOME", "") or "").strip()
-            needs_dash_user_env = bool(meta.get("needs_dash_user_env"))
-            if needs_dash_user_env and not dash_user:
-                return _json_response(self, 400, {"error": "dashboard API missing DASH_API_USER; re-open dashboard via --dash-open"}, origin)
-
-            title = str(meta.get("title", action) or action)
-
             needs_confirm = bool(meta.get("needs_confirm"))
             required_phrase = str(meta.get("phrase", "") or "").strip().upper()
 
@@ -52027,186 +52613,26 @@ class Handler(BaseHTTPRequestHandler):
                         items.pop(confirm_token, None)
                     except Exception:
                         pass
-
-            timeout_s = 300
-            try:
-                timeout_s = int(meta.get("timeout_s", 300))
-            except Exception:
-                timeout_s = 300
-            if timeout_s < 10:
-                timeout_s = 10
-            if timeout_s > 2 * 3600:
-                timeout_s = 2 * 3600
-
-            job_id = secrets.token_urlsafe(18)
-            unit, log_path, status_path, script_file = _quick_paths(job_id)
-
-            # Precreate log + status so the first poll can't race before the unit writes anything.
-            try:
-                os.makedirs(QUICK_LOG_DIR, exist_ok=True)
-                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
-                with open(log_path, "a", encoding="utf-8"):
-                    pass
-                with open(status_path, "w", encoding="utf-8") as f:
-                    f.write("done=0\n")
-                    f.write("rc=0\n")
-                    f.write("stage=starting\n")
-                    f.write(f"action={action}\n")
-                    f.write(f"title={title}\n")
-                    f.write(f"ai_triggered={1 if ai_triggered else 0}\n")
-                    f.write(f"ai_source={ai_source}\n")
-            except Exception:
-                pass
-
-            # Compose a shell script for the transient unit.
-            cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
-
-            inject_user = ""
-            try:
-                if needs_dash_user_env and dash_user:
-                    # Inject SUDO_USER so helper subcommands that expect sudo still work.
-                    # SUDO_USER_HOME is optional but improves behavior for a few paths.
-                    inject_user = "\n".join([
-                        f'export SUDO_USER={shlex.quote(dash_user)}',
-                        f'export SUDO_USER_HOME={shlex.quote(dash_home)}' if dash_home else 'true',
-                    ])
-            except Exception:
-                inject_user = ""
-
-            script_text = "\n".join([
-                'set -euo pipefail',
-                f'LOG={shlex.quote(log_path)}',
-                f'STATUS={shlex.quote(status_path)}',
-                f'ACTION={shlex.quote(action)}',
-                f'TITLE={shlex.quote(title)}',
-                f'AI_TRIGGERED={1 if ai_triggered else 0}',
-                f'AI_SOURCE={shlex.quote(ai_source)}',
-                f'TIMEOUT_S={timeout_s}',
-                'mkdir -p /var/log/zypper-auto/service-logs || true',
-                'mkdir -p /var/lib/zypper-auto || true',
-                'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
-                'write_status() {',
-                '  local done="$1"; local rc="$2"; local stage="$3"',
-                '  local tmp="${STATUS}.tmp.$$"',
-                '  {',
-                '    echo "done=${done}"',
-                '    echo "rc=${rc}"',
-                '    echo "stage=${stage}"',
-                '    echo "action=${ACTION:-}"',
-                '    echo "title=${TITLE:-}"',
-                '    echo "ai_triggered=${AI_TRIGGERED:-0}"',
-                '    echo "ai_source=${AI_SOURCE:-}"',
-                '    echo "started_at_utc=${STARTED_AT}"',
-                '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
-                '  } >"${tmp}" 2>/dev/null || true',
-                '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
-                '}',
-                'write_status 0 0 starting',
-                'echo "==========================================" >>"$LOG" || true',
-                'echo " WebUI Quick Action job " >>"$LOG" || true',
-                'echo "==========================================" >>"$LOG" || true',
-                'date >>"$LOG" 2>/dev/null || true',
-                'echo "" >>"$LOG" || true',
-                'echo "ACTION: ${ACTION}" >>"$LOG" || true',
-                'echo "TITLE : ${TITLE}" >>"$LOG" || true',
-                'echo "AI_LAUNCHED: ${AI_TRIGGERED} (${AI_SOURCE:-none})" >>"$LOG" || true',
-                f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
-                'echo "" >>"$LOG" || true',
-                'export ZNH_NON_INTERACTIVE=1',
-                inject_user if inject_user else 'true',
-                'write_status 0 0 running',
-                'set +e',
-                f'( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
-                'rc=${PIPESTATUS[0]}',
-                'set -e',
-                'echo "" >>"$LOG" || true',
-                'echo "[webui] quick action rc=${rc}" >>"$LOG" || true',
-                'if [ ${rc} -eq 124 ] 2>/dev/null; then',
-                '  write_status 1 ${rc} timed-out',
-                '  echo "[webui] ERROR: timed out" >>"$LOG" || true',
-                '  rm -f "$0" >/dev/null 2>&1 || true',
-                '  exit ${rc}',
-                'fi',
-                'if [ ${rc} -eq 0 ]; then',
-                '  write_status 1 ${rc} done',
-                'else',
-                '  write_status 1 ${rc} failed',
-                'fi',
-                'rm -f "$0" >/dev/null 2>&1 || true',
-                'exit ${rc}',
-            ])
-
-            # Write unit script to disk (inside the API service sandbox).
-            try:
-                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
-                with open(script_file, "w", encoding="utf-8") as f:
-                    f.write("#!/usr/bin/env bash\n")
-                    f.write(script_text)
-                    f.write("\n")
-                os.chmod(script_file, 0o700)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"failed to write quick-action unit script: {e}"}, origin)
-
-            sys_cmd = [
-                "systemd-run",
-                "--quiet",
-                "--collect",
-                "--unit",
-                unit,
-                "--property=Nice=19",
-                "--property=IOSchedulingClass=idle",
-                "--",
-                "/usr/bin/bash",
-                script_file,
-            ]
-
-            try:
-                p = subprocess.run(
-                    sys_cmd,
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                )
-                if p.returncode != 0:
-                    out = (p.stdout or "").strip()
-                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
-
-            # Persist job metadata into history DB (best-effort)
-            try:
-                _history_job_upsert(self.server, {
-                    "job_id": job_id,
-                    "type": "quick-action",
-                    "action": action,
-                    "title": title,
-                    "ai_triggered": bool(ai_triggered),
-                    "ai_source": str(ai_source or ""),
-                    "simulate": False,
-                    "dry_run": False,
-                    "channel": "",
-                    "running": True,
-                    "done": False,
-                    "rc": None,
-                    "stage": "Starting",
-                    "unit": unit,
-                    "log_path": log_path,
-                    "status_path": status_path,
-                    "started_at": time.time(),
-                    "finished_at": 0,
-                    "output": "",
-                }, summary=f"{title} (starting)")
-            except Exception:
-                pass
+            started = _launch_quick_action(
+                action,
+                meta,
+                ai_triggered=bool(ai_triggered),
+                ai_source=str(ai_source or ""),
+                log_banner="WebUI Quick Action job",
+                log_prefix="[webui]",
+            )
+            if not bool(started.get("ok", False)):
+                status = int(started.get("http_status", 500) or 500)
+                msg = str(started.get("error", "") or "quick action start failed")
+                out = str(started.get("output", "") or "").strip()
+                if out:
+                    return _json_response(self, status, {"error": msg, "output": out}, origin)
+                return _json_response(self, status, {"error": msg}, origin)
 
             return _json_response(self, 200, {
-                "job_id": job_id,
-                "ai_triggered": bool(ai_triggered),
-                "ai_source": str(ai_source or ""),
+                "job_id": str(started.get("job_id", "") or ""),
+                "ai_triggered": bool(started.get("ai_triggered", False)),
+                "ai_source": str(started.get("ai_source", "") or ""),
             }, origin)
 
         # --- Self-update control (dashboard) ---

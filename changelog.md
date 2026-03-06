@@ -6,8 +6,14 @@
 - Verify service: expensive deep checks can now be deferred during cooldown windows to reduce CPU/IO pressure when failures repeat.
 - Config/WebUI/validation: added `VERIFY_LOW_IMPACT_ENABLED`, `VERIFY_LOW_IMPACT_FAIL_STREAK`, `VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES`, and `VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES`.
 - Default verification cadence tuned: `VERIFY_TIMER_INTERVAL_MINUTES` now defaults to `15` (from `5`) for lower background impact.
+- Default verification cadence retuned: `VERIFY_TIMER_INTERVAL_MINUTES` now defaults to `30` (from `15`) in the current config template/schema and validation fallback path.
+- Verify/self-check/install notifier syntax validation now uses a read-only-safe AST parser helper (`python_ast_syntax_check`) to avoid false failures caused by pycache writes under hardened mounts.
 - WebUI Managers (Server/SQLite): quick-action entries now show explicit AI launch markers (`[AI launched]`) with persisted source metadata (`ai_triggered`, `ai_source`).
 - Quick action API/recovery/history: AI launch metadata is now carried through quick start/status/history flows so reopen/resume paths keep the AI marker.
+- AI Smart Report (`/api/ai/smart-report`) now emits deterministic error→repair mapping data (`repair_plan`) with selected action, confidence, evidence, and confirmation requirements.
+- AI Smart Report now supports optional safe initiation (`initiate_repair=true`) for allowlisted no-confirm quick actions and reports blocked reasons when confirmation is required.
+- Quick action background spawning is now centralized in a shared WebUI API helper and reused by both `/api/quick/start` and AI smart-report initiation paths, reducing duplication and keeping status/log/history behavior aligned.
+- Contract tests were strengthened to assert shared-launcher routing for `/api/quick/start` and AI smart-report initiation, while preserving quick-action history payload constraints.
 - Snapper WebUI API hardening: background jobs now run with lower-priority scheduling (`Nice=19`, idle I/O class) plus low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
 - Snapper direct run API (`/api/snapper/run`) now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
 - Snapper cleanup WebUI confirmation now includes an explicit force-low-space override toggle (`force_low_space`) that maps to helper env `ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1`.

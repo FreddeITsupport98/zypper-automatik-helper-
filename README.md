@@ -196,6 +196,7 @@ In addition to the downloader, a small root service periodically runs the same
 * Runs `zypper-auto-helper --verify` as a oneshot root service.
     * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
     * Uses `python3 -B -m py_compile` for syntax checks so verification still works under systemd hardening (it won’t try to write `__pycache__/*.pyc` into the user’s home).
+    * Newer builds additionally use a read-only-safe AST parser path (`python_ast_syntax_check`) for notifier syntax checks, so verify does not depend on pyc generation behavior under hardened mounts.
     * Automatically resets failed states for the core units it manages and,
       when configured, sends a short desktop notification whenever it fixes
       one or more issues.
@@ -567,6 +568,7 @@ Key options include:
     allowed set and behaviour as above).
   - `VERIFY_TIMER_INTERVAL_MINUTES` – how often the root verification/auto‑repair
     service runs (again, allowed **only**: `1,5,10,15,30,60`).
+  - Current default template/schema value for `VERIFY_TIMER_INTERVAL_MINUTES` is `30` minutes (lower background impact baseline).
 - The installer converts these into appropriate `OnCalendar` values, e.g.
   `*:0/10` for every 10 minutes or `hourly` for 60.
 <a id="cfg-verify-low-impact"></a>
@@ -1881,6 +1883,8 @@ systemctl status zypper-autodownload.service
     - Defers expensive deep checks during cooldown windows and lowers verify CPU/IO priority.
     - Adds configurable follow-up delay and exposes new `VERIFY_LOW_IMPACT_*` settings in config/WebUI.
   - ⏱️ **CHANGED:** default `VERIFY_TIMER_INTERVAL_MINUTES` is now `15` (from `5`) to reduce repeated verify pressure on busy systems.
+  - ⏱️ **CHANGED:** default `VERIFY_TIMER_INTERVAL_MINUTES` is now `30` (from `15`) in the current config template/schema and fallback validation path.
+  - 🧪 **IMPROVED:** notifier syntax validation in self-check/verify/install now uses a read-only-safe AST parser helper (`python_ast_syntax_check`) to avoid false failures caused by `__pycache__` writes under hardened mounts.
   - 🧰 **IMPROVED:** Ready-to-Install (`zypper-run-install`) now writes clearer zypp lock diagnostics into `run-install.log` (lock file/PID/process) and streams full `zypper dup` output into the log for easier debugging.
   - 🧿 **NEW:** WebUI Recent Activity Log now includes **View: Install helper** (shows `dashboard-run-install-tail.log`) so Ready-to-Install failures are visible in the dashboard.
   - 🧿 **IMPROVED:** WebUI scrub-ghost Smart Analyze (AUTO) readability:
@@ -2033,6 +2037,10 @@ systemctl status zypper-autodownload.service
     - Also includes **recent failed jobs** from the local SQLite history (when available).
     - Output is safe + bounded to avoid hogging CPU/RAM, and can be copied or downloaded as JSON.
     - API endpoint: `POST /api/ai/smart-report` (requires `X-ZNH-Token`).
+    - New deterministic error→repair mapping output: `repair_plan` (selected quick action, confidence, evidence, confirmation requirements).
+    - Optional safe initiation path: request body `initiate_repair=true` can auto-start allowlisted no-confirm quick actions; confirmation-required actions are intentionally blocked and reported in `initiated_repair.blocked_reason`.
+  - 🧰 **IMPROVED:** quick-action spawning now uses one shared backend launcher for both manual `/api/quick/start` and AI smart-report initiation, so status files, logs, and history metadata stay aligned.
+  - 🧪 **IMPROVED:** contract tests now explicitly enforce that both quick-start and AI initiation routes go through the shared launcher path.
   - 🗄️ **IMPROVED:** dashboard Recent Activity Log now includes a visible **SQLite viewer** button that jumps directly to **Managers → Server (SQLite)** for discoverability.
     - Retention is controlled by `WEBUI_HISTORY_RETENTION_DAYS` (7/30/90) + a manual cleanup/integrity action in the Server tab.
     - SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`

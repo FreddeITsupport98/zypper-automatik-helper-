@@ -34,11 +34,11 @@ class SnapperStartResponseContractTest(unittest.TestCase):
         self.assertFalse(missing, f"/api/snapper/start success payload missing keys: {missing}; found: {sorted(keys)}")
     def test_quick_action_history_seed_excludes_low_space_keys(self) -> None:
         block_match = re.search(
-            r'if path == "/api/quick/start":(?P<body>.*?)\n\s*if path == "/api/self-update/confirm":',
+            r'def _launch_quick_action\((?P<body>.*?)\n\s*# --- Dashboard maintenance \(safe\) ---',
             self.script_text,
             re.S,
         )
-        self.assertIsNotNone(block_match, f"Could not find /api/quick/start block in {self.script_path}")
+        self.assertIsNotNone(block_match, f"Could not find _launch_quick_action helper in {self.script_path}")
         block = str(block_match.group("body"))
 
         upsert_match = re.search(
@@ -66,6 +66,30 @@ class SnapperStartResponseContractTest(unittest.TestCase):
         self.assertFalse(
             leaked,
             f"quick-action history payload must not include low-space telemetry keys, found: {leaked}",
+        )
+    def test_quick_start_routes_to_shared_launcher(self) -> None:
+        block_match = re.search(
+            r'if path == "/api/quick/start":(?P<body>.*?)\n\s*# --- Self-update control \(dashboard\) ---',
+            self.script_text,
+            re.S,
+        )
+        self.assertIsNotNone(block_match, f"Could not find /api/quick/start block in {self.script_path}")
+        block = str(block_match.group("body"))
+
+        self.assertIn(
+            "_launch_quick_action(",
+            block,
+            "/api/quick/start must route quick-action spawning through shared _launch_quick_action helper",
+        )
+        self.assertNotIn(
+            "script_text = ",
+            block,
+            "/api/quick/start should not build unit scripts inline after shared-launcher refactor",
+        )
+        self.assertNotIn(
+            "systemd-run",
+            block,
+            "/api/quick/start should not call systemd-run inline after shared-launcher refactor",
         )
     def test_snapper_history_seed_includes_low_space_keys(self) -> None:
         block_match = re.search(
