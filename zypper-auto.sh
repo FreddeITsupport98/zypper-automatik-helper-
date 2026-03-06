@@ -12315,6 +12315,12 @@ generate_dashboard() {
           <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-grub-detail"></div>
           <div style="margin-top:6px; font-size:0.82rem; color: rgba(148,163,184,0.92);" id="boot-grub-delta"></div>
         </div>
+        <div class="stat-box">
+          <span class="stat-label">Installed kernels</span>
+          <span class="stat-value" id="boot-kernel-count">(loading)</span>
+          <div style="margin-top:8px; font-size:0.85rem; color: var(--muted);" id="boot-kernel-detail"></div>
+          <div style="margin-top:6px; font-size:0.82rem; color: rgba(148,163,184,0.92); line-height:1.35;" id="boot-kernel-list"></div>
+        </div>
       </div>
 
       <div class="grid">
@@ -12383,12 +12389,22 @@ generate_dashboard() {
 
         <div class="stat-box">
           <span class="stat-label">AUTO enable timers (Option 5)</span>
-          <button class="pill" type="button" id="snapper-auto-enable-btn">Enable</button>
+          <button class="pill" type="button" id="snapper-auto-enable-btn">Enable all</button>
+          <div style="margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="pill" type="button" id="snapper-enable-timeline-btn">Enable timeline</button>
+            <button class="pill" type="button" id="snapper-enable-cleanup-btn">Enable cleanup</button>
+            <button class="pill" type="button" id="snapper-enable-boot-btn">Enable boot</button>
+          </div>
         </div>
 
         <div class="stat-box">
           <span class="stat-label">AUTO disable timers (Option 6)</span>
-          <button class="pill" type="button" id="snapper-auto-disable-btn" style="border-color: rgba(239,68,68,0.30);">Disable</button>
+          <button class="pill" type="button" id="snapper-auto-disable-btn" style="border-color: rgba(239,68,68,0.30);">Disable all</button>
+          <div style="margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="pill" type="button" id="snapper-disable-timeline-btn" style="border-color: rgba(239,68,68,0.30);">Disable timeline</button>
+            <button class="pill" type="button" id="snapper-disable-cleanup-btn" style="border-color: rgba(239,68,68,0.30);">Disable cleanup</button>
+            <button class="pill" type="button" id="snapper-disable-boot-btn" style="border-color: rgba(239,68,68,0.30);">Disable boot</button>
+          </div>
         </div>
       </div>
 
@@ -19786,6 +19802,69 @@ generate_dashboard() {
                 }
             }
 
+            // Installed kernels stats
+            var kernels = (s && s.installed_kernels) ? s.installed_kernels : null;
+            var kernelCountEl = document.getElementById('boot-kernel-count');
+            var kernelDetailEl = document.getElementById('boot-kernel-detail');
+            var kernelListEl = document.getElementById('boot-kernel-list');
+            var kernelEntries = [];
+            var kernelNames = [];
+
+            try {
+                if (kernels && Array.isArray(kernels.entries)) {
+                    kernelEntries = kernels.entries;
+                }
+            } catch (eK0) { kernelEntries = []; }
+            try {
+                if (kernels && Array.isArray(kernels.names)) {
+                    kernelNames = kernels.names;
+                }
+            } catch (eK1) { kernelNames = []; }
+
+            if (kernelCountEl) {
+                if (kernels && kernels.ok) {
+                    var kc = 0;
+                    try { kc = parseInt(kernels.count || 0, 10) || 0; } catch (eK2) { kc = 0; }
+                    kernelCountEl.textContent = String(kc);
+                } else {
+                    kernelCountEl.textContent = '(unknown)';
+                }
+            }
+            if (kernelDetailEl) {
+                if (kernels && kernels.ok) {
+                    var kcnt = 0;
+                    try { kcnt = parseInt(kernels.count || 0, 10) || 0; } catch (eK3) { kcnt = 0; }
+                    kernelDetailEl.textContent = 'installed versions=' + String(kcnt) + ' • package families=' + String(kernelNames.length);
+                } else {
+                    kernelDetailEl.textContent = 'kernel inventory not detected';
+                }
+            }
+            if (kernelListEl) {
+                if (kernels && kernels.ok) {
+                    if (kernelEntries.length > 0) {
+                        var chunks = [];
+                        var i = 0;
+                        for (i = 0; i < kernelEntries.length; i += 1) {
+                            var it = kernelEntries[i] || {};
+                            var kver = '';
+                            var kname = '';
+                            try { kver = String(it.version || '').trim(); } catch (eK4) { kver = ''; }
+                            try { kname = String(it.name || '').trim(); } catch (eK5) { kname = ''; }
+                            if (!kver && !kname) continue;
+                            if (kname && kver) chunks.push(kname + ' (' + kver + ')');
+                            else if (kname) chunks.push(kname);
+                            else chunks.push(kver);
+                        }
+                        kernelListEl.textContent = chunks.length ? chunks.join(' • ') : 'no installed kernels detected';
+                    } else if (kernelNames.length > 0) {
+                        kernelListEl.textContent = kernelNames.join(' • ');
+                    } else {
+                        kernelListEl.textContent = 'no installed kernels detected';
+                    }
+                } else {
+                    kernelListEl.textContent = 'kernel inventory unavailable';
+                }
+            }
             function _setDelta(el, text, kind) {
                 if (!el) return;
                 el.textContent = String(text || '');
@@ -21128,12 +21207,18 @@ generate_dashboard() {
                 _snapperSetOut(r.output || '(no output)');
                 var msg = (r.rc === 0) ? 'OK' : ('rc=' + r.rc);
                 var toastKind = (r.rc === 0) ? 'ok' : 'err';
+                var actionStr = String(action || '');
                 if (r.rc === 0 && String(action || '') === 'rollback') msg = 'OK (reboot required)';
                 if (r.rc === 0 && String(action || '') === 'auto-disable') {
                     msg = '✓ Disabled (timers intentionally off)';
                     toastKind = 'warn';
                 } else if (r.rc === 0 && String(action || '') === 'auto-enable') {
                     msg = '✓ Enabled';
+                } else if (r.rc === 0 && actionStr.indexOf('timer-disable-') === 0) {
+                    msg = '✓ Timer disabled';
+                    toastKind = 'warn';
+                } else if (r.rc === 0 && actionStr.indexOf('timer-enable-') === 0) {
+                    msg = '✓ Timer enabled';
                 }
                 toast('Snapper: ' + action, msg, toastKind);
                 _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
@@ -21236,6 +21321,12 @@ generate_dashboard() {
         var b5 = document.getElementById('snapper-auto-enable-btn');
         var b6 = document.getElementById('snapper-auto-disable-btn');
         var b7 = document.getElementById('snapper-rollback-btn');
+        var b5a = document.getElementById('snapper-enable-timeline-btn');
+        var b5b = document.getElementById('snapper-enable-cleanup-btn');
+        var b5c = document.getElementById('snapper-enable-boot-btn');
+        var b6a = document.getElementById('snapper-disable-timeline-btn');
+        var b6b = document.getElementById('snapper-disable-cleanup-btn');
+        var b6c = document.getElementById('snapper-disable-boot-btn');
 
         if (b1) b1.addEventListener('click', function() {
             _api('/api/snapper/status', { method: 'GET' }).then(function(r) {
@@ -21351,6 +21442,29 @@ generate_dashboard() {
 
         if (b6) b6.addEventListener('click', function() {
             snapperRun('auto-disable', {}, 'auto-disable');
+        });
+        if (b5a) b5a.addEventListener('click', function() {
+            snapperRun('timer-enable-timeline', {}, 'timer-enable-timeline');
+        });
+
+        if (b5b) b5b.addEventListener('click', function() {
+            snapperRun('timer-enable-cleanup', {}, 'timer-enable-cleanup');
+        });
+
+        if (b5c) b5c.addEventListener('click', function() {
+            snapperRun('timer-enable-boot', {}, 'timer-enable-boot');
+        });
+
+        if (b6a) b6a.addEventListener('click', function() {
+            snapperRun('timer-disable-timeline', {}, 'timer-disable-timeline');
+        });
+
+        if (b6b) b6b.addEventListener('click', function() {
+            snapperRun('timer-disable-cleanup', {}, 'timer-disable-cleanup');
+        });
+
+        if (b6c) b6c.addEventListener('click', function() {
+            snapperRun('timer-disable-boot', {}, 'timer-disable-boot');
         });
 
         // Option 4 card remains compact; only mode selector is present here.
@@ -37336,6 +37450,74 @@ run_snapper_menu_only() {
         [ "${first}" = "${unit}" ]
     }
 
+    __znh_snapper_single_timer() {
+        local action="${1:-enable}"
+        local timer_key="${2:-}"
+        local unit=""
+
+        case "${timer_key}" in
+            timeline|snapper-timeline.timer) unit="snapper-timeline.timer" ;;
+            cleanup|snapper-cleanup.timer) unit="snapper-cleanup.timer" ;;
+            boot|snapper-boot.timer) unit="snapper-boot.timer" ;;
+            *)
+                echo "[snapper][timer] Unknown timer key: ${timer_key}"
+                echo "Use one of: timeline | cleanup | boot"
+                return 1
+                ;;
+        esac
+
+        if [ "${action}" != "enable" ] && [ "${action}" != "disable" ]; then
+            echo "[snapper][timer] Unknown action: ${action} (expected: enable|disable)"
+            return 1
+        fi
+
+        echo ""
+        echo "Snapper timer management (${action}): ${unit}"
+
+        if ! __znh_snapper_timer_exists "${unit}"; then
+            echo "  [skip] Timer not found: ${unit}"
+            return 0
+        fi
+
+        if [ "${action}" = "enable" ]; then
+            if systemctl is-failed --quiet "${unit}" 2>/dev/null; then
+                echo "  [fix] Resetting failed state: ${unit}"
+                execute_guarded "Reset failed state for ${unit}" systemctl reset-failed "${unit}" || true
+            fi
+            if systemctl is-enabled "${unit}" 2>/dev/null | grep -q "masked"; then
+                echo "  [fix] Unmasking: ${unit}"
+                execute_guarded "Unmask ${unit}" systemctl unmask "${unit}" || true
+            fi
+            execute_guarded "Enable + start ${unit}" systemctl enable --now "${unit}" || true
+        else
+            execute_guarded "Disable + stop ${unit}" systemctl disable --now "${unit}" || true
+        fi
+
+        # Persist explicit user intent if cleanup timer is disabled individually.
+        local _snap_disable_marker
+        _snap_disable_marker="${SNAPPER_AUTO_DISABLE_MARKER:-/var/lib/zypper-auto/snapper-auto-disabled.intent}"
+        if [ "${unit}" = "snapper-cleanup.timer" ]; then
+            if [ "${action}" = "disable" ]; then
+                mkdir -p "$(dirname "${_snap_disable_marker}")" 2>/dev/null || true
+                {
+                    printf 'disabled_at=%s\n' "$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')"
+                    printf 'run_id=%s\n' "${RUN_ID:-unknown}"
+                    printf 'source=snapper-timer-disable:%s\n' "${unit}"
+                } >"${_snap_disable_marker}" 2>/dev/null || true
+                chmod 644 "${_snap_disable_marker}" 2>/dev/null || true
+                log_info "[snapper][timer] disable marker written: ${_snap_disable_marker}"
+            elif [ -f "${_snap_disable_marker}" ]; then
+                rm -f -- "${_snap_disable_marker}" 2>/dev/null || true
+                log_info "[snapper][timer] disable marker cleared: ${_snap_disable_marker}"
+            fi
+        fi
+
+        echo ""
+        echo "Current snapper timers (if any):"
+        systemctl --no-pager list-timers 'snapper-*.timer' 2>/dev/null || true
+        return 0
+    }
+
     __znh_snapper_auto_timers() {
         local action="${1:-enable}"
         local units=(snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer)
@@ -37729,6 +37911,8 @@ run_snapper_menu_only() {
     #   zypper-auto-helper snapper rollback <ID>
     #   zypper-auto-helper snapper auto   (enable timers)
     #   zypper-auto-helper snapper auto-off (disable timers)
+    #   zypper-auto-helper snapper timer-enable <timeline|cleanup|boot>
+    #   zypper-auto-helper snapper timer-disable <timeline|cleanup|boot>
     local sub="${1:-}"
     case "${sub}" in
         status)
@@ -37775,6 +37959,20 @@ run_snapper_menu_only() {
             __znh_snapper_auto_timers disable
             set -e
             return 0
+            ;;
+        timer-enable)
+            shift
+            __znh_snapper_single_timer enable "${1:-}"
+            local rc=$?
+            set -e
+            return $rc
+            ;;
+        timer-disable)
+            shift
+            __znh_snapper_single_timer disable "${1:-}"
+            local rc=$?
+            set -e
+            return $rc
             ;;
         "")
             # Interactive menu below
@@ -50275,11 +50473,88 @@ class Handler(BaseHTTPRequestHandler):
                 out["reason"] = f"failed to read grub cfg: {e}"
                 return out
 
+        def _rpm_owner_name(path0: str) -> str:
+            p = str(path0 or "").strip()
+            if not p:
+                return ""
+            try:
+                pr = subprocess.run(
+                    ["rpm", "-qf", "--qf", "%{NAME}\n", p],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=8,
+                )
+                if int(pr.returncode or 0) != 0:
+                    return ""
+                for ln in str(pr.stdout or "").splitlines():
+                    s = str(ln or "").strip()
+                    if s:
+                        return s
+                return ""
+            except Exception:
+                return ""
+
+        def _installed_kernels_stats() -> dict:
+            out = {
+                "ok": False,
+                "count": 0,
+                "versions": [],
+                "names": [],
+                "entries": [],
+            }
+            versions = set()
+            for base in ("/lib/modules", "/usr/lib/modules"):
+                try:
+                    if not os.path.isdir(base):
+                        continue
+                    for bn in os.listdir(base):
+                        if not bn:
+                            continue
+                        p = os.path.join(base, str(bn))
+                        if os.path.isdir(p):
+                            versions.add(str(bn))
+                except Exception:
+                    continue
+
+            vers = sorted(list(versions))
+            names = set()
+            entries = []
+            for kv in vers:
+                owner = ""
+                for dep in (f"/lib/modules/{kv}/modules.dep", f"/usr/lib/modules/{kv}/modules.dep"):
+                    try:
+                        if os.path.isfile(dep):
+                            owner = _rpm_owner_name(dep)
+                            if owner:
+                                break
+                    except Exception:
+                        pass
+                if owner:
+                    names.add(str(owner))
+                entries.append({
+                    "version": str(kv),
+                    "name": str(owner or ""),
+                })
+
+            out.update({
+                "ok": True,
+                "count": int(len(vers)),
+                "versions": vers,
+                "names": sorted(list(names)),
+                "entries": entries,
+            })
+            return out
+
         if path == "/api/boot/stats":
             efi = _statvfs_usage("/boot/efi")
             boot = _statvfs_usage("/boot")
             bls = _bls_entries_stats()
             grub = _grub_stats()
+            kernels = _installed_kernels_stats()
 
             # If GRUB is configured for BLS (blscfg), the actual boot menu entries are
             # effectively the BLS entry files (not the literal menuentry lines in grub.cfg).
@@ -50298,6 +50573,7 @@ class Handler(BaseHTTPRequestHandler):
                 "boot": boot,
                 "bls_entries": bls,
                 "grub": grub,
+                "installed_kernels": kernels,
             }, origin)
 
         # --- Snapper (dashboard) ---
@@ -53820,6 +54096,12 @@ class Handler(BaseHTTPRequestHandler):
                 "rollback": "Type ROLLBACK to confirm Snapper rollback (danger: changes root filesystem; reboot required).",
                 "auto-enable": "Type ENABLE to confirm enabling Snapper timers.",
                 "auto-disable": "Type DISABLE to confirm disabling Snapper timers.",
+                "timer-enable-timeline": "Type ENABLE to confirm enabling snapper-timeline.timer.",
+                "timer-enable-cleanup": "Type ENABLE to confirm enabling snapper-cleanup.timer.",
+                "timer-enable-boot": "Type ENABLE to confirm enabling snapper-boot.timer.",
+                "timer-disable-timeline": "Type DISABLE to confirm disabling snapper-timeline.timer.",
+                "timer-disable-cleanup": "Type DISABLE to confirm disabling snapper-cleanup.timer.",
+                "timer-disable-boot": "Type DISABLE to confirm disabling snapper-boot.timer.",
             }
             if action not in allowed:
                 return _json_response(self, 400, {"error": f"unsupported confirm action: {action}"}, origin)
@@ -53851,6 +54133,10 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "auto-enable":
                 phrase = "ENABLE"
             elif action == "auto-disable":
+                phrase = "DISABLE"
+            elif action in ("timer-enable-timeline", "timer-enable-cleanup", "timer-enable-boot"):
+                phrase = "ENABLE"
+            elif action in ("timer-disable-timeline", "timer-disable-cleanup", "timer-disable-boot"):
                 phrase = "DISABLE"
 
             return _json_response(self, 200, {
@@ -53919,7 +54205,19 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
             # Determine if action requires confirmation.
-            needs_confirm = action in ("create", "cleanup", "rollback", "auto-enable", "auto-disable")
+            needs_confirm = action in (
+                "create",
+                "cleanup",
+                "rollback",
+                "auto-enable",
+                "auto-disable",
+                "timer-enable-timeline",
+                "timer-enable-cleanup",
+                "timer-enable-boot",
+                "timer-disable-timeline",
+                "timer-disable-cleanup",
+                "timer-disable-boot",
+            )
             if action in ("status", "list"):
                 needs_confirm = False
 
@@ -53943,6 +54241,12 @@ class Handler(BaseHTTPRequestHandler):
                         "rollback": "ROLLBACK",
                         "auto-enable": "ENABLE",
                         "auto-disable": "DISABLE",
+                        "timer-enable-timeline": "ENABLE",
+                        "timer-enable-cleanup": "ENABLE",
+                        "timer-enable-boot": "ENABLE",
+                        "timer-disable-timeline": "DISABLE",
+                        "timer-disable-cleanup": "DISABLE",
+                        "timer-disable-boot": "DISABLE",
                     }.get(action, "")
 
                     if required_phrase and confirm_phrase.upper() != required_phrase:
@@ -54008,6 +54312,30 @@ class Handler(BaseHTTPRequestHandler):
                 cmd = [HELPER_BIN, "snapper", "auto-off"]
                 timeout_s = 20 * 60
                 title = "snapper auto-disable"
+            elif action == "timer-enable-timeline":
+                cmd = [HELPER_BIN, "snapper", "timer-enable", "timeline"]
+                timeout_s = 5 * 60
+                title = "snapper enable timeline timer"
+            elif action == "timer-enable-cleanup":
+                cmd = [HELPER_BIN, "snapper", "timer-enable", "cleanup"]
+                timeout_s = 5 * 60
+                title = "snapper enable cleanup timer"
+            elif action == "timer-enable-boot":
+                cmd = [HELPER_BIN, "snapper", "timer-enable", "boot"]
+                timeout_s = 5 * 60
+                title = "snapper enable boot timer"
+            elif action == "timer-disable-timeline":
+                cmd = [HELPER_BIN, "snapper", "timer-disable", "timeline"]
+                timeout_s = 5 * 60
+                title = "snapper disable timeline timer"
+            elif action == "timer-disable-cleanup":
+                cmd = [HELPER_BIN, "snapper", "timer-disable", "cleanup"]
+                timeout_s = 5 * 60
+                title = "snapper disable cleanup timer"
+            elif action == "timer-disable-boot":
+                cmd = [HELPER_BIN, "snapper", "timer-disable", "boot"]
+                timeout_s = 5 * 60
+                title = "snapper disable boot timer"
             else:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 
@@ -54277,7 +54605,19 @@ class Handler(BaseHTTPRequestHandler):
                 force_low_space = False
 
             # Determine if action requires confirmation.
-            needs_confirm = action in ("create", "cleanup", "rollback", "auto-enable", "auto-disable")
+            needs_confirm = action in (
+                "create",
+                "cleanup",
+                "rollback",
+                "auto-enable",
+                "auto-disable",
+                "timer-enable-timeline",
+                "timer-enable-cleanup",
+                "timer-enable-boot",
+                "timer-disable-timeline",
+                "timer-disable-cleanup",
+                "timer-disable-boot",
+            )
             if action in ("status", "list"):
                 needs_confirm = False
 
@@ -54301,6 +54641,12 @@ class Handler(BaseHTTPRequestHandler):
                         "rollback": "ROLLBACK",
                         "auto-enable": "ENABLE",
                         "auto-disable": "DISABLE",
+                        "timer-enable-timeline": "ENABLE",
+                        "timer-enable-cleanup": "ENABLE",
+                        "timer-enable-boot": "ENABLE",
+                        "timer-disable-timeline": "DISABLE",
+                        "timer-disable-cleanup": "DISABLE",
+                        "timer-disable-boot": "DISABLE",
                     }.get(action, "")
 
                     if required_phrase and confirm_phrase.upper() != required_phrase:
@@ -54359,6 +54705,24 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "auto-disable":
                 cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "auto-off"]
                 timeout_s = 120
+            elif action == "timer-enable-timeline":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-enable", "timeline"]
+                timeout_s = 300
+            elif action == "timer-enable-cleanup":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-enable", "cleanup"]
+                timeout_s = 300
+            elif action == "timer-enable-boot":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-enable", "boot"]
+                timeout_s = 300
+            elif action == "timer-disable-timeline":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-disable", "timeline"]
+                timeout_s = 300
+            elif action == "timer-disable-cleanup":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-disable", "cleanup"]
+                timeout_s = 300
+            elif action == "timer-disable-boot":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-disable", "boot"]
+                timeout_s = 300
             else:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 

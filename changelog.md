@@ -42,6 +42,8 @@
 - Cleanup confirmation modal now hosts the Option 4 settings actions directly (`Apply settings` / `Refresh from config`) via the existing Settings API helpers.
 - Added regression smoke test `test_snapper_option4_modal_layout.sh` to assert Option 4 stays compact and `snopt-*` customization controls remain modal-only.
 - WebUI Settings drawer includes `KERNEL_FAMILY_PURGE_*` configuration fields (Advanced + Danger zone).
+- Snapper Manager Option 5/6 now includes per-timer controls for `snapper-timeline.timer`, `snapper-cleanup.timer`, and `snapper-boot.timer` (individual enable/disable buttons in addition to enable-all/disable-all).
+- Boot/EFI stats now include installed kernel inventory in Snapper Manager (kernel count plus per-kernel package/version labels).
 
 ## v70 (2026-02-18)
 - See `README.md` → Version History for full release notes.

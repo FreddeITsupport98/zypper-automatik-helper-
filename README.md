@@ -2048,6 +2048,8 @@ systemctl status zypper-autodownload.service
     - WebUI: Snapper Option 4 panel now includes a **Customize cleanup behavior** section to configure kernel purge / scrub-ghost hygiene / kernel family purge settings.
     - WebUI layout update: Option 4 card now stays compact (mode selector + run button + status badges), and the full cleanup description/customization controls are shown in the cleanup confirmation modal.
     - Added regression smoke test: `test_snapper_option4_modal_layout.sh` verifies Option 4 card stays compact and that `snopt-*` customization controls are modal-only.
+    - Snapper Manager Option 5/6 now also includes per-timer controls for `snapper-timeline.timer`, `snapper-cleanup.timer`, and `snapper-boot.timer` (individual enable/disable in addition to all-at-once).
+    - Snapper Manager Boot/EFI stats now show installed kernel inventory (kernel count + per-kernel package/version labels).
     - WebUI Settings drawer also includes the `KERNEL_FAMILY_PURGE_*` keys (Advanced + Danger zone).
   - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:
     - EFI/Boot usage: used% + (used/total) + a progress bar
