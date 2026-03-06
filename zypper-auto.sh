@@ -47874,60 +47874,78 @@ def _history_job_upsert(server, job: dict, *, summary: str = "", extra: dict | N
             if ai_source:
                 extra_payload["ai_source"] = ai_source
 
-            # Snapper low-space guard telemetry (for Managers Server visibility).
-            try:
-                force_low_space = _to_boolish(job.get("force_low_space", False))
-                if force_low_space:
-                    extra_payload["force_low_space"] = True
-            except Exception:
-                pass
-            try:
-                guard_required = _to_boolish(job.get("low_space_guard_required", False))
-                if guard_required:
-                    extra_payload["low_space_guard_required"] = True
-            except Exception:
-                pass
-            try:
-                guard_reason = str(job.get("low_space_guard_reason", "") or "").strip()
-                if guard_reason:
-                    if len(guard_reason) > 240:
-                        guard_reason = guard_reason[:240]
-                    extra_payload["low_space_guard_reason"] = guard_reason
-            except Exception:
-                pass
-            try:
-                h_enabled = _to_boolish(job.get("low_space_hysteresis_enabled", False))
-                if h_enabled:
-                    extra_payload["low_space_hysteresis_enabled"] = True
-            except Exception:
-                pass
-            try:
-                h_latched = _to_boolish(job.get("low_space_hysteresis_latched", False))
-                if h_latched:
-                    extra_payload["low_space_hysteresis_latched"] = True
-            except Exception:
-                pass
-            try:
-                free_mb_raw = job.get("low_space_free_mb", None)
-                if free_mb_raw is not None:
-                    free_mb = int(str(free_mb_raw).strip())
-                    extra_payload["low_space_free_mb"] = int(free_mb)
-            except Exception:
-                pass
-            try:
-                critical_raw = job.get("low_space_critical_mb", None)
-                if critical_raw is not None:
-                    critical_mb = int(str(critical_raw).strip())
-                    extra_payload["low_space_critical_mb"] = int(critical_mb)
-            except Exception:
-                pass
-            try:
-                high_raw = job.get("low_space_high_mb", None)
-                if high_raw is not None:
-                    high_mb = int(str(high_raw).strip())
-                    extra_payload["low_space_high_mb"] = int(high_mb)
-            except Exception:
-                pass
+            # Runtime contract: low-space guard telemetry is snapper-only.
+            low_space_keys = (
+                "force_low_space",
+                "low_space_guard_required",
+                "low_space_guard_reason",
+                "low_space_hysteresis_enabled",
+                "low_space_hysteresis_latched",
+                "low_space_free_mb",
+                "low_space_critical_mb",
+                "low_space_high_mb",
+            )
+            if job_type != "snapper":
+                for k in low_space_keys:
+                    try:
+                        extra_payload.pop(k, None)
+                    except Exception:
+                        pass
+            else:
+                # Snapper low-space guard telemetry (for Managers Server visibility).
+                try:
+                    force_low_space = _to_boolish(job.get("force_low_space", False))
+                    if force_low_space:
+                        extra_payload["force_low_space"] = True
+                except Exception:
+                    pass
+                try:
+                    guard_required = _to_boolish(job.get("low_space_guard_required", False))
+                    if guard_required:
+                        extra_payload["low_space_guard_required"] = True
+                except Exception:
+                    pass
+                try:
+                    guard_reason = str(job.get("low_space_guard_reason", "") or "").strip()
+                    if guard_reason:
+                        if len(guard_reason) > 240:
+                            guard_reason = guard_reason[:240]
+                        extra_payload["low_space_guard_reason"] = guard_reason
+                except Exception:
+                    pass
+                try:
+                    h_enabled = _to_boolish(job.get("low_space_hysteresis_enabled", False))
+                    if h_enabled:
+                        extra_payload["low_space_hysteresis_enabled"] = True
+                except Exception:
+                    pass
+                try:
+                    h_latched = _to_boolish(job.get("low_space_hysteresis_latched", False))
+                    if h_latched:
+                        extra_payload["low_space_hysteresis_latched"] = True
+                except Exception:
+                    pass
+                try:
+                    free_mb_raw = job.get("low_space_free_mb", None)
+                    if free_mb_raw is not None:
+                        free_mb = int(str(free_mb_raw).strip())
+                        extra_payload["low_space_free_mb"] = int(free_mb)
+                except Exception:
+                    pass
+                try:
+                    critical_raw = job.get("low_space_critical_mb", None)
+                    if critical_raw is not None:
+                        critical_mb = int(str(critical_raw).strip())
+                        extra_payload["low_space_critical_mb"] = int(critical_mb)
+                except Exception:
+                    pass
+                try:
+                    high_raw = job.get("low_space_high_mb", None)
+                    if high_raw is not None:
+                        high_mb = int(str(high_raw).strip())
+                        extra_payload["low_space_high_mb"] = int(high_mb)
+                except Exception:
+                    pass
 
             if extra_payload:
                 extra_json = json.dumps(extra_payload, ensure_ascii=False)[:40_000]
@@ -53703,12 +53721,12 @@ class Handler(BaseHTTPRequestHandler):
                     "output": "",
                     "force_low_space": bool(action == "cleanup" and force_low_space),
                     "low_space_guard_required": bool(action == "cleanup" and low_space_guard_required),
-                    "low_space_guard_reason": str(low_space_guard_reason or ""),
+                    "low_space_guard_reason": str(low_space_guard_reason or "") if action == "cleanup" else "",
                     "low_space_hysteresis_enabled": bool(action == "cleanup" and low_space_hysteresis_enabled),
                     "low_space_hysteresis_latched": bool(action == "cleanup" and low_space_hysteresis_latched),
-                    "low_space_free_mb": int(low_space_free_mb),
-                    "low_space_critical_mb": int(low_space_critical_mb),
-                    "low_space_high_mb": int(low_space_high_mb),
+                    "low_space_free_mb": int(low_space_free_mb) if action == "cleanup" else None,
+                    "low_space_critical_mb": int(low_space_critical_mb) if action == "cleanup" else None,
+                    "low_space_high_mb": int(low_space_high_mb) if action == "cleanup" else None,
                 }, summary=f"{title} (starting)")
             except Exception:
                 pass

@@ -18,6 +18,8 @@
 - Snapper WebUI now uses `GET /api/snapper/preflight?action=cleanup` before cleanup runs to show free-space/hysteresis/busy risk hints and force-override context.
 - Snapper cleanup preflight can detect existing running jobs/zypp lock states, and the WebUI reopens the active Snapper overlay instead of launching duplicate cleanup attempts.
 - Snapper job history now persists cleanup low-space guard telemetry (`force_low_space`, guard reason/state, hysteresis flags, free/critical/high MB) and exposes it via history list/detail APIs.
+- History upsert runtime guard now enforces low-space telemetry as snapper-only metadata and strips those keys for non-snapper job types.
+- Added focused contract test `test_snapper_start_contract.py` to assert `/api/snapper/start` success responses include `job_id`, `coalesced`, `artifact_gc`, and `preflight`.
 - Managers → Server (SQLite) tab now uses visibility-aware polling/backoff: faster while visible, slower while hidden, and polling stops when overlay/tab is not active.
 - Snapper Full Cleanup: mode `force-prune` can implicitly run kernel package cleanup (`zypper purge-kernels`) even when `KERNEL_PURGE_ENABLED=false` (configurable via `KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE`, default true).
 - Snapper Full Cleanup: mode `force-prune` can also run a safe boot menu hygiene pass via `scrub-ghost` to quarantine duplicate/stale snapshot boot entries and optionally rebuild GRUB config (configurable via `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED`, default true).

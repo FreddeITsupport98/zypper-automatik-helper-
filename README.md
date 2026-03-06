@@ -1983,6 +1983,8 @@ systemctl status zypper-autodownload.service
     - Preflight reports free-space thresholds, hysteresis latch state, and busy/zypp-lock signals.
     - If cleanup is already running, the WebUI now reuses/reopens the active Snapper overlay instead of starting a duplicate job.
   - 🗄️ **IMPROVED:** Snapper cleanup jobs now persist low-space guard telemetry into server history (force flag, guard reason, hysteresis flags, free/critical/high MB), and Managers → Server (SQLite) receives the same fields via history APIs.
+  - 🛡️ **IMPROVED:** server history upsert now enforces low-space telemetry as **snapper-only** metadata and strips those keys from non-snapper jobs (prevents cross-job contamination in Managers → Server).
+  - 🧪 **NEW:** added focused contract test `test_snapper_start_contract.py` to ensure `/api/snapper/start` success payloads always include `job_id`, `coalesced`, `artifact_gc`, and `preflight`.
   - 🧰 **IMPROVED:** direct Snapper API runs (`/api/snapper/run`) now also honor cleanup `force_low_space` and propagate it into helper environment.
   - ⚡ **IMPROVED:** Snapper cleanup now supports configurable **phase pacing** between heavy cleanup phases and force-prune delete batches (`SNAP_CLEANUP_PHASE_PACING_SECONDS`) to reduce burst load.
   - 🧿 **NEW:** Managers → **Server (SQLite)** tab now uses visibility-aware auto-refresh pacing:
