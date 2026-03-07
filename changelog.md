@@ -21,6 +21,8 @@
 - AI Smart Report now supports optional safe initiation (`initiate_repair=true`) for allowlisted no-confirm quick actions and reports blocked reasons when confirmation is required.
 - Quick action background spawning is now centralized in a shared WebUI API helper and reused by both `/api/quick/start` and AI smart-report initiation paths, reducing duplication and keeping status/log/history behavior aligned.
 - Contract tests were strengthened to assert shared-launcher routing for `/api/quick/start` and AI smart-report initiation, while preserving quick-action history payload constraints.
+- Background job start APIs now reuse a shared launcher helper (`_launch_background_systemd_job`) across `/api/self-update/start`, `/api/snapper/start`, and `/api/scrub/start`, reducing duplicated systemd transient-unit launch logic.
+- Contract tests now also assert shared-launcher routing for self-update/snapper/scrub start endpoints and validate quick-action history payload keys against the top-level shared quick launcher helper.
 - Snapper WebUI API hardening: background jobs now run with lower-priority scheduling (`Nice=19`, idle I/O class) plus low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
 - Snapper direct run API (`/api/snapper/run`) now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
 - Snapper cleanup WebUI confirmation now includes an explicit force-low-space override toggle (`force_low_space`) that maps to helper env `ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1`.
@@ -48,6 +50,10 @@
 - Snapper Manager timer badges now refresh immediately after successful timer enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, instead of waiting for stale dashboard polling state.
 - Snapper Option 4 cleanup confirmation modal now includes a detected installed-kernel-family dropdown (populated from `/api/boot/stats`) to help set `KERNEL_FAMILY_PURGE_TARGETS` quickly while preserving manual input.
 - Snapper WebUI confirm modal now auto-refreshes expired confirmation tokens and retries once (both `/api/snapper/run` and `/api/snapper/start` paths), reducing `missing/expired confirm token` failures when users spend longer in the dialog.
+- Snapper kernel package cleanup (`zypper purge-kernels`) now handles zypp lock contention more gracefully: it waits with backoff, retries once on lock-race, and records a clear non-fatal skip/audit entry when the lock does not clear.
+- Default downloader/notifier cadence now uses hourly defaults (`DL_TIMER_INTERVAL_MINUTES=60`, `NT_TIMER_INTERVAL_MINUTES=60`) in config template/fallback paths.
+- `zypper-with-ps` lock handling for manual `dup`/`dist-upgrade`/`update` now includes lock-detail wait/retry before execution and one retry when lock contention appears during the actual `zypper` run (lock-race handling).
+- Added regression smoke test `test_wrapper_lock_race_regression.sh` to assert wrapper lock helper presence, pre-run wait behavior, lock-race retry-once logic, and final lock-detail messaging.
 
 ## v70 (2026-02-18)
 - See `README.md` → Version History for full release notes.

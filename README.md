@@ -742,6 +742,9 @@ Key options include:
   - `KERNEL_PURGE_DRY_RUN` – when `true`, uses `--dry-run` (prints what would be removed).
   - `KERNEL_PURGE_DETAILS` – when `true`, adds `--details` for a more verbose summary.
   - `KERNEL_PURGE_TIMEOUT_SECONDS` – best-effort timeout for the purge step.
+  - Lock contention handling: when another `zypper`/zypp client holds the system lock,
+    kernel purge now waits with backoff, retries once on lock-race, and then exits
+    with a clear non-fatal skip message/audit marker instead of noisy hard-failure logs.
 
 
 <a id="cfg-caching-snooze"></a>
@@ -884,7 +887,7 @@ When you run `zypper dup` (or, in Fish, even `sudo zypper dup`) the helper
 actually invokes the wrapper script `~/.local/bin/zypper-with-ps`, which:
 
 1. Publishes a short "downloading" status for the GUI notifier.
-2. Waits politely if another zypper/YaST instance holds the system management lock.
+2. Waits with lock-detail retries if another zypper/YaST instance holds the system management lock, and retries once automatically if a lock race happens during command execution.
 3. Runs **whitelist and/or third‑party duplicate cleanup** according to
    `AUTO_DUPLICATE_RPM_MODE` and the safety rails above.
 4. In `thirdparty`/`both` modes, takes a **Snapper single snapshot** (`-t single -p`)
@@ -946,7 +949,7 @@ post‑update helpers, and reboot guidance as with plain `zypper ...`.
 <a id="usage"></a>
 ## 🏃 Usage
 
-1.  **Wait.** The services run in the background. By default, both the downloader and notifier run every minute. You can change their frequency via `/etc/zypper-auto.conf` (`DL_TIMER_INTERVAL_MINUTES` / `NT_TIMER_INTERVAL_MINUTES`) and re-run `sudo ./zypper-auto.sh install`.
+1.  **Wait.** The services run in the background. By default, both the downloader and notifier run every hour (60 minutes). You can change their frequency via `/etc/zypper-auto.conf` (`DL_TIMER_INTERVAL_MINUTES` / `NT_TIMER_INTERVAL_MINUTES`) and re-run `sudo ./zypper-auto.sh install`.
 2.  **Get Notified.** You will get a notification *only* when new updates are pending.
 3.    > **Snapshot 20251110-0 Ready**
 4.    > 12 updates are pending. Click 'Install' to begin.
@@ -1916,6 +1919,9 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - ⏱️ **CHANGED:** default downloader/notifier cadence now uses `DL_TIMER_INTERVAL_MINUTES=60` and `NT_TIMER_INTERVAL_MINUTES=60` in the built-in config template/fallback paths (hourly baseline by default).
+  - 🛡️ **IMPROVED:** `zypper-with-ps` lock handling now includes lock-detail wait/retry before run plus a one-time retry when lock contention appears during the actual `zypper` execution (race-safe path for `dup`/`dist-upgrade`/`update`).
+  - 🧪 **NEW:** added regression smoke test `test_wrapper_lock_race_regression.sh` to guard wrapper lock-helper wiring, pre-run wait logic, retry-on-lock-race behavior, and final lock-detail messaging.
   - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
   - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.
   - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
@@ -2026,6 +2032,8 @@ systemctl status zypper-autodownload.service
     - This provides an explicit, user-visible override path for low-space hysteresis/critical guard scenarios.
   - 🧵 **IMPROVED:** repeated WebUI Snapper start requests are now **coalesced** onto an existing running Snapper job (same action), returning the existing `job_id` instead of spawning duplicate jobs.
   - 🧹 **IMPROVED:** Snapper WebUI start now performs best-effort stale artifact cleanup (old `snapper-web-*.status/.log/.sh` files) and surfaces cleanup stats via `artifact_gc` in API responses.
+  - 🧰 **IMPROVED:** WebUI background job launch flow is now consolidated through a shared API helper (`_launch_background_systemd_job`) for `/api/self-update/start`, `/api/snapper/start`, and `/api/scrub/start`, keeping transient-unit startup/error/status handling aligned.
+  - 🧪 **IMPROVED:** contract coverage now asserts shared-launcher routing for self-update/snapper/scrub start paths and validates quick-action history payload constraints against the top-level shared quick launcher.
   - 🧿 **NEW:** Snapper cleanup now supports an explicit **preflight API** (`GET /api/snapper/preflight?action=cleanup`) used by the WebUI before running cleanup.
     - Preflight reports free-space thresholds, hysteresis latch state, and busy/zypp-lock signals.
     - If cleanup is already running, the WebUI now reuses/reopens the active Snapper overlay instead of starting a duplicate job.

@@ -1435,8 +1435,8 @@ REPAIR_SAFETY_SNAPSHOT_FINALIZED=0
 CONFIG_WARNINGS=()
 
 # Timer intervals (in minutes) for downloader and notifier (1,5,10,15,30,60)
-DL_TIMER_INTERVAL_MINUTES=1
-NT_TIMER_INTERVAL_MINUTES=1
+DL_TIMER_INTERVAL_MINUTES=60
+NT_TIMER_INTERVAL_MINUTES=60
 VERIFY_TIMER_INTERVAL_MINUTES=30
 
 # Smart low-impact verify mode (primarily for background/systemd verification
@@ -1549,7 +1549,7 @@ AUTO_REPAIR_TRY_REMOUNT_RW="false"
 HOOKS_BASE_DIR="/etc/zypper-auto/hooks"
 
 # Notifier cache / snooze defaults (also overridable via CONFIG_FILE)
-CACHE_EXPIRY_MINUTES="10"
+CACHE_EXPIRY_MINUTES="60"
 SNOOZE_SHORT_HOURS="1"   # used by the "1h" snooze button
 SNOOZE_MEDIUM_HOURS="4"  # used by the "4h" snooze button
 SNOOZE_LONG_HOURS="24"   # used by the "1d" snooze button
@@ -2252,8 +2252,8 @@ __znh_write_dashboard_schema_json() {
     "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
     "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED": {"type": "bool", "default": "true"},
 
-    "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
-    "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "1"},
+    "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
+    "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
     "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "30"},
     "VERIFY_LOW_IMPACT_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_LOW_IMPACT_FAIL_STREAK": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
@@ -8453,14 +8453,16 @@ VERIFY_JOURNAL_AUTO_VACUUM_ENABLED=true
 #   30 = every 30 minutes
 #   60 = every hour (hourly)
 # Any other value is treated as invalid and will be reset to a safe default.
-DL_TIMER_INTERVAL_MINUTES=1
+DL_TIMER_INTERVAL_MINUTES=60
+
 
 # NT_TIMER_INTERVAL_MINUTES
 # How often (in minutes) the *user* notifier (zypper-notify-user.timer)
 # should run to check for updates and send notifications.
 # Uses the same allowed values and rules as above (MUST be exactly one of
 # 1,5,10,15,30,60; anything else falls back to a safe default).
-NT_TIMER_INTERVAL_MINUTES=1
+NT_TIMER_INTERVAL_MINUTES=60
+
 
 # VERIFY_TIMER_INTERVAL_MINUTES
 # How often (in minutes) the verification/auto-repair timer
@@ -8944,7 +8946,7 @@ MAX_LOG_SIZE_MB=50
 # hitting zypper too often. This value controls how long (in minutes)
 # a cached result is considered valid before forcing a fresh check.
 # Higher values = fewer zypper runs but potentially more stale info.
-CACHE_EXPIRY_MINUTES=10
+CACHE_EXPIRY_MINUTES=60
 
 # SNOOZE_SHORT_HOURS / SNOOZE_MEDIUM_HOURS / SNOOZE_LONG_HOURS
 # Durations (in hours) used by the Snooze buttons in the desktop
@@ -9258,8 +9260,8 @@ EOF
     validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES 30 5 720
 
     # Timers: exact allowed list
-    validate_allowed_set DL_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
-    validate_allowed_set NT_TIMER_INTERVAL_MINUTES 1 "1,5,10,15,30,60"
+    validate_allowed_set DL_TIMER_INTERVAL_MINUTES 60 "1,5,10,15,30,60"
+    validate_allowed_set NT_TIMER_INTERVAL_MINUTES 60 "1,5,10,15,30,60"
     validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 30 "1,5,10,15,30,60"
 
     # Enums
@@ -9296,7 +9298,7 @@ EOF
 
     validate_int MAX_LOG_FILES 10
     validate_int MAX_LOG_SIZE_MB 50
-    validate_int CACHE_EXPIRY_MINUTES 10
+    validate_int CACHE_EXPIRY_MINUTES 60
     validate_int SNOOZE_SHORT_HOURS 1
     validate_int SNOOZE_MEDIUM_HOURS 4
     validate_int SNOOZE_LONG_HOURS 24
@@ -9368,8 +9370,8 @@ EOF
         esac
     }
 
-    validate_interval DL_TIMER_INTERVAL_MINUTES 1
-    validate_interval NT_TIMER_INTERVAL_MINUTES 1
+    validate_interval DL_TIMER_INTERVAL_MINUTES 60
+    validate_interval NT_TIMER_INTERVAL_MINUTES 60
     validate_interval VERIFY_TIMER_INTERVAL_MINUTES 30
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag HOOKS_ENABLED true
@@ -37109,12 +37111,6 @@ run_snapper_menu_only() {
                 return 0
             fi
 
-            # Guard: don't run while zypper appears active (package manager lock).
-            # NOTE: best-effort; we keep it simple to avoid false positives.
-            if pgrep -x zypper >/dev/null 2>&1; then
-                log_warn "[kernel-purge] zypper appears to be running already; skipping purge-kernels to avoid lock conflicts"
-                return 0
-            fi
 
             local policy_line
             policy_line=""
@@ -37128,6 +37124,173 @@ run_snapper_menu_only() {
             if ! [[ "${timeout_s}" =~ ^[0-9]+$ ]] || [ "${timeout_s}" -le 0 ] 2>/dev/null; then
                 timeout_s=900
             fi
+
+            __znh_kernel_purge_lock_file() {
+                if [ -f /run/zypp.pid ]; then
+                    echo /run/zypp.pid
+                    return 0
+                fi
+                if [ -f /var/run/zypp.pid ]; then
+                    echo /var/run/zypp.pid
+                    return 0
+                fi
+                echo ""
+                return 1
+            }
+
+            __znh_kernel_purge_lock_details() {
+                local lf pid owner pgrep_pid
+                lf="$(__znh_kernel_purge_lock_file 2>/dev/null || true)"
+                pid=""
+                owner=""
+
+                if [ -n "${lf:-}" ]; then
+                    pid=$(cat "${lf}" 2>/dev/null || echo "")
+                fi
+
+                if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                    owner=$(ps -p "${pid}" -o comm= 2>/dev/null || echo "")
+                else
+                    pgrep_pid=$(pgrep -x zypper 2>/dev/null | head -n 1 || true)
+                    if [[ "${pgrep_pid:-}" =~ ^[0-9]+$ ]]; then
+                        if [ -z "${pid:-}" ]; then
+                            pid="${pgrep_pid}"
+                        fi
+                        owner=$(ps -p "${pgrep_pid}" -o comm= 2>/dev/null || echo "")
+                        if [ -z "${owner:-}" ]; then
+                            owner="zypper"
+                        fi
+                    fi
+                fi
+
+                printf '%s\t%s\t%s\n' "${lf}" "${pid}" "${owner}"
+                return 0
+            }
+
+            __znh_kernel_purge_lock_active() {
+                local lf pid
+                lf="$(__znh_kernel_purge_lock_file 2>/dev/null || true)"
+                if [ -n "${lf:-}" ]; then
+                    pid=$(cat "${lf}" 2>/dev/null || echo "")
+                    if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                        return 0
+                    fi
+                fi
+                if pgrep -x zypper >/dev/null 2>&1; then
+                    return 0
+                fi
+                return 1
+            }
+
+            __znh_kernel_purge_wait_for_lock() {
+                local max_wait_seconds="$1"
+                local start now elapsed backoff attempt details lf pid owner
+
+                if [ -z "${max_wait_seconds:-}" ] || ! [[ "${max_wait_seconds}" =~ ^[0-9]+$ ]]; then
+                    max_wait_seconds=0
+                fi
+                if [ "${max_wait_seconds}" -lt 0 ] 2>/dev/null; then
+                    max_wait_seconds=0
+                fi
+
+                start="$(date +%s 2>/dev/null || echo 0)"
+                backoff=2
+                attempt=1
+
+                while __znh_kernel_purge_lock_active; do
+                    details="$(__znh_kernel_purge_lock_details 2>/dev/null || true)"
+                    IFS=$'\t' read -r lf pid owner <<< "${details}"
+
+                    now="$(date +%s 2>/dev/null || echo 0)"
+                    elapsed=0
+                    if [[ "${start:-}" =~ ^[0-9]+$ ]] && [[ "${now:-}" =~ ^[0-9]+$ ]]; then
+                        elapsed=$((now - start))
+                    fi
+
+                    if [ "${max_wait_seconds}" -le 0 ] 2>/dev/null || [ "${elapsed}" -ge "${max_wait_seconds}" ] 2>/dev/null; then
+                        log_warn "[kernel-purge] zypp lock still active after ${elapsed}s (lock_file=${lf:-none} pid=${pid:-unknown} owner=${owner:-unknown})"
+                        return 1
+                    fi
+
+                    log_info "[kernel-purge] zypp lock active (lock_file=${lf:-none} pid=${pid:-unknown} owner=${owner:-unknown}); waiting ${backoff}s before retry (attempt ${attempt}, elapsed ${elapsed}s/${max_wait_seconds}s)"
+                    sleep "${backoff}"
+                    backoff=$((backoff * 2))
+                    if [ "${backoff}" -gt 30 ] 2>/dev/null; then
+                        backoff=30
+                    fi
+                    attempt=$((attempt + 1))
+                done
+
+                return 0
+            }
+
+            __znh_kernel_purge_run_direct_zypper() {
+                local desc="$1"
+                local tmp_out rc cmd_str details lf pid owner
+                local -a cmd=()
+
+                if command -v timeout >/dev/null 2>&1; then
+                    cmd=(timeout "${timeout_s}" zypper -n purge-kernels)
+                else
+                    cmd=(zypper -n purge-kernels)
+                fi
+
+                if ! __znh_kernel_purge_wait_for_lock "${timeout_s}"; then
+                    details="$(__znh_kernel_purge_lock_details 2>/dev/null || true)"
+                    IFS=$'\t' read -r lf pid owner <<< "${details}"
+                    log_warn "[kernel-purge] Skipping purge-kernels because lock did not clear (lock_file=${lf:-none} pid=${pid:-unknown} owner=${owner:-unknown})"
+                    __znh_audit_record "kernel-purge:skipped:zypp-lock-timeout"
+                    return 0
+                fi
+
+                tmp_out="$(mktemp)"
+                if "${cmd[@]}" >"${tmp_out}" 2>&1; then
+                    log_success "${desc}"
+                    rm -f "${tmp_out}" 2>/dev/null || true
+                    return 0
+                fi
+                rc=$?
+
+                if grep -qiE 'system management is locked|locked by the application with pid' "${tmp_out}" 2>/dev/null; then
+                    details="$(__znh_kernel_purge_lock_details 2>/dev/null || true)"
+                    IFS=$'\t' read -r lf pid owner <<< "${details}"
+                    log_warn "[kernel-purge] Lock contention detected during purge (rc=${rc}; lock_file=${lf:-none} pid=${pid:-unknown} owner=${owner:-unknown}); waiting and retrying once"
+
+                    if __znh_kernel_purge_wait_for_lock "${timeout_s}"; then
+                        if "${cmd[@]}" >"${tmp_out}" 2>&1; then
+                            log_success "${desc} (retry)"
+                            rm -f "${tmp_out}" 2>/dev/null || true
+                            return 0
+                        fi
+                        rc=$?
+                    fi
+
+                    if grep -qiE 'system management is locked|locked by the application with pid' "${tmp_out}" 2>/dev/null; then
+                        details="$(__znh_kernel_purge_lock_details 2>/dev/null || true)"
+                        IFS=$'\t' read -r lf pid owner <<< "${details}"
+                        log_warn "[kernel-purge] Skipping purge-kernels after retry because lock is still active (lock_file=${lf:-none} pid=${pid:-unknown} owner=${owner:-unknown})"
+                        sed 's/^/  [CMD_OUT] /' "${tmp_out}" >>"${LOG_FILE}" 2>/dev/null || true
+                        if [ -n "${TRACE_LOG:-}" ]; then
+                            sed 's/^/[CMD_OUT] /' "${tmp_out}" >>"${TRACE_LOG}" 2>/dev/null || true
+                        fi
+                        __znh_audit_record "kernel-purge:skipped:zypp-lock-race"
+                        rm -f "${tmp_out}" 2>/dev/null || true
+                        return 0
+                    fi
+                fi
+
+                cmd_str="$(_format_cmd "${cmd[@]}")"
+                log_error "FAILED: ${desc} (Exit Code: ${rc})"
+                log_error "Command was: ${cmd_str}"
+                log_error "⬇⬇⬇ COMMAND OUTPUT ⬇⬇⬇"
+                sed 's/^/  [CMD_OUT] /' "${tmp_out}" | tee -a "${LOG_FILE}" >&2
+                if [ -n "${TRACE_LOG:-}" ]; then
+                    sed 's/^/[CMD_OUT] /' "${tmp_out}" >>"${TRACE_LOG}" 2>/dev/null || true
+                fi
+                log_error "⬆⬆⬆ END COMMAND OUTPUT ⬆⬆⬆"
+                rm -f "${tmp_out}" 2>/dev/null || true
+                return "${rc}"
+            }
 
             echo ""
             echo "== Kernel package cleanup (purge-kernels) =="
@@ -37211,37 +37374,33 @@ run_snapper_menu_only() {
 
             case "${mode}" in
                 zypper)
-                    if command -v timeout >/dev/null 2>&1; then
-                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" zypper -n purge-kernels || true
-                    else
-                        execute_guarded "Kernel purge (zypper purge-kernels)" zypper -n purge-kernels || true
-                    fi
+                    __znh_kernel_purge_run_direct_zypper "Kernel purge (zypper purge-kernels)" || true
                     ;;
                 systemd)
                     if __znh_unit_file_exists_system purge-kernels.service; then
-                        # The unit is gated by /boot/do_purge_kernels; create the marker and start it.
-                        execute_guarded "Create /boot/do_purge_kernels marker" touch /boot/do_purge_kernels || true
-                        if command -v timeout >/dev/null 2>&1; then
-                            execute_guarded "Kernel purge (purge-kernels.service)" timeout "${timeout_s}" systemctl start purge-kernels.service || true
+                        local __kp_lock_info __kp_lock_file __kp_lock_pid __kp_lock_owner
+                        if ! __znh_kernel_purge_wait_for_lock "${timeout_s}"; then
+                            __kp_lock_info="$(__znh_kernel_purge_lock_details 2>/dev/null || true)"
+                            IFS=$'\t' read -r __kp_lock_file __kp_lock_pid __kp_lock_owner <<< "${__kp_lock_info}"
+                            log_warn "[kernel-purge] Skipping purge-kernels.service start because lock did not clear (lock_file=${__kp_lock_file:-none} pid=${__kp_lock_pid:-unknown} owner=${__kp_lock_owner:-unknown})"
+                            __znh_audit_record "kernel-purge:skipped:zypp-lock-timeout:systemd"
                         else
-                            execute_guarded "Kernel purge (purge-kernels.service)" systemctl start purge-kernels.service || true
+                        # The unit is gated by /boot/do_purge_kernels; create the marker and start it.
+                            execute_guarded "Create /boot/do_purge_kernels marker" touch /boot/do_purge_kernels || true
+                            if command -v timeout >/dev/null 2>&1; then
+                                execute_guarded "Kernel purge (purge-kernels.service)" timeout "${timeout_s}" systemctl start purge-kernels.service || true
+                            else
+                                execute_guarded "Kernel purge (purge-kernels.service)" systemctl start purge-kernels.service || true
+                            fi
                         fi
                     else
                         log_warn "[kernel-purge] purge-kernels.service not found; falling back to direct zypper purge-kernels"
-                        if command -v timeout >/dev/null 2>&1; then
-                            execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" zypper -n purge-kernels || true
-                        else
-                            execute_guarded "Kernel purge (zypper purge-kernels)" zypper -n purge-kernels || true
-                        fi
+                        __znh_kernel_purge_run_direct_zypper "Kernel purge (zypper purge-kernels)" || true
                     fi
                     ;;
                 auto|*)
                     # Prefer direct zypper invocation; it's the most portable.
-                    if command -v timeout >/dev/null 2>&1; then
-                        execute_guarded "Kernel purge (zypper purge-kernels)" timeout "${timeout_s}" zypper -n purge-kernels || true
-                    else
-                        execute_guarded "Kernel purge (zypper purge-kernels)" zypper -n purge-kernels || true
-                    fi
+                    __znh_kernel_purge_run_direct_zypper "Kernel purge (zypper purge-kernels)" || true
                     ;;
             esac
 
@@ -42040,7 +42199,7 @@ if [ -f "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
-CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-10}"
+CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-60}"
 DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
 
 # Skip running any downloads on metered connections.
@@ -42882,6 +43041,95 @@ has_zypp_lock() {
     return 1
 }
 
+zypp_lock_details() {
+    local lock_file pid owner comm cmd fallback_pid
+    lock_file=""
+    pid=""
+    owner=""
+
+    if [ -f /run/zypp.pid ]; then
+        lock_file="/run/zypp.pid"
+    elif [ -f /var/run/zypp.pid ]; then
+        lock_file="/var/run/zypp.pid"
+    fi
+
+    if [ -n "$lock_file" ]; then
+        pid=$(cat "$lock_file" 2>/dev/null || echo "")
+    fi
+
+    if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        comm=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
+        cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
+        if printf '%s\n%s\n' "$comm" "$cmd" | grep -qiE 'zypper|yast|y2base|zypp|packagekitd'; then
+            owner="${comm:-${cmd:-unknown}}"
+        fi
+    fi
+
+    if [ -z "$owner" ]; then
+        fallback_pid=$(pgrep -x zypper 2>/dev/null | head -n 1 || true)
+        if [[ "${fallback_pid:-}" =~ ^[0-9]+$ ]]; then
+            if [ -z "${pid:-}" ]; then
+                pid="$fallback_pid"
+            fi
+            owner=$(ps -p "$fallback_pid" -o comm= 2>/dev/null || echo "zypper")
+        fi
+    fi
+
+    printf '%s\t%s\t%s\n' "${lock_file:-none}" "${pid:-unknown}" "${owner:-unknown}"
+}
+
+is_zypp_lock_output() {
+    local out_file="${1:-}"
+    [ -n "$out_file" ] || return 1
+    [ -f "$out_file" ] || return 1
+    grep -qiE 'system management is locked|locked by the application with pid' "$out_file" 2>/dev/null
+}
+
+wait_for_zypp_lock_clear() {
+    local max_attempts="${1:-10}"
+    local base_delay="${2:-1}"
+    local attempt delay details lock_file lock_pid lock_owner
+
+    if ! [[ "${max_attempts:-}" =~ ^[0-9]+$ ]]; then
+        max_attempts=10
+    fi
+    if ! [[ "${base_delay:-}" =~ ^[0-9]+$ ]]; then
+        base_delay=1
+    fi
+
+    # Keep compatibility with documented behavior:
+    # LOCK_RETRY_INITIAL_DELAY_SECONDS=0 disables waiting (fail fast).
+    if [ "${base_delay}" -eq 0 ] 2>/dev/null; then
+        max_attempts=0
+    fi
+
+    attempt=1
+    while has_zypp_lock && [ "$attempt" -le "$max_attempts" ]; do
+        delay=$((base_delay * attempt))
+        details="$(zypp_lock_details)"
+        IFS=$'\t' read -r lock_file lock_pid lock_owner <<< "$details"
+
+        echo ""
+        echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
+        echo "Retry $attempt/$max_attempts: waiting $delay second(s) (lock_file=${lock_file} pid=${lock_pid} owner=${lock_owner})..."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+
+    if has_zypp_lock; then
+        details="$(zypp_lock_details)"
+        IFS=$'\t' read -r lock_file lock_pid lock_owner <<< "$details"
+        echo ""
+        echo "System management is still locked by another update tool."
+        echo "Lock details: lock_file=${lock_file} pid=${lock_pid} owner=${lock_owner}"
+        echo "Close that other update tool (or wait for it to finish), then run this zypper command again."
+        echo ""
+        return 1
+    fi
+
+    return 0
+}
+
 # Opportunistic clean-up for packages that are known to leave multiple
 # RPM versions installed with broken %preun/%postun scriptlets.
 # Behaviour is controlled via the following config keys:
@@ -43153,28 +43401,16 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     sudo mkdir -p "$STATUS_DIR" >/dev/null 2>&1 || true
     sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' 'downloading:0:manual:0:0' > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
 
-    # Before running zypper, respect the global system management lock and
-    # retry a few times with increasing delays so the user can see that we
-    # are waiting instead of failing immediately.
+    # Before running zypper, respect the global system management lock.
     max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
     base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
-    attempt=1
-    while has_zypp_lock && [ "$attempt" -le "$max_attempts" ]; do
-        delay=$((base_delay * attempt))
-        echo ""
-        echo "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
-        echo "Retry $attempt/$max_attempts: waiting $delay second(s) for the other updater to finish..."
-        sleep "$delay"
-        attempt=$((attempt + 1))
-    done
-
-    # After retries, if a lock is still present, show a clear message and exit
-    # cleanly instead of letting zypper print the raw lock error.
-    if has_zypp_lock; then
-        echo ""
-        echo "System management is still locked by another update tool."
-        echo "Close that other update tool (or wait for it to finish), then run this zypper command again."
-        echo ""
+    if ! [[ "${max_attempts:-}" =~ ^[0-9]+$ ]]; then
+        max_attempts=10
+    fi
+    if ! [[ "${base_delay:-}" =~ ^[0-9]+$ ]]; then
+        base_delay=1
+    fi
+    if ! wait_for_zypp_lock_clear "$max_attempts" "$base_delay"; then
         # Clear the manual downloading state so the notifier does not show a
         # stuck progress bar when we never actually ran zypper.
         sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' idle > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
@@ -43188,25 +43424,62 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES / AUTO_DUPLICATE_RPM_MODE.
     cleanup_duplicate_rpms
 
-    # Run the actual zypper command. If it fails specifically due to the
-    # system management lock (exit code 7), we will show a clearer message
-    # afterwards instead of leaving only the raw zypper error.
-    ZYPPER_OUT_FILE="$(mktemp /tmp/znh-zypper-with-ps.XXXXXX 2>/dev/null || echo /tmp/znh-zypper-with-ps.$$)"
-    sudo /usr/bin/zypper "$@" 2>&1 | tee "$ZYPPER_OUT_FILE"
-    EXIT_CODE=${PIPESTATUS[0]}
+    # Run the actual zypper command, with one retry on lock race.
+    # This handles the case where lock contention appears after the pre-check.
+    run_attempt=1
+    run_attempt_max=2
+    EXIT_CODE=0
     DID_UPDATES=1
-    if grep -q "Nothing to do\." "$ZYPPER_OUT_FILE" 2>/dev/null; then
-        DID_UPDATES=0
-    fi
-    rm -f "$ZYPPER_OUT_FILE" 2>/dev/null || true
+    LOCK_FAILURE=0
+    FINAL_OUTPUT_LOCK=0
+    while [ "$run_attempt" -le "$run_attempt_max" ]; do
+        ZYPPER_OUT_FILE="$(mktemp /tmp/znh-zypper-with-ps.XXXXXX 2>/dev/null || echo /tmp/znh-zypper-with-ps.$$)"
+        sudo /usr/bin/zypper "$@" 2>&1 | tee "$ZYPPER_OUT_FILE"
+        EXIT_CODE=${PIPESTATUS[0]}
+        DID_UPDATES=1
+        if grep -q "Nothing to do\." "$ZYPPER_OUT_FILE" 2>/dev/null; then
+            DID_UPDATES=0
+        fi
+
+        if is_zypp_lock_output "$ZYPPER_OUT_FILE"; then
+            FINAL_OUTPUT_LOCK=1
+        else
+            FINAL_OUTPUT_LOCK=0
+        fi
+
+        if [ "$EXIT_CODE" -eq 0 ]; then
+            rm -f "$ZYPPER_OUT_FILE" 2>/dev/null || true
+            break
+        fi
+
+        if [ "$run_attempt" -lt "$run_attempt_max" ] && { [ "$EXIT_CODE" -eq 7 ] || [ "$FINAL_OUTPUT_LOCK" -eq 1 ]; }; then
+            echo ""
+            echo "Lock contention detected during zypper run (attempt $run_attempt/$run_attempt_max)."
+            echo "Waiting for the lock to clear, then retrying once..."
+            rm -f "$ZYPPER_OUT_FILE" 2>/dev/null || true
+            if wait_for_zypp_lock_clear "$max_attempts" "$base_delay"; then
+                run_attempt=$((run_attempt + 1))
+                continue
+            fi
+            LOCK_FAILURE=1
+            EXIT_CODE=7
+            break
+        fi
+
+        rm -f "$ZYPPER_OUT_FILE" 2>/dev/null || true
+        break
+    done
+    rm -f "${ZYPPER_OUT_FILE:-}" 2>/dev/null || true
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         run_hooks "post" || true
     fi
-
-    if [ "$EXIT_CODE" -eq 7 ]; then
+    if [ "$EXIT_CODE" -eq 7 ] || [ "$LOCK_FAILURE" -eq 1 ] || [ "$FINAL_OUTPUT_LOCK" -eq 1 ]; then
+        lock_info="$(zypp_lock_details)"
+        IFS=$'\t' read -r lock_file lock_pid lock_owner <<< "$lock_info"
         echo ""
         echo "System management is locked by another update tool (zypper/YaST/PackageKit)."
+        echo "Lock details: lock_file=${lock_file} pid=${lock_pid} owner=${lock_owner}"
         echo "Close that other update tool (or wait for it to finish), then run this zypper command again."
         echo ""
     fi
@@ -44132,7 +44405,7 @@ SNOOZE_FILE = CACHE_DIR / "snooze_until.txt"
 # Marker file used to suppress duplicate popups while an interactive install
 # is running (created by the notifier and the Ready-to-Install helper).
 INSTALL_MARKER_FILE = CACHE_DIR / "install_in_progress.txt"
-CACHE_EXPIRY_MINUTES = 10
+CACHE_EXPIRY_MINUTES = 60
 
 # Global config path for zypper-auto-helper
 CONFIG_FILE = "/etc/zypper-auto.conf"
@@ -44149,7 +44422,7 @@ def _int_env(name: str, default: int) -> int:
     except ValueError:
         return default
 
-CACHE_EXPIRY_MINUTES = _int_env("ZNH_CACHE_EXPIRY_MINUTES", 10)
+CACHE_EXPIRY_MINUTES = _int_env("ZNH_CACHE_EXPIRY_MINUTES", 60)
 SNOOZE_SHORT_HOURS = _int_env("ZNH_SNOOZE_SHORT_HOURS", 1)
 SNOOZE_MEDIUM_HOURS = _int_env("ZNH_SNOOZE_MEDIUM_HOURS", 4)
 SNOOZE_LONG_HOURS = _int_env("ZNH_SNOOZE_LONG_HOURS", 24)
@@ -48687,14 +48960,6 @@ def _recover_scrub_job(job_id: str) -> dict | None:
         "unit": unit,
         "log_path": log_path,
         "status_path": status_path,
-        "force_low_space": bool(force_low_space),
-        "low_space_guard_required": bool(low_space_guard_required),
-        "low_space_guard_reason": str(low_space_guard_reason or ""),
-        "low_space_hysteresis_enabled": bool(low_space_hysteresis_enabled),
-        "low_space_hysteresis_latched": bool(low_space_hysteresis_latched),
-        "low_space_free_mb": low_space_free_mb,
-        "low_space_critical_mb": low_space_critical_mb,
-        "low_space_high_mb": low_space_high_mb,
     }
 
 
@@ -49289,6 +49554,312 @@ def _quick_paths(job_id: str) -> tuple[str, str, str, str]:
     status_path = f"{QUICK_STATUS_DIR}/webui-quick-{jid[:10]}.status"
     script_path = f"{QUICK_STATUS_DIR}/webui-quick-{jid[:10]}.sh"
     return unit, log_path, status_path, script_path
+
+def _launch_background_systemd_job(
+    *,
+    path_builder,
+    log_dir: str,
+    status_dir: str,
+    status_lines: list[str],
+    script_text: str,
+    systemd_properties: list[str] | None = None,
+    script_label: str = "background",
+    job_id: str = "",
+) -> dict:
+    """Write log/status/script artifacts and launch a transient systemd unit."""
+    jid = str(job_id or "").strip()
+    if not jid:
+        jid = secrets.token_urlsafe(18)
+
+    unit, log_path, status_path, script_file = path_builder(jid)
+
+    # Precreate log + status so the first poll can't race before the unit writes anything.
+    try:
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        if status_dir:
+            os.makedirs(status_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8"):
+            pass
+        with open(status_path, "w", encoding="utf-8") as f:
+            for ln in (status_lines or []):
+                if ln is None:
+                    continue
+                line = str(ln)
+                if line.endswith("\n"):
+                    f.write(line)
+                else:
+                    f.write(line + "\n")
+    except Exception:
+        pass
+
+    # Write unit script to disk (inside the API service sandbox).
+    try:
+        if status_dir:
+            os.makedirs(status_dir, exist_ok=True)
+        with open(script_file, "w", encoding="utf-8") as f:
+            f.write("#!/usr/bin/env bash\n")
+            f.write(str(script_text or ""))
+            f.write("\n")
+        os.chmod(script_file, 0o700)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"failed to write {script_label} unit script: {e}",
+            "http_status": 500,
+        }
+
+    sys_cmd = [
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        "--unit",
+        unit,
+    ]
+    for prop in (systemd_properties or []):
+        pv = str(prop or "").strip()
+        if not pv:
+            continue
+        if pv.startswith("--property"):
+            sys_cmd.append(pv)
+        else:
+            sys_cmd.extend(["--property", pv])
+    sys_cmd.extend([
+        "--",
+        "/usr/bin/bash",
+        script_file,
+    ])
+
+    try:
+        p = subprocess.run(
+            sys_cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if p.returncode != 0:
+            out = (p.stdout or "").strip()
+            return {
+                "ok": False,
+                "error": f"systemd-run failed rc={p.returncode}",
+                "output": out,
+                "http_status": 500,
+            }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"systemd-run exception: {e}",
+            "http_status": 500,
+        }
+
+    return {
+        "ok": True,
+        "job_id": jid,
+        "unit": unit,
+        "log_path": log_path,
+        "status_path": status_path,
+        "script_path": script_file,
+    }
+
+
+def _launch_quick_action_shared(
+    server,
+    quick_action: str,
+    meta: dict,
+    *,
+    ai_triggered: bool = False,
+    ai_source: str = "",
+    log_banner: str = "WebUI Quick Action job",
+    log_prefix: str = "[webui]",
+) -> dict:
+    cmd = meta.get("cmd")
+    if not isinstance(cmd, list) or not cmd:
+        return {
+            "ok": False,
+            "error": "invalid action command",
+            "http_status": 500,
+        }
+
+    needs_dash_user_env = bool(meta.get("needs_dash_user_env"))
+    dash_user = str(os.environ.get("DASH_API_USER", "") or "").strip()
+    dash_home = str(os.environ.get("DASH_API_USER_HOME", "") or "").strip()
+    if needs_dash_user_env and not dash_user:
+        return {
+            "ok": False,
+            "error": "dashboard API missing DASH_API_USER; re-open dashboard via --dash-open",
+            "http_status": 400,
+        }
+
+    timeout_s = 300
+    try:
+        timeout_s = int(meta.get("timeout_s", 300) or 300)
+    except Exception:
+        timeout_s = 300
+    if timeout_s < 10:
+        timeout_s = 10
+    if timeout_s > 2 * 3600:
+        timeout_s = 2 * 3600
+
+    src = _sanitize_ai_source(ai_source)
+    if src and not ai_triggered:
+        ai_triggered = True
+    if ai_triggered and not src:
+        src = "webui-ai"
+    if not ai_triggered:
+        src = ""
+
+    title = str(meta.get("title", quick_action) or quick_action)
+    job_id = secrets.token_urlsafe(18)
+    unit, log_path, status_path, _script_file = _quick_paths(job_id)
+
+    cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
+
+    inject_user = ""
+    try:
+        if needs_dash_user_env and dash_user:
+            # Inject SUDO_USER so helper subcommands that expect sudo still work.
+            # SUDO_USER_HOME is optional but improves behavior for a few paths.
+            inject_user = "\n".join([
+                f'export SUDO_USER={shlex.quote(dash_user)}',
+                f'export SUDO_USER_HOME={shlex.quote(dash_home)}' if dash_home else 'true',
+            ])
+    except Exception:
+        inject_user = ""
+
+    banner = str(log_banner or "WebUI Quick Action job").replace('"', "'")
+    pfx = str(log_prefix or "[webui]").replace('"', "'")
+
+    script_text = "\n".join([
+        'set -euo pipefail',
+        f'LOG={shlex.quote(log_path)}',
+        f'STATUS={shlex.quote(status_path)}',
+        f'ACTION={shlex.quote(quick_action)}',
+        f'TITLE={shlex.quote(title)}',
+        f'AI_TRIGGERED={1 if ai_triggered else 0}',
+        f'AI_SOURCE={shlex.quote(src)}',
+        f'TIMEOUT_S={timeout_s}',
+        'mkdir -p /var/log/zypper-auto/service-logs || true',
+        'mkdir -p /var/lib/zypper-auto || true',
+        'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+        'write_status() {',
+        '  local done="$1"; local rc="$2"; local stage="$3"',
+        '  local tmp="${STATUS}.tmp.$$"',
+        '  {',
+        '    echo "done=${done}"',
+        '    echo "rc=${rc}"',
+        '    echo "stage=${stage}"',
+        '    echo "action=${ACTION:-}"',
+        '    echo "title=${TITLE:-}"',
+        '    echo "ai_triggered=${AI_TRIGGERED:-0}"',
+        '    echo "ai_source=${AI_SOURCE:-}"',
+        '    echo "started_at_utc=${STARTED_AT}"',
+        '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+        '  } >"${tmp}" 2>/dev/null || true',
+        '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
+        '}',
+        'write_status 0 0 starting',
+        'echo "==========================================" >>"$LOG" || true',
+        f'echo " {banner} " >>"$LOG" || true',
+        'echo "==========================================" >>"$LOG" || true',
+        'date >>"$LOG" 2>/dev/null || true',
+        'echo "" >>"$LOG" || true',
+        'echo "ACTION: ${ACTION}" >>"$LOG" || true',
+        'echo "TITLE : ${TITLE}" >>"$LOG" || true',
+        'echo "AI_LAUNCHED: ${AI_TRIGGERED} (${AI_SOURCE:-none})" >>"$LOG" || true',
+        f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
+        'echo "" >>"$LOG" || true',
+        'export ZNH_NON_INTERACTIVE=1',
+        inject_user if inject_user else 'true',
+        'write_status 0 0 running',
+        'set +e',
+        f'( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
+        'rc=${PIPESTATUS[0]}',
+        'set -e',
+        'echo "" >>"$LOG" || true',
+        f'echo "{pfx} quick action rc=${{rc}}" >>"$LOG" || true',
+        'if [ ${rc} -eq 124 ] 2>/dev/null; then',
+        '  write_status 1 ${rc} timed-out',
+        f'  echo "{pfx} ERROR: timed out" >>"$LOG" || true',
+        '  rm -f "$0" >/dev/null 2>&1 || true',
+        '  exit ${rc}',
+        'fi',
+        'if [ ${rc} -eq 0 ]; then',
+        '  write_status 1 ${rc} done',
+        'else',
+        '  write_status 1 ${rc} failed',
+        'fi',
+        'rm -f "$0" >/dev/null 2>&1 || true',
+        'exit ${rc}',
+    ])
+
+    launch = _launch_background_systemd_job(
+        path_builder=_quick_paths,
+        log_dir=QUICK_LOG_DIR,
+        status_dir=QUICK_STATUS_DIR,
+        status_lines=[
+            "done=0",
+            "rc=0",
+            "stage=starting",
+            f"action={quick_action}",
+            f"title={title}",
+            f"ai_triggered={1 if ai_triggered else 0}",
+            f"ai_source={src}",
+        ],
+        script_text=script_text,
+        systemd_properties=[
+            "Nice=19",
+            "IOSchedulingClass=idle",
+        ],
+        script_label="quick-action",
+        job_id=job_id,
+    )
+    if not bool(launch.get("ok", False)):
+        return launch
+
+    unit = str(launch.get("unit", unit) or unit)
+    log_path = str(launch.get("log_path", log_path) or log_path)
+    status_path = str(launch.get("status_path", status_path) or status_path)
+
+    # Persist job metadata into history DB (best-effort)
+    try:
+        _history_job_upsert(server, {
+            "job_id": job_id,
+            "type": "quick-action",
+            "action": quick_action,
+            "title": title,
+            "ai_triggered": bool(ai_triggered),
+            "ai_source": str(src or ""),
+            "simulate": False,
+            "dry_run": False,
+            "channel": "",
+            "running": True,
+            "done": False,
+            "rc": None,
+            "stage": "Starting",
+            "unit": unit,
+            "log_path": log_path,
+            "status_path": status_path,
+            "started_at": time.time(),
+            "finished_at": 0,
+            "output": "",
+        }, summary=f"{title} (starting)")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "action": quick_action,
+        "unit": unit,
+        "status_path": status_path,
+        "log_path": log_path,
+        "ai_triggered": bool(ai_triggered),
+        "ai_source": str(src or ""),
+    }
 
 
 def _quick_action_table() -> dict:
@@ -52109,233 +52680,15 @@ class Handler(BaseHTTPRequestHandler):
             log_banner: str = "WebUI Quick Action job",
             log_prefix: str = "[webui]",
         ) -> dict:
-            cmd = meta.get("cmd")
-            if not isinstance(cmd, list) or not cmd:
-                return {
-                    "ok": False,
-                    "error": "invalid action command",
-                    "http_status": 500,
-                }
-
-            needs_dash_user_env = bool(meta.get("needs_dash_user_env"))
-            dash_user = str(os.environ.get("DASH_API_USER", "") or "").strip()
-            dash_home = str(os.environ.get("DASH_API_USER_HOME", "") or "").strip()
-            if needs_dash_user_env and not dash_user:
-                return {
-                    "ok": False,
-                    "error": "dashboard API missing DASH_API_USER; re-open dashboard via --dash-open",
-                    "http_status": 400,
-                }
-
-            timeout_s = 300
-            try:
-                timeout_s = int(meta.get("timeout_s", 300) or 300)
-            except Exception:
-                timeout_s = 300
-            if timeout_s < 10:
-                timeout_s = 10
-            if timeout_s > 2 * 3600:
-                timeout_s = 2 * 3600
-
-            src = _sanitize_ai_source(ai_source)
-            if src and not ai_triggered:
-                ai_triggered = True
-            if ai_triggered and not src:
-                src = "webui-ai"
-            if not ai_triggered:
-                src = ""
-
-            title = str(meta.get("title", quick_action) or quick_action)
-            job_id = secrets.token_urlsafe(18)
-            unit, log_path, status_path, script_file = _quick_paths(job_id)
-
-            # Precreate log + status so the first poll can't race before the unit writes anything.
-            try:
-                os.makedirs(QUICK_LOG_DIR, exist_ok=True)
-                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
-                with open(log_path, "a", encoding="utf-8"):
-                    pass
-                with open(status_path, "w", encoding="utf-8") as f:
-                    f.write("done=0\n")
-                    f.write("rc=0\n")
-                    f.write("stage=starting\n")
-                    f.write(f"action={quick_action}\n")
-                    f.write(f"title={title}\n")
-                    f.write(f"ai_triggered={1 if ai_triggered else 0}\n")
-                    f.write(f"ai_source={src}\n")
-            except Exception:
-                pass
-
-            cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
-
-            inject_user = ""
-            try:
-                if needs_dash_user_env and dash_user:
-                    # Inject SUDO_USER so helper subcommands that expect sudo still work.
-                    # SUDO_USER_HOME is optional but improves behavior for a few paths.
-                    inject_user = "\n".join([
-                        f'export SUDO_USER={shlex.quote(dash_user)}',
-                        f'export SUDO_USER_HOME={shlex.quote(dash_home)}' if dash_home else 'true',
-                    ])
-            except Exception:
-                inject_user = ""
-
-            banner = str(log_banner or "WebUI Quick Action job").replace('"', "'")
-            pfx = str(log_prefix or "[webui]").replace('"', "'")
-
-            script_text = "\n".join([
-                'set -euo pipefail',
-                f'LOG={shlex.quote(log_path)}',
-                f'STATUS={shlex.quote(status_path)}',
-                f'ACTION={shlex.quote(quick_action)}',
-                f'TITLE={shlex.quote(title)}',
-                f'AI_TRIGGERED={1 if ai_triggered else 0}',
-                f'AI_SOURCE={shlex.quote(src)}',
-                f'TIMEOUT_S={timeout_s}',
-                'mkdir -p /var/log/zypper-auto/service-logs || true',
-                'mkdir -p /var/lib/zypper-auto || true',
-                'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
-                'write_status() {',
-                '  local done="$1"; local rc="$2"; local stage="$3"',
-                '  local tmp="${STATUS}.tmp.$$"',
-                '  {',
-                '    echo "done=${done}"',
-                '    echo "rc=${rc}"',
-                '    echo "stage=${stage}"',
-                '    echo "action=${ACTION:-}"',
-                '    echo "title=${TITLE:-}"',
-                '    echo "ai_triggered=${AI_TRIGGERED:-0}"',
-                '    echo "ai_source=${AI_SOURCE:-}"',
-                '    echo "started_at_utc=${STARTED_AT}"',
-                '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
-                '  } >"${tmp}" 2>/dev/null || true',
-                '  mv -f "${tmp}" "${STATUS}" 2>/dev/null || true',
-                '}',
-                'write_status 0 0 starting',
-                'echo "==========================================" >>"$LOG" || true',
-                f'echo " {banner} " >>"$LOG" || true',
-                'echo "==========================================" >>"$LOG" || true',
-                'date >>"$LOG" 2>/dev/null || true',
-                'echo "" >>"$LOG" || true',
-                'echo "ACTION: ${ACTION}" >>"$LOG" || true',
-                'echo "TITLE : ${TITLE}" >>"$LOG" || true',
-                'echo "AI_LAUNCHED: ${AI_TRIGGERED} (${AI_SOURCE:-none})" >>"$LOG" || true',
-                f'echo "CMD   : {cmd_str}" >>"$LOG" || true',
-                'echo "" >>"$LOG" || true',
-                'export ZNH_NON_INTERACTIVE=1',
-                inject_user if inject_user else 'true',
-                'write_status 0 0 running',
-                'set +e',
-                f'( timeout "${{TIMEOUT_S}}" {cmd_str} ) 2>&1 | tee -a "$LOG"',
-                'rc=${PIPESTATUS[0]}',
-                'set -e',
-                'echo "" >>"$LOG" || true',
-                f'echo "{pfx} quick action rc=${{rc}}" >>"$LOG" || true',
-                'if [ ${rc} -eq 124 ] 2>/dev/null; then',
-                '  write_status 1 ${rc} timed-out',
-                f'  echo "{pfx} ERROR: timed out" >>"$LOG" || true',
-                '  rm -f "$0" >/dev/null 2>&1 || true',
-                '  exit ${rc}',
-                'fi',
-                'if [ ${rc} -eq 0 ]; then',
-                '  write_status 1 ${rc} done',
-                'else',
-                '  write_status 1 ${rc} failed',
-                'fi',
-                'rm -f "$0" >/dev/null 2>&1 || true',
-                'exit ${rc}',
-            ])
-
-            # Write unit script to disk (inside the API service sandbox).
-            try:
-                os.makedirs(QUICK_STATUS_DIR, exist_ok=True)
-                with open(script_file, "w", encoding="utf-8") as f:
-                    f.write("#!/usr/bin/env bash\n")
-                    f.write(script_text)
-                    f.write("\n")
-                os.chmod(script_file, 0o700)
-            except Exception as e:
-                return {
-                    "ok": False,
-                    "error": f"failed to write quick-action unit script: {e}",
-                    "http_status": 500,
-                }
-
-            sys_cmd = [
-                "systemd-run",
-                "--quiet",
-                "--collect",
-                "--unit",
-                unit,
-                "--property=Nice=19",
-                "--property=IOSchedulingClass=idle",
-                "--",
-                "/usr/bin/bash",
-                script_file,
-            ]
-
-            try:
-                p = subprocess.run(
-                    sys_cmd,
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                )
-                if p.returncode != 0:
-                    out = (p.stdout or "").strip()
-                    return {
-                        "ok": False,
-                        "error": f"systemd-run failed rc={p.returncode}",
-                        "output": out,
-                        "http_status": 500,
-                    }
-            except Exception as e:
-                return {
-                    "ok": False,
-                    "error": f"systemd-run exception: {e}",
-                    "http_status": 500,
-                }
-
-            # Persist job metadata into history DB (best-effort)
-            try:
-                _history_job_upsert(self.server, {
-                    "job_id": job_id,
-                    "type": "quick-action",
-                    "action": quick_action,
-                    "title": title,
-                    "ai_triggered": bool(ai_triggered),
-                    "ai_source": str(src or ""),
-                    "simulate": False,
-                    "dry_run": False,
-                    "channel": "",
-                    "running": True,
-                    "done": False,
-                    "rc": None,
-                    "stage": "Starting",
-                    "unit": unit,
-                    "log_path": log_path,
-                    "status_path": status_path,
-                    "started_at": time.time(),
-                    "finished_at": 0,
-                    "output": "",
-                }, summary=f"{title} (starting)")
-            except Exception:
-                pass
-
-            return {
-                "ok": True,
-                "job_id": job_id,
-                "action": quick_action,
-                "unit": unit,
-                "status_path": status_path,
-                "log_path": log_path,
-                "ai_triggered": bool(ai_triggered),
-                "ai_source": str(src or ""),
-            }
+            return _launch_quick_action_shared(
+                self.server,
+                quick_action,
+                meta,
+                ai_triggered=bool(ai_triggered),
+                ai_source=str(ai_source or ""),
+                log_banner=log_banner,
+                log_prefix=log_prefix,
+            )
 
         # --- Dashboard maintenance (safe) ---
         if path == "/api/dashboard/refresh":
@@ -53405,23 +53758,6 @@ class Handler(BaseHTTPRequestHandler):
             job_id = secrets.token_urlsafe(18)
             unit, log_path, status_path, script_file = _su_paths(job_id)
 
-            # Precreate log + status so the first poll can't race before the unit writes anything.
-            try:
-                os.makedirs("/var/log/zypper-auto/service-logs", exist_ok=True)
-                os.makedirs("/var/lib/zypper-auto", exist_ok=True)
-                with open(log_path, "a", encoding="utf-8"):
-                    pass
-                with open(status_path, "w", encoding="utf-8") as f:
-                    f.write(f"done=0\n")
-                    f.write(f"rc=0\n")
-                    f.write(f"update_rc=0\n")
-                    f.write(f"post_action={post_action}\n")
-                    f.write(f"post_action_rc=0\n")
-                    f.write(f"stage=starting\n")
-                    f.write(f"channel={ch}\n")
-                    f.write(f"dry_run={1 if dry_run else 0}\n")
-            except Exception:
-                pass
 
             su_cmd = f"{HELPER_BIN} --self-update {ch}".strip()
             if switchs_ok:
@@ -53508,48 +53844,39 @@ class Handler(BaseHTTPRequestHandler):
                 'exit ${rc}',
             ])
 
-            # Write unit script to disk (inside the API service sandbox).
-            try:
-                os.makedirs("/var/lib/zypper-auto", exist_ok=True)
-                with open(script_file, "w", encoding="utf-8") as f:
-                    f.write("#!/usr/bin/env bash\n")
-                    f.write(script_text)
-                    f.write("\n")
-                os.chmod(script_file, 0o700)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"failed to write self-update unit script: {e}"}, origin)
+            launched = _launch_background_systemd_job(
+                path_builder=_su_paths,
+                log_dir=SU_LOG_DIR,
+                status_dir=SU_STATUS_DIR,
+                status_lines=[
+                    "done=0",
+                    "rc=0",
+                    "update_rc=0",
+                    f"post_action={post_action}",
+                    "post_action_rc=0",
+                    "stage=starting",
+                    f"channel={ch}",
+                    f"dry_run={1 if dry_run else 0}",
+                ],
+                script_text=script_text,
+                systemd_properties=[
+                    "After=network-online.target",
+                    "Wants=network-online.target",
+                ],
+                script_label="self-update",
+                job_id=job_id,
+            )
+            if not bool(launched.get("ok", False)):
+                status = int(launched.get("http_status", 500) or 500)
+                msg = str(launched.get("error", "") or "self-update start failed")
+                out = str(launched.get("output", "") or "").strip()
+                if out:
+                    return _json_response(self, status, {"error": msg, "output": out}, origin)
+                return _json_response(self, status, {"error": msg}, origin)
 
-            sys_cmd = [
-                "systemd-run",
-                "--quiet",
-                "--collect",
-                "--unit",
-                unit,
-                "--property",
-                "After=network-online.target",
-                "--property",
-                "Wants=network-online.target",
-                "--",
-                "/usr/bin/bash",
-                script_file,
-            ]
-
-            try:
-                p = subprocess.run(
-                    sys_cmd,
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                )
-                if p.returncode != 0:
-                    out = (p.stdout or "").strip()
-                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
+            unit = str(launched.get("unit", unit) or unit)
+            log_path = str(launched.get("log_path", log_path) or log_path)
+            status_path = str(launched.get("status_path", status_path) or status_path)
 
             # Persist job metadata into history DB (best-effort)
             try:
@@ -54647,28 +54974,6 @@ class Handler(BaseHTTPRequestHandler):
             job_id = secrets.token_urlsafe(18)
             unit, log_path, status_path, script_file = _snapper_paths(job_id)
 
-            # Precreate log + status so the first poll can't race before the unit writes anything.
-            try:
-                os.makedirs(SNAPPER_LOG_DIR, exist_ok=True)
-                os.makedirs(SNAPPER_STATUS_DIR, exist_ok=True)
-                with open(log_path, "a", encoding="utf-8"):
-                    pass
-                with open(status_path, "w", encoding="utf-8") as f:
-                    f.write("done=0\n")
-                    f.write("rc=0\n")
-                    f.write("stage=starting\n")
-                    f.write(f"action={action}\n")
-                    f.write(f"title={title}\n")
-                    f.write(f"force_low_space={1 if force_low_space else 0}\n")
-                    f.write(f"low_space_guard_required={1 if low_space_guard_required else 0}\n")
-                    f.write(f"low_space_guard_reason={low_space_guard_reason}\n")
-                    f.write(f"low_space_hysteresis_enabled={1 if low_space_hysteresis_enabled else 0}\n")
-                    f.write(f"low_space_hysteresis_latched={1 if low_space_hysteresis_latched else 0}\n")
-                    f.write(f"low_space_free_mb={int(low_space_free_mb)}\n")
-                    f.write(f"low_space_critical_mb={int(low_space_critical_mb)}\n")
-                    f.write(f"low_space_high_mb={int(low_space_high_mb)}\n")
-            except Exception:
-                pass
 
             cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
 
@@ -54766,50 +55071,51 @@ class Handler(BaseHTTPRequestHandler):
                 'exit ${rc}',
             ])
 
-            try:
-                os.makedirs(SNAPPER_STATUS_DIR, exist_ok=True)
-                with open(script_file, "w", encoding="utf-8") as f:
-                    f.write("#!/usr/bin/env bash\n")
-                    f.write(script_text)
-                    f.write("\n")
-                os.chmod(script_file, 0o700)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"failed to write snapper unit script: {e}"}, origin)
-
-            sys_cmd = [
-                "systemd-run",
-                "--quiet",
-                "--collect",
-                "--unit",
-                unit,
-                "--property=Nice=19",
-                "--property=IOSchedulingClass=idle",
-                "--",
-                "/usr/bin/bash",
-                script_file,
+            systemd_props = [
+                "Nice=19",
+                "IOSchedulingClass=idle",
             ]
             if cpu_quota_pct > 0:
                 try:
-                    sys_cmd.insert(5, f"--property=CPUQuota={int(cpu_quota_pct)}%")
+                    systemd_props.append(f"CPUQuota={int(cpu_quota_pct)}%")
                 except Exception:
                     pass
 
-            try:
-                p = subprocess.run(
-                    sys_cmd,
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                )
-                if p.returncode != 0:
-                    out = (p.stdout or "").strip()
-                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
+            launched = _launch_background_systemd_job(
+                path_builder=_snapper_paths,
+                log_dir=SNAPPER_LOG_DIR,
+                status_dir=SNAPPER_STATUS_DIR,
+                status_lines=[
+                    "done=0",
+                    "rc=0",
+                    "stage=starting",
+                    f"action={action}",
+                    f"title={title}",
+                    f"force_low_space={1 if force_low_space else 0}",
+                    f"low_space_guard_required={1 if low_space_guard_required else 0}",
+                    f"low_space_guard_reason={low_space_guard_reason}",
+                    f"low_space_hysteresis_enabled={1 if low_space_hysteresis_enabled else 0}",
+                    f"low_space_hysteresis_latched={1 if low_space_hysteresis_latched else 0}",
+                    f"low_space_free_mb={int(low_space_free_mb)}",
+                    f"low_space_critical_mb={int(low_space_critical_mb)}",
+                    f"low_space_high_mb={int(low_space_high_mb)}",
+                ],
+                script_text=script_text,
+                systemd_properties=systemd_props,
+                script_label="snapper",
+                job_id=job_id,
+            )
+            if not bool(launched.get("ok", False)):
+                status = int(launched.get("http_status", 500) or 500)
+                msg = str(launched.get("error", "") or "snapper start failed")
+                out = str(launched.get("output", "") or "").strip()
+                if out:
+                    return _json_response(self, status, {"error": msg, "output": out}, origin)
+                return _json_response(self, status, {"error": msg}, origin)
+
+            unit = str(launched.get("unit", unit) or unit)
+            log_path = str(launched.get("log_path", log_path) or log_path)
+            status_path = str(launched.get("status_path", status_path) or status_path)
 
             # Persist job metadata into history DB (best-effort)
             try:
@@ -55461,20 +55767,6 @@ class Handler(BaseHTTPRequestHandler):
             job_id = secrets.token_urlsafe(18)
             unit, log_path, status_path, script_file = _scrub_paths(job_id)
 
-            # Precreate log + status so the first poll can't race before the unit writes anything.
-            try:
-                os.makedirs(SCRUB_LOG_DIR, exist_ok=True)
-                os.makedirs(SCRUB_STATUS_DIR, exist_ok=True)
-                with open(log_path, "a", encoding="utf-8"):
-                    pass
-                with open(status_path, "w", encoding="utf-8") as f:
-                    f.write("done=0\n")
-                    f.write("rc=0\n")
-                    f.write("stage=starting\n")
-                    f.write(f"action={action}\n")
-                    f.write(f"title={title}\n")
-            except Exception:
-                pass
 
             cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
 
@@ -55535,43 +55827,33 @@ class Handler(BaseHTTPRequestHandler):
                 'exit ${rc}',
             ])
 
-            try:
-                os.makedirs(SCRUB_STATUS_DIR, exist_ok=True)
-                with open(script_file, "w", encoding="utf-8") as f:
-                    f.write("#!/usr/bin/env bash\n")
-                    f.write(script_text)
-                    f.write("\n")
-                os.chmod(script_file, 0o700)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"failed to write scrub unit script: {e}"}, origin)
+            launched = _launch_background_systemd_job(
+                path_builder=_scrub_paths,
+                log_dir=SCRUB_LOG_DIR,
+                status_dir=SCRUB_STATUS_DIR,
+                status_lines=[
+                    "done=0",
+                    "rc=0",
+                    "stage=starting",
+                    f"action={action}",
+                    f"title={title}",
+                ],
+                script_text=script_text,
+                systemd_properties=[],
+                script_label="scrub",
+                job_id=job_id,
+            )
+            if not bool(launched.get("ok", False)):
+                status = int(launched.get("http_status", 500) or 500)
+                msg = str(launched.get("error", "") or "scrub start failed")
+                out = str(launched.get("output", "") or "").strip()
+                if out:
+                    return _json_response(self, status, {"error": msg, "output": out}, origin)
+                return _json_response(self, status, {"error": msg}, origin)
 
-            sys_cmd = [
-                "systemd-run",
-                "--quiet",
-                "--collect",
-                "--unit",
-                unit,
-                "--",
-                "/usr/bin/bash",
-                script_file,
-            ]
-
-            try:
-                p = subprocess.run(
-                    sys_cmd,
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                )
-                if p.returncode != 0:
-                    out = (p.stdout or "").strip()
-                    return _json_response(self, 500, {"error": f"systemd-run failed rc={p.returncode}", "output": out}, origin)
-            except Exception as e:
-                return _json_response(self, 500, {"error": f"systemd-run exception: {e}"}, origin)
+            unit = str(launched.get("unit", unit) or unit)
+            log_path = str(launched.get("log_path", log_path) or log_path)
+            status_path = str(launched.get("status_path", status_path) or status_path)
 
             # Persist job metadata into history DB (best-effort)
             try:

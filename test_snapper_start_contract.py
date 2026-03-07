@@ -34,15 +34,15 @@ class SnapperStartResponseContractTest(unittest.TestCase):
         self.assertFalse(missing, f"/api/snapper/start success payload missing keys: {missing}; found: {sorted(keys)}")
     def test_quick_action_history_seed_excludes_low_space_keys(self) -> None:
         block_match = re.search(
-            r'def _launch_quick_action\((?P<body>.*?)\n\s*# --- Dashboard maintenance \(safe\) ---',
+            r'def _launch_quick_action_shared\((?P<body>.*?)\n\n\ndef _quick_action_table',
             self.script_text,
             re.S,
         )
-        self.assertIsNotNone(block_match, f"Could not find _launch_quick_action helper in {self.script_path}")
+        self.assertIsNotNone(block_match, f"Could not find _launch_quick_action_shared helper in {self.script_path}")
         block = str(block_match.group("body"))
 
         upsert_match = re.search(
-            r'_history_job_upsert\(self\.server,\s*\{(?P<payload>.*?)\},\s*summary=',
+            r'_history_job_upsert\(server,\s*\{(?P<payload>.*?)\},\s*summary=',
             block,
             re.S,
         )
@@ -90,6 +90,93 @@ class SnapperStartResponseContractTest(unittest.TestCase):
             "systemd-run",
             block,
             "/api/quick/start should not call systemd-run inline after shared-launcher refactor",
+        )
+    def test_self_update_start_routes_to_shared_background_launcher(self) -> None:
+        block_match = re.search(
+            r'if path == "/api/self-update/start":(?P<body>.*?)\n\s*if path == "/api/self-update/run":',
+            self.script_text,
+            re.S,
+        )
+        self.assertIsNotNone(block_match, f'Could not find /api/self-update/start block in {self.script_path}')
+        block = str(block_match.group("body"))
+
+        self.assertIn(
+            "launched = _launch_background_systemd_job(",
+            block,
+            "/api/self-update/start must call the shared _launch_background_systemd_job helper",
+        )
+        self.assertIn(
+            "path_builder=_su_paths",
+            block,
+            "/api/self-update/start must route through _su_paths in shared launcher helper",
+        )
+        self.assertNotIn(
+            "subprocess.run(",
+            block,
+            "/api/self-update/start should not spawn systemd-run inline after helper extraction",
+        )
+        self.assertNotIn(
+            "sys_cmd = [",
+            block,
+            "/api/self-update/start should not construct inline systemd-run command arrays after helper extraction",
+        )
+    def test_snapper_start_routes_to_shared_background_launcher(self) -> None:
+        block_match = re.search(
+            r'if path == "/api/snapper/start":(?P<body>.*?)\n\s*if path == "/api/snapper/run":',
+            self.script_text,
+            re.S,
+        )
+        self.assertIsNotNone(block_match, f'Could not find /api/snapper/start block in {self.script_path}')
+        block = str(block_match.group("body"))
+
+        self.assertIn(
+            "launched = _launch_background_systemd_job(",
+            block,
+            "/api/snapper/start must call the shared _launch_background_systemd_job helper",
+        )
+        self.assertIn(
+            "path_builder=_snapper_paths",
+            block,
+            "/api/snapper/start must route through _snapper_paths in shared launcher helper",
+        )
+        self.assertNotIn(
+            "subprocess.run(",
+            block,
+            "/api/snapper/start should not spawn systemd-run inline after helper extraction",
+        )
+        self.assertNotIn(
+            "sys_cmd = [",
+            block,
+            "/api/snapper/start should not construct inline systemd-run command arrays after helper extraction",
+        )
+    def test_scrub_start_routes_to_shared_background_launcher(self) -> None:
+        block_match = re.search(
+            r'if path == "/api/scrub/start":(?P<body>.*?)\n\s*if path == "/api/scrub/run":',
+            self.script_text,
+            re.S,
+        )
+        self.assertIsNotNone(block_match, f'Could not find /api/scrub/start block in {self.script_path}')
+        block = str(block_match.group("body"))
+
+        self.assertIn(
+            "launched = _launch_background_systemd_job(",
+            block,
+            "/api/scrub/start must call the shared _launch_background_systemd_job helper",
+        )
+        self.assertIn(
+            "path_builder=_scrub_paths",
+            block,
+            "/api/scrub/start must route through _scrub_paths in shared launcher helper",
+        )
+        self.assertNotIn(
+            "subprocess.run(",
+            block,
+            "/api/scrub/start should not spawn systemd-run inline after helper extraction",
+        )
+        self.assertNotIn(
+            "sys_cmd = [",
+            block,
+            "/api/scrub/start should not construct inline systemd-run command arrays after helper extraction",
         )
     def test_snapper_history_seed_includes_low_space_keys(self) -> None:
         block_match = re.search(
