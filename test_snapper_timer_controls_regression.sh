@@ -14,6 +14,8 @@ Regression smoke test for Snapper per-timer controls:
   - confirm-token expiry is auto-recovered in both run and background-start flows
   - frontend has a timer-badge refresh helper and uses it after timer toggles
   - frontend does an initial timer-badge refresh on Snapper UI wire-up
+  - frontend stores a short-lived authoritative timer override from /api/snapper/timers
+    and reconciles it in applyLiveData so stale status-data polls do not revert badges
   - backend exposes /api/snapper/timers for immediate badge state fetches
   - helper has __znh_snapper_single_timer and timer-enable/timer-disable subcommands
   - /api/snapper/confirm allows per-timer actions with ENABLE/DISABLE phrases
@@ -126,6 +128,15 @@ snapper_confirm_modal_block="$(
 )"
 [ -n "${snapper_confirm_modal_block}" ] || fail "Could not locate _snOpenConfirmAndRun block"
 
+apply_live_data_block="$(
+    awk '
+        /function applyLiveData\(d\) \{/ {inblk=1}
+        inblk {print}
+        /var liveEnabled = false;/ && inblk {exit}
+    ' "${TARGET_FILE}"
+)"
+[ -n "${apply_live_data_block}" ] || fail "Could not locate applyLiveData block"
+
 # UI/markup assertions
 require_contains "${source_text}" "id=\"snapper-auto-enable-btn\">Enable all" "Option 5 all-enable button label missing"
 require_contains "${source_text}" "id=\"snapper-enable-timeline-btn\"" "Option 5 per-timer timeline button missing"
@@ -153,6 +164,12 @@ require_contains "${source_text}" "function znhSnapperRefreshTimerBadges() {" "z
 require_contains "${source_text}" "_api('/api/snapper/timers', { method: 'GET' })" "timer badge refresh helper must call /api/snapper/timers"
 require_contains "${source_text}" "function _snIsConfirmTokenError(errObj) {" "confirm-token error classifier helper missing"
 require_contains "${source_text}" "function _snRequestFreshConfirmToken(action, params) {" "confirm-token refresh helper missing"
+require_contains "${source_text}" "var _znhSnapperTimerOverride = null;" "snapper timer override state variable missing"
+require_contains "${source_text}" "function _znhSnapperTimerStateNorm(v) {" "snapper timer state normalizer helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerOverrideSetFromApi(payload) {" "snapper timer override set helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerOverrideGet() {" "snapper timer override getter helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerOverrideMaybeClear(serverData) {" "snapper timer override clear helper missing"
+require_contains "${source_text}" "_znhSnapperTimerOverrideSetFromApi(r);" "timer refresh helper missing authoritative override write"
 require_contains "${wire_snapper_block}" "if (typeof znhSnapperRefreshTimerBadges === 'function') {" "initial timer refresh guard missing in _wireSnapperUI"
 require_contains "${wire_snapper_block}" "znhSnapperRefreshTimerBadges();" "initial timer refresh call missing in _wireSnapperUI"
 require_contains "${snapper_run_block}" "var didTimerToggle = false;" "snapperRun must track timer-toggle actions for refresh"
@@ -161,6 +178,12 @@ require_contains "${snapper_run_block}" "if (typeof znhSnapperRefreshTimerBadges
 require_contains "${snapper_run_block}" "needsRefresh = !!confirmAction && _snIsConfirmTokenError(e0);" "snapperRun missing confirm-token error detection"
 require_contains "${snapper_run_block}" "_snRequestFreshConfirmToken(confirmAction, params)" "snapperRun missing refresh confirm-token request"
 require_contains "${snapper_run_block}" "Confirmation refreshed" "snapperRun missing user feedback for confirm-token refresh"
+require_contains "${apply_live_data_block}" "var snapTimeline = d.snapper_timeline_timer;" "applyLiveData missing snapper timeline local state"
+require_contains "${apply_live_data_block}" "_znhSnapperTimerOverrideMaybeClear(d);" "applyLiveData missing override catch-up clear logic"
+require_contains "${apply_live_data_block}" "var _ov = _znhSnapperTimerOverrideGet();" "applyLiveData missing timer override lookup"
+require_contains "${apply_live_data_block}" "if (_ov.timeline) snapTimeline = _ov.timeline;" "applyLiveData missing timeline override application"
+require_contains "${apply_live_data_block}" "if (_ov.cleanup) snapCleanup = _ov.cleanup;" "applyLiveData missing cleanup override application"
+require_contains "${apply_live_data_block}" "if (_ov.boot) snapBoot = _ov.boot;" "applyLiveData missing boot override application"
 require_contains "${snapper_confirm_modal_block}" "function _startSnapperJobWithToken(tok, phr, didRetry) {" "_snOpenConfirmAndRun missing background start helper"
 require_contains "${snapper_confirm_modal_block}" "shouldRetry = (!didRetry) && _snIsConfirmTokenError(err0);" "_snOpenConfirmAndRun missing token-expiry retry detection"
 require_contains "${snapper_confirm_modal_block}" "_snRequestFreshConfirmToken(confirmAct, _sn.params || {})" "_snOpenConfirmAndRun missing confirm-token refresh request"

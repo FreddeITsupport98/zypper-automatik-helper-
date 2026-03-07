@@ -1923,6 +1923,7 @@ systemctl status zypper-autodownload.service
   - 🛡️ **IMPROVED:** `zypper-with-ps` lock handling now includes lock-detail wait/retry before run plus a one-time retry when lock contention appears during the actual `zypper` execution (race-safe path for `dup`/`dist-upgrade`/`update`).
   - 🧪 **NEW:** added regression smoke test `test_wrapper_lock_race_regression.sh` to guard wrapper lock-helper wiring, pre-run wait logic, retry-on-lock-race behavior, and final lock-detail messaging.
   - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
+  - 🧿 **FIXED:** Snapper timer badges in WebUI now keep short-lived authoritative `/api/snapper/timers` state after timer toggles, so stale `status-data.json` polls no longer revert freshly changed enable/disable states before dashboard data catches up.
   - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.
   - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
   - 🧰 **IMPROVED:** verify check 48 now removes stale disable markers when `snapper-cleanup.timer` is active again, keeping timer state + intent metadata consistent.

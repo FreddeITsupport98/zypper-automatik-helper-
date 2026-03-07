@@ -21308,12 +21308,70 @@ generate_dashboard() {
         });
     }
 
+    var _znhSnapperTimerOverride = null;
+
+    function _znhSnapperTimerStateNorm(v) {
+        var s = '';
+        try { s = String((v === undefined || v === null) ? '' : v).trim().toLowerCase(); } catch (e0) { s = ''; }
+        if (s === 'enabled' || s === '✓ enabled') return 'enabled';
+        if (s === 'partial' || s === '⚠ partial') return 'partial';
+        if (s === 'disabled' || s === '✓ disabled') return 'disabled';
+        if (s === 'missing') return 'missing';
+        return '';
+    }
+
+    function _znhSnapperTimerOverrideSetFromApi(payload) {
+        var p = payload || {};
+        var timeline = _znhSnapperTimerStateNorm(p.snapper_timeline_timer);
+        var cleanup = _znhSnapperTimerStateNorm(p.snapper_cleanup_timer);
+        var boot = _znhSnapperTimerStateNorm(p.snapper_boot_timer);
+        var nowMs = 0;
+        try { nowMs = Date.now(); } catch (e0) { nowMs = 0; }
+        _znhSnapperTimerOverride = {
+            timeline: timeline,
+            cleanup: cleanup,
+            boot: boot,
+            // Hold a short-lived authoritative override so stale status-data.json
+            // updates do not immediately revert freshly toggled timer badges.
+            expires_at_ms: nowMs + (20 * 60 * 1000),
+            set_at_ms: nowMs
+        };
+    }
+
+    function _znhSnapperTimerOverrideGet() {
+        var o = _znhSnapperTimerOverride;
+        if (!o) return null;
+        var nowMs = 0;
+        try { nowMs = Date.now(); } catch (e0) { nowMs = 0; }
+        try {
+            if (o.expires_at_ms && nowMs && nowMs > o.expires_at_ms) {
+                _znhSnapperTimerOverride = null;
+                return null;
+            }
+        } catch (e1) {}
+        return o;
+    }
+
+    function _znhSnapperTimerOverrideMaybeClear(serverData) {
+        var o = _znhSnapperTimerOverrideGet();
+        if (!o) return;
+        var d = serverData || {};
+        var st = _znhSnapperTimerStateNorm(d.snapper_timeline_timer);
+        var sc = _znhSnapperTimerStateNorm(d.snapper_cleanup_timer);
+        var sb = _znhSnapperTimerStateNorm(d.snapper_boot_timer);
+        if (!st || !sc || !sb) return;
+        if (st === String(o.timeline || '') && sc === String(o.cleanup || '') && sb === String(o.boot || '')) {
+            _znhSnapperTimerOverride = null;
+        }
+    }
+
     function znhSnapperRefreshTimerBadges() {
         return _api('/api/snapper/timers', { method: 'GET' }).then(function(r) {
             if (!r) return null;
             try { if (r.snapper_timeline_timer !== undefined) setTimerState('snapper-timeline-timer', r.snapper_timeline_timer); } catch (e0) {}
             try { if (r.snapper_cleanup_timer !== undefined) setTimerState('snapper-cleanup-timer', r.snapper_cleanup_timer); } catch (e1) {}
             try { if (r.snapper_boot_timer !== undefined) setTimerState('snapper-boot-timer', r.snapper_boot_timer); } catch (e2) {}
+            try { _znhSnapperTimerOverrideSetFromApi(r); } catch (e3) {}
             return r;
         }).catch(function() {
             return null;
@@ -28964,9 +29022,23 @@ generate_dashboard() {
         if (d.verify_last_ts !== undefined) setText('verify-last-ts', d.verify_last_ts);
 
         // Snapper timers (dashboard Snapper panel)
-        if (d.snapper_timeline_timer !== undefined) setTimerState('snapper-timeline-timer', d.snapper_timeline_timer);
-        if (d.snapper_cleanup_timer !== undefined) setTimerState('snapper-cleanup-timer', d.snapper_cleanup_timer);
-        if (d.snapper_boot_timer !== undefined) setTimerState('snapper-boot-timer', d.snapper_boot_timer);
+        // Prefer recently fetched /api/snapper/timers values for a short period so
+        // stale status-data.json does not revert timer badges right after toggle actions.
+        var snapTimeline = d.snapper_timeline_timer;
+        var snapCleanup = d.snapper_cleanup_timer;
+        var snapBoot = d.snapper_boot_timer;
+        try { _znhSnapperTimerOverrideMaybeClear(d); } catch (eSt0) {}
+        try {
+            var _ov = _znhSnapperTimerOverrideGet();
+            if (_ov) {
+                if (_ov.timeline) snapTimeline = _ov.timeline;
+                if (_ov.cleanup) snapCleanup = _ov.cleanup;
+                if (_ov.boot) snapBoot = _ov.boot;
+            }
+        } catch (eSt1) {}
+        if (snapTimeline !== undefined) setTimerState('snapper-timeline-timer', snapTimeline);
+        if (snapCleanup !== undefined) setTimerState('snapper-cleanup-timer', snapCleanup);
+        if (snapBoot !== undefined) setTimerState('snapper-boot-timer', snapBoot);
 
         setText('last-install-log', d.last_install_log);
         setText('flight-report-log', d.flight_report_log);
@@ -29046,6 +29118,7 @@ generate_dashboard() {
                 pollDownloaderStatus();
                 pollPerf();
                 pollRecentActivityLog();
+                try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e5) {}
                 try { _znhRecentLogStreamEnsure(true); } catch (eSSE) {}
             } else {
                 try { _znhRecentLogStreamStop(); } catch (eSSE2) {}
@@ -30076,6 +30149,7 @@ generate_dashboard() {
             pollLive(true);
             pollDownloaderStatus();
             pollDashboardMeta();
+            try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e0) {}
         }
         document.addEventListener('visibilitychange', function() {
             if (!document.hidden) _refreshWhenResumed();

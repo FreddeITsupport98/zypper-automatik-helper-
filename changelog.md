@@ -48,6 +48,7 @@
 - Boot/EFI stats now include installed kernel inventory in Snapper Manager (kernel count plus per-kernel package/version labels).
 - Added regression smoke test `test_snapper_timer_controls_regression.sh` to assert per-timer Snapper controls are wired across WebUI buttons, API actions, and helper subcommands.
 - Snapper Manager timer badges now refresh immediately after successful timer enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, instead of waiting for stale dashboard polling state.
+- Snapper WebUI timer badges now keep a short-lived authoritative `/api/snapper/timers` override after toggle actions so stale `status-data.json` poll data does not revert freshly changed timer state before dashboard data catches up.
 - Snapper Option 4 cleanup confirmation modal now includes a detected installed-kernel-family dropdown (populated from `/api/boot/stats`) to help set `KERNEL_FAMILY_PURGE_TARGETS` quickly while preserving manual input.
 - Snapper WebUI confirm modal now auto-refreshes expired confirmation tokens and retries once (both `/api/snapper/run` and `/api/snapper/start` paths), reducing `missing/expired confirm token` failures when users spend longer in the dialog.
 - Snapper kernel package cleanup (`zypper purge-kernels`) now handles zypp lock contention more gracefully: it waits with backoff, retries once on lock-race, and records a clear non-fatal skip/audit entry when the lock does not clear.
