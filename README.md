@@ -1162,6 +1162,30 @@ Safety behavior:
 - It tracks Snapper + related maintenance timers so running the test does not
   leave side effects unless `--keep-state` is used.
 
+### 4. Snapper Timer WebUI Browser Regression (`test_snapper_timer_playwright_regression.py`)
+
+Located in the repo root, this browser-level regression uses Playwright
+(Chromium) to verify Snapper timer WebUI state sync behavior.
+
+What it checks:
+- Timer badges + Option 5/6 button states after a timer-toggle action.
+- Stale `status-data.json` live polls do not immediately regress freshly
+  toggled states.
+- Throttled authoritative `/api/snapper/timers` re-sync reconciles CLI-side
+  changes and keeps button/badge state aligned.
+
+Run it in an isolated venv (recommended, fish-safe commands):
+
+```bash
+python3 -m venv /tmp/zah-playwright-venv
+/tmp/zah-playwright-venv/bin/python -m pip install playwright
+/tmp/zah-playwright-venv/bin/python -m playwright install chromium
+/tmp/zah-playwright-venv/bin/python -m unittest -v test_snapper_timer_playwright_regression.py
+```
+
+If Playwright is unavailable, the test is skipped automatically instead of
+failing unrelated test runs.
+
 -----
 
 <a id="diagnostics"></a>
@@ -1924,6 +1948,8 @@ systemctl status zypper-autodownload.service
   - 🧪 **NEW:** added regression smoke test `test_wrapper_lock_race_regression.sh` to guard wrapper lock-helper wiring, pre-run wait logic, retry-on-lock-race behavior, and final lock-detail messaging.
   - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
   - 🧿 **FIXED:** Snapper timer badges in WebUI now keep short-lived authoritative `/api/snapper/timers` state after timer toggles, so stale `status-data.json` polls no longer revert freshly changed enable/disable states before dashboard data catches up.
+  - 🧿 **FIXED:** Snapper WebUI Option 5/6 buttons now also sync their live enabled/disabled state from timer status (with state styling + guard-disable when already in target state), so controls stay persistent and match CLI/systemd timer reality.
+  - 🧪 **NEW:** browser-level regression `test_snapper_timer_playwright_regression.py` now validates Snapper timer badge/button persistence through stale live polls and throttled authoritative API re-sync behavior.
   - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.
   - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
   - 🧰 **IMPROVED:** verify check 48 now removes stale disable markers when `snapper-cleanup.timer` is active again, keeping timer state + intent metadata consistent.

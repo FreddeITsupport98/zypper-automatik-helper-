@@ -11258,6 +11258,21 @@ generate_dashboard() {
         border-color: rgba(37,99,235,0.38);
         color: var(--text);
     }
+    .pill.state-on {
+        background: linear-gradient(135deg, rgba(34,197,94,0.22), rgba(22,163,74,0.16));
+        border-color: rgba(34,197,94,0.45);
+        color: var(--text);
+    }
+    .pill.state-off {
+        background: linear-gradient(135deg, rgba(245,158,11,0.22), rgba(239,68,68,0.14));
+        border-color: rgba(245,158,11,0.45);
+        color: var(--text);
+    }
+    .pill:disabled {
+        opacity: 0.68;
+        cursor: not-allowed;
+        transform: none !important;
+    }
     html[data-theme="dark"] .pill.active,
     html:not([data-theme]) .pill.active {
         color: var(--text);
@@ -21309,6 +21324,8 @@ generate_dashboard() {
     }
 
     var _znhSnapperTimerOverride = null;
+    var _znhSnapperTimerApiSyncLastMs = 0;
+    var _znhSnapperTimerApiSyncInFlight = false;
 
     function _znhSnapperTimerStateNorm(v) {
         var s = '';
@@ -21318,6 +21335,92 @@ generate_dashboard() {
         if (s === 'disabled' || s === '✓ disabled') return 'disabled';
         if (s === 'missing') return 'missing';
         return '';
+    }
+
+    function _znhSnapperTimerUiSetBtn(id, mode, disabled, title) {
+        var btn = document.getElementById(id);
+        if (!btn) return;
+        btn.classList.remove('active', 'state-on', 'state-off');
+        if (mode === 'on') btn.classList.add('state-on');
+        else if (mode === 'off') btn.classList.add('state-off');
+        try { btn.disabled = !!disabled; } catch (e0) {}
+        try {
+            var t = String((title === undefined || title === null) ? '' : title).trim();
+            if (t) btn.title = t;
+            else btn.removeAttribute('title');
+        } catch (e1) {}
+    }
+
+    function znhSnapperSyncTimerButtons(payload) {
+        var p = payload || {};
+        var timeline = _znhSnapperTimerStateNorm(p.snapper_timeline_timer);
+        var cleanup = _znhSnapperTimerStateNorm(p.snapper_cleanup_timer);
+        var boot = _znhSnapperTimerStateNorm(p.snapper_boot_timer);
+
+        function _pair(enableId, disableId, state, unitName) {
+            if (state === 'enabled') {
+                _znhSnapperTimerUiSetBtn(enableId, 'on', true, unitName + ' is already enabled');
+                _znhSnapperTimerUiSetBtn(disableId, '', false, 'Disable ' + unitName);
+                return;
+            }
+            if (state === 'disabled') {
+                _znhSnapperTimerUiSetBtn(enableId, '', false, 'Enable ' + unitName);
+                _znhSnapperTimerUiSetBtn(disableId, 'off', true, unitName + ' is already disabled');
+                return;
+            }
+            if (state === 'missing') {
+                _znhSnapperTimerUiSetBtn(enableId, 'off', true, unitName + ' is not available on this system');
+                _znhSnapperTimerUiSetBtn(disableId, 'off', true, unitName + ' is not available on this system');
+                return;
+            }
+            if (state === 'partial') {
+                _znhSnapperTimerUiSetBtn(enableId, '', false, unitName + ' is partially active (recommended: enable)');
+                _znhSnapperTimerUiSetBtn(disableId, '', false, unitName + ' is partially active (recommended: disable then enable)');
+                return;
+            }
+            _znhSnapperTimerUiSetBtn(enableId, '', false, '');
+            _znhSnapperTimerUiSetBtn(disableId, '', false, '');
+        }
+
+        _pair('snapper-enable-timeline-btn', 'snapper-disable-timeline-btn', timeline, 'snapper-timeline.timer');
+        _pair('snapper-enable-cleanup-btn', 'snapper-disable-cleanup-btn', cleanup, 'snapper-cleanup.timer');
+        _pair('snapper-enable-boot-btn', 'snapper-disable-boot-btn', boot, 'snapper-boot.timer');
+
+        var all = [timeline, cleanup, boot];
+        var allEnabled = all.length === 3 && all[0] === 'enabled' && all[1] === 'enabled' && all[2] === 'enabled';
+        var allDisabled = all.length === 3 && all[0] === 'disabled' && all[1] === 'disabled' && all[2] === 'disabled';
+
+        if (allEnabled) {
+            _znhSnapperTimerUiSetBtn('snapper-auto-enable-btn', 'on', true, 'All Snapper timers are already enabled');
+            _znhSnapperTimerUiSetBtn('snapper-auto-disable-btn', '', false, 'Disable all Snapper timers');
+        } else if (allDisabled) {
+            _znhSnapperTimerUiSetBtn('snapper-auto-enable-btn', '', false, 'Enable all Snapper timers');
+            _znhSnapperTimerUiSetBtn('snapper-auto-disable-btn', 'off', true, 'All Snapper timers are already disabled');
+        } else {
+            _znhSnapperTimerUiSetBtn('snapper-auto-enable-btn', '', false, '');
+            _znhSnapperTimerUiSetBtn('snapper-auto-disable-btn', '', false, '');
+        }
+    }
+    window.znhSnapperSyncTimerButtons = znhSnapperSyncTimerButtons;
+
+    function _znhSnapperTimerMaybeApiSync() {
+        var nowMs = 0;
+        try { nowMs = Date.now(); } catch (e0) { nowMs = 0; }
+        try {
+            if (_znhSnapperTimerApiSyncInFlight) return;
+            if (_znhSnapperTimerApiSyncLastMs && nowMs && (nowMs - _znhSnapperTimerApiSyncLastMs) < 15000) return;
+            _znhSnapperTimerApiSyncInFlight = true;
+            _znhSnapperTimerApiSyncLastMs = nowMs;
+        } catch (e1) {}
+
+        Promise.resolve().then(function() {
+            if (typeof znhSnapperRefreshTimerBadges !== 'function') return null;
+            return znhSnapperRefreshTimerBadges();
+        }).catch(function() {
+            return null;
+        }).finally(function() {
+            _znhSnapperTimerApiSyncInFlight = false;
+        });
     }
 
     function _znhSnapperTimerOverrideSetFromApi(payload) {
@@ -21372,6 +21475,7 @@ generate_dashboard() {
             try { if (r.snapper_cleanup_timer !== undefined) setTimerState('snapper-cleanup-timer', r.snapper_cleanup_timer); } catch (e1) {}
             try { if (r.snapper_boot_timer !== undefined) setTimerState('snapper-boot-timer', r.snapper_boot_timer); } catch (e2) {}
             try { _znhSnapperTimerOverrideSetFromApi(r); } catch (e3) {}
+            try { if (typeof znhSnapperSyncTimerButtons === 'function') znhSnapperSyncTimerButtons(r); } catch (e4) {}
             return r;
         }).catch(function() {
             return null;
@@ -28910,6 +29014,15 @@ generate_dashboard() {
             if (!el) continue;
             setTimerState(id, String(el.textContent || '').trim());
         }
+        try {
+            if (typeof znhSnapperSyncTimerButtons === 'function') {
+                znhSnapperSyncTimerButtons({
+                    snapper_timeline_timer: (document.getElementById('snapper-timeline-timer') || {}).textContent || '',
+                    snapper_cleanup_timer: (document.getElementById('snapper-cleanup-timer') || {}).textContent || '',
+                    snapper_boot_timer: (document.getElementById('snapper-boot-timer') || {}).textContent || ''
+                });
+            }
+        } catch (e0) {}
     })();
 
     function updateZyppLockBadge(d) {
@@ -29039,6 +29152,16 @@ generate_dashboard() {
         if (snapTimeline !== undefined) setTimerState('snapper-timeline-timer', snapTimeline);
         if (snapCleanup !== undefined) setTimerState('snapper-cleanup-timer', snapCleanup);
         if (snapBoot !== undefined) setTimerState('snapper-boot-timer', snapBoot);
+        try {
+            if (typeof znhSnapperSyncTimerButtons === 'function') {
+                znhSnapperSyncTimerButtons({
+                    snapper_timeline_timer: snapTimeline,
+                    snapper_cleanup_timer: snapCleanup,
+                    snapper_boot_timer: snapBoot
+                });
+            }
+        } catch (eSt2) {}
+        try { _znhSnapperTimerMaybeApiSync(); } catch (eSt3) {}
 
         setText('last-install-log', d.last_install_log);
         setText('flight-report-log', d.flight_report_log);

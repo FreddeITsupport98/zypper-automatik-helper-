@@ -14,6 +14,7 @@ Regression smoke test for Snapper per-timer controls:
   - confirm-token expiry is auto-recovered in both run and background-start flows
   - frontend has a timer-badge refresh helper and uses it after timer toggles
   - frontend does an initial timer-badge refresh on Snapper UI wire-up
+  - frontend syncs Snapper timer enable/disable button state from timer status
   - frontend stores a short-lived authoritative timer override from /api/snapper/timers
     and reconciles it in applyLiveData so stale status-data polls do not revert badges
   - backend exposes /api/snapper/timers for immediate badge state fetches
@@ -166,10 +167,15 @@ require_contains "${source_text}" "function _snIsConfirmTokenError(errObj) {" "c
 require_contains "${source_text}" "function _snRequestFreshConfirmToken(action, params) {" "confirm-token refresh helper missing"
 require_contains "${source_text}" "var _znhSnapperTimerOverride = null;" "snapper timer override state variable missing"
 require_contains "${source_text}" "function _znhSnapperTimerStateNorm(v) {" "snapper timer state normalizer helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerUiSetBtn(id, mode, disabled, title) {" "snapper timer UI button helper missing"
+require_contains "${source_text}" "function znhSnapperSyncTimerButtons(payload) {" "snapper timer button sync helper missing"
+require_contains "${source_text}" "window.znhSnapperSyncTimerButtons = znhSnapperSyncTimerButtons;" "snapper timer button sync helper export missing"
+require_contains "${source_text}" "function _znhSnapperTimerMaybeApiSync() {" "snapper timer throttled api resync helper missing"
 require_contains "${source_text}" "function _znhSnapperTimerOverrideSetFromApi(payload) {" "snapper timer override set helper missing"
 require_contains "${source_text}" "function _znhSnapperTimerOverrideGet() {" "snapper timer override getter helper missing"
 require_contains "${source_text}" "function _znhSnapperTimerOverrideMaybeClear(serverData) {" "snapper timer override clear helper missing"
 require_contains "${source_text}" "_znhSnapperTimerOverrideSetFromApi(r);" "timer refresh helper missing authoritative override write"
+require_contains "${source_text}" "if (typeof znhSnapperSyncTimerButtons === 'function') znhSnapperSyncTimerButtons(r);" "timer refresh helper missing button sync call"
 require_contains "${wire_snapper_block}" "if (typeof znhSnapperRefreshTimerBadges === 'function') {" "initial timer refresh guard missing in _wireSnapperUI"
 require_contains "${wire_snapper_block}" "znhSnapperRefreshTimerBadges();" "initial timer refresh call missing in _wireSnapperUI"
 require_contains "${snapper_run_block}" "var didTimerToggle = false;" "snapperRun must track timer-toggle actions for refresh"
@@ -184,6 +190,8 @@ require_contains "${apply_live_data_block}" "var _ov = _znhSnapperTimerOverrideG
 require_contains "${apply_live_data_block}" "if (_ov.timeline) snapTimeline = _ov.timeline;" "applyLiveData missing timeline override application"
 require_contains "${apply_live_data_block}" "if (_ov.cleanup) snapCleanup = _ov.cleanup;" "applyLiveData missing cleanup override application"
 require_contains "${apply_live_data_block}" "if (_ov.boot) snapBoot = _ov.boot;" "applyLiveData missing boot override application"
+require_contains "${apply_live_data_block}" "znhSnapperSyncTimerButtons({" "applyLiveData missing timer button sync call"
+require_contains "${apply_live_data_block}" "_znhSnapperTimerMaybeApiSync();" "applyLiveData missing throttled timer API resync call"
 require_contains "${snapper_confirm_modal_block}" "function _startSnapperJobWithToken(tok, phr, didRetry) {" "_snOpenConfirmAndRun missing background start helper"
 require_contains "${snapper_confirm_modal_block}" "shouldRetry = (!didRetry) && _snIsConfirmTokenError(err0);" "_snOpenConfirmAndRun missing token-expiry retry detection"
 require_contains "${snapper_confirm_modal_block}" "_snRequestFreshConfirmToken(confirmAct, _sn.params || {})" "_snOpenConfirmAndRun missing confirm-token refresh request"
