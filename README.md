@@ -1186,6 +1186,27 @@ python3 -m venv /tmp/zah-playwright-venv
 If Playwright is unavailable, the test is skipped automatically instead of
 failing unrelated test runs.
 
+### 5. Boot Kernel Inventory Regression Smoke Test (`test_boot_kernel_inventory_regression.sh`)
+
+Located in the repo root, this smoke test guards kernel counting logic used by
+Snapper Manager Boot/EFI stats and kernel purge safety checks.
+
+What it checks:
+- `/api/boot/stats` kernel inventory counts only module trees that have
+  `modules.dep` (bootable installed kernels).
+- Raw module-directory count is still exposed separately for diagnostics
+  (`raw_dirs_count`).
+- Boot/EFI UI text reflects bootable installed kernel versions and shows extra
+  module directories when present.
+- Kernel-family purge and kernel-purge safety counting use the same
+  `modules.dep`-filtered logic.
+
+Run it:
+
+```bash
+bash test_boot_kernel_inventory_regression.sh zypper-auto.sh
+```
+
 -----
 
 <a id="diagnostics"></a>
@@ -1950,6 +1971,8 @@ systemctl status zypper-autodownload.service
   - 🧿 **FIXED:** Snapper timer badges in WebUI now keep short-lived authoritative `/api/snapper/timers` state after timer toggles, so stale `status-data.json` polls no longer revert freshly changed enable/disable states before dashboard data catches up.
   - 🧿 **FIXED:** Snapper WebUI Option 5/6 buttons now also sync their live enabled/disabled state from timer status (with state styling + guard-disable when already in target state), so controls stay persistent and match CLI/systemd timer reality.
   - 🧪 **NEW:** browser-level regression `test_snapper_timer_playwright_regression.py` now validates Snapper timer badge/button persistence through stale live polls and throttled authoritative API re-sync behavior.
+  - 🧿 **FIXED:** Boot/EFI installed-kernel inventory now counts only bootable installed kernels (module trees with `modules.dep`) instead of all raw `/lib/modules` directory names, avoiding false high counts from leftover/devel module dirs.
+  - 🧪 **NEW:** added regression smoke test `test_boot_kernel_inventory_regression.sh` to guard bootable-kernel-only inventory counting and related kernel purge safety checks.
   - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.
   - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
   - 🧰 **IMPROVED:** verify check 48 now removes stale disable markers when `snapper-cleanup.timer` is active again, keeping timer state + intent metadata consistent.

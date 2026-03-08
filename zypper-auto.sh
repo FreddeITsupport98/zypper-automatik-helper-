@@ -19926,8 +19926,14 @@ generate_dashboard() {
             if (kernelDetailEl) {
                 if (kernels && kernels.ok) {
                     var kcnt = 0;
+                    var rawCnt = 0;
                     try { kcnt = parseInt(kernels.count || 0, 10) || 0; } catch (eK3) { kcnt = 0; }
-                    kernelDetailEl.textContent = 'installed versions=' + String(kcnt) + ' • package families=' + String(kernelNames.length);
+                    try { rawCnt = parseInt(kernels.raw_dirs_count || 0, 10) || 0; } catch (eK3b) { rawCnt = 0; }
+                    if (rawCnt > kcnt) {
+                        kernelDetailEl.textContent = 'bootable installed versions=' + String(kcnt) + ' • package families=' + String(kernelNames.length) + ' • extra module dirs=' + String(rawCnt - kcnt);
+                    } else {
+                        kernelDetailEl.textContent = 'bootable installed versions=' + String(kcnt) + ' • package families=' + String(kernelNames.length);
+                    }
                 } else {
                     kernelDetailEl.textContent = 'kernel inventory not detected';
                 }
@@ -37102,7 +37108,14 @@ run_snapper_menu_only() {
 
             # --- SAFETY: determine installed kernel versions ---
             __znh_installed_kernel_versions_list() {
-                find /lib/modules /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -uV || true
+                local _kvd _kv
+                for _kvd in /lib/modules/* /usr/lib/modules/*; do
+                    [ -d "${_kvd}" ] || continue
+                    _kv="${_kvd##*/}"
+                    if [ -f "/lib/modules/${_kv}/modules.dep" ] || [ -f "/usr/lib/modules/${_kv}/modules.dep" ]; then
+                        printf '%s\n' "${_kv}"
+                    fi
+                done | sort -uV || true
             }
 
             local installed_kvers installed_count
@@ -37290,7 +37303,16 @@ run_snapper_menu_only() {
             # If there are fewer than 3 installed kernel versions, skip the actual purge-kernels run.
             # (With 2 kernels installed, purge-kernels *should* be a no-op anyway, but we hard-skip.)
             local __kp_installed_count
-            __kp_installed_count=$(find /lib/modules /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -uV | grep -c '.' 2>/dev/null || echo 0)
+            __kp_installed_count="$(
+                local __kp_dir __kp_kv
+                for __kp_dir in /lib/modules/* /usr/lib/modules/*; do
+                    [ -d "${__kp_dir}" ] || continue
+                    __kp_kv="${__kp_dir##*/}"
+                    if [ -f "/lib/modules/${__kp_kv}/modules.dep" ] || [ -f "/usr/lib/modules/${__kp_kv}/modules.dep" ]; then
+                        printf '%s\n' "${__kp_kv}"
+                    fi
+                done | sort -uV | grep -c '.' 2>/dev/null || echo 0
+            )"
             __kp_installed_count="${__kp_installed_count:-0}"
             if ! [[ "${__kp_installed_count}" =~ ^[0-9]+$ ]]; then
                 __kp_installed_count=0
@@ -51466,8 +51488,9 @@ class Handler(BaseHTTPRequestHandler):
                 "versions": [],
                 "names": [],
                 "entries": [],
+                "raw_dirs_count": 0,
             }
-            versions = set()
+            raw_versions = set()
             for base in ("/lib/modules", "/usr/lib/modules"):
                 try:
                     if not os.path.isdir(base):
@@ -51477,23 +51500,28 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         p = os.path.join(base, str(bn))
                         if os.path.isdir(p):
-                            versions.add(str(bn))
+                            raw_versions.add(str(bn))
                 except Exception:
                     continue
 
-            vers = sorted(list(versions))
+            raw_vers = sorted(list(raw_versions))
+            vers = []
             names = set()
             entries = []
-            for kv in vers:
+            for kv in raw_vers:
+                dep_path = ""
                 owner = ""
                 for dep in (f"/lib/modules/{kv}/modules.dep", f"/usr/lib/modules/{kv}/modules.dep"):
                     try:
                         if os.path.isfile(dep):
-                            owner = _rpm_owner_name(dep)
-                            if owner:
-                                break
+                            dep_path = dep
+                            break
                     except Exception:
                         pass
+                if not dep_path:
+                    continue
+                owner = _rpm_owner_name(dep_path)
+                vers.append(str(kv))
                 if owner:
                     names.add(str(owner))
                 entries.append({
@@ -51507,6 +51535,7 @@ class Handler(BaseHTTPRequestHandler):
                 "versions": vers,
                 "names": sorted(list(names)),
                 "entries": entries,
+                "raw_dirs_count": int(len(raw_vers)),
             })
             return out
 
