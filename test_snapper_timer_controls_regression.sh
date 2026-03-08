@@ -15,6 +15,7 @@ Regression smoke test for Snapper per-timer controls:
   - frontend has a timer-badge refresh helper and uses it after timer toggles
   - frontend does an initial timer-badge refresh on Snapper UI wire-up
   - frontend syncs Snapper timer enable/disable button state from timer status
+  - Snapper status output shows timer service enabled/active/preset fields clearly
   - frontend stores a short-lived authoritative timer override from /api/snapper/timers
     and reconciles it in applyLiveData so stale status-data polls do not revert badges
   - backend exposes /api/snapper/timers for immediate badge state fetches
@@ -68,6 +69,15 @@ helper_snapper_block="$(
     ' "${TARGET_FILE}"
 )"
 [ -n "${helper_snapper_block}" ] || fail "Could not locate snapper helper timer block"
+
+snapper_status_block="$(
+    awk '
+        /__znh_snapper_status\(\) \{/ {inblk=1}
+        inblk {print}
+        /__znh_snapper_create_snapshot\(\) \{/ && inblk {exit}
+    ' "${TARGET_FILE}"
+)"
+[ -n "${snapper_status_block}" ] || fail "Could not locate __znh_snapper_status block"
 
 confirm_api_block="$(
     awk '
@@ -167,6 +177,10 @@ require_contains "${source_text}" "function _snIsConfirmTokenError(errObj) {" "c
 require_contains "${source_text}" "function _snRequestFreshConfirmToken(action, params) {" "confirm-token refresh helper missing"
 require_contains "${source_text}" "var _znhSnapperTimerOverride = null;" "snapper timer override state variable missing"
 require_contains "${source_text}" "function _znhSnapperTimerStateNorm(v) {" "snapper timer state normalizer helper missing"
+require_contains "${source_text}" "if (s === 'on' || s === 'true' || s === 'yes') return 'enabled';" "snapper timer state normalizer missing boolean-ish enabled aliases"
+require_contains "${source_text}" "if (s === 'off' || s === 'false' || s === 'no') return 'disabled';" "snapper timer state normalizer missing boolean-ish disabled aliases"
+require_contains "${source_text}" "var enMatch = s.match(/\\benabled\\s*=\\s*([a-z-]+)/);" "snapper timer state normalizer missing verbose enabled-field parsing"
+require_contains "${source_text}" "if (s.indexOf('enabled') >= 0 && s.indexOf('active') >= 0) return 'enabled';" "snapper timer state normalizer missing fallback enabled+active heuristic"
 require_contains "${source_text}" "function _znhSnapperTimerUiSetBtn(id, mode, disabled, title) {" "snapper timer UI button helper missing"
 require_contains "${source_text}" "function znhSnapperSyncTimerButtons(payload) {" "snapper timer button sync helper missing"
 require_contains "${source_text}" "window.znhSnapperSyncTimerButtons = znhSnapperSyncTimerButtons;" "snapper timer button sync helper export missing"
@@ -174,12 +188,25 @@ require_contains "${source_text}" "function _znhSnapperTimerMaybeApiSync() {" "s
 require_contains "${source_text}" "function _znhSnapperTimerOverrideSetFromApi(payload) {" "snapper timer override set helper missing"
 require_contains "${source_text}" "function _znhSnapperTimerOverrideGet() {" "snapper timer override getter helper missing"
 require_contains "${source_text}" "function _znhSnapperTimerOverrideMaybeClear(serverData) {" "snapper timer override clear helper missing"
+require_contains "${source_text}" "var _znhSnapperTimerPassiveSyncTimer = null;" "snapper timer passive sync timer state var missing"
+require_contains "${source_text}" "var _znhSnapperTimerPassiveSyncStarted = false;" "snapper timer passive sync started-state var missing"
+require_contains "${source_text}" "function _znhSnapperTimerReadDomPayload() {" "snapper timer DOM payload helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerPayloadFromAction(action, basePayload) {" "snapper timer action->payload helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerApplyActionOverride(action) {" "snapper timer optimistic override helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerPassiveSyncIntervalMs() {" "snapper timer passive sync interval helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerPassiveSyncSchedule() {" "snapper timer passive sync scheduler helper missing"
+require_contains "${source_text}" "function _znhSnapperTimerEnsurePassiveSync() {" "snapper timer passive sync init helper missing"
+require_contains "${source_text}" "document.addEventListener('visibilitychange', function() {" "snapper timer passive sync visibility listener missing"
+require_contains "${source_text}" "_znhSnapperTimerPassiveSyncSchedule();" "snapper timer passive sync schedule call missing"
 require_contains "${source_text}" "_znhSnapperTimerOverrideSetFromApi(r);" "timer refresh helper missing authoritative override write"
 require_contains "${source_text}" "if (typeof znhSnapperSyncTimerButtons === 'function') znhSnapperSyncTimerButtons(r);" "timer refresh helper missing button sync call"
 require_contains "${wire_snapper_block}" "if (typeof znhSnapperRefreshTimerBadges === 'function') {" "initial timer refresh guard missing in _wireSnapperUI"
 require_contains "${wire_snapper_block}" "znhSnapperRefreshTimerBadges();" "initial timer refresh call missing in _wireSnapperUI"
+require_contains "${wire_snapper_block}" "if (typeof _znhSnapperTimerEnsurePassiveSync === 'function') {" "passive timer sync guard missing in _wireSnapperUI"
+require_contains "${wire_snapper_block}" "_znhSnapperTimerEnsurePassiveSync();" "passive timer sync initialization missing in _wireSnapperUI"
 require_contains "${snapper_run_block}" "var didTimerToggle = false;" "snapperRun must track timer-toggle actions for refresh"
 require_contains "${snapper_run_block}" "if (didTimerToggle) {" "snapperRun missing post-toggle refresh gate"
+require_contains "${snapper_run_block}" "_znhSnapperTimerApplyActionOverride(actionStr);" "snapperRun missing optimistic timer action override apply"
 require_contains "${snapper_run_block}" "if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges();" "snapperRun missing timer badge refresh call"
 require_contains "${snapper_run_block}" "needsRefresh = !!confirmAction && _snIsConfirmTokenError(e0);" "snapperRun missing confirm-token error detection"
 require_contains "${snapper_run_block}" "_snRequestFreshConfirmToken(confirmAction, params)" "snapperRun missing refresh confirm-token request"
@@ -207,6 +234,13 @@ require_contains "${helper_snapper_block}" "timer-enable)" "snapper subcommand c
 require_contains "${helper_snapper_block}" "timer-disable)" "snapper subcommand case timer-disable missing"
 require_contains "${helper_snapper_block}" "__znh_snapper_single_timer enable" "timer-enable subcommand not routed to helper"
 require_contains "${helper_snapper_block}" "__znh_snapper_single_timer disable" "timer-disable subcommand not routed to helper"
+require_contains "${snapper_status_block}" "echo \"-- snapper systemd timers (enabled vs active) --\"" "snapper status missing timer status section header"
+require_contains "${snapper_status_block}" "enabled=\$(systemctl is-enabled \"\${u}\" 2>/dev/null || echo \"unknown\")" "snapper status missing enabled-state lookup"
+require_contains "${snapper_status_block}" "active=\$(systemctl is-active \"\${u}\" 2>/dev/null || echo \"unknown\")" "snapper status missing active-state lookup"
+require_contains "${snapper_status_block}" "preset=\$(systemctl list-unit-files --no-legend \"\${u}\" 2>/dev/null | awk 'NR==1 {print \$3}' || true)" "snapper status missing preset lookup"
+require_contains "${snapper_status_block}" "printf '  %-22s enabled=%-8s active=%-8s preset=%s\\n'" "snapper status missing enabled/active/preset formatted output"
+require_contains "${snapper_status_block}" "NOTE: timer is enabled but not active. Try: sudo systemctl start \${u}" "snapper status missing enabled-but-inactive note"
+require_contains "${snapper_status_block}" "TIP: enable it with: sudo systemctl enable --now \${u}" "snapper status missing disabled timer enable hint"
 
 # Confirm API assertions
 require_contains "${confirm_api_block}" "\"timer-enable-timeline\": \"Type ENABLE to confirm enabling snapper-timeline.timer.\"" "confirm allowlist missing timer-enable-timeline"

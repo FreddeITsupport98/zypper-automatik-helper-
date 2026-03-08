@@ -295,6 +295,8 @@ zypper-auto-helper --check          # Syntax check only
 zypper-auto-helper install          # Reinstall/upgrade
 zypper-auto-helper --reset-config   # Reset /etc/zypper-auto.conf to documented defaults (with backup)
 zypper-auto-helper --reset-downloads  # Clear cached download/notifier state and restart timers (alias: --reset-state)
+zypper-auto-helper --stale-module-dirs  # Audit stale non-bootable module dirs (safe default: no changes)
+sudo zypper-auto-helper --stale-module-dirs quarantine --yes  # Quarantine stale module dirs (restorable move)
 
 # Self-update (updates the helper script itself)
 sudo zypper-auto-helper --self-update                  # Update using SELF_UPDATE_CHANNEL (default: stable)
@@ -1207,6 +1209,42 @@ Run it:
 bash test_boot_kernel_inventory_regression.sh zypper-auto.sh
 ```
 
+### 6. Stale Module-Dir Helper Regression Smoke Test (`test_stale_module_dirs_helper_regression.sh`)
+
+Located in the repo root, this smoke test guards stale module helper safety and
+wiring behavior.
+
+What it checks:
+- `run_stale_module_dirs_only` keeps `audit` as the safe default.
+- Quarantine mode enforces explicit confirmation and blocks unsafe root
+  quarantine paths.
+- Quarantine actions use non-destructive moves with restore guidance.
+- CLI parser/help text/completion templates include `--stale-module-dirs`.
+
+Run it:
+
+```bash
+bash test_stale_module_dirs_helper_regression.sh zypper-auto.sh
+```
+
+### 7. Stale Module-Dir Runtime Regression (`test_stale_module_dirs_runtime_regression.sh`)
+
+Located in the repo root, this runtime regression executes the stale module-dir
+helper in an isolated temporary module-tree sandbox.
+
+What it checks:
+- Audit mode is non-destructive and reports stale non-bootable module dirs.
+- Non-interactive quarantine fails without explicit `--yes` guard.
+- Quarantine mode (`--yes`) moves stale module dirs into timestamped quarantine
+  paths and keeps bootable module dirs intact.
+- A follow-up audit reports zero stale versions after quarantine.
+
+Run it:
+
+```bash
+bash test_stale_module_dirs_runtime_regression.sh zypper-auto.sh
+```
+
 -----
 
 <a id="diagnostics"></a>
@@ -1970,7 +2008,15 @@ systemctl status zypper-autodownload.service
   - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
   - 🧿 **FIXED:** Snapper timer badges in WebUI now keep short-lived authoritative `/api/snapper/timers` state after timer toggles, so stale `status-data.json` polls no longer revert freshly changed enable/disable states before dashboard data catches up.
   - 🧿 **FIXED:** Snapper WebUI Option 5/6 buttons now also sync their live enabled/disabled state from timer status (with state styling + guard-disable when already in target state), so controls stay persistent and match CLI/systemd timer reality.
+  - 🧿 **IMPROVED:** Snapper timer state normalization now accepts verbose/legacy state strings (for example `enabled=enabled active=active ...`) and boolean aliases (`on/off`, `true/false`, `yes/no`) to keep WebUI state parsing consistent across mixed data sources.
+  - 🧿 **IMPROVED:** successful Snapper timer toggles now apply an immediate optimistic action override to timer badges/buttons before the authoritative refresh returns, reducing transient UI mismatch windows.
+  - 🧿 **IMPROVED:** Snapper Manager now keeps a passive visibility-aware timer sync loop in the WebUI so long-lived tabs stay aligned with out-of-band CLI/systemd timer changes.
   - 🧪 **NEW:** browser-level regression `test_snapper_timer_playwright_regression.py` now validates Snapper timer badge/button persistence through stale live polls and throttled authoritative API re-sync behavior.
+  - 🧪 **IMPROVED:** static regression `test_snapper_timer_controls_regression.sh` now also guards verbose state normalization, optimistic override wiring, passive timer-sync initialization paths, and Snapper status service-state output formatting (`enabled=... active=... preset=...`).
+  - 🧰 **NEW:** added `zypper-auto-helper --stale-module-dirs` helper command (safe audit default) with optional quarantine mode, explicit confirmation phrase, and non-interactive `--yes` guard.
+  - 🧪 **NEW:** added regression smoke test `test_stale_module_dirs_helper_regression.sh` to validate stale module helper safety behavior, CLI/help wiring, and shell completion exposure.
+  - 🧰 **FIXED:** early helper option fast-path now recognizes `--stale-module-dirs` / `--stale-modules` so stale-module helper invocations are not rejected as unknown options before parser dispatch.
+  - 🧪 **NEW:** added runtime regression `test_stale_module_dirs_runtime_regression.sh` using isolated temporary module roots (`ZNH_STALE_MODULE_LIB_ROOT` / `ZNH_STALE_MODULE_USR_LIB_ROOT`) to validate real audit/quarantine behavior without touching system module directories.
   - 🧿 **FIXED:** Boot/EFI installed-kernel inventory now counts only bootable installed kernels (module trees with `modules.dep`) instead of all raw `/lib/modules` directory names, avoiding false high counts from leftover/devel module dirs.
   - 🧪 **NEW:** added regression smoke test `test_boot_kernel_inventory_regression.sh` to guard bootable-kernel-only inventory counting and related kernel purge safety checks.
   - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.

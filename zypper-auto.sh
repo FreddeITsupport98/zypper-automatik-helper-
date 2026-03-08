@@ -58,7 +58,7 @@ if [[ $# -gt 0 ]]; then
             ;;
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper|\
-        --reset-config|--reset-downloads|--reset-state|--rm-conflict|\
+        --reset-config|--reset-downloads|--reset-state|--stale-module-dirs|--stale-modules|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
@@ -21332,14 +21332,48 @@ generate_dashboard() {
     var _znhSnapperTimerOverride = null;
     var _znhSnapperTimerApiSyncLastMs = 0;
     var _znhSnapperTimerApiSyncInFlight = false;
+    var _znhSnapperTimerPassiveSyncTimer = null;
+    var _znhSnapperTimerPassiveSyncStarted = false;
 
     function _znhSnapperTimerStateNorm(v) {
         var s = '';
         try { s = String((v === undefined || v === null) ? '' : v).trim().toLowerCase(); } catch (e0) { s = ''; }
+        if (!s) return '';
         if (s === 'enabled' || s === '✓ enabled') return 'enabled';
         if (s === 'partial' || s === '⚠ partial') return 'partial';
         if (s === 'disabled' || s === '✓ disabled') return 'disabled';
         if (s === 'missing') return 'missing';
+
+        // Boolean-ish / simple aliases.
+        if (s === 'on' || s === 'true' || s === 'yes') return 'enabled';
+        if (s === 'off' || s === 'false' || s === 'no') return 'disabled';
+
+        // Legacy/verbose status format fallback, e.g.:
+        // "enabled=enabled active=active preset=disabled"
+        var enMatch = s.match(/\benabled\s*=\s*([a-z-]+)/);
+        var actMatch = s.match(/\bactive\s*=\s*([a-z-]+)/);
+        if (enMatch || actMatch) {
+            var en = enMatch ? String(enMatch[1] || '') : '';
+            var act = actMatch ? String(actMatch[1] || '') : '';
+            var enOn = (en === 'enabled' || en === 'static' || en === 'indirect' || en === 'generated');
+            var enOff = (en === 'disabled' || en === 'masked');
+            var actOn = (act === 'active' || act === 'activating');
+            var actOff = (act === 'inactive' || act === 'failed' || act === 'deactivating' || act === 'dead');
+
+            if (enOn && actOn) return 'enabled';
+            if ((enOn && actOff) || (enOff && actOn)) return 'partial';
+            if (enOff && actOff) return 'disabled';
+
+            if (enOn || actOn) return 'partial';
+            if (enOff || actOff) return 'disabled';
+        }
+
+        // Last-resort text heuristics.
+        if (s.indexOf('missing') >= 0 || s.indexOf('not available') >= 0 || s.indexOf('not found') >= 0) return 'missing';
+        if (s.indexOf('partial') >= 0) return 'partial';
+        if (s.indexOf('enabled') >= 0 && s.indexOf('active') >= 0) return 'enabled';
+        if (s.indexOf('enabled') >= 0 || s.indexOf('active') >= 0) return 'partial';
+        if (s.indexOf('disabled') >= 0 || s.indexOf('inactive') >= 0) return 'disabled';
         return '';
     }
 
@@ -21474,6 +21508,113 @@ generate_dashboard() {
         }
     }
 
+    function _znhSnapperTimerReadDomPayload() {
+        function _readBadge(id) {
+            try { return _znhSnapperTimerStateNorm(((document.getElementById(id) || {}).textContent || '')); } catch (e0) { return ''; }
+        }
+        return {
+            snapper_timeline_timer: _readBadge('snapper-timeline-timer'),
+            snapper_cleanup_timer: _readBadge('snapper-cleanup-timer'),
+            snapper_boot_timer: _readBadge('snapper-boot-timer')
+        };
+    }
+
+    function _znhSnapperTimerPayloadFromAction(action, basePayload) {
+        var act = '';
+        try { act = String(action || '').trim().toLowerCase(); } catch (e0) { act = ''; }
+        var p = basePayload || {};
+
+        var timeline = _znhSnapperTimerStateNorm(p.snapper_timeline_timer);
+        var cleanup = _znhSnapperTimerStateNorm(p.snapper_cleanup_timer);
+        var boot = _znhSnapperTimerStateNorm(p.snapper_boot_timer);
+
+        if (!timeline) timeline = 'disabled';
+        if (!cleanup) cleanup = 'disabled';
+        if (!boot) boot = 'disabled';
+
+        if (act === 'auto-enable') {
+            timeline = 'enabled';
+            cleanup = 'enabled';
+            boot = 'enabled';
+        } else if (act === 'auto-disable') {
+            timeline = 'disabled';
+            cleanup = 'disabled';
+            boot = 'disabled';
+        } else if (act === 'timer-enable-timeline') {
+            timeline = 'enabled';
+        } else if (act === 'timer-enable-cleanup') {
+            cleanup = 'enabled';
+        } else if (act === 'timer-enable-boot') {
+            boot = 'enabled';
+        } else if (act === 'timer-disable-timeline') {
+            timeline = 'disabled';
+        } else if (act === 'timer-disable-cleanup') {
+            cleanup = 'disabled';
+        } else if (act === 'timer-disable-boot') {
+            boot = 'disabled';
+        } else {
+            return null;
+        }
+
+        return {
+            snapper_timeline_timer: timeline,
+            snapper_cleanup_timer: cleanup,
+            snapper_boot_timer: boot
+        };
+    }
+
+    function _znhSnapperTimerApplyActionOverride(action) {
+        var p = _znhSnapperTimerPayloadFromAction(action, _znhSnapperTimerReadDomPayload());
+        if (!p) return;
+        try { _znhSnapperTimerOverrideSetFromApi(p); } catch (e0) {}
+        try { setTimerState('snapper-timeline-timer', p.snapper_timeline_timer); } catch (e1) {}
+        try { setTimerState('snapper-cleanup-timer', p.snapper_cleanup_timer); } catch (e2) {}
+        try { setTimerState('snapper-boot-timer', p.snapper_boot_timer); } catch (e3) {}
+        try { if (typeof znhSnapperSyncTimerButtons === 'function') znhSnapperSyncTimerButtons(p); } catch (e4) {}
+    }
+
+    function _znhSnapperTimerPassiveSyncIntervalMs() {
+        try {
+            if (document && document.hidden) return 30000;
+        } catch (e0) {}
+        return 9000;
+    }
+
+    function _znhSnapperTimerPassiveSyncSchedule() {
+        if (!_znhSnapperTimerPassiveSyncStarted) return;
+        if (_znhSnapperTimerPassiveSyncTimer) {
+            try { clearTimeout(_znhSnapperTimerPassiveSyncTimer); } catch (e0) {}
+            _znhSnapperTimerPassiveSyncTimer = null;
+        }
+        _znhSnapperTimerPassiveSyncTimer = setTimeout(function() {
+            Promise.resolve().then(function() {
+                if (typeof znhSnapperRefreshTimerBadges !== 'function') return null;
+                return znhSnapperRefreshTimerBadges();
+            }).catch(function() {
+                return null;
+            }).finally(function() {
+                _znhSnapperTimerPassiveSyncSchedule();
+            });
+        }, _znhSnapperTimerPassiveSyncIntervalMs());
+    }
+
+    function _znhSnapperTimerEnsurePassiveSync() {
+        if (_znhSnapperTimerPassiveSyncStarted) return;
+        _znhSnapperTimerPassiveSyncStarted = true;
+
+        try {
+            document.addEventListener('visibilitychange', function() {
+                if (!_znhSnapperTimerPassiveSyncStarted) return;
+                if (!document.hidden) {
+                    try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e0) {}
+                }
+                _znhSnapperTimerPassiveSyncSchedule();
+            });
+        } catch (e1) {}
+
+        _znhSnapperTimerPassiveSyncSchedule();
+    }
+
     function znhSnapperRefreshTimerBadges() {
         return _api('/api/snapper/timers', { method: 'GET' }).then(function(r) {
             if (!r) return null;
@@ -21558,6 +21699,7 @@ generate_dashboard() {
                     toast('Snapper: ' + action, msg, toastKind);
                     _settingsClientLog((r.rc === 0) ? 'info' : 'warn', 'snapperRun result', { action: action, rc: r.rc });
                     if (didTimerToggle) {
+                        try { _znhSnapperTimerApplyActionOverride(actionStr); } catch (eR0a) {}
                         try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (eR0) {}
                     }
                     return r;
@@ -21846,6 +21988,11 @@ generate_dashboard() {
                 znhSnapperRefreshTimerBadges();
             }
         } catch (e4) {}
+        try {
+            if (typeof _znhSnapperTimerEnsurePassiveSync === 'function') {
+                _znhSnapperTimerEnsurePassiveSync();
+            }
+        } catch (e4b) {}
     }
 
     // --- scrub-ghost Manager (dashboard -> root API) ---
@@ -39145,6 +39292,169 @@ run_debug_menu_only() {
     done
 }
 
+# --- Helper: stale non-bootable module-dir audit/quarantine (CLI) ---
+run_stale_module_dirs_only() {
+    local mode="${1:-audit}"
+    local assume_yes="${2:-0}"
+    local quarantine_root="${3:-/var/lib/zypper-auto/quarantine}"
+    local lib_modules_root="${ZNH_STALE_MODULE_LIB_ROOT:-/lib/modules}"
+    local usr_lib_modules_root="${ZNH_STALE_MODULE_USR_LIB_ROOT:-/usr/lib/modules}"
+
+    case "${mode}" in
+        audit|quarantine) ;;
+        *)
+            log_error "Invalid stale module-dir mode: ${mode} (expected: audit|quarantine)"
+            return 1
+            ;;
+    esac
+
+    if [ -z "${quarantine_root:-}" ]; then
+        quarantine_root="/var/lib/zypper-auto/quarantine"
+    fi
+    if [ -z "${lib_modules_root:-}" ] || [ -z "${usr_lib_modules_root:-}" ]; then
+        log_error "Invalid module root override (empty path)"
+        return 1
+    fi
+    if [ "${quarantine_root}" = "/" ]; then
+        log_error "Refusing unsafe quarantine root: ${quarantine_root}"
+        return 1
+    fi
+
+    local -a raw_versions=()
+    local -a bootable_versions=()
+    local -a stale_versions=()
+    local _dir _kv
+
+    mapfile -t raw_versions < <(
+        for _dir in "${lib_modules_root}"/* "${usr_lib_modules_root}"/*; do
+            [ -d "${_dir}" ] || continue
+            printf '%s\n' "${_dir##*/}"
+        done | sort -uV || true
+    )
+
+    if [ "${#raw_versions[@]}" -eq 0 ] 2>/dev/null; then
+        echo "[stale-modules] No module directories found under ${lib_modules_root} or ${usr_lib_modules_root}."
+        update_status "SUCCESS: stale module-dir audit found no module trees"
+        return 0
+    fi
+
+    for _kv in "${raw_versions[@]}"; do
+        if [ -f "${lib_modules_root}/${_kv}/modules.dep" ] || [ -f "${usr_lib_modules_root}/${_kv}/modules.dep" ]; then
+            bootable_versions+=("${_kv}")
+        else
+            stale_versions+=("${_kv}")
+        fi
+    done
+
+    local raw_count bootable_count stale_count
+    raw_count="${#raw_versions[@]}"
+    bootable_count="${#bootable_versions[@]}"
+    stale_count="${#stale_versions[@]}"
+
+    echo ""
+    echo "=============================================="
+    echo " Stale module directory helper"
+    echo "=============================================="
+    echo "Mode: ${mode}"
+    echo "Scan roots: ${lib_modules_root} , ${usr_lib_modules_root}"
+    echo "Raw module-dir versions: ${raw_count}"
+    echo "Bootable versions (modules.dep present): ${bootable_count}"
+    echo "Stale non-bootable versions: ${stale_count}"
+
+    if [ "${stale_count}" -eq 0 ] 2>/dev/null; then
+        echo ""
+        echo "[stale-modules] No stale non-bootable module directories detected."
+        update_status "SUCCESS: stale module-dir audit found no stale module trees"
+        return 0
+    fi
+
+    echo ""
+    echo "[stale-modules] Detected stale non-bootable versions:"
+    for _kv in "${stale_versions[@]}"; do
+        local paths
+        paths=""
+        if [ -d "${lib_modules_root}/${_kv}" ]; then
+            paths="${paths:+${paths}, }${lib_modules_root}/${_kv}"
+        fi
+        if [ -d "${usr_lib_modules_root}/${_kv}" ]; then
+            paths="${paths:+${paths}, }${usr_lib_modules_root}/${_kv}"
+        fi
+        printf '  - %s -> %s\n' "${_kv}" "${paths:-<missing>}"
+    done
+
+    if [ "${mode}" = "audit" ]; then
+        echo ""
+        echo "Audit-only mode (safe default): no changes made."
+        echo "To quarantine these directories safely:"
+        echo "  sudo zypper-auto-helper --stale-module-dirs quarantine --yes"
+        update_status "WARNING: stale module-dir audit found ${stale_count} stale versions"
+        return 0
+    fi
+
+    if [ "${assume_yes}" -ne 1 ] 2>/dev/null; then
+        if [ -t 0 ]; then
+            local phrase
+            read -p "Type QUARANTINE to move stale module dirs into a quarantine folder > " -r phrase
+            phrase="${phrase^^}"
+            if [ "${phrase}" != "QUARANTINE" ]; then
+                echo "Quarantine cancelled."
+                update_status "ABORTED: stale module-dir quarantine cancelled"
+                return 1
+            fi
+        else
+            log_error "Non-interactive quarantine requires --yes / -y"
+            return 1
+        fi
+    fi
+
+    local ts quarantine_dir
+    ts="$(date +%Y%m%d-%H%M%S)"
+    quarantine_dir="${quarantine_root%/}/stale-module-dirs-${ts}"
+    if ! execute_guarded "Create stale module quarantine dir (${quarantine_dir})" mkdir -p -- "${quarantine_dir}"; then
+        log_error "Failed to create quarantine directory: ${quarantine_dir}"
+        return 1
+    fi
+
+    local moved=0 failed=0 src dst_parent
+    for _kv in "${stale_versions[@]}"; do
+        for src in "${lib_modules_root}/${_kv}" "${usr_lib_modules_root}/${_kv}"; do
+            [ -d "${src}" ] || continue
+            if [[ "${src}" == "${lib_modules_root}"/* ]]; then
+                dst_parent="${quarantine_dir}/lib-modules"
+            else
+                dst_parent="${quarantine_dir}/usr-lib-modules"
+            fi
+            execute_guarded "Ensure quarantine path (${dst_parent})" mkdir -p -- "${dst_parent}" || true
+            if execute_guarded "Quarantine stale module dir (${src})" mv -f -- "${src}" "${dst_parent}/"; then
+                moved=$((moved + 1))
+            else
+                failed=$((failed + 1))
+            fi
+        done
+    done
+
+    echo ""
+    echo "Quarantine summary:"
+    echo "  - Quarantine dir: ${quarantine_dir}"
+    echo "  - Module dirs moved: ${moved}"
+    echo "  - Move failures: ${failed}"
+    echo ""
+    echo "Restore examples (if needed):"
+    if [ -d "${quarantine_dir}/lib-modules" ]; then
+        echo "  sudo mv ${quarantine_dir}/lib-modules/* ${lib_modules_root}/"
+    fi
+    if [ -d "${quarantine_dir}/usr-lib-modules" ]; then
+        echo "  sudo mv ${quarantine_dir}/usr-lib-modules/* ${usr_lib_modules_root}/"
+    fi
+
+    if [ "${failed}" -gt 0 ] 2>/dev/null; then
+        update_status "FAILED: stale module-dir quarantine had ${failed} move failure(s)"
+        return 1
+    fi
+
+    update_status "SUCCESS: stale module-dir quarantine moved ${moved} directory(ies)"
+    return 0
+}
 # --- Helper: Reset download/notifier state (CLI) ---
 run_reset_download_state_only() {
     log_info ">>> Resetting zypper-auto-helper download/notifier state..."
@@ -41676,6 +41986,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
+    echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
     echo "  --rm-conflict           Scan for duplicate RPMs and auto-clean safe conflicts before manual zypper dup"
     echo "  --reset-state           Alias for --reset-downloads"
@@ -41785,6 +42096,43 @@ elif [[ "${1:-}" == "--reset-config" ]]; then
 elif [[ "${1:-}" == "--reset-downloads" || "${1:-}" == "--reset-state" ]]; then
     log_info "Download/notifier state reset mode requested"
     run_reset_download_state_only
+    exit $?
+elif [[ "${1:-}" == "--stale-module-dirs" || "${1:-}" == "--stale-modules" ]]; then
+    shift || true
+    STALE_MODE="audit"
+    STALE_ASSUME_YES=0
+    STALE_QUARANTINE_ROOT="/var/lib/zypper-auto/quarantine"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            audit)
+                STALE_MODE="audit"
+                ;;
+            quarantine)
+                STALE_MODE="quarantine"
+                ;;
+            --yes|-y|--non-interactive)
+                STALE_ASSUME_YES=1
+                ;;
+            --quarantine-root)
+                shift || true
+                if [ -z "${1:-}" ]; then
+                    log_error "--quarantine-root requires a path argument"
+                    exit 1
+                fi
+                STALE_QUARANTINE_ROOT="$1"
+                ;;
+            --quarantine-root=*)
+                STALE_QUARANTINE_ROOT="${1#--quarantine-root=}"
+                ;;
+            *)
+                log_error "Unknown option for --stale-module-dirs: $1"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+    log_info "Stale module-dir helper mode requested (${STALE_MODE})"
+    run_stale_module_dirs_only "${STALE_MODE}" "${STALE_ASSUME_YES}" "${STALE_QUARANTINE_ROOT}"
     exit $?
 elif [[ "${1:-}" == "--analyze" || "${1:-}" == "--health" ]]; then
     log_info "Log health analysis mode requested"
@@ -44234,7 +44582,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --debug --help -h help"
+ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --stale-module-dirs --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -44345,6 +44693,7 @@ _znh_cmds=(
   install debug snapper scrub-ghost
   --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback
   --soar --brew --pip-package --pipx --setup-SF
+  --stale-module-dirs
   --reset-config --reset-downloads --reset-state --rm-conflict
   --logs --log --live-logs --analyze --health
   --test-notify --status
@@ -44475,6 +44824,7 @@ complete -c zypper-auto-helper -n '__fish_seen_subcommand_from scrub-ghost' -f -
 # common option-like commands
 complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --debug"
 complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
+complete -c zypper-auto-helper -f -a "--stale-module-dirs"
 complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
 complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
 complete -c zypper-auto-helper -f -a "--test-notify --status"
