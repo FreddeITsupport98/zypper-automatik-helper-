@@ -1,0 +1,297 @@
+STUTTER INCIDENT REPORT
+Generated: 2026-03-08
+Host user: fb
+Scope: desktop/UI stutter investigation, root-cause analysis, remediation, and future fix playbook
+
+========================================================================
+1) EXECUTIVE SUMMARY
+========================================================================
+Your stuttering was not caused by sustained CPU saturation or disk I/O wait.
+The strongest immediate issue found was repeated udev parser errors from:
+  /etc/udev/rules.d/99-disable-usb-autosuspend.rules
+caused by invalid syntax on ACTION lines.
+
+This specific spam source was removed successfully by:
+  - disabling/removing ensure-usb-power.service
+  - removing the problematic udev rules file
+  - reloading systemd + udev
+  - verifying no new "Invalid operator for ACTION" entries in recent logs
+
+Remaining likely contributors to intermittent stutter:
+  1) high desktop/browser foreground load (chrome + plasmashell + terminal spikes)
+  2) frequent zypper-auto helper/timer background activity
+
+========================================================================
+2) USER-OBSERVED SYMPTOM
+========================================================================
+Reported symptom:
+  - PC stuttering (intermittent lag/jank)
+
+========================================================================
+3) DIAGNOSTIC TIMELINE (2026-03-08)
+========================================================================
+3.1 Initial resource snapshot
+  Command(s):
+    uptime
+    free -h
+    df -h /
+  Findings:
+    - Load average around: 1.65 / 1.62 / 1.36
+    - Memory: 7.1 GiB total, ~3.9 GiB available
+    - Swap: 2.0 GiB total, ~637 MiB used
+    - Root filesystem usage low (~11%)
+
+3.2 Stall and wait-state sampling
+  Command:
+    vmstat 1 5
+  Findings:
+    - CPU idle mostly 94-97%
+    - I/O wait consistently ~0%
+    - No evidence of active storage wait bottleneck during sampling
+
+3.3 Foreground process pressure
+  Commands:
+    ps -eo pid,comm,%cpu,%mem,stat --sort=-%cpu
+    ps -eo pid,comm,%cpu,%mem,stat --sort=-%mem
+  Findings (representative):
+    - chrome (multiple processes) was a top CPU and RAM consumer
+    - plasmashell had sustained notable CPU usage
+    - warp-terminal had high memory share in top list
+    - later sample also showed snapperd + kworker bursts
+
+3.4 Error-level system logs
+  Command:
+    journalctl -b -p 0..3 --no-pager
+  Key findings:
+    - Repeated:
+        Invalid operator for ACTION.
+      from:
+        /etc/udev/rules.d/99-disable-usb-autosuspend.rules (lines 8-12)
+    - Repeated zypper-auto-helper notifier/timer related errors
+    - Additional warnings existed (ACPI/BTRFS), but not dominant evidence of immediate stutter trigger
+
+3.5 Timer/process activity correlation
+  Commands:
+    systemctl list-timers --all --no-pager
+    systemctl --user list-timers --all --no-pager
+    pgrep -c tail
+    pgrep -c -f 'zypper-auto|znh-dashboard|zypper-notify'
+  Findings:
+    - zypper-auto timers running frequently (roughly minute-level cadence in observed window)
+    - Process counts remained high for helper stack:
+      - tail processes: 35
+      - zypper/dashboard-related processes: 44
+    - This creates periodic wakeups and background churn
+
+========================================================================
+4) ROOT CAUSE ANALYSIS
+========================================================================
+4.1 Confirmed direct log-spam cause (resolved)
+  Root cause:
+    Invalid udev rule syntax in per-device lines used:
+      ACTION="add"
+    where match operator must be:
+      ACTION=="add"
+
+  Why this spammed:
+    udev re-parses rules on events/reloads. Each parse hit those malformed lines and emitted:
+      "Invalid operator for ACTION."
+    This repeated in bursts and added unnecessary system noise/churn.
+
+  Related misconfiguration:
+    ensure-usb-power.service pointed to:
+      /home/fb/Downloads/sleep.sh
+    but that script path did not exist, generating additional service-level errors.
+
+4.2 Remaining likely stutter contributors (not fully removed)
+  - Foreground app load (chrome/plasma/terminal spikes)
+  - Frequent updater/helper activity:
+      zypper-autodownload.timer
+      zypper-auto-verify.timer
+      zypper helper/dashboard workers + log followers
+
+4.3 What was ruled out in sampled window
+  - Sustained disk fill problem (root FS had ample free space)
+  - Sustained storage wait bottleneck (vmstat showed ~0% wa during sample)
+
+========================================================================
+5) REMEDIATION ACTIONS APPLIED
+========================================================================
+Performed successfully:
+  1) stop + disable service:
+       ensure-usb-power.service
+  2) remove service file:
+       /etc/systemd/system/ensure-usb-power.service
+  3) remove bad udev rule file:
+       /etc/udev/rules.d/99-disable-usb-autosuspend.rules
+  4) reload managers:
+       systemctl daemon-reload
+       udevadm control --reload
+
+Post-remediation verification:
+  - Unit check:
+      "Unit ensure-usb-power.service could not be found."
+  - File checks:
+      both removed files no longer exist
+  - Recent log check:
+      no new "Invalid operator for ACTION" entries in the observed post-fix window
+
+========================================================================
+6) FUTURE PLAYBOOK (IF STUTTER RETURNS)
+========================================================================
+6.1 Fast triage (safe, read-only)
+  Run:
+    uptime
+    free -h
+    vmstat 1 5
+    ps -eo pid,comm,%cpu,%mem,stat --sort=-%cpu
+    systemctl list-timers --all --no-pager
+    journalctl -p 3 -S '-30 min' --no-pager
+
+  Interpretation:
+    - High CPU top list + responsive vmstat => app/compositor pressure
+    - High wa (I/O wait) => storage bottleneck
+    - Frequent repeating service errors => background retry churn
+
+6.2 If udev "Invalid operator for ACTION" reappears
+  Check:
+    ls -l /etc/udev/rules.d/99-disable-usb-autosuspend.rules
+    grep -n 'ACTION=' /etc/udev/rules.d/99-disable-usb-autosuspend.rules
+
+  Fix options:
+    A) Remove the file if feature not needed:
+       sudo rm -f /etc/udev/rules.d/99-disable-usb-autosuspend.rules
+       sudo udevadm control --reload
+
+    B) Keep feature and repair syntax:
+       change per-device lines from ACTION="add" -> ACTION=="add"
+       then reload udev:
+       sudo udevadm control --reload
+
+  Verify:
+    journalctl -S '-10 min' --no-pager | grep -F 'Invalid operator for ACTION'
+    (no output means no current recurrence)
+
+6.3 If zypper helper churn is still causing stutter
+  Inspect cadence:
+    systemctl list-timers --all --no-pager
+    systemctl --user list-timers --all --no-pager
+
+  Check helper process volume:
+    pgrep -af 'zypper|auto-helper|notify-user|dashboard'
+    pgrep -c tail
+
+  Mitigation path:
+    - reduce timer frequency OR
+    - disable nonessential zypper helper/dashboard components
+    - keep core update mechanism but remove noisy diagnostics/log followers
+
+  Important:
+    Make only one change at a time, then re-measure for 10-15 minutes.
+
+6.4 If foreground pressure is primary
+  - Reduce live tabs/extensions and hardware-heavy pages in browser
+  - Watch plasmashell and compositor spikes (kwin_wayland/plasmashell)
+  - Keep an eye on swap growth under multitasking
+
+========================================================================
+7) HARDENING RECOMMENDATIONS
+========================================================================
+  1) Keep rule generators under versioned, stable paths
+     (avoid service ExecStart paths into transient locations like Downloads).
+
+  2) Add validation before deploying generated udev rules:
+     - reject lines using ACTION="add" for match expressions
+     - only allow ACTION=="add" for matching
+
+  3) Control background updater telemetry volume:
+     - cap number of long-lived log followers
+     - avoid minute-level retries unless truly required
+
+  4) Keep a known-good rollback note:
+     - command list to disable noisy helper timers quickly
+     - command list to re-enable when needed
+
+========================================================================
+8) CURRENT STATUS
+========================================================================
+Resolved:
+  - udev invalid ACTION operator spam source removed
+  - ensure-usb-power missing-script service removed
+
+Still possible contributors:
+  - intermittent foreground load spikes
+  - zypper-auto helper/timer background activity
+
+Overall:
+  The concrete log-spam bug is fixed. Remaining stutter risk is now mostly
+  workload/timer-churn related and can be reduced with timer/helper tuning.
+========================================================================
+9) ADDENDUM: LOW-NOISE TUNING PLAN (NO CODE EDITS)
+========================================================================
+Purpose:
+  This addendum gives a later-use operational plan to reduce stutter risk by
+  lowering background timer/helper churn, without editing application code.
+
+9.1 Capture baseline before tuning
+  Run:
+    systemctl list-timers --all --no-pager
+    systemctl --user list-timers --all --no-pager
+    pgrep -c tail
+    pgrep -c -f 'zypper-auto|znh-dashboard|zypper-notify'
+    uptime
+    free -h
+
+  Keep this output as your "before" snapshot.
+
+9.2 Conservative low-noise approach
+  Keep:
+    - zypper-autodownload.timer
+    - zypper-cache-cleanup.timer
+
+  Consider reducing/pausing (if stutter persists):
+    - zypper-auto-verify.timer
+    - zypper-auto-verify-followup.timer
+    - user notifier/dashboard helper timer(s)
+
+  Example temporary pause (safe to re-enable later):
+    sudo systemctl disable --now zypper-auto-verify.timer
+    sudo systemctl disable --now zypper-auto-verify-followup.timer
+    systemctl --user disable --now zypper-notify-user.timer
+
+  Notes:
+    - Do one change at a time.
+    - Re-check smoothness for 10-15 minutes after each change.
+
+9.3 Re-measure after each change
+  Run:
+    systemctl list-timers --all --no-pager
+    systemctl --user list-timers --all --no-pager
+    pgrep -c tail
+    pgrep -c -f 'zypper-auto|znh-dashboard|zypper-notify'
+    journalctl -p 3 -S '-15 min' --no-pager
+
+  Success indicators:
+    - fewer frequent timers
+    - lower helper/log-follower process counts
+    - no new repeating error bursts
+    - subjective stutter reduction during normal workload
+
+9.4 Rollback procedure (restore previous behavior)
+  Re-enable disabled components:
+    sudo systemctl enable --now zypper-auto-verify.timer
+    sudo systemctl enable --now zypper-auto-verify-followup.timer
+    systemctl --user enable --now zypper-notify-user.timer
+
+  Validate rollback:
+    systemctl list-timers --all --no-pager
+    systemctl --user list-timers --all --no-pager
+
+9.5 Escalation path if stutter remains
+  If stutter remains after timer/helper reduction:
+    1) profile browser/tab/extensions and compositor load
+    2) check memory pressure + swap growth during workload
+    3) collect 30-minute error logs and correlate with stutter timestamps
+    4) only then consider deeper kernel/driver tuning
+
+END OF REPORT
