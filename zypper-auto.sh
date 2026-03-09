@@ -41321,6 +41321,7 @@ run_uninstall_helper_only() {
             echo "    (OS unit files are never deleted by this uninstaller)" | tee -a "${LOG_FILE}"
         fi
         echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
+        echo "    /usr/bin/zypper-auto-helper (compatibility symlink when pointing to /usr/local/bin/zypper-auto-helper)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-diag-follow (diagnostics follower helper)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-dashboard-perf-worker (dashboard perf worker)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-scrub-ghost + /usr/local/bin/scrub-ghost (boot entry scrubber)" | tee -a "${LOG_FILE}"
@@ -41429,6 +41430,17 @@ run_uninstall_helper_only() {
         /usr/local/bin/zypper-scrub-ghost \
         /usr/local/bin/scrub-ghost || true
 
+    # Remove the compatibility symlink only when it points to the helper we installed.
+    if [ -L /usr/bin/zypper-auto-helper ]; then
+        if [ "$(readlink -f /usr/bin/zypper-auto-helper 2>/dev/null || true)" = "/usr/local/bin/zypper-auto-helper" ]; then
+            execute_guarded "Remove compatibility symlink /usr/bin/zypper-auto-helper" rm -f /usr/bin/zypper-auto-helper || true
+        else
+            log_warn "[uninstall] Leaving /usr/bin/zypper-auto-helper in place (symlink target is not /usr/local/bin/zypper-auto-helper)"
+        fi
+    elif [ -e /usr/bin/zypper-auto-helper ]; then
+        log_warn "[uninstall] Leaving /usr/bin/zypper-auto-helper in place (non-symlink file may be package-managed)"
+    fi
+
     # 4. Remove user-level scripts, systemd units, and desktop/menu shortcuts
     if [ -n "${SUDO_USER_HOME:-}" ]; then
         log_debug "Removing user scripts and units under $SUDO_USER_HOME..."
@@ -41480,6 +41492,7 @@ run_uninstall_helper_only() {
                     -e '/alias zypper=/d' \
                     -e '/# zypper-auto-helper command alias/d' \
                     -e '/alias zypper-auto-helper=/d' \
+                    -e '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}$/d' \
                     "${SUDO_USER_HOME}/.bashrc" 2>/dev/null || true
         fi
         if [ -f "${SUDO_USER_HOME}/.zshrc" ]; then
@@ -41489,6 +41502,7 @@ run_uninstall_helper_only() {
                     -e '/alias zypper=/d' \
                     -e '/# zypper-auto-helper command alias/d' \
                     -e '/alias zypper-auto-helper=/d' \
+                    -e '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}$/d' \
                     "${SUDO_USER_HOME}/.zshrc" 2>/dev/null || true
         fi
     fi
@@ -48435,6 +48449,7 @@ log_info ">>> Installing zypper-auto-helper command..."
 update_status "Installing command-line interface..."
 
 COMMAND_PATH="/usr/local/bin/zypper-auto-helper"
+COMMAND_COMPAT_LINK="/usr/bin/zypper-auto-helper"
 INSTALLER_SCRIPT_PATH="$0"
 
 # Get the absolute path of the installer script
@@ -48468,6 +48483,28 @@ if [ "${command_install_ok}" -eq 1 ] 2>/dev/null; then
     execute_guarded "Set ${COMMAND_PATH} permissions (755)" chmod 755 "$COMMAND_PATH"
     log_success "Command installed: zypper-auto-helper"
     log_info "You can now run: zypper-auto-helper --help"
+
+    # Compatibility PATH shim: provide /usr/bin/zypper-auto-helper as a symlink
+    # to the canonical /usr/local/bin install target. This helps shells/environments
+    # that do not include /usr/local/bin in PATH by default.
+    if [ -d /usr/bin ]; then
+        ZNH_COMPAT_TARGET=""
+        if [ -L "${COMMAND_COMPAT_LINK}" ]; then
+            ZNH_COMPAT_TARGET="$(readlink -f "${COMMAND_COMPAT_LINK}" 2>/dev/null || true)"
+        fi
+
+        if [ -L "${COMMAND_COMPAT_LINK}" ] && [ "${ZNH_COMPAT_TARGET}" = "${COMMAND_PATH}" ]; then
+            log_info "Compatibility PATH symlink already active: ${COMMAND_COMPAT_LINK} -> ${COMMAND_PATH}"
+        elif [ -e "${COMMAND_COMPAT_LINK}" ] && [ ! -L "${COMMAND_COMPAT_LINK}" ]; then
+            log_warn "Compatibility PATH symlink skipped: ${COMMAND_COMPAT_LINK} exists and is not a symlink"
+        else
+            if execute_guarded "Install compatibility PATH symlink ${COMMAND_COMPAT_LINK} -> ${COMMAND_PATH}" ln -sfn "${COMMAND_PATH}" "${COMMAND_COMPAT_LINK}"; then
+                log_success "Compatibility PATH symlink installed: ${COMMAND_COMPAT_LINK} -> ${COMMAND_PATH}"
+            else
+                log_warn "Could not install compatibility PATH symlink at ${COMMAND_COMPAT_LINK} (non-fatal)"
+            fi
+        fi
+    fi
 
     # Seed the self-update state file so the dashboard can correctly tell whether
     # you're up-to-date on stable/rolling WITHOUT falsely showing "Update available"

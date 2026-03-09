@@ -17,6 +17,7 @@ Runs the non-destructive regression suite against zypper-auto.sh:
   - stale module helper/static + runtime regressions (runtime uses temp sandbox roots)
   - boot kernel inventory regression
   - kernel purge lock handling regression
+  - helper PATH install/uninstall regression
   - snapper option-4 modal layout regression
   - optional playwright snapper timer browser regression (skip-safe)
 EOF
@@ -45,6 +46,7 @@ tests=(
     "test_stale_module_dirs_runtime_regression.sh"
     "test_boot_kernel_inventory_regression.sh"
     "test_kernel_purge_lock_regression.sh"
+    "test_helper_path_install_uninstall_regression.sh"
     "test_snapper_option4_modal_layout.sh"
 )
 

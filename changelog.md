@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Install flow now adds a compatibility PATH symlink `/usr/bin/zypper-auto-helper -> /usr/local/bin/zypper-auto-helper` (when safe) so helper command discovery works even when `/usr/local/bin` is absent from PATH.
+- Uninstall flow now removes that compatibility symlink only when it points to the helper target and leaves unrelated/package-managed `/usr/bin/zypper-auto-helper` files untouched.
+- Uninstall shell cleanup now removes full `zypper-auto-helper` wrapper function blocks from `.bashrc`/`.zshrc` in addition to alias lines.
 - Verification Safety Net policy changed: routine `--verify` runs (including `zypper-auto-verify.timer`) no longer create pre/post Snapper Safety Net snapshots on every cycle.
 - Safety Net pre/post snapshots are now kept for install/update verification flow (`install` path), reducing repeated EFI initrd artifact growth from background verify loops.
 - Self-update status API now computes layered MD5 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed-layer metadata.

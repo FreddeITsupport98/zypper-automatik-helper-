@@ -90,6 +90,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 
 * **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
     * Auto-installed to `/usr/local/bin/zypper-auto-helper`
+    * Adds a compatibility symlink at `/usr/bin/zypper-auto-helper` (when safe) so the command stays PATH-accessible on shells/environments that omit `/usr/local/bin`
     * Shell aliases automatically configured for Bash, Zsh, and Fish
     * Commands: `--verify`, `--repair`, `--diagnose`, `--check`, `--help`
 * **Advanced Verification & Auto-Repair (v51):** Comprehensive 52-point health check system:
@@ -152,7 +153,7 @@ It runs `zypper dup --download-only` in the background, but only when it's safe.
 *  * `--dry-run` – show exactly what would be removed without making any changes
 *  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact (including the `status.html` dashboard) while still clearing caches
 *  * `--keep-hooks` – leave custom hook scripts under `/etc/zypper-auto/hooks` intact
-*  * It also cleans up any shell aliases it added to `~/.bashrc` / `~/.zshrc` (best-effort).
+*  * It also cleans up shell aliases and wrapper function blocks it added to `~/.bashrc` / `~/.zshrc` (best-effort), and removes `/usr/bin/zypper-auto-helper` when that path is a compatibility symlink to `/usr/local/bin/zypper-auto-helper`.
 *  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
 
 -----
@@ -2060,6 +2061,8 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🧰 **IMPROVED:** install now adds a compatibility PATH shim at `/usr/bin/zypper-auto-helper` (symlink to `/usr/local/bin/zypper-auto-helper`) so the helper command remains discoverable in environments where `/usr/local/bin` is not in PATH.
+  - 🧹 **IMPROVED:** uninstall now removes that compatibility symlink only when it points to the helper, and also removes full `zypper-auto-helper` wrapper function blocks from `.bashrc` / `.zshrc` (not just alias lines).
   - 🛡️ **CHANGED:** verification Safety Net snapshot policy now skips pre/post Snapper snapshot creation for routine `--verify` runs (including `zypper-auto-verify.timer`) to avoid repeated EFI initrd artifact growth during background verification loops.
   - 🛡️ **CHANGED:** install/update verification flow still keeps Safety Net snapshots enabled (pre/post pair) so install-time auto-repair keeps rollback coverage.
   - 🐛 **FIXED:** stale downloader-status auto-fix command now correctly escapes its temporary file variable under `set -u`, preventing `tmp: unbound variable` failures in verification/install flows.
