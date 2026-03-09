@@ -2121,6 +2121,27 @@ execute_optional() {
 # Helper: best-effort check whether a system unit file exists.
 __znh_unit_file_exists_system() {
     local unit="$1"
+    [ -n "${unit:-}" ] || return 1
+
+    # Prefer systemctl show (actual unit metadata) over list-unit-files text parsing.
+    # This is more robust across distros/locales and better reflects real systemd state.
+    local load_state
+    load_state="$(systemctl show "${unit}" -p LoadState --value 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+    case "${load_state}" in
+        loaded|masked|bad-setting)
+            return 0
+            ;;
+        not-found|error|"")
+            ;;
+        *)
+            # Any other non-empty load state is still an existing unit.
+            if [ -n "${load_state}" ]; then
+                return 0
+            fi
+            ;;
+    esac
+
+    # Fallback: older/systemd-quirky environments.
     local out first
     out=$(systemctl list-unit-files --no-legend "${unit}" 2>/dev/null || true)
     first=$(printf '%s\n' "$out" | awk 'NR==1 {print $1}')
@@ -24627,7 +24648,7 @@ generate_dashboard() {
         _suPreviewSetLoading(true);
         _suPreviewSet(head.join('\n') + 'Loading release notes…');
 
-        var notesHdr = (ch === 'rolling') ? 'Rolling channel: latest commits on main' : 'Stable channel: latest GitHub release notes';
+        var notesHdr = (ch === 'rolling') ? 'Rolling channel: latest commits on main' : 'Stable channel: latest release-candidate notes';
         var fetchNotes = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
         fetchNotes().then(function(notes) {
             var txt = head.join('\n') + notesHdr + '\n\n' + String(notes || '(no notes)');
@@ -24850,6 +24871,30 @@ generate_dashboard() {
         try { st = _self_update_ui.last_status || null; } catch (e0) { st = null; }
         var dl = _suGetDownloadUrlFromStatus(st);
         var destPath = _suGetDestinationPathFromStatus(st);
+        var recAction = 'none';
+        var recReason = '';
+        var recChangedLayers = [];
+
+        function _suNormalizeRecommendedAction(v) {
+            v = String(v || '').toLowerCase();
+            if (v !== 'none' && v !== 'verify' && v !== 'install') v = 'none';
+            return v;
+        }
+
+        try {
+            var rec = (st && st.post_action_recommendation) ? st.post_action_recommendation : null;
+            if (rec) {
+                recAction = _suNormalizeRecommendedAction(rec.recommended);
+                recReason = String(rec.reason || '');
+                if (Array.isArray(rec.changed_layers)) recChangedLayers = rec.changed_layers.slice(0, 8);
+            }
+        } catch (eR0) {
+            recAction = 'none';
+            recReason = '';
+            recChangedLayers = [];
+        }
+
+        _su.post_action = _suNormalizeRecommendedAction(recAction);
 
         var srcHtml = '';
         try {
@@ -24863,6 +24908,19 @@ generate_dashboard() {
                     + '</div>';
             }
         } catch (eS) { srcHtml = ''; }
+
+        var recHtml = '';
+        try {
+            var recLine = '';
+            if (recAction) recLine = 'Recommended: ' + recAction;
+            if (recReason) recLine += (recLine ? ' — ' : '') + recReason;
+            if (recChangedLayers && recChangedLayers.length) recLine += ' (changed layers: ' + recChangedLayers.join(', ') + ')';
+            if (recLine) {
+                recHtml = '<div style=\"color: var(--muted); font-size:0.84rem; margin-top:6px;\">'
+                    + _znhEscapeHtml(recLine)
+                    + '</div>';
+            }
+        } catch (eR1) { recHtml = ''; }
 
         e.body.innerHTML = [
             '<div class="overlay-kv">',
@@ -24884,6 +24942,7 @@ generate_dashboard() {
             '      <option value="install">Full install (recreate services/wrappers)</option>',
             '    </select>',
             '  </div>',
+            recHtml,
             '  <div style="color: var(--muted); font-size:0.84rem;">Quick update replaces only the helper script file. Verify/Install will also run extra checks after updating so new units/scripts are applied.</div>',
             '</div>',
             '<div class="overlay-progress">',
@@ -25663,13 +25722,36 @@ generate_dashboard() {
         }
     }
 
-    function _suFetchStableReleaseNotesText() {
+    function _suFetchLatestStableReleaseCandidate() {
         var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
-        return _githubApiJson(base + '/releases/latest').then(function(j) {
+        return _githubApiJson(base + '/releases?per_page=25').then(function(arr) {
+            if (!Array.isArray(arr)) {
+                var m0 = '';
+                try { m0 = String((arr && arr.message) ? arr.message : 'unexpected GitHub response'); } catch (e0) { m0 = 'unexpected GitHub response'; }
+                throw new Error(m0);
+            }
+            for (var i = 0; i < arr.length; i++) {
+                var r = arr[i] || {};
+                var isDraft = false;
+                var tag = '';
+                try { isDraft = !!r.draft; } catch (e1) { isDraft = false; }
+                try { tag = String(r.tag_name || '').trim(); } catch (e2) { tag = ''; }
+                if (isDraft) continue;
+                if (!tag) continue;
+                return r;
+            }
+            throw new Error('no usable release candidate found');
+        });
+    }
+
+    function _suFetchStableReleaseNotesText() {
+        return _suFetchLatestStableReleaseCandidate().then(function(j) {
             var out = [];
-            out.push('Stable channel (GitHub Releases)');
+            out.push('Stable channel (latest release candidate)');
             out.push('Tag: ' + String(j.tag_name || 'unknown'));
+            if (j.name) out.push('Name: ' + String(j.name));
             if (j.published_at) out.push('Published: ' + String(j.published_at));
+            if (j.prerelease) out.push('Type: prerelease candidate');
             out.push('');
             out.push(String(j.body || '(no release notes)'));
             return out.join('\n');
@@ -26556,15 +26638,17 @@ generate_dashboard() {
         var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
 
         if (ch === 'stable') {
-            return _githubApiJson(base + '/releases/latest').then(function(j) {
+            return _suFetchLatestStableReleaseCandidate().then(function(j) {
                 var out = [];
-                out.push('Stable channel (GitHub Releases)');
+                out.push('Stable channel (latest release candidate)');
                 out.push('Tag: ' + String(j.tag_name || 'unknown'));
+                if (j.name) out.push('Name: ' + String(j.name));
                 if (j.published_at) out.push('Published: ' + String(j.published_at));
+                if (j.prerelease) out.push('Type: prerelease candidate');
                 out.push('');
                 out.push(String(j.body || '(no release notes)'));
                 _selfUpdateSetChangelog(out.join('\n'));
-                toast('Changelog loaded', 'Stable release notes fetched', 'ok');
+                toast('Changelog loaded', 'Stable release-candidate notes fetched', 'ok');
                 return j;
             }).catch(function(e) {
                 var msg = (e && e.message) ? e.message : 'failed';
@@ -31846,7 +31930,7 @@ if [ -f "/var/log/zypper-auto/download-status.txt" ]; then
     if printf '%s\n' "$CURRENT_STATUS" | grep -qE '^(refreshing|downloading:)' && [ "$STATUS_AGE" -gt 3600 ]; then
         log_warn "⚠ Warning: Stale download status '$CURRENT_STATUS' detected (age ${STATUS_AGE}s)"
         log_info "  → Auto-fixer: resetting download status and timing files so background downloads can resume cleanly"
-        execute_guarded "Reset stale download-status.txt to idle" bash -lc "tmp=/var/log/zypper-auto/download-status.txt.tmp.$$; printf '%s\n' idle >\"$tmp\" && mv -f \"$tmp\" /var/log/zypper-auto/download-status.txt" || true
+        execute_guarded "Reset stale download-status.txt to idle" bash -lc "tmp=/var/log/zypper-auto/download-status.txt.tmp.$$; printf '%s\n' idle >\"\$tmp\" && mv -f \"\$tmp\" /var/log/zypper-auto/download-status.txt" || true
         execute_guarded "Remove stale downloader timing files" rm -f \
               "/var/log/zypper-auto/download-last-check.txt" \
               "/var/log/zypper-auto/download-start-time.txt" || true
@@ -34095,20 +34179,50 @@ __znh_finalize_repair_safety_snapshot() {
 }
 
 run_smart_verification_with_safety_net() {
-    local max_retries
+    local max_retries snapshot_mode snapshot_enabled
     max_retries="${1:-2}"
+    snapshot_mode="${2:-auto}"
+    snapshot_enabled=0
 
     # Enable the Flight Report for this invocation.
     FLIGHT_REPORT_ENABLED=1
+    case "${snapshot_mode,,}" in
+        always|install|install-update-only)
+            snapshot_enabled=1
+            ;;
+        never|off|disabled)
+            snapshot_enabled=0
+            ;;
+        auto|"")
+            # Default policy:
+            # - verify-only/timer runs: no Snapper safety snapshot
+            # - install/update verification flow: snapshot enabled
+            if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ] 2>/dev/null; then
+                snapshot_enabled=1
+            fi
+            ;;
+        *)
+            log_warn "Unknown verification snapshot mode '${snapshot_mode}', falling back to auto policy"
+            if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ] 2>/dev/null; then
+                snapshot_enabled=1
+            fi
+            ;;
+    esac
 
-    __znh_start_repair_safety_snapshot || true
+    if [ "${snapshot_enabled}" -eq 1 ] 2>/dev/null; then
+        __znh_start_repair_safety_snapshot || true
+    else
+        log_info "📸 Safety snapshot policy: skipping pre/post Snapper snapshots for this verification run"
+    fi
 
     run_smart_verification "${max_retries}"
     local rc=$?
 
     # Best-effort: finalize snapshot immediately, but also keep an EXIT trap
     # as a backstop in case of unexpected early exits.
-    __znh_finalize_repair_safety_snapshot "$rc" || true
+    if [ "${snapshot_enabled}" -eq 1 ] 2>/dev/null; then
+        __znh_finalize_repair_safety_snapshot "$rc" || true
+    fi
 
     return "$rc"
 }
@@ -38274,10 +38388,7 @@ run_snapper_menu_only() {
 
     __znh_snapper_timer_exists() {
         local unit="$1"
-        local out first
-        out=$(systemctl list-unit-files --no-legend "${unit}" 2>/dev/null)
-        first=$(awk 'NR==1 {print $1}' <<<"${out}")
-        [ "${first}" = "${unit}" ]
+        __znh_unit_file_exists_system "${unit}"
     }
 
     __znh_snapper_single_timer() {
@@ -40421,7 +40532,7 @@ run_self_update_only() {
     remote_ref=""
     installed_ref=""
 
-    # Best-effort: get current installed VERSION header for logging/bootstrap only.
+    # Best-effort: get current installed VERSION header for logging only.
     current_ver="0"
     if [ -f "${dest}" ]; then
         current_line=$(grep -m1 -E '^#\s*VERSION\s+[0-9]+' "${dest}" 2>/dev/null || true)
@@ -40430,59 +40541,40 @@ run_self_update_only() {
     if ! [[ "${current_ver:-}" =~ ^[0-9]+$ ]]; then current_ver=0; fi
 
     if [ "${channel}" = "stable" ]; then
-        api_url="https://api.github.com/repos/${repo}/releases/latest"
+        api_url="https://api.github.com/repos/${repo}/releases?per_page=25"
 
-        # Prefer real JSON parsing, but keep fallback logic so we don't hard-fail on missing python.
+        # Stable tracks the latest non-draft release candidate from the releases list.
+        # This avoids strict VERSION-number dependence for remote selection.
         if command -v python3 >/dev/null 2>&1; then
             tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
-                | python3 -c 'import json,sys; print((json.load(sys.stdin).get("tag_name") or "").strip())' 2>/dev/null || true)
+                | python3 -c 'import json,sys; arr=json.load(sys.stdin); out=""; 
+for rel in (arr if isinstance(arr,list) else []):
+    if bool(rel.get("draft", False)):
+        continue
+    t=str(rel.get("tag_name") or "").strip()
+    if t:
+        out=t
+        break
+print(out)' 2>/dev/null || true)
         fi
         if [ -z "${tag:-}" ]; then
-            # Fallback (best-effort, no strict JSON parsing)
+            # Fallback (best-effort text parse): first tag_name in releases list.
             tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
                 | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
         fi
 
         if [ -z "${tag:-}" ]; then
-            log_error "Could not determine latest stable release tag from GitHub (API rate limit or repo not reachable?)"
+            log_error "Could not determine latest stable release candidate from GitHub (API rate limit or repo not reachable?)"
             return 1
         fi
 
         # Prefer a release asset if you ever publish one, but fall back to raw from tag (works today).
         raw_url_asset="https://github.com/${repo}/releases/download/${tag}/zypper-auto.sh"
         raw_url_tag="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
-        log_info "[self-update] Stable tag detected: ${tag}"
+        log_info "[self-update] Stable release candidate detected: ${tag}"
 
         installed_ref="${installed_stable_tag:-}"
         remote_ref="${tag}"
-
-        # Bootstrap: if state file doesn't exist yet, map local VERSION -> tag pattern
-        # (only to seed state; tag controls update decisions going forward).
-        if [ -z "${installed_ref:-}" ] && [ "${current_ver}" -gt 0 ] 2>/dev/null; then
-            local guess_tag
-            guess_tag=""
-            if [[ "${tag}" =~ ^v[0-9]+$ ]]; then
-                guess_tag="v${current_ver}"
-            elif [[ "${tag}" =~ ^[0-9]+$ ]]; then
-                guess_tag="${current_ver}"
-            fi
-
-            if [ -n "${guess_tag}" ]; then
-                log_info "[self-update] Bootstrapping state file from installed VERSION header: stable_tag=${guess_tag}"
-
-                local cur_sha
-                cur_sha=""
-                if command -v sha256sum >/dev/null 2>&1; then
-                    cur_sha=$(sha256sum "${dest}" 2>/dev/null | cut -d ' ' -f1 || true)
-                elif command -v openssl >/dev/null 2>&1; then
-                    cur_sha=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' || true)
-                fi
-
-                __znh_self_update_state_write "${guess_tag}" "${installed_rolling_sha}" "bootstrap" "${guess_tag}" "bootstrap" "${cur_sha}" "${dest}" >/dev/null 2>&1 || true
-                installed_stable_tag="${guess_tag}"
-                installed_ref="${guess_tag}"
-            fi
-        fi
     else
         api_url="https://api.github.com/repos/${repo}/commits/main"
 
@@ -40564,23 +40656,9 @@ run_self_update_only() {
         fi
     fi
 
-    # Stable downgrade guard: if your installed build appears newer than the latest stable tag,
-    # do not downgrade unless you explicitly pass --force.
-    if [ "${channel}" = "stable" ] && [ "${force}" -ne 1 ] 2>/dev/null && [ -n "${installed_ref:-}" ] && [ -n "${remote_ref:-}" ]; then
-        local installed_n remote_n
-        installed_n=$(printf '%s' "${installed_ref}" | sed -nE 's/^v([0-9]+)$/\1/p' 2>/dev/null || true)
-        remote_n=$(printf '%s' "${remote_ref}" | sed -nE 's/^v([0-9]+)$/\1/p' 2>/dev/null || true)
-        if [[ "${installed_n:-}" =~ ^[0-9]+$ ]] && [[ "${remote_n:-}" =~ ^[0-9]+$ ]]; then
-            if [ "${remote_n}" -lt "${installed_n}" ] 2>/dev/null; then
-                log_warn "[self-update] Latest stable tag (${remote_ref}) is older than installed (${installed_ref}); refusing to downgrade."
-                log_info "Use: sudo zypper-auto-helper --self-update stable --force  (if you really want to downgrade)"
-                return 0
-            fi
-        fi
-    fi
 
     if [ "${channel}" = "stable" ]; then
-        log_info "[self-update] Update available (stable tag ${installed_ref:-unknown} -> ${remote_ref})"
+        log_info "[self-update] Update available (stable release candidate ${installed_ref:-unknown} -> ${remote_ref})"
     else
         local installed_short remote_short
         installed_short="${installed_ref:-unknown}"
@@ -42598,7 +42676,7 @@ if [ "${VERIFICATION_ONLY_MODE:-0}" -eq 1 ]; then
     # a fatal installer error.
     trap - ERR
     set +e
-    run_smart_verification_with_safety_net 2
+    run_smart_verification_with_safety_net 2 never
     rc=$?
     set -e
 
@@ -48954,6 +49032,106 @@ def _github_get_json(path: str, timeout_s: int = 10) -> dict:
         data = r.read().decode("utf-8", errors="replace")
     return json.loads(data)
 
+def _github_latest_release_candidate(timeout_s: int = 10) -> dict:
+    """Return the latest non-draft GitHub release object (stable candidate).
+
+    We intentionally use releases list instead of /releases/latest so stable can
+    track the newest release candidate without relying on VERSION numbering.
+    """
+    try:
+        arr = _github_get_json("/releases?per_page=25", timeout_s=timeout_s)
+    except Exception:
+        raise
+    if not isinstance(arr, list):
+        raise ValueError("unexpected GitHub releases response")
+    for rel in arr:
+        if not isinstance(rel, dict):
+            continue
+        if bool(rel.get("draft", False)):
+            continue
+        tag = str(rel.get("tag_name", "") or "").strip()
+        if not tag:
+            continue
+        return rel
+    raise ValueError("no usable release candidate found")
+
+
+def _read_remote_script_bytes(ref: str, timeout_s: int = 15) -> tuple[bytes, str]:
+    """Fetch remote helper script bytes for a git ref/tag; returns (bytes, path)."""
+    ref_s = str(ref or "").strip()
+    if not ref_s:
+        return b"", ""
+    candidates = [
+        "zypper-auto.sh",
+        "zypper-auto-helper",
+        "zypper-auto-helper.sh",
+    ]
+    for pth in candidates:
+        try:
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{ref_s}/{pth}"
+            req = urllib.request.Request(raw_url, headers={"User-Agent": "znh-dashboard-api"})
+            with urllib.request.urlopen(req, timeout=timeout_s) as r:
+                data = r.read()
+            if data:
+                return data, pth
+        except Exception:
+            continue
+    return b"", ""
+
+
+def _script_layer_md5s(text: str) -> dict:
+    """Compute layered MD5 signatures for key helper sections."""
+    import hashlib
+
+    src = str(text or "")
+
+    def _slice(start_marker: str, end_marker: str = "") -> str:
+        try:
+            s = src.find(start_marker)
+            if s < 0:
+                return ""
+            if end_marker:
+                e = src.find(end_marker, s + len(start_marker))
+                if e > s:
+                    return src[s:e]
+            return src[s:]
+        except Exception:
+            return ""
+
+    layers_src = {
+        "self_update_core": _slice("# --- Helper: Self-update (CLI) ---", "# --- Helper: rollback latest self-update backup ---"),
+        "dashboard_api_embed": _slice("if write_atomic \"${DASH_API_BIN}\" <<'PYEOF'", "PYEOF"),
+        "installer_payloads": _slice("# --- 11e. Install dashboard settings API (localhost) ---"),
+    }
+
+    out = {}
+    for k, v in layers_src.items():
+        vv = str(v or "")
+        if not vv:
+            out[k] = ""
+            continue
+        out[k] = hashlib.md5(vv.encode("utf-8", errors="replace")).hexdigest()  # nosec B324 (non-crypto fingerprinting)
+    return out
+
+
+def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool) -> tuple[str, str, list[str]]:
+    """Recommend none|verify|install from layered MD5 deltas."""
+    if not has_remote:
+        return "verify", "Remote section hashes unavailable; using safer verify recommendation.", []
+
+    changed = []
+    for name in ("self_update_core", "dashboard_api_embed", "installer_payloads"):
+        l = str((local_layers or {}).get(name, "") or "")
+        r = str((remote_layers or {}).get(name, "") or "")
+        if l and r and l != r:
+            changed.append(name)
+
+    if not changed:
+        return "none", "No layered code-section change detected.", changed
+    if any(x in changed for x in ("dashboard_api_embed", "installer_payloads")):
+        return "install", "Installer/deployer sections changed; full install recommended.", changed
+    return "verify", "Core helper sections changed; verify recommended.", changed
+
 
 def _tag_to_int(tag: str) -> int | None:
     # Supports tags like: v65
@@ -52058,13 +52236,28 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- Snapper (dashboard) ---
         if path == "/api/snapper/timers":
-            def _snapper_timer_exists(unit: str) -> bool:
+            def _snapper_timer_probe(unit: str) -> dict:
                 u = str(unit or "").strip()
+                out = {
+                    "unit": u,
+                    "exists": False,
+                    "state": "missing",
+                    "enabled": "",
+                    "active": "",
+                    "load_state": "",
+                    "unit_file_state": "",
+                }
                 if not u:
-                    return False
+                    return out
+
+                # Authoritative systemd metadata first (more robust than parsing
+                # list-unit-files text output across locales/variants).
+                load_state = ""
+                unit_file_state = ""
+                active_state = ""
                 try:
-                    p = subprocess.run(
-                        ["systemctl", "list-unit-files", "--no-legend", u],
+                    p_show = subprocess.run(
+                        ["systemctl", "show", u, "-p", "LoadState", "-p", "UnitFileState", "-p", "ActiveState"],
                         check=False,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
@@ -52073,53 +52266,125 @@ class Handler(BaseHTTPRequestHandler):
                         errors="replace",
                         timeout=8,
                     )
-                    lines = [ln for ln in str(p.stdout or "").splitlines() if str(ln or "").strip()]
-                    if not lines:
-                        return False
-                    first = str(lines[0]).split()
-                    return bool(first and first[0] == u)
+                    for ln in str(p_show.stdout or "").splitlines():
+                        if "=" not in ln:
+                            continue
+                        k, v = ln.split("=", 1)
+                        k = str(k or "").strip()
+                        v = str(v or "").strip()
+                        if k == "LoadState":
+                            load_state = v
+                        elif k == "UnitFileState":
+                            unit_file_state = v
+                        elif k == "ActiveState":
+                            active_state = v
                 except Exception:
-                    return False
+                    pass
 
-            def _snapper_timer_state(unit: str) -> str:
-                u = str(unit or "").strip()
-                if not _snapper_timer_exists(u):
-                    return "missing"
-                en = False
-                act = False
+                out["load_state"] = str(load_state or "")
+                out["unit_file_state"] = str(unit_file_state or "")
+
+                # Missing if systemd explicitly reports not-found/error.
+                if str(load_state or "") in ("not-found", "error"):
+                    return out
+
+                # Fallback existence probe when show metadata is incomplete.
+                exists = bool(str(load_state or "").strip())
+                if not exists:
+                    try:
+                        p_list = subprocess.run(
+                            ["systemctl", "list-unit-files", "--no-legend", u],
+                            check=False,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=8,
+                        )
+                        lines = [ln for ln in str(p_list.stdout or "").splitlines() if str(ln or "").strip()]
+                        if lines:
+                            first = str(lines[0]).split()
+                            exists = bool(first and first[0] == u)
+                    except Exception:
+                        exists = False
+                if not exists:
+                    return out
+
+                # Live enabled/active states from systemd.
+                en_state = ""
+                act_state = ""
                 try:
-                    p1 = subprocess.run(
-                        ["systemctl", "is-enabled", "--quiet", u],
+                    p_en = subprocess.run(
+                        ["systemctl", "is-enabled", u],
                         check=False,
-                        stdout=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=8,
                     )
-                    en = (int(p1.returncode or 1) == 0)
+                    en_state = str(p_en.stdout or "").strip()
                 except Exception:
-                    en = False
+                    en_state = ""
                 try:
-                    p2 = subprocess.run(
-                        ["systemctl", "is-active", "--quiet", u],
+                    p_act = subprocess.run(
+                        ["systemctl", "is-active", u],
                         check=False,
-                        stdout=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=8,
                     )
-                    act = (int(p2.returncode or 1) == 0)
+                    act_state = str(p_act.stdout or "").strip()
                 except Exception:
-                    act = False
-                if en and act:
-                    return "enabled"
-                if en or act:
-                    return "partial"
-                return "disabled"
+                    act_state = ""
+
+                if not en_state:
+                    en_state = str(unit_file_state or "").strip()
+                if not act_state:
+                    act_state = str(active_state or "").strip()
+
+                en = str(en_state or "").strip().lower()
+                act = str(act_state or "").strip().lower()
+
+                en_on = en in ("enabled", "static", "indirect", "generated", "alias", "linked", "linked-runtime")
+                en_off = en in ("disabled", "masked", "masked-runtime")
+                act_on = act in ("active", "activating", "reloading")
+                act_off = act in ("inactive", "failed", "deactivating", "dead")
+
+                state = "disabled"
+                if en_on and act_on:
+                    state = "enabled"
+                elif (en_on and act_off) or (en_off and act_on):
+                    state = "partial"
+                elif en_off and act_off:
+                    state = "disabled"
+                elif en_on or act_on:
+                    state = "partial"
+                elif en_off or act_off:
+                    state = "disabled"
+
+                out["exists"] = True
+                out["enabled"] = str(en_state or "")
+                out["active"] = str(act_state or "")
+                out["state"] = state
+                return out
+            t_timeline = _snapper_timer_probe("snapper-timeline.timer")
+            t_cleanup = _snapper_timer_probe("snapper-cleanup.timer")
+            t_boot = _snapper_timer_probe("snapper-boot.timer")
 
             return _json_response(self, 200, {
                 "ok": True,
-                "snapper_timeline_timer": _snapper_timer_state("snapper-timeline.timer"),
-                "snapper_cleanup_timer": _snapper_timer_state("snapper-cleanup.timer"),
-                "snapper_boot_timer": _snapper_timer_state("snapper-boot.timer"),
+                "snapper_timeline_timer": str(t_timeline.get("state", "missing")),
+                "snapper_cleanup_timer": str(t_cleanup.get("state", "missing")),
+                "snapper_boot_timer": str(t_boot.get("state", "missing")),
+                "snapper_timeline_timer_live": t_timeline,
+                "snapper_cleanup_timer_live": t_cleanup,
+                "snapper_boot_timer_live": t_boot,
             }, origin)
         if path == "/api/snapper/status":
             cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "status"]
@@ -52255,17 +52520,19 @@ class Handler(BaseHTTPRequestHandler):
                     guessed = True
 
             installed_ver = _read_installed_version_header(HELPER_BIN)
-            if ch == "stable" and not installed_ref and installed_ver > 0:
-                installed_ref = f"v{installed_ver}"
-                known_installed = True
-                guessed = True
 
             remote_ref = ""
+            stable_candidate_name = ""
+            stable_candidate_published_at = ""
+            stable_candidate_is_prerelease = False
             err = ""
             try:
                 if ch == "stable":
-                    j = _github_get_json("/releases/latest", timeout_s=10)
+                    j = _github_latest_release_candidate(timeout_s=10)
                     remote_ref = str(j.get("tag_name", "") or "").strip()
+                    stable_candidate_name = str(j.get("name", "") or "").strip()
+                    stable_candidate_published_at = str(j.get("published_at", "") or "").strip()
+                    stable_candidate_is_prerelease = bool(j.get("prerelease", False))
                 else:
                     j = _github_get_json("/commits/main", timeout_s=10)
                     remote_ref = str(j.get("sha", "") or "").strip()
@@ -52274,56 +52541,49 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 err = str(e)
 
-            # Rolling content-compare (bulletproof):
-            # Compare the installed helper file SHA256 against the *remote raw helper script* at the
-            # latest rolling commit.
-            #
-            # Why?
-            # - Rolling commit SHAs can change even when zypper-auto.sh did not change (docs-only commits).
-            # - Comparing contents avoids false "Update available" statuses.
+            # Content-based compare for both channels (stable candidate + rolling),
+            # so stable does not rely on VERSION numbering.
             remote_script_sha256 = ""
             remote_script_path = ""
             rolling_checksum_used = False
+            remote_script_text = ""
+            local_script_text = ""
             try:
-                if ch == "rolling" and remote_ref and installed_sha_current:
+                if remote_ref and installed_sha_current:
                     import hashlib
-
-                    # Try common raw paths (repo layout can evolve; keep this best-effort).
-                    candidates = [
-                        "zypper-auto.sh",
-                        "zypper-auto-helper",
-                        "zypper-auto-helper.sh",
-                    ]
-
-                    for pth in candidates:
+                    data, pth = _read_remote_script_bytes(remote_ref, timeout_s=15)
+                    if data:
+                        remote_script_sha256 = hashlib.sha256(data).hexdigest().strip().lower()
+                        remote_script_path = str(pth or "")
+                        rolling_checksum_used = bool(ch == "rolling")
                         try:
-                            raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/{pth}"
-                            req = urllib.request.Request(raw_url, headers={"User-Agent": "znh-dashboard-api"})
-                            with urllib.request.urlopen(req, timeout=15) as r:
-                                data = r.read()
-                            remote_script_sha256 = hashlib.sha256(data).hexdigest().strip().lower()
-                            remote_script_path = pth
-                            rolling_checksum_used = True
-                            break
+                            remote_script_text = data.decode("utf-8", errors="replace")
                         except Exception:
-                            continue
+                            remote_script_text = ""
             except Exception:
                 remote_script_sha256 = ""
                 remote_script_path = ""
                 rolling_checksum_used = False
+                remote_script_text = ""
+
+            try:
+                with open(HELPER_BIN, "r", encoding="utf-8", errors="replace") as f:
+                    local_script_text = f.read()
+            except Exception:
+                local_script_text = ""
+
+            local_layer_md5 = _script_layer_md5s(local_script_text)
+            remote_layer_md5 = _script_layer_md5s(remote_script_text)
+            rec_action, rec_reason, rec_changed_layers = _recommend_post_action(
+                local_layer_md5,
+                remote_layer_md5,
+                has_remote=bool(remote_script_text),
+            )
 
             up_to_date = False
             update_available = False
             install_available = False
             remote_is_older = False
-
-            # Even when switching channel, we can still detect stable downgrade risk
-            # (stable tags are comparable to each other).
-            if ch == "stable" and installed_ref and remote_ref:
-                iv = _tag_to_int(installed_ref)
-                rv = _tag_to_int(remote_ref)
-                if iv is not None and rv is not None and rv < iv:
-                    remote_is_older = True
 
             if channel_switch:
                 # We do not attempt to compare rolling SHA vs stable tag. Treat this as a
@@ -52356,19 +52616,14 @@ class Handler(BaseHTTPRequestHandler):
                         install_available = True
 
                 elif installed_ref and remote_ref:
-                    if ch == "rolling" and installed_sha_current and remote_script_sha256:
-                        # Bulletproof rolling: treat as up-to-date when contents match,
-                        # even if commit SHAs differ (docs-only commits, etc.).
+                    if installed_sha_current and remote_script_sha256:
+                        # Content-based truth for both channels.
                         if installed_sha_current == remote_script_sha256:
                             up_to_date = True
                         else:
                             update_available = True
                     elif installed_ref == remote_ref:
                         up_to_date = True
-                    elif ch == "stable":
-                        # remote_is_older already computed above
-                        if not remote_is_older:
-                            update_available = True
                     else:
                         update_available = True
 
@@ -52400,19 +52655,6 @@ class Handler(BaseHTTPRequestHandler):
                         msg += f" (target={to_ref[:12]})"
                 except Exception:
                     pass
-
-                # Downgrade hint: if the helper's VERSION header is newer than the latest stable tag,
-                # switching to stable will be a downgrade.
-                try:
-                    if ch == "stable" and installed_ver and remote_ref:
-                        rv = _tag_to_int(remote_ref)
-                        if rv is not None and int(installed_ver) > int(rv):
-                            msg += f" (NOTE: stable {remote_ref} is older than installed v{installed_ver}; this is a downgrade)"
-                except Exception:
-                    pass
-            elif remote_is_older and ch == "stable":
-                action_type = "none"
-                msg = "Remote stable tag is older (downgrade blocked by default)"
             elif update_available:
                 action_type = "update"
                 msg = "Update available"
@@ -52472,6 +52714,26 @@ class Handler(BaseHTTPRequestHandler):
                 "update_available": update_available,
                 "install_available": install_available,
                 "remote_is_older": remote_is_older,
+                "stable_candidate": {
+                    "name": stable_candidate_name,
+                    "published_at": stable_candidate_published_at,
+                    "is_prerelease": bool(stable_candidate_is_prerelease),
+                },
+                "post_action_recommendation": {
+                    "recommended": str(rec_action or "none"),
+                    "reason": str(rec_reason or ""),
+                    "changed_layers": rec_changed_layers if isinstance(rec_changed_layers, list) else [],
+                },
+                "stable_candidate": {
+                    "name": stable_candidate_name,
+                    "published_at": stable_candidate_published_at,
+                    "is_prerelease": bool(stable_candidate_is_prerelease),
+                },
+                "post_action_recommendation": {
+                    "recommended": str(rec_action or "none"),
+                    "reason": str(rec_reason or ""),
+                    "changed_layers": rec_changed_layers if isinstance(rec_changed_layers, list) else [],
+                },
                 "state_file": SELF_UPDATE_STATE_FILE,
                 "install_source": install_source,
                 "error": err,
@@ -57248,7 +57510,7 @@ fi
 if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
     # Only run verification during installation, not in verify-only mode
     # (verify-only mode calls the function directly and exits)
-    run_smart_verification_with_safety_net 1
+    run_smart_verification_with_safety_net 1 always
 fi
 
 # --- 14b. Check for Optional Packages ---

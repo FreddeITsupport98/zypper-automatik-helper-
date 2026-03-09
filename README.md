@@ -347,6 +347,10 @@ zypper-auto-helper --test-notify    # Send a test desktop notification to verify
 zypper-auto-helper --uninstall-zypper  # Remove only this helper's services/scripts/logs
 ```
 
+Verification snapshot policy note:
+- `zypper-auto-helper --verify` (including the periodic `zypper-auto-verify.timer`) does **not** create pre/post Snapper Safety Net snapshots on each run.
+- Safety Net snapshots are created by the install/update verification flow (for example `zypper-auto-helper install`).
+
 <a id="self-update"></a>
 ### 🔄 Self-update
 
@@ -527,6 +531,7 @@ Key options include:
 
 - [Post-update helpers](#cfg-post-update-helpers)
 - [Timer intervals](#cfg-timer-intervals)
+- [Verification snapshot policy](#cfg-verify-safety-snapshots)
 - [Self-update](#cfg-self-update)
 - [Zypper Turbo (performance)](#cfg-zypper-turbo)
 - [Journal auto-vacuum (hygiene)](#cfg-journal-auto-vacuum)
@@ -590,6 +595,12 @@ Key options include:
   - It lowers verify CPU/IO priority and temporarily defers heavy deep-repair
     checks until cooldown expires.
   - Interactive/manual verify runs continue to use normal behavior.
+<a id="cfg-verify-safety-snapshots"></a>
+#### Verification snapshot policy
+
+- Routine verify mode (`zypper-auto-helper --verify`, including `zypper-auto-verify.timer`) skips automatic pre/post Snapper Safety Net snapshot creation.
+- Install/update verification flow keeps Safety Net snapshots enabled (for example `zypper-auto-helper install`), so upgrade-time repairs still have a rollback pair.
+- This policy reduces repeated EFI `initrd-*` artifact growth from background verify loops while preserving Safety Net snapshots for install/update cycles.
 
 
 <a id="cfg-self-update"></a>
@@ -2049,6 +2060,10 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🛡️ **CHANGED:** verification Safety Net snapshot policy now skips pre/post Snapper snapshot creation for routine `--verify` runs (including `zypper-auto-verify.timer`) to avoid repeated EFI initrd artifact growth during background verification loops.
+  - 🛡️ **CHANGED:** install/update verification flow still keeps Safety Net snapshots enabled (pre/post pair) so install-time auto-repair keeps rollback coverage.
+  - 🐛 **FIXED:** stale downloader-status auto-fix command now correctly escapes its temporary file variable under `set -u`, preventing `tmp: unbound variable` failures in verification/install flows.
+  - 🧪 **NEW:** added `test_verify_snapshot_policy_regression.sh` and included it in `run_regression_suite.sh` to guard verify-vs-install Safety Net snapshot behavior.
   - ⏱️ **CHANGED:** default downloader/notifier cadence now uses `DL_TIMER_INTERVAL_MINUTES=60` and `NT_TIMER_INTERVAL_MINUTES=60` in the built-in config template/fallback paths (hourly baseline by default).
   - 🛡️ **IMPROVED:** `zypper-with-ps` lock handling now includes lock-detail wait/retry before run plus a one-time retry when lock contention appears during the actual `zypper` execution (race-safe path for `dup`/`dist-upgrade`/`update`).
   - 🧪 **NEW:** added regression smoke test `test_wrapper_lock_race_regression.sh` to guard wrapper lock-helper wiring, pre-run wait logic, retry-on-lock-race behavior, and final lock-detail messaging.
@@ -2332,6 +2347,10 @@ systemctl status zypper-autodownload.service
   - 🧾 **IMPROVED:** after a successful self-update, the post-reload “Update installed successfully” dialog now preserves the live log tail (and offers a Copy button) and adds a short “Verified:” message when checksums/tags match.
   - 🧾 **IMPROVED:** the post-success dialog notes header is now channel-aware (shows **Rolling commits** when on rolling, and **Stable release notes** when on stable), so it’s obvious what you’re looking at.
   - 🧰 **NEW:** self-update install step now has an **After update** mode: Quick update only, Verify & Fix (recommended), or Full install (recreate services/wrappers).
+  - 🧠 **NEW:** Self-update status now computes **layered MD5 fingerprints** for key helper sections and returns a `post_action_recommendation` (`none` / `verify` / `install`) with reason + changed layers.
+  - 🧿 **IMPROVED:** Self-update install overlay now preselects the **After update** mode automatically from backend recommendation metadata and shows a short recommendation hint to the user.
+  - 🧭 **IMPROVED:** Stable self-update semantics now resolve from the latest non-draft **release candidate** (`/releases?per_page=25`) across backend API, CLI self-update flow, and WebUI release-notes/changelog fetchers (reduced VERSION-number dependence).
+  - 🧰 **IMPROVED:** Snapper WebUI timer status API now reads authoritative systemd state directly (`systemctl show` + `is-enabled` + `is-active`) and includes per-timer live detail payloads (`snapper_*_timer_live`) alongside compatibility fields.
   - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
   - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
   - 🧰 **IMPROVED (advanced):** when Advanced settings are unlocked, the self-update panel shows a small technical line (remote raw path + short SHA256 prefixes) so you can verify exactly what it compared.

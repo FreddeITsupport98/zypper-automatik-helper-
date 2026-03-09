@@ -10,6 +10,8 @@ Usage: ./run_regression_suite.sh [path/to/zypper-auto.sh]
 
 Runs the non-destructive regression suite against zypper-auto.sh:
   - wrapper lock race regression
+  - self-update recommendation regression
+  - verify snapshot policy regression
   - snapper timer controls regression
   - snapper service-status regression
   - stale module helper/static + runtime regressions (runtime uses temp sandbox roots)
@@ -34,6 +36,8 @@ fi
 
 tests=(
     "test_wrapper_lock_race_regression.sh"
+    "test_self_update_recommendation_regression.sh"
+    "test_verify_snapshot_policy_regression.sh"
     "test_diag_follower_low_noise_regression.sh"
     "test_snapper_timer_controls_regression.sh"
     "test_snapper_status_services_regression.sh"

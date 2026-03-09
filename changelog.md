@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- Verification Safety Net policy changed: routine `--verify` runs (including `zypper-auto-verify.timer`) no longer create pre/post Snapper Safety Net snapshots on every cycle.
+- Safety Net pre/post snapshots are now kept for install/update verification flow (`install` path), reducing repeated EFI initrd artifact growth from background verify loops.
+- Self-update status API now computes layered MD5 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed-layer metadata.
+- Self-update WebUI install overlay now preselects the post-update mode from backend recommendation metadata and shows recommendation hint text.
+- Stable self-update semantics now resolve the latest non-draft release candidate from GitHub releases list (`/releases?per_page=25`) in API, CLI self-update flow, and WebUI stable notes/changelog fetch paths.
+- Snapper `/api/snapper/timers` now uses systemd-authoritative live probing (`systemctl show` + `is-enabled` + `is-active`) and returns `snapper_*_timer_live` detail objects in addition to compatibility state fields.
+- Added focused regression smoke test `test_self_update_recommendation_regression.sh` and wired it into `run_regression_suite.sh`.
+- Updated `test_snapper_timer_controls_regression.sh` timer-endpoint expectations to validate probe-based live-state payloads.
+- Fixed stale downloader-status auto-repair command quoting so temporary file handling works correctly under `set -u` (prevents `tmp: unbound variable` failures).
+- Added regression smoke test `test_verify_snapshot_policy_regression.sh` and wired it into `run_regression_suite.sh` to guard verify-vs-install snapshot policy behavior.
 - Snapper WebUI/CLI status semantics updated: disabled Snapper timers are now shown as intentional warning/checkmark states (`✓ disabled`) instead of error-style states.
 - Dashboard status UI now performs one-shot `status-data.json` auto-sync on page load even with Live mode OFF, and refreshes again on tab focus/visibility resume to self-correct stale Snapper timer cards.
 - Snapper auto-disable now persists explicit user intent via `/var/lib/zypper-auto/snapper-auto-disabled.intent`.
