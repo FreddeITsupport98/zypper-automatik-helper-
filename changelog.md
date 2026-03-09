@@ -55,6 +55,13 @@
 - Snapper Manager WebUI now keeps a passive visibility-aware timer sync loop so long-lived tabs reconcile out-of-band timer changes without manual refresh.
 - Added browser-level regression `test_snapper_timer_playwright_regression.py` (Playwright/Chromium) to validate Snapper timer badge/button persistence through stale live polls and throttled authoritative timer API resync.
 - Extended static regression `test_snapper_timer_controls_regression.sh` to cover timer normalization aliases/verbose formats, optimistic action override helpers, passive timer-sync initialization wiring, and Snapper status service-state formatting (`enabled=... active=... preset=...`).
+- Added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, timer service-state output guidance/formatting, and `/api/snapper/status` helper API contract.
+- Added regression smoke test `test_diag_follower_low_noise_regression.sh` to guard diagnostics follower multiplexer behavior and live-log/service-log source capping.
+- Added central non-destructive regression runner `run_regression_suite.sh` to execute shell regressions together (with optional Playwright browser regression run).
+- Diagnostics follower low-noise tuning: embedded `zypper-auto-diag-follow` now uses one multiplexed `tail -F` process for tracked sources instead of spawning one tail per file.
+- Diagnostics runner now follows only the most-recent service logs by default (`ZNH_DIAG_MAX_SERVICE_LOGS`, default `6`) to reduce long-lived background process churn.
+- Interactive debug-menu/CLI `--live-logs` fallback source fanout is now capped (`ZNH_LIVE_LOGS_MAX_SERVICE_LOGS`, default `8`) to reduce temporary tail-process spikes.
+- WebUI Settings/API/schema now expose `ZNH_DIAG_MAX_SERVICE_LOGS` and `ZNH_LIVE_LOGS_MAX_SERVICE_LOGS` so low-noise caps can be tuned without manual config edits.
 - Boot/EFI installed-kernel inventory now counts only bootable installed kernels (module trees with `modules.dep`) and reports extra raw module-directory count separately (`raw_dirs_count`) to avoid false high kernel totals from leftover/devel module dirs.
 - Added regression smoke test `test_boot_kernel_inventory_regression.sh` to guard bootable-kernel-only inventory counting and kernel purge safety counting filters.
 - Added helper command `--stale-module-dirs` (alias: `--stale-modules`) with safe default `audit` mode to detect stale non-bootable module directories.

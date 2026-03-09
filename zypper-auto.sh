@@ -1439,6 +1439,11 @@ DL_TIMER_INTERVAL_MINUTES=60
 NT_TIMER_INTERVAL_MINUTES=60
 VERIFY_TIMER_INTERVAL_MINUTES=30
 
+# Low-noise diagnostics/live-log caps (count of service logs to follow).
+# Used by the diagnostics follower and interactive live-log fallback paths.
+ZNH_DIAG_MAX_SERVICE_LOGS=6
+ZNH_LIVE_LOGS_MAX_SERVICE_LOGS=8
+
 # Smart low-impact verify mode (primarily for background/systemd verification
 # runs to reduce CPU/IO pressure during repeated failure periods).
 VERIFY_LOW_IMPACT_ENABLED="true"
@@ -2235,6 +2240,8 @@ __znh_write_dashboard_schema_json() {
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
     "DASHBOARD_PERFORMANCE_MODE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
+    "ZNH_DIAG_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "6"},
+    "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "8"},
     "MANAGERS_SERVER_POLL_VISIBLE_MS": {"type": "int", "min": 1200, "max": 60000, "step": 100, "default": "4500"},
     "MANAGERS_SERVER_POLL_HIDDEN_MS": {"type": "int", "min": 2000, "max": 180000, "step": 100, "default": "16000"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
@@ -8351,6 +8358,22 @@ DASHBOARD_JS_VERBOSE_DEBUG=false
 #   zypper-auto-helper --dash-open
 DASHBOARD_PERFORMANCE_MODE="powersaving"
 
+# ZNH_DIAG_MAX_SERVICE_LOGS
+# Low-noise diagnostics follower cap: maximum number of most-recent
+# /var/log/zypper-auto/service-logs/*.log files tracked by the persistent
+# diagnostics follower (`--diag-logs-on` path).
+# Range: 1..30
+# Default: 6
+ZNH_DIAG_MAX_SERVICE_LOGS=6
+
+# ZNH_LIVE_LOGS_MAX_SERVICE_LOGS
+# Interactive fallback live-log cap: maximum number of most-recent
+# /var/log/zypper-auto/service-logs/*.log files tracked by
+# `zypper-auto-helper --live-logs` and debug-menu option 2 fallback mode.
+# Range: 1..30
+# Default: 8
+ZNH_LIVE_LOGS_MAX_SERVICE_LOGS=8
+
 # MANAGERS_SERVER_POLL_VISIBLE_MS
 # Managers overlay → Server (SQLite) tab polling interval in milliseconds while
 # the browser tab is visible.
@@ -9248,6 +9271,8 @@ EOF
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_allowed_set DASHBOARD_PERFORMANCE_MODE powersaving "powersaving,balanced,performance"
+    validate_nonneg_int_bounded_optional ZNH_DIAG_MAX_SERVICE_LOGS 6 1 30
+    validate_nonneg_int_bounded_optional ZNH_LIVE_LOGS_MAX_SERVICE_LOGS 8 1 30
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_VISIBLE_MS 4500 1200 60000
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_HIDDEN_MS 16000 2000 180000
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
@@ -9501,6 +9526,8 @@ EOF
     log_debug "  HOOKS_ENABLED=${HOOKS_ENABLED:-true}"
     log_debug "  DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-true}"
     log_debug "  DASHBOARD_BROWSER=${DASHBOARD_BROWSER:-<default>}"
+    log_debug "  ZNH_DIAG_MAX_SERVICE_LOGS=${ZNH_DIAG_MAX_SERVICE_LOGS:-6}"
+    log_debug "  ZNH_LIVE_LOGS_MAX_SERVICE_LOGS=${ZNH_LIVE_LOGS_MAX_SERVICE_LOGS:-8}"
     log_debug "  MANAGERS_SERVER_POLL_VISIBLE_MS=${MANAGERS_SERVER_POLL_VISIBLE_MS:-4500}"
     log_debug "  MANAGERS_SERVER_POLL_HIDDEN_MS=${MANAGERS_SERVER_POLL_HIDDEN_MS:-16000}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
@@ -9618,6 +9645,8 @@ EOF
     _mark_missing_key "HOOKS_BASE_DIR"
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
+    _mark_missing_key "ZNH_DIAG_MAX_SERVICE_LOGS"
+    _mark_missing_key "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS"
     _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
     _mark_missing_key "MANAGERS_SERVER_POLL_HIDDEN_MS"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
@@ -9760,6 +9789,12 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
+                    ;;
+                ZNH_DIAG_MAX_SERVICE_LOGS)
+                    log_info "  - ZNH_DIAG_MAX_SERVICE_LOGS: cap for how many most-recent service logs the persistent diagnostics follower tracks (lower = less background churn)."
+                    ;;
+                ZNH_LIVE_LOGS_MAX_SERVICE_LOGS)
+                    log_info "  - ZNH_LIVE_LOGS_MAX_SERVICE_LOGS: cap for how many most-recent service logs interactive live-log fallback views track."
                     ;;
                 MANAGERS_SERVER_POLL_VISIBLE_MS)
                     log_info "  - MANAGERS_SERVER_POLL_VISIBLE_MS: Managers Server tab polling interval (ms) when browser tab is visible."
@@ -10035,6 +10070,12 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     DASHBOARD_BROWSER=""
+                    ;;
+                ZNH_DIAG_MAX_SERVICE_LOGS)
+                    ZNH_DIAG_MAX_SERVICE_LOGS=6
+                    ;;
+                ZNH_LIVE_LOGS_MAX_SERVICE_LOGS)
+                    ZNH_LIVE_LOGS_MAX_SERVICE_LOGS=8
                     ;;
                 MANAGERS_SERVER_POLL_VISIBLE_MS)
                     MANAGERS_SERVER_POLL_VISIBLE_MS=4500
@@ -17938,6 +17979,8 @@ generate_dashboard() {
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
         { key: 'DASHBOARD_PERFORMANCE_MODE', type: 'enum', label: 'Dashboard: performance mode (PowerSaving/Balanced/Performance)', help: 'Controls WebUI polling cadence and dash-open worker intervals. Default is powersaving to avoid CPU/RAM hogging. Tip: after changing this, re-open the dashboard (zypper-auto-helper --dash-open) to restart background workers with the new mode.' },
+        { key: 'ZNH_DIAG_MAX_SERVICE_LOGS', type: 'int', label: 'Diagnostics follower: max service logs tracked', advanced: true, help: 'Low-noise cap for persistent diagnostics follower source fanout (most-recent service logs). Lower values reduce background process/load.' },
+        { key: 'ZNH_LIVE_LOGS_MAX_SERVICE_LOGS', type: 'int', label: 'Live logs fallback: max service logs tracked', advanced: true, help: 'Cap for debug-menu/CLI live-log fallback source fanout. Lower values reduce temporary tail-process spikes.' },
         { key: 'MANAGERS_SERVER_POLL_VISIBLE_MS', type: 'int', label: 'Managers (Server tab): visible poll interval (ms)', advanced: true, help: 'Polling interval while the browser tab is visible. Lower values are more responsive but use more API/CPU.' },
         { key: 'MANAGERS_SERVER_POLL_HIDDEN_MS', type: 'int', label: 'Managers (Server tab): hidden poll interval (ms)', advanced: true, help: 'Polling interval while browser tab is hidden/backgrounded. Use a higher value to reduce idle load.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
@@ -34855,16 +34898,66 @@ set -euo pipefail
 if [ "$#" -eq 0 ]; then
     exit 0
 fi
+follow_paths=()
+follow_tags=()
 
 for path in "$@"; do
     [ -e "$path" ] || continue
-    base="$(basename "$path")"
+    abs_path="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
+    base="$(basename "$abs_path")"
     src="${base%.*}"
     src="${src^^}"
-    # Tail each file and prefix lines with a source tag based on the basename.
-    tail -n 0 -F "$path" | sed -u "s/^/[SRC=${src}] /" &
+    follow_paths+=("$abs_path")
+    follow_tags+=("$src")
 done
 
+if [ "${#follow_paths[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+map_file="$(mktemp)"
+trap 'rm -f -- "$map_file" 2>/dev/null || true' EXIT
+
+i=0
+while [ "$i" -lt "${#follow_paths[@]}" ]; do
+    printf '%s\t%s\n' "${follow_paths[$i]}" "${follow_tags[$i]}" >>"$map_file"
+    i=$((i + 1))
+done
+
+first_tag="${follow_tags[0]}"
+
+# Low-noise multiplexer: use ONE tail process for all files instead of one
+# tail process per file.
+tail -n 0 -F "${follow_paths[@]}" 2>/dev/null | awk -v map_file="$map_file" -v default_tag="$first_tag" '
+    BEGIN {
+        while ((getline line < map_file) > 0) {
+            split(line, parts, "\t")
+            if (length(parts[1]) > 0) {
+                tag_for_path[parts[1]] = parts[2]
+            }
+        }
+        close(map_file)
+        current_tag = default_tag
+    }
+    /^==> .* <==$/ {
+        path = $0
+        sub(/^==> /, "", path)
+        sub(/ <==$/, "", path)
+        tag = tag_for_path[path]
+        if (tag == "") {
+            n = split(path, seg, "/")
+            base = seg[n]
+            sub(/\.[^.]+$/, "", base)
+            tag = toupper(base)
+        }
+        current_tag = tag
+        next
+    }
+    {
+        printf("[SRC=%s] %s\n", current_tag, $0)
+        fflush()
+    }
+'
 wait || true
 EOF
         chmod +x "${diag_follower}" || true
@@ -34967,12 +35060,31 @@ run_diag_logs_runner_only() {
     fi
 
     if [ -d "${LOG_DIR}/service-logs" ]; then
-        local f
-        for f in "${LOG_DIR}/service-logs"/*.log; do
-            if [ -f "$f" ]; then
-                follow_paths+=("$f")
+        local f max_service_logs
+        local -a service_logs=()
+        max_service_logs="${ZNH_DIAG_MAX_SERVICE_LOGS:-6}"
+        case "${max_service_logs}" in
+            ''|*[!0-9]*) max_service_logs=6 ;;
+        esac
+        if [ "${max_service_logs}" -lt 1 ] 2>/dev/null; then
+            max_service_logs=1
+        fi
+        if [ "${max_service_logs}" -gt 30 ] 2>/dev/null; then
+            max_service_logs=30
+        fi
+
+        mapfile -t service_logs < <(
+            find "${LOG_DIR}/service-logs" -maxdepth 1 -type f -name '*.log' -printf '%T@\t%p\n' 2>/dev/null \
+                | sort -nr | head -n "${max_service_logs}" | cut -f2- || true
+        )
+        for f in "${service_logs[@]}"; do
+            if [ -f "${f}" ]; then
+                follow_paths+=("${f}")
             fi
         done
+        if [ "${#service_logs[@]}" -gt 0 ] 2>/dev/null; then
+            log_info "Diagnostics follower low-noise mode: tracking ${#service_logs[@]} most-recent service logs (cap=${max_service_logs})"
+        fi
     fi
 
     if [ -n "${SUDO_USER_HOME:-}" ] && [ -f "${SUDO_USER_HOME}/.local/share/zypper-notify/notifier-detailed.log" ]; then
@@ -38976,10 +39088,25 @@ run_debug_menu_only() {
                 fi
 
                 if [ -d "${LOG_DIR}/service-logs" ]; then
-                    # shellcheck disable=SC2086
-                    for f in "${LOG_DIR}/service-logs"/*.log; do
-                        if [ -f "$f" ]; then
-                            echo "- [SYS] Service log: $f"
+                    local f service_log_limit
+                    local -a service_log_files=()
+                    service_log_limit="${ZNH_LIVE_LOGS_MAX_SERVICE_LOGS:-8}"
+                    case "${service_log_limit}" in
+                        ''|*[!0-9]*) service_log_limit=8 ;;
+                    esac
+                    if [ "${service_log_limit}" -lt 1 ] 2>/dev/null; then
+                        service_log_limit=1
+                    fi
+                    if [ "${service_log_limit}" -gt 30 ] 2>/dev/null; then
+                        service_log_limit=30
+                    fi
+                    mapfile -t service_log_files < <(
+                        find "${LOG_DIR}/service-logs" -maxdepth 1 -type f -name '*.log' -printf '%T@\t%p\n' 2>/dev/null \
+                            | sort -nr | head -n "${service_log_limit}" | cut -f2- || true
+                    )
+                    for f in "${service_log_files[@]}"; do
+                        if [ -f "${f}" ]; then
+                            echo "- [SYS] Service log: ${f}"
                             LIVE_SOURCES+=("SYS:${f}")
                         fi
                     done
@@ -42186,10 +42313,23 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
     fi
 
     if [ -d "${LOG_DIR}/service-logs" ]; then
-        # shellcheck disable=SC2086
-        for f in "${LOG_DIR}/service-logs"/*.log; do
-            if [ -f "$f" ]; then
-                echo "- [SYS] Service log: $f"
+        LIVE_SERVICE_LOG_LIMIT="${ZNH_LIVE_LOGS_MAX_SERVICE_LOGS:-8}"
+        case "${LIVE_SERVICE_LOG_LIMIT}" in
+            ''|*[!0-9]*) LIVE_SERVICE_LOG_LIMIT=8 ;;
+        esac
+        if [ "${LIVE_SERVICE_LOG_LIMIT}" -lt 1 ] 2>/dev/null; then
+            LIVE_SERVICE_LOG_LIMIT=1
+        fi
+        if [ "${LIVE_SERVICE_LOG_LIMIT}" -gt 30 ] 2>/dev/null; then
+            LIVE_SERVICE_LOG_LIMIT=30
+        fi
+        mapfile -t LIVE_SERVICE_LOG_FILES < <(
+            find "${LOG_DIR}/service-logs" -maxdepth 1 -type f -name '*.log' -printf '%T@\t%p\n' 2>/dev/null \
+                | sort -nr | head -n "${LIVE_SERVICE_LOG_LIMIT}" | cut -f2- || true
+        )
+        for f in "${LIVE_SERVICE_LOG_FILES[@]}"; do
+            if [ -f "${f}" ]; then
+                echo "- [SYS] Service log: ${f}"
                 LIVE_SOURCES+=("SYS:${f}")
             fi
         done

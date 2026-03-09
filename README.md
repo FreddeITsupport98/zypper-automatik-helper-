@@ -1244,6 +1244,49 @@ Run it:
 ```bash
 bash test_stale_module_dirs_runtime_regression.sh zypper-auto.sh
 ```
+### 8. Snapper Service-Status Regression Smoke Test (`test_snapper_status_services_regression.sh`)
+
+Located in the repo root, this focused static regression validates Snapper
+Manager status/service reporting wiring.
+
+What it checks:
+- Snapper menu Option 1 status label exists and routes to
+  `__znh_snapper_status`.
+- `__znh_snapper_status` emits timer service-state fields in
+  `enabled=... active=... preset=...` format with guidance hints.
+- Snapper status block includes timer schedule output via
+  `systemctl list-timers`.
+- Dashboard API route `/api/snapper/status` maps to helper command
+  `snapper status` and returns HTTP 200 with `{ok, rc, output}` payload.
+
+Run it:
+
+```bash
+bash test_snapper_status_services_regression.sh zypper-auto.sh
+```
+### 9. Central Regression Suite Runner (`run_regression_suite.sh`)
+
+Located in the repo root, this convenience runner executes the non-destructive
+regression scripts as one suite (including the dedicated Snapper service-status
+regression).
+
+What it runs:
+- `test_wrapper_lock_race_regression.sh`
+- `test_diag_follower_low_noise_regression.sh`
+- `test_snapper_timer_controls_regression.sh`
+- `test_snapper_status_services_regression.sh`
+- `test_stale_module_dirs_helper_regression.sh`
+- `test_stale_module_dirs_runtime_regression.sh`
+- `test_boot_kernel_inventory_regression.sh`
+- `test_kernel_purge_lock_regression.sh`
+- `test_snapper_option4_modal_layout.sh`
+- Optional: `test_snapper_timer_playwright_regression.py` (skip-safe)
+
+Run it:
+
+```bash
+bash run_regression_suite.sh zypper-auto.sh
+```
 
 -----
 
@@ -1281,6 +1324,10 @@ The helper includes a small diagnostics toolkit built around aggregated log foll
     - Also follows the helper's `trace.log`, which includes mirrored structured install/verify output.
       This ensures the aggregated diagnostics log continues to capture new installs even though each
       install uses a new `install-YYYYMMDD-HHMMSS.log` filename.
+    - Uses a low-noise multiplexer (single `tail -F` process for tracked sources) and follows only the
+      most-recent service logs by default to reduce long-lived background process churn.
+      - Tune cap (config/WebUI Settings): `ZNH_DIAG_MAX_SERVICE_LOGS` (default `6`) and
+        `ZNH_LIVE_LOGS_MAX_SERVICE_LOGS` (default `8` for interactive live-log fallback views).
     - Tags each line with its source (`[SRC=INSTALL]`, `[SRC=DOWNLOADER]`, `[SRC=NOTIFIER]`, etc.).
     - Writes everything into a daily diagnostics file:
       - `/var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log`
@@ -2012,7 +2059,12 @@ systemctl status zypper-autodownload.service
   - 🧿 **IMPROVED:** successful Snapper timer toggles now apply an immediate optimistic action override to timer badges/buttons before the authoritative refresh returns, reducing transient UI mismatch windows.
   - 🧿 **IMPROVED:** Snapper Manager now keeps a passive visibility-aware timer sync loop in the WebUI so long-lived tabs stay aligned with out-of-band CLI/systemd timer changes.
   - 🧪 **NEW:** browser-level regression `test_snapper_timer_playwright_regression.py` now validates Snapper timer badge/button persistence through stale live polls and throttled authoritative API re-sync behavior.
+  - 🧪 **NEW:** added regression smoke test `test_diag_follower_low_noise_regression.sh` to guard low-noise diagnostics follower multiplexing and service-log source caps.
   - 🧪 **IMPROVED:** static regression `test_snapper_timer_controls_regression.sh` now also guards verbose state normalization, optimistic override wiring, passive timer-sync initialization paths, and Snapper status service-state output formatting (`enabled=... active=... preset=...`).
+  - 🧪 **NEW:** added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, Snapper service-state output formatting/hints, and `/api/snapper/status` helper API contract.
+  - 🧪 **NEW:** added central runner `run_regression_suite.sh` for non-destructive regression execution (includes Snapper service-status regression and optional Playwright run).
+  - ⚡ **IMPROVED:** diagnostics follower now uses a low-noise single-tail multiplexer and caps followed service logs to most-recent entries by default (`ZNH_DIAG_MAX_SERVICE_LOGS`), now exposed in WebUI Settings.
+  - ⚡ **IMPROVED:** interactive debug-menu/CLI live-log fallback paths now cap service-log source fanout (`ZNH_LIVE_LOGS_MAX_SERVICE_LOGS`) to avoid temporary tail-process spikes, now exposed in WebUI Settings.
   - 🧰 **NEW:** added `zypper-auto-helper --stale-module-dirs` helper command (safe audit default) with optional quarantine mode, explicit confirmation phrase, and non-interactive `--yes` guard.
   - 🧪 **NEW:** added regression smoke test `test_stale_module_dirs_helper_regression.sh` to validate stale module helper safety behavior, CLI/help wiring, and shell completion exposure.
   - 🧰 **FIXED:** early helper option fast-path now recognizes `--stale-module-dirs` / `--stale-modules` so stale-module helper invocations are not rejected as unknown options before parser dispatch.
