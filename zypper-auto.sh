@@ -24172,10 +24172,32 @@ generate_dashboard() {
                 return r;
             }
 
-            // Show server-side reason text (single source of truth)
+            // Show server-side reason text (single source of truth), plus
+            // install-origin/channel recommendation context.
             try {
+                var detailBits = [];
                 var msg = (r.evaluation && r.evaluation.message) ? String(r.evaluation.message) : '';
-                _selfUpdateSetDetail(msg);
+                if (msg) detailBits.push(msg);
+
+                try {
+                    var io = (r.install_origin && typeof r.install_origin === 'object') ? r.install_origin : null;
+                    var ioLabel = io ? String(io.label || io.kind || '') : '';
+                    var ioConf = io ? String(io.confidence || '') : '';
+                    if (ioLabel) {
+                        detailBits.push('Origin: ' + ioLabel + (ioConf ? (' (' + ioConf + ')') : ''));
+                    }
+                } catch (eIo0) {}
+
+                try {
+                    var chRec = (r.channel_recommendation && typeof r.channel_recommendation === 'object') ? r.channel_recommendation : null;
+                    var chRecAct = chRec ? String(chRec.recommended || '').toLowerCase() : '';
+                    var chRecReason = chRec ? String(chRec.reason || '') : '';
+                    if (chRecAct === 'switch_to_rolling') {
+                        detailBits.push('Recommendation: switch channel to rolling' + (chRecReason ? (' — ' + chRecReason) : ''));
+                    }
+                } catch (eIo1) {}
+
+                _selfUpdateSetDetail(detailBits.join(' • '));
             } catch (eMsg) {
                 _selfUpdateSetDetail('');
             }
@@ -24756,28 +24778,38 @@ generate_dashboard() {
         var instSha = '';
         var remSha = '';
         var pth = '';
+        var originLabel = '';
+        var originConfidence = '';
+        var channelRecAction = '';
+        var channelRecReason = '';
         try { instRef = String((st && st.installed && st.installed.ref) ? st.installed.ref : (st && st.installed_ref) ? st.installed_ref : ''); } catch (e0) { instRef = ''; }
         try { remRef = String((st && st.remote && st.remote.ref) ? st.remote.ref : (st && st.remote_ref) ? st.remote_ref : ''); } catch (e1) { remRef = ''; }
         try { instSha = String((st && st.installed && st.installed.script_sha256) ? st.installed.script_sha256 : ''); } catch (e2) { instSha = ''; }
         try { remSha = String((st && st.remote && st.remote.script_sha256) ? st.remote.script_sha256 : ''); } catch (e3) { remSha = ''; }
         try { pth = String((st && st.remote && st.remote.script_path) ? st.remote.script_path : ''); } catch (e4) { pth = ''; }
+        try { originLabel = String((st && st.install_origin && (st.install_origin.label || st.install_origin.kind)) ? (st.install_origin.label || st.install_origin.kind) : ''); } catch (e5) { originLabel = ''; }
+        try { originConfidence = String((st && st.install_origin && st.install_origin.confidence) ? st.install_origin.confidence : ''); } catch (e6) { originConfidence = ''; }
+        try { channelRecAction = String((st && st.channel_recommendation && st.channel_recommendation.recommended) ? st.channel_recommendation.recommended : '').toLowerCase(); } catch (e7) { channelRecAction = ''; }
+        try { channelRecReason = String((st && st.channel_recommendation && st.channel_recommendation.reason) ? st.channel_recommendation.reason : ''); } catch (e8) { channelRecReason = ''; }
 
         if (dest) lines.push('Destination: ' + dest);
         if (dl) lines.push('Download: ' + dl);
         if (remRef) lines.push('Remote ref: ' + remRef);
         if (instRef) lines.push('Installed ref: ' + instRef);
+        if (originLabel) lines.push('Install origin: ' + originLabel + (originConfidence ? (' (' + originConfidence + ')') : ''));
         if (pth) lines.push('Remote path: ' + pth);
         if (instSha) lines.push('Installed sha256: ' + sh(instSha, 12));
         if (remSha) lines.push('Remote sha256: ' + sh(remSha, 12));
 
         var match = (instSha && remSha && instSha === remSha);
         if (instSha && remSha) lines.push('Checksum match: ' + (match ? 'YES' : 'NO'));
+        if (channelRecAction === 'switch_to_rolling') lines.push('Recommendation: switch channel to rolling' + (channelRecReason ? (' — ' + channelRecReason) : ''));
 
         try {
             if (st && st.installed && st.installed.is_dirty) {
                 lines.push('NOTE: Local edits were detected (dirty install).');
             }
-        } catch (e5) {}
+        } catch (e9) {}
 
         return lines.join('\n');
     }
@@ -24798,6 +24830,22 @@ generate_dashboard() {
         var actionType = (st && st.evaluation && st.evaluation.action_type) ? st.evaluation.action_type : '';
         var actionMsg = (st && st.evaluation && st.evaluation.message) ? st.evaluation.message : '';
         var source = (st && st.install_source) ? st.install_source : '';
+        var installOrigin = null;
+        var installOriginLabel = '';
+        var installOriginConfidence = '';
+        var installOriginReason = '';
+        var channelRec = null;
+        var channelRecAction = '';
+        var channelRecReason = '';
+        var channelRecTarget = '';
+        try { installOrigin = (st && st.install_origin && typeof st.install_origin === 'object') ? st.install_origin : null; } catch (eIO0) { installOrigin = null; }
+        try { installOriginLabel = installOrigin ? String(installOrigin.label || installOrigin.kind || '') : ''; } catch (eIO1) { installOriginLabel = ''; }
+        try { installOriginConfidence = installOrigin ? String(installOrigin.confidence || '') : ''; } catch (eIO2) { installOriginConfidence = ''; }
+        try { installOriginReason = installOrigin ? String(installOrigin.reason || '') : ''; } catch (eIO3) { installOriginReason = ''; }
+        try { channelRec = (st && st.channel_recommendation && typeof st.channel_recommendation === 'object') ? st.channel_recommendation : null; } catch (eCR0) { channelRec = null; }
+        try { channelRecAction = channelRec ? String(channelRec.recommended || '').toLowerCase() : ''; } catch (eCR1) { channelRecAction = ''; }
+        try { channelRecReason = channelRec ? String(channelRec.reason || '') : ''; } catch (eCR2) { channelRecReason = ''; }
+        try { channelRecTarget = channelRec ? String(channelRec.target_channel || '') : ''; } catch (eCR3) { channelRecTarget = ''; }
         var stablePolicy = '';
         var stableSelection = '';
         var stableFallbackReason = '';
@@ -24829,8 +24877,11 @@ generate_dashboard() {
         if (dl) {
             info.push('<div class="feat-badge"><span class="feat-dot" style="color: rgba(34,197,94,0.95);">●</span> Download: <code style="font-size:0.85rem;">' + _znhEscapeHtml(dl) + '</code></div>');
         }
+        if (installOriginLabel) {
+            info.push('<div class=\"feat-badge\"><span class=\"feat-dot\" style=\"color: var(--accent-2);\">●</span> Install origin: <strong>' + _znhEscapeHtml(installOriginLabel) + '</strong>' + (installOriginConfidence ? (' <span style=\"color: var(--muted); font-size:0.82rem;\">(' + _znhEscapeHtml(installOriginConfidence) + ')</span>') : '') + '</div>');
+        }
         if (source) {
-            info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Install source: <strong>' + _znhEscapeHtml(source) + '</strong></div>');
+            info.push('<div class=\"feat-badge\"><span class=\"feat-dot\" style=\"color: var(--accent-2);\">●</span> State source tag: <strong>' + _znhEscapeHtml(source) + '</strong></div>');
         }
         if (actionType) {
             info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Action: <strong>' + _znhEscapeHtml(actionType) + '</strong></div>');
@@ -24852,6 +24903,14 @@ generate_dashboard() {
 
         if (actionMsg && !warn) {
             warn = '<div class="overlay-alert overlay-alert-warn">' + _znhEscapeHtml(actionMsg) + '</div>';
+        }
+        if (channelRecAction === 'switch_to_rolling' && !warn) {
+            var recTxt = 'Recommendation: switch channel to ' + _znhEscapeHtml(channelRecTarget || 'rolling') + '.';
+            if (channelRecReason) recTxt += ' ' + _znhEscapeHtml(channelRecReason);
+            warn = '<div class=\"overlay-alert overlay-alert-warn\">' + recTxt + '</div>';
+        }
+        if (installOriginReason && !warn && installOriginLabel) {
+            warn = '<div class=\"overlay-alert overlay-alert-warn\">Install origin: ' + _znhEscapeHtml(installOriginLabel) + '. ' + _znhEscapeHtml(installOriginReason) + '</div>';
         }
 
         var d = _suLongDisclosureHtml(ch);
@@ -24965,8 +25024,16 @@ generate_dashboard() {
 
         function _suNormalizeRecommendedAction(v) {
             v = String(v || '').toLowerCase();
-            if (v !== 'none' && v !== 'verify' && v !== 'install') v = 'none';
+            if (v === 'switch-to-rolling' || v === 'switch channel rolling' || v === 'switch rolling') v = 'switch_to_rolling';
+            if (v !== 'none' && v !== 'verify' && v !== 'install' && v !== 'switch_to_rolling') v = 'none';
             return v;
+        }
+        function _suRecommendedActionLabel(v) {
+            v = _suNormalizeRecommendedAction(v);
+            if (v === 'verify') return 'verify';
+            if (v === 'install') return 'install';
+            if (v === 'switch_to_rolling') return 'switch channel to rolling';
+            return 'none';
         }
 
         try {
@@ -24987,6 +25054,7 @@ generate_dashboard() {
         }
 
         _su.post_action = _suNormalizeRecommendedAction(recAction);
+        if (_su.post_action === 'switch_to_rolling') _su.post_action = 'none';
 
         var srcHtml = '';
         try {
@@ -25023,7 +25091,7 @@ generate_dashboard() {
             }
             recHtml = [
                 '<details style=\"margin-top:8px; border:1px solid rgba(255,255,255,0.10); border-radius:12px; padding:8px 10px; background:rgba(255,255,255,0.03);\">',
-                '  <summary style=\"cursor:pointer; font-weight:900; color: var(--text);\">Why recommended? <span style=\"color:var(--muted); font-weight:800;\">(' + _znhEscapeHtml(recAction || 'none') + ')</span></summary>',
+                '  <summary style=\\\"cursor:pointer; font-weight:900; color: var(--text);\\\">Why recommended? <span style=\\\"color:var(--muted); font-weight:800;\\\">(' + _znhEscapeHtml(_suRecommendedActionLabel(recAction || 'none')) + ')</span></summary>',
                 '  <div style=\"margin-top:8px; color: var(--muted); font-size:0.84rem;\">' + _znhEscapeHtml(recReason || 'No additional recommendation reason available.') + '</div>',
                 (recMeta.length ? ('  <div style=\"margin-top:6px; color: var(--muted); font-size:0.82rem;\">' + _znhEscapeHtml(recMeta.join(' • ')) + '</div>') : ''),
                 (layerLines.length ? ('  <pre class=\"overlay-pre\" style=\"margin-top:8px; max-height: 120px;\">' + _znhEscapeHtml(layerLines.join('\n')) + '</pre>') : ''),
@@ -25123,10 +25191,23 @@ generate_dashboard() {
             var isDry = false;
             try { isDry = !!(dry && dry.checked); } catch (eW0) { isDry = false; }
             var selected = _suNormalizePostAction(postSel ? postSel.value : _su.post_action);
-            var recommended = _suNormalizePostAction(recAction);
-            if (isDry || selected === recommended) {
+            var recommendedRaw = _suNormalizeRecommendedAction(recAction);
+            var recommended = _suNormalizePostAction(recommendedRaw);
+            if (isDry) {
                 try { warnEl.classList.add('znh-hidden'); } catch (eW1) {}
                 try { warnEl.textContent = ''; } catch (eW2) {}
+                return;
+            }
+            if (recommendedRaw === 'switch_to_rolling') {
+                var txtSwitch = 'Recommendation: switch channel to rolling before installing. ';
+                if (recReason) txtSwitch += recReason;
+                try { warnEl.textContent = txtSwitch; } catch (eW3s) {}
+                try { warnEl.classList.remove('znh-hidden'); } catch (eW4s) {}
+                return;
+            }
+            if (selected === recommended) {
+                try { warnEl.classList.add('znh-hidden'); } catch (eW1a) {}
+                try { warnEl.textContent = ''; } catch (eW2a) {}
                 return;
             }
             var txt = 'Manual override: selected ' + _suPostActionLabel(selected) + ' while recommendation is ' + _suPostActionLabel(recommended) + '.';
@@ -40983,7 +41064,7 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
                     log_info "[self-update] Local file perfectly matches remote rolling. Seeding state."
                     installed_ref="${remote_ref}"
                     installed_rolling_sha="${remote_ref}"
-                    __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "local-install" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+                    __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "rolling-commit" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
                 fi
             else
                 log_warn "[self-update] Rolling raw-script check: remote download did not look like a valid bash script; skipping state seed (possible portal/proxy)"
@@ -41350,7 +41431,15 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
             dest_sha=$(openssl dgst -sha256 "${dest}" 2>/dev/null | sed -E 's/^.*= //' || true)
         fi
 
-        if __znh_self_update_state_write "${new_state_stable}" "${new_state_rolling}" "${channel}" "${last_ref}" "self-update" "${dest_sha}" "${dest}"; then
+        local state_install_source
+        state_install_source="self-update"
+        if [ "${channel}" = "stable" ]; then
+            state_install_source="stable-release"
+        elif [ "${channel}" = "rolling" ]; then
+            state_install_source="rolling-commit"
+        fi
+
+        if __znh_self_update_state_write "${new_state_stable}" "${new_state_rolling}" "${channel}" "${last_ref}" "${state_install_source}" "${dest_sha}" "${dest}"; then
             log_info "[self-update] State updated: $(__znh_self_update_state_file)"
         else
             log_warn "[self-update] Failed to write update state file (non-fatal): $(__znh_self_update_state_file)"
@@ -49596,6 +49685,94 @@ def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remot
     if any(x in changed for x in ("dashboard_api_embed", "installer_payloads")):
         return "install", "Installer/deployer sections changed; full install recommended.", changed, "high", "high"
     return "verify", "Core helper sections changed; verify recommended.", changed, "medium", "moderate"
+def _is_git_sha(v: str) -> bool:
+    try:
+        s = str(v or "").strip().lower()
+    except Exception:
+        s = ""
+    return bool(re.fullmatch(r"[0-9a-f]{7,40}", s or ""))
+
+
+def _is_release_tag(v: str) -> bool:
+    try:
+        s = str(v or "").strip().lower()
+    except Exception:
+        s = ""
+    return bool(re.fullmatch(r"v[0-9]+", s or ""))
+
+
+def _normalize_install_source(raw: str) -> str:
+    try:
+        s = str(raw or "").strip().lower().replace("_", "-")
+    except Exception:
+        s = ""
+    return s
+
+
+def _detect_install_origin(*, install_source: str, active_channel: str, active_ref: str, stable_tag: str, rolling_sha: str) -> dict:
+    src = _normalize_install_source(install_source)
+    ch = str(active_channel or "").strip().lower()
+    ref = str(active_ref or "").strip()
+    st = str(stable_tag or "").strip()
+    rs = str(rolling_sha or "").strip().lower()
+
+    def _mk(kind: str, label: str, confidence: str, reason: str, channel_hint: str) -> dict:
+        return {
+            "kind": str(kind or "unknown"),
+            "label": str(label or "Unknown origin"),
+            "confidence": str(confidence or "low"),
+            "reason": str(reason or ""),
+            "channel_hint": str(channel_hint or ""),
+            "raw_source": str(src or ""),
+        }
+
+    if src in ("rolling-commit", "self-update-rolling", "self-update-rolling-commit"):
+        return _mk("rolling-commit", "Rolling commit", "high", "State install_source explicitly marks a rolling commit install.", "rolling")
+    if src in ("stable-release", "self-update-stable", "self-update-stable-release"):
+        return _mk("stable-release", "Stable release", "high", "State install_source explicitly marks a stable release install.", "stable")
+
+    if _is_git_sha(ref):
+        return _mk("rolling-commit", "Rolling commit", "high", "last_update_ref matches a commit SHA pattern.", "rolling")
+    if _is_release_tag(ref):
+        return _mk("stable-release", "Stable release", "high", "last_update_ref matches a release tag pattern.", "stable")
+
+    if src in ("local-git", "local-stamped"):
+        if _is_git_sha(rs) or _is_git_sha(ref):
+            return _mk("rolling-commit", "Rolling commit", "medium", "Install source indicates git/stamped build metadata.", "rolling")
+        return _mk("rolling-commit", "Rolling commit", "low", "Install source suggests git/stamped lineage.", "rolling")
+
+    if ch == "rolling" and (_is_git_sha(rs) or _is_git_sha(ref)):
+        return _mk("rolling-commit", "Rolling commit", "medium", "State channel/ref metadata indicates rolling commit lineage.", "rolling")
+    if ch == "stable" and (_is_release_tag(st) or _is_release_tag(ref)):
+        return _mk("stable-release", "Stable release", "medium", "State channel/ref metadata indicates stable release lineage.", "stable")
+
+    if _is_git_sha(rs):
+        return _mk("rolling-commit", "Rolling commit", "low", "rolling_sha metadata is present.", "rolling")
+    if _is_release_tag(st):
+        return _mk("stable-release", "Stable release", "low", "stable_tag metadata is present.", "stable")
+
+    return _mk("unknown", "Unknown origin", "low", "Not enough self-update state metadata to classify install origin.", "")
+
+
+def _recommend_channel_switch(*, configured_channel: str, active_channel: str, install_origin: dict, channel_switch: bool, is_externally_managed: bool) -> tuple[str, str, str, str]:
+    ch = str(configured_channel or "").strip().lower()
+    active = str(active_channel or "").strip().lower()
+    origin_kind = str((install_origin or {}).get("kind", "") or "").strip().lower()
+
+    if is_externally_managed:
+        return "none", "", "", "high"
+
+    # Recommend switching back to rolling when origin is rolling-commit but the
+    # configured channel is stable and state channel metadata no longer indicates rolling.
+    if ch == "stable" and origin_kind == "rolling-commit" and not channel_switch and active != "rolling":
+        return (
+            "switch_to_rolling",
+            "rolling",
+            "Current install appears to come from a rolling commit build. Switch channel to rolling to track commit-based updates explicitly.",
+            "medium",
+        )
+
+    return "none", "", "", "high"
 
 
 def _tag_to_int(tag: str) -> int | None:
@@ -53172,6 +53349,13 @@ class Handler(BaseHTTPRequestHandler):
                 active_ref = ""
 
             channel_switch = bool(active_channel and active_channel != ch)
+            install_origin = _detect_install_origin(
+                install_source=install_source,
+                active_channel=active_channel,
+                active_ref=active_ref,
+                stable_tag=installed_stable,
+                rolling_sha=installed_rolling,
+            )
 
             installed_ref = installed_stable if ch == "stable" else installed_rolling
             known_installed = bool(installed_ref)
@@ -53278,6 +53462,19 @@ class Handler(BaseHTTPRequestHandler):
                 remote_layer_sha256,
                 has_remote=bool(remote_script_text),
             )
+            channel_rec_action, channel_rec_target, channel_rec_reason, channel_rec_confidence = _recommend_channel_switch(
+                configured_channel=ch,
+                active_channel=active_channel,
+                install_origin=install_origin,
+                channel_switch=channel_switch,
+                is_externally_managed=is_externally_managed,
+            )
+            if channel_rec_action == "switch_to_rolling":
+                rec_action = "switch_to_rolling"
+                rec_reason = channel_rec_reason or rec_reason
+                rec_changed_layers = []
+                rec_confidence = channel_rec_confidence or "medium"
+                rec_risk_level = "low"
 
             up_to_date = False
             update_available = False
@@ -53434,6 +53631,13 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "state_file": SELF_UPDATE_STATE_FILE,
                 "install_source": install_source,
+                "install_origin": dict(install_origin) if isinstance(install_origin, dict) else {},
+                "channel_recommendation": {
+                    "recommended": str(channel_rec_action or "none"),
+                    "target_channel": str(channel_rec_target or ""),
+                    "reason": str(channel_rec_reason or ""),
+                    "confidence": str(channel_rec_confidence or ""),
+                },
                 "error": err,
 
                 # New flags
@@ -53451,6 +53655,9 @@ class Handler(BaseHTTPRequestHandler):
                     "ref": active_ref or installed_ref,
                     "version": f"v{installed_ver}" if installed_ver > 0 else "",
                     "source": install_source,
+                    "origin_kind": str((install_origin or {}).get("kind", "") if isinstance(install_origin, dict) else ""),
+                    "origin_label": str((install_origin or {}).get("label", "") if isinstance(install_origin, dict) else ""),
+                    "origin_confidence": str((install_origin or {}).get("confidence", "") if isinstance(install_origin, dict) else ""),
                     "is_dirty": is_dirty,
                     "is_externally_managed": is_externally_managed,
                     "script_sha256": installed_sha_current,

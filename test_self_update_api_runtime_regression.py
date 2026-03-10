@@ -215,6 +215,67 @@ class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
         self.assertEqual(rec.get("recommended"), "install")
         self.assertIn("ambiguous", str(rec.get("reason", "")).lower())
         self.assertEqual(rec.get("risk_level"), "high")
+    def test_self_update_status_recommends_switch_to_rolling_from_origin_metadata(self) -> None:
+        helper_path = self._temp_helper_script("#!/bin/bash\n# VERSION 1\n")
+        conf_path = self._temp_helper_script("SELF_UPDATE_CHANNEL=\"stable\"\n")
+        state_path = f"{helper_path}.state"
+        Path(state_path).write_text(
+            json.dumps(
+                {
+                    "stable_tag": "v1",
+                    "rolling_sha": "6f4e3d2c1b0a9f8e7d6c5b4a3210fedcba987654",
+                    "last_update_channel": "stable",
+                    "last_update_ref": "v1",
+                    "install_source": "rolling-commit",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        stub_any_running = lambda: {"running": False, "channel": "", "unit": "", "status_path": ""}
+        stub_conf = lambda _p: ({"SELF_UPDATE_CHANNEL": "stable", "SELF_UPDATE_STABLE_POLICY": "release"}, [], [])
+        stub_release = (
+            {
+                "tag_name": "v1001",
+                "name": "v1001",
+                "published_at": "2026-03-10T00:00:00Z",
+                "prerelease": False,
+            },
+            {
+                "policy": "release",
+                "selection": "release",
+                "fallback_reason": "",
+                "source_url": "",
+                "source_urls": [],
+                "is_prerelease": False,
+            },
+        )
+
+        with _override(
+            self.ns,
+            HELPER_BIN=helper_path,
+            SELF_UPDATE_STATE_FILE=state_path,
+            _read_conf=stub_conf,
+            _self_update_any_running=stub_any_running,
+            _github_latest_release_candidate=lambda **_k: stub_release,
+            _read_remote_script_bytes=lambda *_a, **_k: (b"", ""),
+        ):
+            _orig_realpath = self.ns["os"].path.realpath
+            with mock.patch.object(
+                self.ns["os"].path,
+                "realpath",
+                side_effect=lambda p, _orig=_orig_realpath: "/usr/local/bin/zypper-auto-helper" if str(p) == str(helper_path) else _orig(p),
+            ):
+                code, payload = self._invoke_get("/api/self-update/status?channel=stable", conf_path=conf_path)
+
+        self.assertEqual(code, 200)
+        rec = payload.get("post_action_recommendation") or {}
+        self.assertEqual(rec.get("recommended"), "switch_to_rolling")
+        chrec = payload.get("channel_recommendation") or {}
+        self.assertEqual(chrec.get("recommended"), "switch_to_rolling")
+        self.assertEqual(chrec.get("target_channel"), "rolling")
+        origin = payload.get("install_origin") or {}
+        self.assertEqual(origin.get("kind"), "rolling-commit")
 
     def test_snapper_timers_missing_units_include_partial_reason(self) -> None:
         conf_path = self._temp_helper_script("SELF_UPDATE_CHANNEL=\"stable\"\n")

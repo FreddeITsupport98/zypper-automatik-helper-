@@ -80,6 +80,8 @@ require_contains "${source_text}" "def _github_latest_release_candidate(*, polic
 require_contains "${source_text}" "def _read_remote_script_bytes(ref: str, timeout_s: int = 15) -> tuple[bytes, str]:" "backend missing remote script bytes helper"
 require_contains "${source_text}" "def _script_layer_sha256s(text: str) -> dict:" "backend missing layered SHA256 helper"
 require_contains "${source_text}" "def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool) -> tuple[str, str, list[str], str, str]:" "backend missing recommendation helper"
+require_contains "${source_text}" "def _detect_install_origin(*, install_source: str, active_channel: str, active_ref: str, stable_tag: str, rolling_sha: str) -> dict:" "backend missing install-origin detection helper"
+require_contains "${source_text}" "def _recommend_channel_switch(*, configured_channel: str, active_channel: str, install_origin: dict, channel_switch: bool, is_externally_managed: bool) -> tuple[str, str, str, str]:" "backend missing channel-switch recommendation helper"
 
 require_contains "${self_update_status_block}" "_github_latest_release_candidate(policy=stable_policy, timeout_s=10)" "status endpoint missing policy-aware stable release-candidate selection"
 require_contains "${self_update_status_block}" "data, pth = _read_remote_script_bytes(remote_ref, timeout_s=15)" "status endpoint missing remote script content fetch"
@@ -88,6 +90,8 @@ require_contains "${self_update_status_block}" "remote_layer_sha256 = _script_la
 require_contains "${self_update_status_block}" "rec_action, rec_reason, rec_changed_layers, rec_confidence, rec_risk_level = _recommend_post_action(" "status endpoint missing expanded recommendation decision call"
 require_contains "${source_text}" "\"stable_candidate\": {" "status payload missing stable candidate metadata"
 require_contains "${source_text}" "\"post_action_recommendation\": {" "status payload missing post-action recommendation object"
+require_contains "${source_text}" "\"install_origin\": dict(install_origin) if isinstance(install_origin, dict) else {}," "status payload missing install-origin object"
+require_contains "${source_text}" "\"channel_recommendation\": {" "status payload missing channel recommendation object"
 require_contains "${source_text}" "\"recommended\": str(rec_action or \"none\")," "status payload missing recommendation value"
 require_contains "${source_text}" "\"changed_layers\": rec_changed_layers if isinstance(rec_changed_layers, list) else []," "status payload missing changed-layer list"
 require_contains "${source_text}" "\"confidence\": str(rec_confidence or \"\")," "status payload missing recommendation confidence"
@@ -110,5 +114,7 @@ require_contains "${su_render_install_block}" "Why recommended?" "install overla
 require_contains "${su_render_install_block}" "function _suChangedLayerLabel(name) {" "install overlay missing plain-language changed-layer labels"
 require_contains "${su_render_install_block}" "id=\\\"su-post-action-warning\\\"" "install overlay missing manual override warning container"
 require_contains "${su_render_install_block}" "function syncPostActionWarning() {" "install overlay missing override warning sync helper"
+require_contains "${su_render_install_block}" "switch_to_rolling" "install overlay missing switch-to-rolling recommendation handling"
+require_contains "${su_render_install_block}" "Recommendation: switch channel to rolling before installing." "install overlay missing explicit rolling switch recommendation text"
 
 pass "Self-update recommendation regression checks passed"

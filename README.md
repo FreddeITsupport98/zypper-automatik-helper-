@@ -369,6 +369,8 @@ Self-update notes:
 - Stable channel safety: it refuses to **downgrade** to an older stable tag unless you pass `--force`.
 - In the stable channel, if a `.sha256`/`.sha256sum` file is published for the release, it will verify SHA256 before installing.
 - After installing, it runs a safe post-update self-test (`--help` and `--check` when possible). If that fails, it automatically rolls back to the previous version.
+- Self-update state now records clearer install provenance for update runs (`stable-release` vs `rolling-commit`) so API/UI status can show where the current helper build came from.
+- Dashboard/API status now exposes `install_origin` + `channel_recommendation`; when a build appears to come from rolling lineage while stable is configured, the UI can explicitly recommend switching channel to rolling.
 - **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
 
 #### 🖥️ Dashboard WebUI self-update
@@ -1196,6 +1198,14 @@ python3 -m venv /tmp/zah-playwright-venv
 /tmp/zah-playwright-venv/bin/python -m playwright install chromium
 /tmp/zah-playwright-venv/bin/python -m unittest -v test_snapper_timer_playwright_regression.py
 ```
+Or bootstrap/update the project-local regression venv in one command:
+```bash
+bash scripts/bootstrap_playwright_regression.sh
+```
+Then run the suite as usual (optional Playwright test auto-detects this venv):
+```bash
+bash run_regression_suite.sh zypper-auto.sh
+```
 
 If Playwright is unavailable, the test is skipped automatically instead of
 failing unrelated test runs.
@@ -1292,12 +1302,20 @@ What it runs:
 - `test_boot_kernel_inventory_regression.sh`
 - `test_kernel_purge_lock_regression.sh`
 - `test_snapper_option4_modal_layout.sh`
-- Optional: `test_snapper_timer_playwright_regression.py` (skip-safe)
+- Optional: `test_snapper_timer_playwright_regression.py` (skip-safe; prefers `./.venv-playwright-regression/bin/python` when present)
 
 Run it:
 
 ```bash
 bash run_regression_suite.sh zypper-auto.sh
+```
+If needed, refresh the optional Playwright venv/runtime first:
+```bash
+bash scripts/bootstrap_playwright_regression.sh
+```
+You can also force a specific interpreter for the optional Playwright test:
+```bash
+PLAYWRIGHT_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
 ```
 
 -----
@@ -2087,6 +2105,8 @@ systemctl status zypper-autodownload.service
   - 🧪 **IMPROVED:** static regression `test_snapper_timer_controls_regression.sh` now also guards verbose state normalization, optimistic override wiring, passive timer-sync initialization paths, and Snapper status service-state output formatting (`enabled=... active=... preset=...`).
   - 🧪 **NEW:** added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, Snapper service-state output formatting/hints, and `/api/snapper/status` helper API contract.
   - 🧪 **NEW:** added central runner `run_regression_suite.sh` for non-destructive regression execution (includes Snapper service-status regression and optional Playwright run).
+  - 🧪 **IMPROVED:** `run_regression_suite.sh` optional Playwright regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
+  - 🧪 **NEW:** added `scripts/bootstrap_playwright_regression.sh` helper to create/update the local Playwright regression venv + Chromium runtime in one command.
   - ⚡ **IMPROVED:** diagnostics follower now uses a low-noise single-tail multiplexer and caps followed service logs to most-recent entries by default (`ZNH_DIAG_MAX_SERVICE_LOGS`), now exposed in WebUI Settings.
   - ⚡ **IMPROVED:** interactive debug-menu/CLI live-log fallback paths now cap service-log source fanout (`ZNH_LIVE_LOGS_MAX_SERVICE_LOGS`) to avoid temporary tail-process spikes, now exposed in WebUI Settings.
   - 🧰 **NEW:** added `zypper-auto-helper --stale-module-dirs` helper command (safe audit default) with optional quarantine mode, explicit confirmation phrase, and non-interactive `--yes` guard.
@@ -2358,6 +2378,8 @@ systemctl status zypper-autodownload.service
   - 🧰 **NEW:** self-update install step now has an **After update** mode: Quick update only, Verify & Fix (recommended), or Full install (recreate services/wrappers).
   - 🧠 **NEW:** Self-update status now computes **layered SHA256 fingerprints** for key helper sections and returns `post_action_recommendation` (`none` / `verify` / `install`) with reason + changed layers + `confidence` + `risk_level`.
   - 🧿 **IMPROVED:** Self-update install overlay now preselects the **After update** mode automatically, shows an expandable **Why recommended?** explanation (plain-language changed-layer labels), and warns visibly when manual post-action override deviates from recommendation.
+  - 🧭 **IMPROVED:** Self-update recommendation metadata now supports `switch_to_rolling` when install-origin evidence indicates rolling-commit lineage while stable remains configured.
+  - 🧾 **IMPROVED:** Self-update status payload now includes explicit install-origin + channel-advice objects (`install_origin`, `channel_recommendation`), and the WebUI surfaces this context in status detail/verification text.
   - 🧭 **IMPROVED:** Stable self-update semantics are now explicit-policy driven (`SELF_UPDATE_STABLE_POLICY=release|candidate|prerelease`) with provenance surfaced end-to-end (selected policy, fallback reason, source URL(s)) across backend API, CLI self-update flow, and WebUI release-notes/changelog fetchers.
   - 🧰 **IMPROVED:** Snapper WebUI timer status API now reads authoritative systemd state directly (`systemctl show` + `is-enabled` + `is-active`) and includes richer per-timer truth fields (`next_trigger_utc`, `last_trigger_utc`, `last_result`, `partial_reason`) alongside compatibility state fields.
   - 🧪 **NEW:** Added runtime API regression coverage (`test_self_update_api_runtime_regression.py`) for mocked failure paths: GitHub rate-limit/selection failures, missing remote script fingerprints, ambiguous section markers, and missing Snapper timer units.

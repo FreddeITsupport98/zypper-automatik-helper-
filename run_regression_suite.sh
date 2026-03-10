@@ -20,7 +20,7 @@ Runs the non-destructive regression suite against zypper-auto.sh:
   - kernel purge lock handling regression
   - helper PATH install/uninstall regression
   - snapper option-4 modal layout regression
-  - optional playwright snapper timer browser regression (skip-safe)
+  - optional playwright snapper timer browser regression (skip-safe; prefers .venv-playwright-regression when present)
 EOF
 }
 
@@ -61,7 +61,20 @@ if command -v python3 >/dev/null 2>&1; then
     printf '\n==> test_self_update_api_runtime_regression.py\n'
     python3 -m unittest -v "${SCRIPT_DIR}/test_self_update_api_runtime_regression.py"
     printf '\n==> test_snapper_timer_playwright_regression.py (optional)\n'
-    python3 -m unittest -v "${SCRIPT_DIR}/test_snapper_timer_playwright_regression.py" || true
+    PLAYWRIGHT_TEST_PYTHON="${PLAYWRIGHT_TEST_PYTHON:-}"
+    if [ -n "${PLAYWRIGHT_TEST_PYTHON}" ] && [ ! -x "${PLAYWRIGHT_TEST_PYTHON}" ]; then
+        fail "PLAYWRIGHT_TEST_PYTHON is set but not executable: ${PLAYWRIGHT_TEST_PYTHON}"
+    fi
+    if [ -z "${PLAYWRIGHT_TEST_PYTHON}" ]; then
+        PLAYWRIGHT_VENV_PY="${SCRIPT_DIR}/.venv-playwright-regression/bin/python"
+        if [ -x "${PLAYWRIGHT_VENV_PY}" ]; then
+            PLAYWRIGHT_TEST_PYTHON="${PLAYWRIGHT_VENV_PY}"
+        else
+            PLAYWRIGHT_TEST_PYTHON="python3"
+        fi
+    fi
+    printf 'Using Playwright test python: %s\n' "${PLAYWRIGHT_TEST_PYTHON}"
+    "${PLAYWRIGHT_TEST_PYTHON}" -m unittest -v "${SCRIPT_DIR}/test_snapper_timer_playwright_regression.py" || true
 else
     printf '\nSkipping optional Playwright regression: python3 not found\n'
 fi

@@ -14,10 +14,14 @@
 - Install/update verification flow now also skips Safety Net pre/post snapshots (`run_smart_verification_with_safety_net ... never`), so helper auto-repair does not create extra Btrfs snapshots.
 - Self-update status API now computes layered SHA256 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed layers + `confidence` + `risk_level`.
 - Self-update WebUI install overlay now preselects post-update mode from recommendation metadata, includes an expandable **Why recommended?** explanation, and warns when manual override deviates from recommendation.
+- Self-update recommendation logic now supports `switch_to_rolling` when install-origin metadata indicates a rolling-commit lineage but the configured channel remains stable.
+- Self-update status payloads now expose normalized install-origin metadata (`install_origin`) and channel advice (`channel_recommendation`), and the WebUI surfaces this in status/detail and overlay verification text.
 - Stable self-update now uses explicit policy semantics (`SELF_UPDATE_STABLE_POLICY=release|candidate|prerelease`) and surfaces provenance (`selection`, `fallback_reason`, source URL) across API/CLI/WebUI stable notes/changelog flows.
 - Snapper `/api/snapper/timers` now uses systemd-authoritative probing (`systemctl show` + `is-enabled` + `is-active`) and returns richer truth fields (`next_trigger_utc`, `last_trigger_utc`, `last_result`, `partial_reason`) in `snapper_*_timer_live` payloads alongside compatibility state fields.
 - Added focused regression smoke test `test_self_update_recommendation_regression.sh` and wired it into `run_regression_suite.sh`.
 - Added runtime API regression test `test_self_update_api_runtime_regression.py` and wired it into `run_regression_suite.sh` for mocked `/api/self-update/status` and `/api/snapper/timers` failure-path coverage.
+- `run_regression_suite.sh` optional Playwright browser regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
+- Added helper `scripts/bootstrap_playwright_regression.sh` to create/update the local Playwright regression venv and install Chromium runtime in one command.
 - Updated `test_snapper_timer_controls_regression.sh` timer-endpoint expectations to validate probe-based live-state payloads.
 - Fixed stale downloader-status auto-repair command quoting so temporary file handling works correctly under `set -u` (prevents `tmp: unbound variable` failures).
 - Added regression smoke test `test_verify_snapshot_policy_regression.sh` and wired it into `run_regression_suite.sh` to guard verify-vs-install snapshot policy behavior.
