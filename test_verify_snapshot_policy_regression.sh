@@ -11,7 +11,7 @@ Usage: ./test_verify_snapshot_policy_regression.sh [path/to/zypper-auto.sh]
 Regression smoke test for verification Safety Net snapshot policy:
   - run_smart_verification_with_safety_net supports explicit snapshot mode control
   - verify-only path forces snapshot mode "never"
-  - install verification path forces snapshot mode "always"
+  - install/update verification path keeps snapshot mode disabled ("never")
 EOF
 }
 
@@ -59,6 +59,6 @@ require_contains "${fn_block}" "skipping pre/post Snapper snapshots for this ver
 require_contains "${fn_block}" "__znh_finalize_repair_safety_snapshot \"\$rc\" || true" "snapshot finalize call missing"
 
 require_contains "${source_text}" "run_smart_verification_with_safety_net 2 never" "verify-only path must disable safety snapshots"
-require_contains "${source_text}" "run_smart_verification_with_safety_net 1 always" "install verification path must keep safety snapshots"
+require_contains "${source_text}" "run_smart_verification_with_safety_net 1 never" "install verification path must keep safety snapshots disabled"
 
 pass "Verification snapshot policy regression checks passed"

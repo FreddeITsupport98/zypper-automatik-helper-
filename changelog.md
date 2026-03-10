@@ -5,12 +5,13 @@
 - Uninstall flow now removes that compatibility symlink only when it points to the helper target and leaves unrelated/package-managed `/usr/bin/zypper-auto-helper` files untouched.
 - Uninstall shell cleanup now removes full `zypper-auto-helper` wrapper function blocks from `.bashrc`/`.zshrc` in addition to alias lines.
 - Verification Safety Net policy changed: routine `--verify` runs (including `zypper-auto-verify.timer`) no longer create pre/post Snapper Safety Net snapshots on every cycle.
-- Safety Net pre/post snapshots are now kept for install/update verification flow (`install` path), reducing repeated EFI initrd artifact growth from background verify loops.
-- Self-update status API now computes layered MD5 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed-layer metadata.
-- Self-update WebUI install overlay now preselects the post-update mode from backend recommendation metadata and shows recommendation hint text.
-- Stable self-update semantics now resolve the latest non-draft release candidate from GitHub releases list (`/releases?per_page=25`) in API, CLI self-update flow, and WebUI stable notes/changelog fetch paths.
-- Snapper `/api/snapper/timers` now uses systemd-authoritative live probing (`systemctl show` + `is-enabled` + `is-active`) and returns `snapper_*_timer_live` detail objects in addition to compatibility state fields.
+- Install/update verification flow now also skips Safety Net pre/post snapshots (`run_smart_verification_with_safety_net ... never`), so helper auto-repair does not create extra Btrfs snapshots.
+- Self-update status API now computes layered SHA256 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed layers + `confidence` + `risk_level`.
+- Self-update WebUI install overlay now preselects post-update mode from recommendation metadata, includes an expandable **Why recommended?** explanation, and warns when manual override deviates from recommendation.
+- Stable self-update now uses explicit policy semantics (`SELF_UPDATE_STABLE_POLICY=release|candidate|prerelease`) and surfaces provenance (`selection`, `fallback_reason`, source URL) across API/CLI/WebUI stable notes/changelog flows.
+- Snapper `/api/snapper/timers` now uses systemd-authoritative probing (`systemctl show` + `is-enabled` + `is-active`) and returns richer truth fields (`next_trigger_utc`, `last_trigger_utc`, `last_result`, `partial_reason`) in `snapper_*_timer_live` payloads alongside compatibility state fields.
 - Added focused regression smoke test `test_self_update_recommendation_regression.sh` and wired it into `run_regression_suite.sh`.
+- Added runtime API regression test `test_self_update_api_runtime_regression.py` and wired it into `run_regression_suite.sh` for mocked `/api/self-update/status` and `/api/snapper/timers` failure-path coverage.
 - Updated `test_snapper_timer_controls_regression.sh` timer-endpoint expectations to validate probe-based live-state payloads.
 - Fixed stale downloader-status auto-repair command quoting so temporary file handling works correctly under `set -u` (prevents `tmp: unbound variable` failures).
 - Added regression smoke test `test_verify_snapshot_policy_regression.sh` and wired it into `run_regression_suite.sh` to guard verify-vs-install snapshot policy behavior.

@@ -1531,6 +1531,11 @@ DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. fire
 # Self-update channel used by --self-update (rolling=latest commit, stable=GitHub releases)
 # Default: stable (tags). Rolling is still available if you want "always latest".
 SELF_UPDATE_CHANNEL="stable"
+# Stable-channel release selection policy:
+#   release    = prefer non-prerelease releases (default)
+#   candidate  = allow newest release candidate from releases list
+#   prerelease = prefer prerelease builds
+SELF_UPDATE_STABLE_POLICY="release"
 
 # Zypper Turbo tuner (optional): tune /etc/zypp/zypp.conf for faster downloads.
 # Default is false because it modifies a core system config file.
@@ -2269,6 +2274,7 @@ __znh_write_dashboard_schema_json() {
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
+    "SELF_UPDATE_STABLE_POLICY": {"type": "enum", "allowed": ["release","candidate","prerelease"], "default": "release"},
 
     "ROCKET_WIZARD_DEFAULT_SIMULATE": {"type": "bool", "default": "true"},
     "ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 600, "step": 30, "default": "180"},
@@ -8420,6 +8426,15 @@ MANAGERS_SERVER_POLL_HIDDEN_MS=16000
 # Default: stable
 SELF_UPDATE_CHANNEL="stable"
 
+# SELF_UPDATE_STABLE_POLICY
+# Controls how the stable channel picks a release from GitHub Releases.
+# Allowed values:
+#   - release    : prefer non-prerelease releases (default)
+#   - candidate  : pick newest non-draft release candidate from releases list
+#   - prerelease : prefer prerelease builds (falls back to latest candidate)
+# Default: release
+SELF_UPDATE_STABLE_POLICY="release"
+
 # ---------------------------------------------------------------------
 # Rocket Update Wizard (WebUI) defaults
 # ---------------------------------------------------------------------
@@ -9316,6 +9331,7 @@ EOF
     validate_allowed_set CLEANUP_REPORT_FORMAT both "text,json,both"
     validate_allowed_set BOOT_ENTRY_CLEANUP_MODE backup "backup,delete"
     validate_allowed_set SELF_UPDATE_CHANNEL stable "rolling,stable"
+    validate_allowed_set SELF_UPDATE_STABLE_POLICY release "release,candidate,prerelease"
     validate_allowed_set WEBUI_HISTORY_RETENTION_DAYS 30 "7,30,90"
 
     # Snapper knobs (bounded ints + bools)
@@ -9671,6 +9687,7 @@ EOF
     _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
     _mark_missing_key "MANAGERS_SERVER_POLL_HIDDEN_MS"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
+    _mark_missing_key "SELF_UPDATE_STABLE_POLICY"
     _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
     _mark_missing_key "ZYPPER_TURBO_TUNER_ENABLED"
     _mark_missing_key "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED"
@@ -9825,6 +9842,9 @@ EOF
                     ;;
                 SELF_UPDATE_CHANNEL)
                     log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
+                    ;;
+                SELF_UPDATE_STABLE_POLICY)
+                    log_info "  - SELF_UPDATE_STABLE_POLICY: controls stable-channel release selection policy (release/candidate/prerelease) for self-update and dashboard status."
                     ;;
                 ZYPPER_TURBO_TUNER_ENABLED)
                     log_info "  - ZYPPER_TURBO_TUNER_ENABLED: when true, verification can tune /etc/zypp/zypp.conf for faster zypper downloads (parallel connections + DownloadInAdvance)."
@@ -18008,6 +18028,7 @@ generate_dashboard() {
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
+        { key: 'SELF_UPDATE_STABLE_POLICY', type: 'enum', label: 'Self-update stable policy (release/candidate/prerelease)', help: 'Controls stable-channel target selection policy for self-update status, changelog notes, and install flow.' },
 
         { key: 'ROCKET_WIZARD_DEFAULT_SIMULATE', type: 'bool', label: 'Rocket Wizard: default to Simulation mode (dry-run) in WebUI', help: 'Safer default: opens wizard in dry-run mode unless you uncheck it.' },
         { key: 'ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS', type: 'int', label: 'Rocket Wizard: preview lock-wait timeout (seconds)', help: 'How long preview waits if YaST/zypper lock is active.' },
@@ -24648,8 +24669,26 @@ generate_dashboard() {
         _suPreviewSetLoading(true);
         _suPreviewSet(head.join('\n') + 'Loading release notes…');
 
-        var notesHdr = (ch === 'rolling') ? 'Rolling channel: latest commits on main' : 'Stable channel: latest release-candidate notes';
-        var fetchNotes = (ch === 'rolling') ? _suFetchRollingCommitsText : _suFetchStableReleaseNotesText;
+        var stablePolicy = '';
+        var stableSelection = '';
+        var stableFallbackReason = '';
+        if (ch === 'stable') {
+            try { stablePolicy = String((st && st.configured_stable_policy) || (st && st.stable_policy) || 'release'); } catch (eP1) { stablePolicy = ''; }
+            try { stableSelection = String((st && st.stable_candidate && st.stable_candidate.selection) || stablePolicy || 'release'); } catch (eP2) { stableSelection = ''; }
+            try { stableFallbackReason = String((st && st.stable_candidate && st.stable_candidate.fallback_reason) || ''); } catch (eP3) { stableFallbackReason = ''; }
+            stablePolicy = _suNormalizeStablePolicy(stablePolicy);
+            stableSelection = _suNormalizeStablePolicy(stableSelection || stablePolicy);
+            if (stablePolicy) head.push('Stable policy: ' + stablePolicy + ' (selected: ' + stableSelection + ')');
+            if (stableFallbackReason) head.push('Stable fallback: ' + stableFallbackReason);
+            head.push('');
+        }
+
+        var notesHdr = (ch === 'rolling')
+            ? 'Rolling channel: latest commits on main'
+            : ('Stable channel: policy-aware release notes' + (stablePolicy ? (' (policy=' + stablePolicy + ', selected=' + (stableSelection || stablePolicy) + ')') : ''));
+        var fetchNotes = (ch === 'rolling')
+            ? _suFetchRollingCommitsText
+            : function() { return _suFetchStableReleaseNotesText(st || null); };
         fetchNotes().then(function(notes) {
             var txt = head.join('\n') + notesHdr + '\n\n' + String(notes || '(no notes)');
             try { window.__znh_su_preview_cache = { key: cacheKey, text: txt }; } catch (e5) {}
@@ -24732,6 +24771,16 @@ generate_dashboard() {
         var actionType = (st && st.evaluation && st.evaluation.action_type) ? st.evaluation.action_type : '';
         var actionMsg = (st && st.evaluation && st.evaluation.message) ? st.evaluation.message : '';
         var source = (st && st.install_source) ? st.install_source : '';
+        var stablePolicy = '';
+        var stableSelection = '';
+        var stableFallbackReason = '';
+        var stableSourceUrl = '';
+        try { stablePolicy = String((st && st.configured_stable_policy) || (st && st.stable_policy) || ''); } catch (eSP0) { stablePolicy = ''; }
+        try { stableSelection = String((st && st.stable_candidate && st.stable_candidate.selection) || ''); } catch (eSP1) { stableSelection = ''; }
+        try { stableFallbackReason = String((st && st.stable_candidate && st.stable_candidate.fallback_reason) || ''); } catch (eSP2) { stableFallbackReason = ''; }
+        try { stableSourceUrl = String((st && st.stable_candidate && st.stable_candidate.source_url) || ''); } catch (eSP3) { stableSourceUrl = ''; }
+        stablePolicy = _suNormalizeStablePolicy(stablePolicy);
+        stableSelection = _suNormalizeStablePolicy(stableSelection || stablePolicy);
         var dl = _suGetDownloadUrlFromStatus(st);
         var destPath = _suGetDestinationPathFromStatus(st);
 
@@ -24741,6 +24790,12 @@ generate_dashboard() {
         }
         info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Installed ref: <strong>' + _znhEscapeHtml(installedRef) + '</strong></div>');
         info.push('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent-2);">●</span> Remote ref: <strong>' + _znhEscapeHtml(remoteRef) + '</strong></div>');
+        if (ch === 'stable' && stablePolicy) {
+            info.push('<div class=\"feat-badge\"><span class=\"feat-dot\" style=\"color: rgba(34,197,94,0.95);\">●</span> Stable policy: <strong>' + _znhEscapeHtml(stablePolicy) + '</strong> (selected: <strong>' + _znhEscapeHtml(stableSelection || stablePolicy) + '</strong>)</div>');
+        }
+        if (ch === 'stable' && stableSourceUrl) {
+            info.push('<div class=\"feat-badge\"><span class=\"feat-dot\" style=\"color: rgba(34,197,94,0.95);\">●</span> Stable source: <code style=\"font-size:0.85rem;\">' + _znhEscapeHtml(stableSourceUrl) + '</code></div>');
+        }
         if (destPath) {
             info.push('<div class="feat-badge"><span class="feat-dot" style="color: rgba(34,197,94,0.95);">●</span> Destination: <code style="font-size:0.85rem;">' + _znhEscapeHtml(destPath) + '</code></div>');
         }
@@ -24762,6 +24817,10 @@ generate_dashboard() {
             warn = '<div class="overlay-alert overlay-alert-warn">Remote stable tag is older than your installed build. Downgrades are blocked by default.</div>';
         } else if (st && st.is_dirty) {
             warn = '<div class="overlay-alert overlay-alert-warn">Local edits detected: your installed helper differs from the last recorded install/update. Self-update will overwrite manual changes.</div>';
+        }
+
+        if (ch === 'stable' && stableFallbackReason && !warn) {
+            warn = '<div class=\"overlay-alert overlay-alert-warn\">Stable selection fallback: ' + _znhEscapeHtml(stableFallbackReason) + '</div>';
         }
 
         if (actionMsg && !warn) {
@@ -24874,6 +24933,8 @@ generate_dashboard() {
         var recAction = 'none';
         var recReason = '';
         var recChangedLayers = [];
+        var recConfidence = '';
+        var recRiskLevel = '';
 
         function _suNormalizeRecommendedAction(v) {
             v = String(v || '').toLowerCase();
@@ -24887,11 +24948,15 @@ generate_dashboard() {
                 recAction = _suNormalizeRecommendedAction(rec.recommended);
                 recReason = String(rec.reason || '');
                 if (Array.isArray(rec.changed_layers)) recChangedLayers = rec.changed_layers.slice(0, 8);
+                recConfidence = String(rec.confidence || '');
+                recRiskLevel = String(rec.risk_level || '');
             }
         } catch (eR0) {
             recAction = 'none';
             recReason = '';
             recChangedLayers = [];
+            recConfidence = '';
+            recRiskLevel = '';
         }
 
         _su.post_action = _suNormalizeRecommendedAction(recAction);
@@ -24910,16 +24975,33 @@ generate_dashboard() {
         } catch (eS) { srcHtml = ''; }
 
         var recHtml = '';
+        function _suChangedLayerLabel(name) {
+            var n = '';
+            try { n = String(name || '').trim(); } catch (eL0) { n = ''; }
+            if (n === 'self_update_core') return 'Core self-update logic';
+            if (n === 'dashboard_api_embed') return 'Dashboard API backend';
+            if (n === 'installer_payloads') return 'Installer/deployer payloads';
+            return n || 'Unknown layer';
+        }
         try {
-            var recLine = '';
-            if (recAction) recLine = 'Recommended: ' + recAction;
-            if (recReason) recLine += (recLine ? ' — ' : '') + recReason;
-            if (recChangedLayers && recChangedLayers.length) recLine += ' (changed layers: ' + recChangedLayers.join(', ') + ')';
-            if (recLine) {
-                recHtml = '<div style=\"color: var(--muted); font-size:0.84rem; margin-top:6px;\">'
-                    + _znhEscapeHtml(recLine)
-                    + '</div>';
+            var recMeta = [];
+            if (recConfidence) recMeta.push('confidence: ' + recConfidence);
+            if (recRiskLevel) recMeta.push('risk: ' + recRiskLevel);
+            var layerLines = [];
+            if (recChangedLayers && recChangedLayers.length) {
+                for (var li = 0; li < recChangedLayers.length; li++) {
+                    var rawLayer = String(recChangedLayers[li] || '');
+                    layerLines.push('- ' + _suChangedLayerLabel(rawLayer) + (rawLayer ? (' (' + rawLayer + ')') : ''));
+                }
             }
+            recHtml = [
+                '<details style=\"margin-top:8px; border:1px solid rgba(255,255,255,0.10); border-radius:12px; padding:8px 10px; background:rgba(255,255,255,0.03);\">',
+                '  <summary style=\"cursor:pointer; font-weight:900; color: var(--text);\">Why recommended? <span style=\"color:var(--muted); font-weight:800;\">(' + _znhEscapeHtml(recAction || 'none') + ')</span></summary>',
+                '  <div style=\"margin-top:8px; color: var(--muted); font-size:0.84rem;\">' + _znhEscapeHtml(recReason || 'No additional recommendation reason available.') + '</div>',
+                (recMeta.length ? ('  <div style=\"margin-top:6px; color: var(--muted); font-size:0.82rem;\">' + _znhEscapeHtml(recMeta.join(' • ')) + '</div>') : ''),
+                (layerLines.length ? ('  <pre class=\"overlay-pre\" style=\"margin-top:8px; max-height: 120px;\">' + _znhEscapeHtml(layerLines.join('\n')) + '</pre>') : ''),
+                '</details>'
+            ].join('\n');
         } catch (eR1) { recHtml = ''; }
 
         e.body.innerHTML = [
@@ -24938,11 +25020,12 @@ generate_dashboard() {
             '    <span style="font-size:0.88rem; color: var(--muted); font-weight: 800;">After update:</span>',
             '    <select id="su-post-action" style="padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text);">',
             '      <option value="none">Quick update only (atomic script swap)</option>',
-            '      <option value="verify">Verify & Fix (recommended)</option>',
+            '      <option value=\"verify\">Verify & Fix</option>',
             '      <option value="install">Full install (recreate services/wrappers)</option>',
             '    </select>',
             '  </div>',
             recHtml,
+            '  <div id=\"su-post-action-warning\" class=\"overlay-alert overlay-alert-warn znh-hidden\" style=\"margin-top:8px;\"></div>',
             '  <div style="color: var(--muted); font-size:0.84rem;">Quick update replaces only the helper script file. Verify/Install will also run extra checks after updating so new units/scripts are applied.</div>',
             '</div>',
             '<div class="overlay-progress">',
@@ -25000,6 +25083,30 @@ generate_dashboard() {
             if (v !== 'none' && v !== 'verify' && v !== 'install') v = 'none';
             return v;
         }
+        function _suPostActionLabel(v) {
+            v = _suNormalizePostAction(v);
+            if (v === 'verify') return 'Verify & Fix';
+            if (v === 'install') return 'Full install';
+            return 'Quick update only';
+        }
+
+        function syncPostActionWarning() {
+            var warnEl = document.getElementById('su-post-action-warning');
+            if (!warnEl) return;
+            var isDry = false;
+            try { isDry = !!(dry && dry.checked); } catch (eW0) { isDry = false; }
+            var selected = _suNormalizePostAction(postSel ? postSel.value : _su.post_action);
+            var recommended = _suNormalizePostAction(recAction);
+            if (isDry || selected === recommended) {
+                try { warnEl.classList.add('znh-hidden'); } catch (eW1) {}
+                try { warnEl.textContent = ''; } catch (eW2) {}
+                return;
+            }
+            var txt = 'Manual override: selected ' + _suPostActionLabel(selected) + ' while recommendation is ' + _suPostActionLabel(recommended) + '.';
+            if (recReason) txt += ' Reason: ' + recReason;
+            try { warnEl.textContent = txt; } catch (eW3) {}
+            try { warnEl.classList.remove('znh-hidden'); } catch (eW4) {}
+        }
 
         function syncPostActionDisabled() {
             if (!postSel) return;
@@ -25012,6 +25119,7 @@ generate_dashboard() {
             } else {
                 try { postSel.disabled = false; } catch (eD3) {}
             }
+            syncPostActionWarning();
         }
 
         if (postSel) {
@@ -25019,6 +25127,7 @@ generate_dashboard() {
             postSel.addEventListener('change', function() {
                 try { _su.post_action = _suNormalizePostAction(postSel.value); } catch (eP1) { _su.post_action = 'none'; }
                 syncPostActionDisabled();
+                syncPostActionWarning();
             });
         }
 
@@ -25026,8 +25135,10 @@ generate_dashboard() {
         if (dry) dry.addEventListener('change', function() {
             _su.dry_run = !!dry.checked;
             syncPostActionDisabled();
+            syncPostActionWarning();
         });
         syncPostActionDisabled();
+        syncPostActionWarning();
         updateInstallEnabled();
     }
 
@@ -25722,32 +25833,104 @@ generate_dashboard() {
         }
     }
 
-    function _suFetchLatestStableReleaseCandidate() {
+    function _suNormalizeStablePolicy(v) {
+        var p = '';
+        try { p = String(v || '').trim().toLowerCase(); } catch (e0) { p = ''; }
+        if (p !== 'release' && p !== 'candidate' && p !== 'prerelease') p = 'release';
+        return p;
+    }
+
+    function _suStablePolicyFromStatus(st) {
+        var p = '';
+        try {
+            if (st && st.configured_stable_policy != null) p = String(st.configured_stable_policy || '');
+            if (!p && st && st.stable_policy != null) p = String(st.stable_policy || '');
+            if (!p && st && st.stable_candidate && st.stable_candidate.policy != null) p = String(st.stable_candidate.policy || '');
+            if (!p && _settingsConfig && _settingsConfig.SELF_UPDATE_STABLE_POLICY != null) p = String(_settingsConfig.SELF_UPDATE_STABLE_POLICY || '');
+        } catch (e0) { p = ''; }
+        return _suNormalizeStablePolicy(p);
+    }
+
+    function _suSelectStableReleaseCandidate(arr, policy) {
+        var pol = _suNormalizeStablePolicy(policy);
+        var candidates = [];
+        var i;
+        for (i = 0; i < (Array.isArray(arr) ? arr.length : 0); i++) {
+            var r0 = arr[i] || {};
+            var isDraft0 = false;
+            var tag0 = '';
+            try { isDraft0 = !!r0.draft; } catch (e0) { isDraft0 = false; }
+            try { tag0 = String(r0.tag_name || '').trim(); } catch (e1) { tag0 = ''; }
+            if (isDraft0) continue;
+            if (!tag0) continue;
+            candidates.push(r0);
+        }
+        if (!candidates.length) throw new Error('no usable release candidate found');
+
+        var releases = [];
+        var prereleases = [];
+        for (i = 0; i < candidates.length; i++) {
+            var rr = candidates[i] || {};
+            var isPre = false;
+            try { isPre = !!rr.prerelease; } catch (e2) { isPre = false; }
+            if (isPre) prereleases.push(rr);
+            else releases.push(rr);
+        }
+
+        var chosen = null;
+        var selection = pol;
+        var fallbackReason = '';
+        if (pol === 'prerelease') {
+            if (prereleases.length) chosen = prereleases[0];
+            else {
+                chosen = candidates[0];
+                selection = 'candidate';
+                fallbackReason = 'No prerelease candidate available; fell back to latest non-draft candidate.';
+            }
+        } else if (pol === 'candidate') {
+            chosen = candidates[0];
+        } else {
+            if (releases.length) chosen = releases[0];
+            else {
+                chosen = candidates[0];
+                selection = 'candidate';
+                fallbackReason = 'No non-prerelease release available; fell back to latest non-draft candidate.';
+            }
+        }
+
+        return {
+            release: chosen || {},
+            provenance: {
+                policy: pol,
+                selection: selection,
+                fallback_reason: fallbackReason,
+                is_prerelease: !!((chosen || {}).prerelease),
+            }
+        };
+    }
+
+    function _suFetchLatestStableReleaseCandidate(statusHint) {
         var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
+        var pol = _suStablePolicyFromStatus(statusHint || null);
         return _githubApiJson(base + '/releases?per_page=25').then(function(arr) {
             if (!Array.isArray(arr)) {
                 var m0 = '';
                 try { m0 = String((arr && arr.message) ? arr.message : 'unexpected GitHub response'); } catch (e0) { m0 = 'unexpected GitHub response'; }
                 throw new Error(m0);
             }
-            for (var i = 0; i < arr.length; i++) {
-                var r = arr[i] || {};
-                var isDraft = false;
-                var tag = '';
-                try { isDraft = !!r.draft; } catch (e1) { isDraft = false; }
-                try { tag = String(r.tag_name || '').trim(); } catch (e2) { tag = ''; }
-                if (isDraft) continue;
-                if (!tag) continue;
-                return r;
-            }
-            throw new Error('no usable release candidate found');
+            return _suSelectStableReleaseCandidate(arr, pol);
         });
     }
 
-    function _suFetchStableReleaseNotesText() {
-        return _suFetchLatestStableReleaseCandidate().then(function(j) {
+    function _suFetchStableReleaseNotesText(statusHint) {
+        return _suFetchLatestStableReleaseCandidate(statusHint || null).then(function(sel) {
+            var j = (sel && sel.release) ? sel.release : {};
+            var prov = (sel && sel.provenance) ? sel.provenance : {};
             var out = [];
-            out.push('Stable channel (latest release candidate)');
+            out.push('Stable channel (policy-aware release candidate)');
+            out.push('Policy: ' + String((prov && prov.policy) ? prov.policy : 'release'));
+            out.push('Selection: ' + String((prov && prov.selection) ? prov.selection : 'release'));
+            if (prov && prov.fallback_reason) out.push('Fallback: ' + String(prov.fallback_reason));
             out.push('Tag: ' + String(j.tag_name || 'unknown'));
             if (j.name) out.push('Name: ' + String(j.name));
             if (j.published_at) out.push('Published: ' + String(j.published_at));
@@ -26638,9 +26821,16 @@ generate_dashboard() {
         var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
 
         if (ch === 'stable') {
-            return _suFetchLatestStableReleaseCandidate().then(function(j) {
+            var statusHint = null;
+            try { statusHint = _self_update_ui.last_status || null; } catch (eSH0) { statusHint = null; }
+            return _suFetchLatestStableReleaseCandidate(statusHint).then(function(sel) {
+                var j = (sel && sel.release) ? sel.release : {};
+                var prov = (sel && sel.provenance) ? sel.provenance : {};
                 var out = [];
-                out.push('Stable channel (latest release candidate)');
+                out.push('Stable channel (policy-aware release candidate)');
+                out.push('Policy: ' + String((prov && prov.policy) ? prov.policy : 'release'));
+                out.push('Selection: ' + String((prov && prov.selection) ? prov.selection : 'release'));
+                if (prov && prov.fallback_reason) out.push('Fallback: ' + String(prov.fallback_reason));
                 out.push('Tag: ' + String(j.tag_name || 'unknown'));
                 if (j.name) out.push('Name: ' + String(j.name));
                 if (j.published_at) out.push('Published: ' + String(j.published_at));
@@ -26648,7 +26838,7 @@ generate_dashboard() {
                 out.push('');
                 out.push(String(j.body || '(no release notes)'));
                 _selfUpdateSetChangelog(out.join('\n'));
-                toast('Changelog loaded', 'Stable release-candidate notes fetched', 'ok');
+                toast('Changelog loaded', 'Stable notes fetched (' + String((prov && prov.selection) ? prov.selection : 'release') + ')', 'ok');
                 return j;
             }).catch(function(e) {
                 var msg = (e && e.message) ? e.message : 'failed';
@@ -34195,17 +34385,12 @@ run_smart_verification_with_safety_net() {
             ;;
         auto|"")
             # Default policy:
-            # - verify-only/timer runs: no Snapper safety snapshot
-            # - install/update verification flow: snapshot enabled
-            if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ] 2>/dev/null; then
-                snapshot_enabled=1
-            fi
+            # - auto-repair runs should not create additional btrfs/snapper snapshots.
+            snapshot_enabled=0
             ;;
         *)
             log_warn "Unknown verification snapshot mode '${snapshot_mode}', falling back to auto policy"
-            if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ] 2>/dev/null; then
-                snapshot_enabled=1
-            fi
+            snapshot_enabled=0
             ;;
     esac
 
@@ -40521,6 +40706,7 @@ run_self_update_only() {
     local repo api_url tag remote_sha raw_url_asset raw_url_tag raw_url
     local remote_ref installed_ref
     local current_line current_ver
+    local stable_policy stable_selection stable_fallback_reason stable_is_prerelease stable_info
 
     repo="FreddeITsupport98/zypper-automatik-helper-"
 
@@ -40531,6 +40717,11 @@ run_self_update_only() {
     raw_url_tag=""
     remote_ref=""
     installed_ref=""
+    stable_policy="release"
+    stable_selection="release"
+    stable_fallback_reason=""
+    stable_is_prerelease="0"
+    stable_info=""
 
     # Best-effort: get current installed VERSION header for logging only.
     current_ver="0"
@@ -40541,26 +40732,93 @@ run_self_update_only() {
     if ! [[ "${current_ver:-}" =~ ^[0-9]+$ ]]; then current_ver=0; fi
 
     if [ "${channel}" = "stable" ]; then
+        stable_policy="${SELF_UPDATE_STABLE_POLICY:-release}"
+        stable_policy="$(printf '%s' "${stable_policy:-release}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "${stable_policy}" in
+            release|candidate|prerelease) : ;;
+            *) stable_policy="release" ;;
+        esac
+
         api_url="https://api.github.com/repos/${repo}/releases?per_page=25"
 
-        # Stable tracks the latest non-draft release candidate from the releases list.
-        # This avoids strict VERSION-number dependence for remote selection.
+        # Stable selection is policy-driven (release|candidate|prerelease)
+        # using the latest non-draft GitHub releases list.
         if command -v python3 >/dev/null 2>&1; then
-            tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
-                | python3 -c 'import json,sys; arr=json.load(sys.stdin); out=""; 
-for rel in (arr if isinstance(arr,list) else []):
+            stable_info=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+                | python3 -c 'import json,sys
+policy=str(sys.argv[1] if len(sys.argv) > 1 else "release").strip().lower()
+if policy not in ("release", "candidate", "prerelease"):
+    policy="release"
+try:
+    arr=json.load(sys.stdin)
+except Exception:
+    arr=[]
+if not isinstance(arr, list):
+    arr=[]
+candidates=[]
+for rel in arr:
+    if not isinstance(rel, dict):
+        continue
     if bool(rel.get("draft", False)):
         continue
-    t=str(rel.get("tag_name") or "").strip()
-    if t:
-        out=t
-        break
-print(out)' 2>/dev/null || true)
+    tag=str(rel.get("tag_name") or "").strip()
+    if not tag:
+        continue
+    candidates.append(rel)
+if not candidates:
+    print("")
+    print(policy)
+    print("")
+    print("0")
+    raise SystemExit(0)
+releases=[r for r in candidates if not bool(r.get("prerelease", False))]
+prereleases=[r for r in candidates if bool(r.get("prerelease", False))]
+selection=policy
+fallback_reason=""
+chosen=None
+if policy == "prerelease":
+    if prereleases:
+        chosen=prereleases[0]
+    else:
+        chosen=candidates[0]
+        selection="candidate"
+        fallback_reason="No prerelease candidate available; fell back to latest non-draft candidate."
+elif policy == "candidate":
+    chosen=candidates[0]
+else:
+    if releases:
+        chosen=releases[0]
+    else:
+        chosen=candidates[0]
+        selection="candidate"
+        fallback_reason="No non-prerelease release available; fell back to latest non-draft candidate."
+tag=str((chosen or {}).get("tag_name") or "").strip()
+is_pre="1" if bool((chosen or {}).get("prerelease", False)) else "0"
+print(tag)
+print(selection)
+print((fallback_reason or "").replace("\n", " ").strip())
+print(is_pre)' "${stable_policy}" 2>/dev/null || true)
+            tag="$(printf '%s\n' "${stable_info}" | sed -n '1p')"
+            stable_selection="$(printf '%s\n' "${stable_info}" | sed -n '2p')"
+            stable_fallback_reason="$(printf '%s\n' "${stable_info}" | sed -n '3p')"
+            stable_is_prerelease="$(printf '%s\n' "${stable_info}" | sed -n '4p')"
+            stable_selection="$(printf '%s' "${stable_selection:-${stable_policy}}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+            case "${stable_selection}" in
+                release|candidate|prerelease) : ;;
+                *) stable_selection="${stable_policy}" ;;
+            esac
+            case "${stable_is_prerelease}" in
+                0|1) : ;;
+                *) stable_is_prerelease="0" ;;
+            esac
         fi
         if [ -z "${tag:-}" ]; then
             # Fallback (best-effort text parse): first tag_name in releases list.
             tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
                 | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
+            stable_selection="${stable_policy}"
+            stable_fallback_reason=""
+            stable_is_prerelease="0"
         fi
 
         if [ -z "${tag:-}" ]; then
@@ -40571,7 +40829,13 @@ print(out)' 2>/dev/null || true)
         # Prefer a release asset if you ever publish one, but fall back to raw from tag (works today).
         raw_url_asset="https://github.com/${repo}/releases/download/${tag}/zypper-auto.sh"
         raw_url_tag="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
-        log_info "[self-update] Stable release candidate detected: ${tag}"
+        log_info "[self-update] Stable policy=${stable_policy} selected=${stable_selection} tag=${tag}"
+        if [ "${stable_is_prerelease}" = "1" ] 2>/dev/null; then
+            log_warn "[self-update] Selected stable target is a prerelease candidate (${tag})."
+        fi
+        if [ -n "${stable_fallback_reason:-}" ]; then
+            log_warn "[self-update] Stable policy fallback: ${stable_fallback_reason}"
+        fi
 
         installed_ref="${installed_stable_tag:-}"
         remote_ref="${tag}"
@@ -48597,6 +48861,7 @@ update_status "Installing dashboard settings API..."
 if write_atomic "${DASH_API_BIN}" <<'PYEOF'
 #!/usr/bin/env python3
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -49069,18 +49334,47 @@ def _github_get_json(path: str, timeout_s: int = 10) -> dict:
         data = r.read().decode("utf-8", errors="replace")
     return json.loads(data)
 
-def _github_latest_release_candidate(timeout_s: int = 10) -> dict:
-    """Return the latest non-draft GitHub release object (stable candidate).
+def _normalize_stable_policy(policy: str) -> str:
+    p = str(policy or "").strip().lower()
+    if p not in ("release", "candidate", "prerelease"):
+        p = "release"
+    return p
 
-    We intentionally use releases list instead of /releases/latest so stable can
-    track the newest release candidate without relying on VERSION numbering.
+
+def _stable_policy_from_conf(eff_conf: dict | None) -> str:
+    try:
+        return _normalize_stable_policy(str((eff_conf or {}).get("SELF_UPDATE_STABLE_POLICY", "release") or "release"))
+    except Exception:
+        return "release"
+
+
+def _stable_release_urls(tag: str) -> list[str]:
+    t = str(tag or "").strip()
+    if not t:
+        return []
+    return [
+        f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{t}/zypper-auto.sh",
+        f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{t}/zypper-auto.sh",
+    ]
+
+
+def _github_latest_release_candidate(*, policy: str = "release", timeout_s: int = 10) -> tuple[dict, dict]:
+    """Return selected release object and provenance based on stable policy.
+
+    policy:
+      - release: prefer non-prerelease
+      - candidate: newest non-draft candidate (pre/non-pre)
+      - prerelease: prefer prerelease builds
     """
+    pol = _normalize_stable_policy(policy)
     try:
         arr = _github_get_json("/releases?per_page=25", timeout_s=timeout_s)
     except Exception:
         raise
     if not isinstance(arr, list):
         raise ValueError("unexpected GitHub releases response")
+
+    candidates = []
     for rel in arr:
         if not isinstance(rel, dict):
             continue
@@ -49089,8 +49383,46 @@ def _github_latest_release_candidate(timeout_s: int = 10) -> dict:
         tag = str(rel.get("tag_name", "") or "").strip()
         if not tag:
             continue
-        return rel
-    raise ValueError("no usable release candidate found")
+        candidates.append(rel)
+
+    if not candidates:
+        raise ValueError("no usable release candidate found")
+
+    releases = [r for r in candidates if not bool(r.get("prerelease", False))]
+    prereleases = [r for r in candidates if bool(r.get("prerelease", False))]
+
+    chosen = None
+    fallback_reason = ""
+    selection = pol
+
+    if pol == "prerelease":
+        if prereleases:
+            chosen = prereleases[0]
+        else:
+            chosen = candidates[0]
+            fallback_reason = "No prerelease candidate available; fell back to latest non-draft candidate."
+            selection = "candidate"
+    elif pol == "candidate":
+        chosen = candidates[0]
+    else:  # release
+        if releases:
+            chosen = releases[0]
+        else:
+            chosen = candidates[0]
+            fallback_reason = "No non-prerelease release available; fell back to latest non-draft candidate."
+            selection = "candidate"
+
+    tag = str((chosen or {}).get("tag_name", "") or "").strip()
+    urls = _stable_release_urls(tag)
+    provenance = {
+        "policy": pol,
+        "selection": selection,
+        "fallback_reason": fallback_reason,
+        "source_url": str(urls[0] if urls else ""),
+        "source_urls": urls,
+        "is_prerelease": bool((chosen or {}).get("prerelease", False)),
+    }
+    return chosen, provenance
 
 
 def _read_remote_script_bytes(ref: str, timeout_s: int = 15) -> tuple[bytes, str]:
@@ -49116,8 +49448,8 @@ def _read_remote_script_bytes(ref: str, timeout_s: int = 15) -> tuple[bytes, str
     return b"", ""
 
 
-def _script_layer_md5s(text: str) -> dict:
-    """Compute layered MD5 signatures for key helper sections."""
+def _script_layer_sha256s(text: str) -> dict:
+    """Compute layered SHA256 fingerprints for key helper sections."""
     import hashlib
 
     src = str(text or "")
@@ -49147,27 +49479,38 @@ def _script_layer_md5s(text: str) -> dict:
         if not vv:
             out[k] = ""
             continue
-        out[k] = hashlib.md5(vv.encode("utf-8", errors="replace")).hexdigest()  # nosec B324 (non-crypto fingerprinting)
+        out[k] = hashlib.sha256(vv.encode("utf-8", errors="replace")).hexdigest()  # nosec B324 (non-crypto fingerprinting)
     return out
 
-
-def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool) -> tuple[str, str, list[str]]:
-    """Recommend none|verify|install from layered MD5 deltas."""
+def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool) -> tuple[str, str, list[str], str, str]:
+    """Recommend none|verify|install from layered SHA256 deltas."""
     if not has_remote:
-        return "verify", "Remote section hashes unavailable; using safer verify recommendation.", []
+        return "verify", "Remote section fingerprints unavailable; using safer verify recommendation.", [], "low", "elevated"
 
     changed = []
+    ambiguous = []
     for name in ("self_update_core", "dashboard_api_embed", "installer_payloads"):
         l = str((local_layers or {}).get(name, "") or "")
         r = str((remote_layers or {}).get(name, "") or "")
+        if not l or not r:
+            ambiguous.append(name)
+            continue
         if l and r and l != r:
             changed.append(name)
+    if ambiguous:
+        return (
+            "install",
+            "Layer markers were missing/ambiguous; defaulting to safer install recommendation.",
+            changed + ambiguous,
+            "low",
+            "high",
+        )
 
     if not changed:
-        return "none", "No layered code-section change detected.", changed
+        return "none", "No layered code-section change detected.", changed, "high", "low"
     if any(x in changed for x in ("dashboard_api_embed", "installer_payloads")):
-        return "install", "Installer/deployer sections changed; full install recommended.", changed
-    return "verify", "Core helper sections changed; verify recommended.", changed
+        return "install", "Installer/deployer sections changed; full install recommended.", changed, "high", "high"
+    return "verify", "Core helper sections changed; verify recommended.", changed, "medium", "moderate"
 
 
 def _tag_to_int(tag: str) -> int | None:
@@ -52273,6 +52616,35 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- Snapper (dashboard) ---
         if path == "/api/snapper/timers":
+            def _systemd_time_to_utc(raw: str) -> str:
+                s = str(raw or "").strip()
+                if not s:
+                    return ""
+                low = s.lower()
+                if low in ("0", "n/a", "never", "infinity", "inf", "-"):
+                    return ""
+                try:
+                    if re.fullmatch(r"[0-9]+", s or ""):
+                        us = int(s)
+                        if us <= 0:
+                            return ""
+                        return datetime.datetime.fromtimestamp(us / 1_000_000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    pass
+                try:
+                    if s.endswith(" UTC"):
+                        dt = datetime.datetime.strptime(s, "%a %Y-%m-%d %H:%M:%S UTC")
+                        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    pass
+                try:
+                    m = re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})", s)
+                    if m:
+                        dt2 = datetime.datetime.strptime(str(m.group(1)), "%Y-%m-%d %H:%M:%S")
+                        return dt2.replace(tzinfo=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    pass
+                return ""
             def _snapper_timer_probe(unit: str) -> dict:
                 u = str(unit or "").strip()
                 out = {
@@ -52283,8 +52655,13 @@ class Handler(BaseHTTPRequestHandler):
                     "active": "",
                     "load_state": "",
                     "unit_file_state": "",
+                    "next_trigger_utc": "",
+                    "last_trigger_utc": "",
+                    "last_result": "unknown",
+                    "partial_reason": "",
                 }
                 if not u:
+                    out["partial_reason"] = "empty timer unit name"
                     return out
 
                 # Authoritative systemd metadata first (more robust than parsing
@@ -52292,9 +52669,20 @@ class Handler(BaseHTTPRequestHandler):
                 load_state = ""
                 unit_file_state = ""
                 active_state = ""
+                next_trigger_raw = ""
+                last_trigger_raw = ""
+                last_result = ""
                 try:
                     p_show = subprocess.run(
-                        ["systemctl", "show", u, "-p", "LoadState", "-p", "UnitFileState", "-p", "ActiveState"],
+                        [
+                            "systemctl", "show", u,
+                            "-p", "LoadState",
+                            "-p", "UnitFileState",
+                            "-p", "ActiveState",
+                            "-p", "NextElapseUSecRealtime",
+                            "-p", "LastTriggerUSec",
+                            "-p", "Result",
+                        ],
                         check=False,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
@@ -52315,14 +52703,24 @@ class Handler(BaseHTTPRequestHandler):
                             unit_file_state = v
                         elif k == "ActiveState":
                             active_state = v
+                        elif k == "NextElapseUSecRealtime":
+                            next_trigger_raw = v
+                        elif k == "LastTriggerUSec":
+                            last_trigger_raw = v
+                        elif k == "Result":
+                            last_result = v
                 except Exception:
                     pass
 
                 out["load_state"] = str(load_state or "")
                 out["unit_file_state"] = str(unit_file_state or "")
+                out["next_trigger_utc"] = _systemd_time_to_utc(next_trigger_raw)
+                out["last_trigger_utc"] = _systemd_time_to_utc(last_trigger_raw)
+                out["last_result"] = str(last_result or "unknown")
 
                 # Missing if systemd explicitly reports not-found/error.
                 if str(load_state or "") in ("not-found", "error"):
+                    out["partial_reason"] = f"systemd load state reports {load_state or 'missing'}"
                     return out
 
                 # Fallback existence probe when show metadata is incomplete.
@@ -52346,6 +52744,7 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         exists = False
                 if not exists:
+                    out["partial_reason"] = "unit not found in systemd unit files"
                     return out
 
                 # Live enabled/active states from systemd.
@@ -52409,6 +52808,10 @@ class Handler(BaseHTTPRequestHandler):
                 out["enabled"] = str(en_state or "")
                 out["active"] = str(act_state or "")
                 out["state"] = state
+                if state == "partial":
+                    out["partial_reason"] = f"state mismatch (enabled={str(en_state or 'unknown')}, active={str(act_state or 'unknown')})"
+                else:
+                    out["partial_reason"] = ""
                 return out
             t_timeline = _snapper_timer_probe("snapper-timeline.timer")
             t_cleanup = _snapper_timer_probe("snapper-cleanup.timer")
@@ -52499,6 +52902,7 @@ class Handler(BaseHTTPRequestHandler):
                 ch = str(eff.get("SELF_UPDATE_CHANNEL", "stable")).strip().lower()
             if ch not in ("stable", "rolling"):
                 ch = "stable"
+            stable_policy = _stable_policy_from_conf(eff)
 
             state = _read_self_update_state()
             installed_stable = str(state.get("stable_tag", "") or "").strip()
@@ -52562,14 +52966,46 @@ class Handler(BaseHTTPRequestHandler):
             stable_candidate_name = ""
             stable_candidate_published_at = ""
             stable_candidate_is_prerelease = False
+            stable_provenance = {
+                "policy": stable_policy,
+                "selection": stable_policy,
+                "fallback_reason": "",
+                "source_url": "",
+                "source_urls": [],
+                "is_prerelease": False,
+            }
             err = ""
             try:
                 if ch == "stable":
-                    j = _github_latest_release_candidate(timeout_s=10)
+                    j = {}
+                    prov = {}
+                    try:
+                        selected = _github_latest_release_candidate(policy=stable_policy, timeout_s=10)
+                        if isinstance(selected, tuple) and len(selected) >= 2:
+                            j = selected[0] if isinstance(selected[0], dict) else {}
+                            prov = selected[1] if isinstance(selected[1], dict) else {}
+                        elif isinstance(selected, dict):
+                            j = selected
+                    except Exception:
+                        raise
+                    if isinstance(prov, dict):
+                        try:
+                            stable_provenance.update({
+                                "policy": str(prov.get("policy", stable_policy) or stable_policy),
+                                "selection": str(prov.get("selection", stable_policy) or stable_policy),
+                                "fallback_reason": str(prov.get("fallback_reason", "") or ""),
+                                "source_url": str(prov.get("source_url", "") or ""),
+                                "source_urls": [str(x) for x in (prov.get("source_urls") or []) if str(x or "").strip()],
+                                "is_prerelease": bool(prov.get("is_prerelease", False)),
+                            })
+                        except Exception:
+                            pass
                     remote_ref = str(j.get("tag_name", "") or "").strip()
                     stable_candidate_name = str(j.get("name", "") or "").strip()
                     stable_candidate_published_at = str(j.get("published_at", "") or "").strip()
-                    stable_candidate_is_prerelease = bool(j.get("prerelease", False))
+                    stable_candidate_is_prerelease = bool(
+                        stable_provenance.get("is_prerelease", bool(j.get("prerelease", False)))
+                    )
                 else:
                     j = _github_get_json("/commits/main", timeout_s=10)
                     remote_ref = str(j.get("sha", "") or "").strip()
@@ -52609,11 +53045,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 local_script_text = ""
 
-            local_layer_md5 = _script_layer_md5s(local_script_text)
-            remote_layer_md5 = _script_layer_md5s(remote_script_text)
-            rec_action, rec_reason, rec_changed_layers = _recommend_post_action(
-                local_layer_md5,
-                remote_layer_md5,
+            local_layer_sha256 = _script_layer_sha256s(local_script_text)
+            remote_layer_sha256 = _script_layer_sha256s(remote_script_text)
+            rec_action, rec_reason, rec_changed_layers, rec_confidence, rec_risk_level = _recommend_post_action(
+                local_layer_sha256,
+                remote_layer_sha256,
                 has_remote=bool(remote_script_text),
             )
 
@@ -52715,10 +53151,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if remote_ref:
                     if ch == "stable":
-                        download_urls = [
-                            f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{remote_ref}/zypper-auto.sh",
-                            f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/zypper-auto.sh",
-                        ]
+                        prov_urls = stable_provenance.get("source_urls") if isinstance(stable_provenance, dict) else []
+                        if isinstance(prov_urls, list) and prov_urls:
+                            download_urls = [str(x) for x in prov_urls if str(x or "").strip()]
+                        else:
+                            download_urls = _stable_release_urls(remote_ref)
                     else:
                         pth = remote_script_path or "zypper-auto.sh"
                         download_urls = [
@@ -52751,25 +53188,23 @@ class Handler(BaseHTTPRequestHandler):
                 "update_available": update_available,
                 "install_available": install_available,
                 "remote_is_older": remote_is_older,
+                "stable_policy": stable_policy,
                 "stable_candidate": {
                     "name": stable_candidate_name,
                     "published_at": stable_candidate_published_at,
                     "is_prerelease": bool(stable_candidate_is_prerelease),
+                    "policy": str(stable_provenance.get("policy", stable_policy) if isinstance(stable_provenance, dict) else stable_policy),
+                    "selection": str(stable_provenance.get("selection", stable_policy) if isinstance(stable_provenance, dict) else stable_policy),
+                    "fallback_reason": str(stable_provenance.get("fallback_reason", "") if isinstance(stable_provenance, dict) else ""),
+                    "source_url": str(stable_provenance.get("source_url", "") if isinstance(stable_provenance, dict) else ""),
+                    "source_urls": [str(x) for x in (stable_provenance.get("source_urls") or [])] if isinstance(stable_provenance, dict) else [],
                 },
                 "post_action_recommendation": {
                     "recommended": str(rec_action or "none"),
                     "reason": str(rec_reason or ""),
                     "changed_layers": rec_changed_layers if isinstance(rec_changed_layers, list) else [],
-                },
-                "stable_candidate": {
-                    "name": stable_candidate_name,
-                    "published_at": stable_candidate_published_at,
-                    "is_prerelease": bool(stable_candidate_is_prerelease),
-                },
-                "post_action_recommendation": {
-                    "recommended": str(rec_action or "none"),
-                    "reason": str(rec_reason or ""),
-                    "changed_layers": rec_changed_layers if isinstance(rec_changed_layers, list) else [],
+                    "confidence": str(rec_confidence or ""),
+                    "risk_level": str(rec_risk_level or ""),
                 },
                 "state_file": SELF_UPDATE_STATE_FILE,
                 "install_source": install_source,
@@ -52804,8 +53239,10 @@ class Handler(BaseHTTPRequestHandler):
                     "script_path": remote_script_path,
                     "download_url": download_url,
                     "download_urls": download_urls,
+                    "stable_provenance": dict(stable_provenance) if isinstance(stable_provenance, dict) else {},
                 },
                 "configured_target_channel": ch,
+                "configured_stable_policy": stable_policy,
                 "evaluation": {
                     "action_type": action_type,
                     "can_safely_execute": can_safely_execute,
@@ -57547,7 +57984,7 @@ fi
 if [ "${VERIFICATION_ONLY_MODE:-0}" -ne 1 ]; then
     # Only run verification during installation, not in verify-only mode
     # (verify-only mode calls the function directly and exits)
-    run_smart_verification_with_safety_net 1 always
+    run_smart_verification_with_safety_net 1 never
 fi
 
 # --- 14b. Check for Optional Packages ---

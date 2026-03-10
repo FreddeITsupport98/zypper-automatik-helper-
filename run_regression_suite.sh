@@ -15,6 +15,7 @@ Runs the non-destructive regression suite against zypper-auto.sh:
   - snapper timer controls regression
   - snapper service-status regression
   - stale module helper/static + runtime regressions (runtime uses temp sandbox roots)
+  - self-update/snapper runtime API failure-path regressions (mocked GitHub/systemctl)
   - boot kernel inventory regression
   - kernel purge lock handling regression
   - helper PATH install/uninstall regression
@@ -57,6 +58,8 @@ for t in "${tests[@]}"; do
 done
 
 if command -v python3 >/dev/null 2>&1; then
+    printf '\n==> test_self_update_api_runtime_regression.py\n'
+    python3 -m unittest -v "${SCRIPT_DIR}/test_self_update_api_runtime_regression.py"
     printf '\n==> test_snapper_timer_playwright_regression.py (optional)\n'
     python3 -m unittest -v "${SCRIPT_DIR}/test_snapper_timer_playwright_regression.py" || true
 else
