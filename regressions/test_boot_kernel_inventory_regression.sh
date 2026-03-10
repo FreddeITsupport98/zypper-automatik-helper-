@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_FILE="${1:-${SCRIPT_DIR}/zypper-auto.sh}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TARGET_FILE="${1:-${REPO_ROOT}/zypper-auto.sh}"
 
 usage() {
     cat <<'EOF'

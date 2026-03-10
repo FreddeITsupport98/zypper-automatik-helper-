@@ -1,0 +1,57 @@
+name: Regression Runtime Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_pythons:
+        description: 'JSON array of Python runtime versions for matrix (example: ["3.11","3.12"])'
+        required: false
+        default: '["3.11","3.12"]'
+  push:
+    paths:
+      - '.github/workflows/regression-runtime-matrix.yml'
+      - 'run_regression_suite.sh'
+      - 'scripts/bootstrap_playwright_regression.sh'
+      - 'zypper-auto.sh'
+      - 'regressions/*.sh'
+      - 'regressions/*.py'
+      - 'README.md'
+      - 'changelog.md'
+  pull_request:
+    paths:
+      - '.github/workflows/regression-runtime-matrix.yml'
+      - 'run_regression_suite.sh'
+      - 'scripts/bootstrap_playwright_regression.sh'
+      - 'zypper-auto.sh'
+      - 'regressions/*.sh'
+      - 'regressions/*.py'
+      - 'README.md'
+      - 'changelog.md'
+
+jobs:
+  regression-runtime-matrix:
+    name: regression (python ${{ matrix.runtime_python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime_python: ${{ fromJSON((github.event_name == 'workflow_dispatch' && github.event.inputs.runtime_pythons) || '["3.11","3.12"]') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.runtime_python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.runtime_python }}
+
+      - name: Show runtime
+        run: |
+          python --version
+          python3 --version
+
+      - name: Run regression suite with runtime override
+        run: |
+          chmod +x ./run_regression_suite.sh
+          RUNTIME_TEST_PYTHON=python bash ./run_regression_suite.sh ./zypper-auto.sh

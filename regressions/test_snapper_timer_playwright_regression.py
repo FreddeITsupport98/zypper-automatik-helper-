@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# RUNNER_OPTIONAL=1
+# RUNNER_RUNTIME=playwright
 import re
 import unittest
 from pathlib import Path
@@ -12,7 +14,7 @@ except Exception:  # pragma: no cover - optional dependency
 class SnapperTimerPlaywrightRegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        repo_root = Path(__file__).resolve().parent
+        repo_root = Path(__file__).resolve().parent.parent
         cls.script_path = repo_root / "zypper-auto.sh"
         cls.script_text = cls.script_path.read_text(encoding="utf-8")
 

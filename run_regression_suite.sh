@@ -2,25 +2,46 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_FILE="${1:-${SCRIPT_DIR}/zypper-auto.sh}"
+REGRESSION_DIR="${SCRIPT_DIR}/regressions"
+DEFAULT_TARGET_FILE="${SCRIPT_DIR}/zypper-auto.sh"
+TARGET_FILE=""
+INCLUDE_STATEFUL=0
+PLAYWRIGHT_TEST_PYTHON_BIN=""
+ONLY_PATTERNS=()
+EXCLUDE_PATTERNS=()
 
 usage() {
     cat <<'EOF'
-Usage: ./run_regression_suite.sh [path/to/zypper-auto.sh]
+Usage: ./run_regression_suite.sh [options] [path/to/zypper-auto.sh]
 
-Runs the non-destructive regression suite against zypper-auto.sh:
-  - wrapper lock race regression
-  - self-update recommendation regression
-  - verify snapshot policy regression
-  - snapper timer controls regression
-  - snapper service-status regression
-  - stale module helper/static + runtime regressions (runtime uses temp sandbox roots)
-  - self-update/snapper runtime API failure-path regressions (mocked GitHub/systemctl)
-  - boot kernel inventory regression
-  - kernel purge lock handling regression
-  - helper PATH install/uninstall regression
-  - snapper option-4 modal layout regression
-  - optional playwright snapper timer browser regression (skip-safe; prefers .venv-playwright-regression when present)
+Runs auto-discovered regressions from:
+  - ./regressions/test_*.sh
+  - ./regressions/test_*.py
+
+Safety behavior:
+  - Stateful tests are skipped by default.
+  - Use --include-stateful to explicitly include stateful tests.
+  - Optional tests are warn-only on failure.
+
+Test metadata markers (add as single comment lines in test files):
+  - # RUNNER_STATEFUL=1      include only with --include-stateful
+  - # RUNNER_OPTIONAL=1      do not fail full suite on test failure
+  - # RUNNER_RUNTIME=...     python runtime selector: default|playwright
+  - # RUNNER_REQUIRES_ROOT=1 require root for this test
+  - # RUNNER_NEEDS_TARGET=0  shell test does not accept target-file arg
+
+Options:
+  --include-stateful         Include tests marked RUNNER_STATEFUL=1
+  --only PATTERN             Include only tests whose basename matches shell glob PATTERN (repeatable)
+  --exclude PATTERN          Exclude tests whose basename matches shell glob PATTERN (repeatable)
+  -h, --help                 Show this help
+
+Runtime environment variables:
+  RUNTIME_TEST_PYTHON     Python runtime for required Python runtime regressions
+                          (default: python3)
+  PLAYWRIGHT_TEST_PYTHON  Python runtime for optional Playwright regression
+                          (default: ./.venv-playwright-regression/bin/python
+                          when present, otherwise RUNTIME_TEST_PYTHON)
 EOF
 }
 
@@ -29,54 +50,335 @@ fail() {
     exit 1
 }
 
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-    usage
-    exit 0
-fi
-
-[ -f "${TARGET_FILE}" ] || fail "Target file not found: ${TARGET_FILE}"
-
-tests=(
-    "test_wrapper_lock_race_regression.sh"
-    "test_self_update_recommendation_regression.sh"
-    "test_verify_snapshot_policy_regression.sh"
-    "test_diag_follower_low_noise_regression.sh"
-    "test_snapper_timer_controls_regression.sh"
-    "test_snapper_status_services_regression.sh"
-    "test_stale_module_dirs_helper_regression.sh"
-    "test_stale_module_dirs_runtime_regression.sh"
-    "test_boot_kernel_inventory_regression.sh"
-    "test_kernel_purge_lock_regression.sh"
-    "test_helper_path_install_uninstall_regression.sh"
-    "test_snapper_option4_modal_layout.sh"
-)
-
-printf 'Running shell regressions against: %s\n' "${TARGET_FILE}"
-for t in "${tests[@]}"; do
-    printf '\n==> %s\n' "${t}"
-    bash "${SCRIPT_DIR}/${t}" "${TARGET_FILE}"
-done
-
-if command -v python3 >/dev/null 2>&1; then
-    printf '\n==> test_self_update_api_runtime_regression.py\n'
-    python3 -m unittest -v "${SCRIPT_DIR}/test_self_update_api_runtime_regression.py"
-    printf '\n==> test_snapper_timer_playwright_regression.py (optional)\n'
-    PLAYWRIGHT_TEST_PYTHON="${PLAYWRIGHT_TEST_PYTHON:-}"
-    if [ -n "${PLAYWRIGHT_TEST_PYTHON}" ] && [ ! -x "${PLAYWRIGHT_TEST_PYTHON}" ]; then
-        fail "PLAYWRIGHT_TEST_PYTHON is set but not executable: ${PLAYWRIGHT_TEST_PYTHON}"
+resolve_python_runtime() {
+    local candidate="$1"
+    if [ -x "${candidate}" ]; then
+        printf '%s\n' "${candidate}"
+        return 0
     fi
-    if [ -z "${PLAYWRIGHT_TEST_PYTHON}" ]; then
-        PLAYWRIGHT_VENV_PY="${SCRIPT_DIR}/.venv-playwright-regression/bin/python"
-        if [ -x "${PLAYWRIGHT_VENV_PY}" ]; then
-            PLAYWRIGHT_TEST_PYTHON="${PLAYWRIGHT_VENV_PY}"
-        else
-            PLAYWRIGHT_TEST_PYTHON="python3"
+    if command -v "${candidate}" >/dev/null 2>&1; then
+        command -v "${candidate}"
+        return 0
+    fi
+    return 1
+}
+
+runner_meta_value() {
+    local file="$1"
+    local key="$2"
+    local default_value="$3"
+    local line=""
+    local prefix="# ${key}="
+    line="$(grep -m1 -E "^# ${key}=" "${file}" || true)"
+    if [ -n "${line}" ]; then
+        printf '%s\n' "${line#"${prefix}"}"
+    else
+        printf '%s\n' "${default_value}"
+    fi
+}
+
+is_truthy() {
+    case "$1" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+matches_any_pattern() {
+    local value="$1"
+    shift
+    local pattern=""
+    for pattern in "$@"; do
+        # shellcheck disable=SC2254
+        case "${value}" in
+            ${pattern})
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+test_matches_filters() {
+    local test_name="$1"
+    if [ "${#ONLY_PATTERNS[@]}" -gt 0 ]; then
+        if ! matches_any_pattern "${test_name}" "${ONLY_PATTERNS[@]}"; then
+            return 1
         fi
     fi
-    printf 'Using Playwright test python: %s\n' "${PLAYWRIGHT_TEST_PYTHON}"
-    "${PLAYWRIGHT_TEST_PYTHON}" -m unittest -v "${SCRIPT_DIR}/test_snapper_timer_playwright_regression.py" || true
-else
-    printf '\nSkipping optional Playwright regression: python3 not found\n'
+    if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+        if matches_any_pattern "${test_name}" "${EXCLUDE_PATTERNS[@]}"; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+ensure_test_executable_if_needed() {
+    local test_path="$1"
+    local test_name=""
+    test_name="$(basename "${test_path}")"
+    if [ -x "${test_path}" ]; then
+        return 0
+    fi
+    chmod +x "${test_path}" || fail "Could not mark regression test executable: ${test_name}"
+    printf 'INFO: Marked test executable: %s\n' "${test_name}"
+}
+
+resolve_playwright_test_python_bin() {
+    if [ -n "${PLAYWRIGHT_TEST_PYTHON_BIN}" ]; then
+        printf '%s\n' "${PLAYWRIGHT_TEST_PYTHON_BIN}"
+        return 0
+    fi
+
+    PLAYWRIGHT_TEST_PYTHON="${PLAYWRIGHT_TEST_PYTHON:-}"
+    if [ -n "${PLAYWRIGHT_TEST_PYTHON}" ]; then
+        PLAYWRIGHT_TEST_PYTHON_BIN="$(resolve_python_runtime "${PLAYWRIGHT_TEST_PYTHON}" || true)"
+        [ -n "${PLAYWRIGHT_TEST_PYTHON_BIN}" ] || fail "PLAYWRIGHT_TEST_PYTHON not found/executable: ${PLAYWRIGHT_TEST_PYTHON}"
+        printf '%s\n' "${PLAYWRIGHT_TEST_PYTHON_BIN}"
+        return 0
+    fi
+
+    PLAYWRIGHT_VENV_PY="${SCRIPT_DIR}/.venv-playwright-regression/bin/python"
+    if [ -x "${PLAYWRIGHT_VENV_PY}" ]; then
+        PLAYWRIGHT_TEST_PYTHON_BIN="${PLAYWRIGHT_VENV_PY}"
+    else
+        PLAYWRIGHT_TEST_PYTHON_BIN="${RUNTIME_TEST_PYTHON_BIN}"
+    fi
+    printf '%s\n' "${PLAYWRIGHT_TEST_PYTHON_BIN}"
+}
+
+python_bin_for_runtime_tag() {
+    local runtime_tag="$1"
+    case "${runtime_tag}" in
+        ""|default)
+            printf '%s\n' "${RUNTIME_TEST_PYTHON_BIN}"
+            ;;
+        playwright)
+            resolve_playwright_test_python_bin
+            ;;
+        *)
+            fail "Unknown RUNNER_RUNTIME value: ${runtime_tag}"
+            ;;
+    esac
+}
+
+run_shell_test() {
+    local test_path="$1"
+    local optional="$2"
+    local test_name=""
+    local needs_target="1"
+    local requires_root="0"
+    local label=""
+    test_name="$(basename "${test_path}")"
+    needs_target="$(runner_meta_value "${test_path}" "RUNNER_NEEDS_TARGET" "1")"
+    requires_root="$(runner_meta_value "${test_path}" "RUNNER_REQUIRES_ROOT" "0")"
+    if is_truthy "${optional}"; then
+        label=" (optional)"
+    fi
+
+    if is_truthy "${requires_root}" && [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        fail "Test ${test_name} requires root; rerun with sudo when using this selection"
+    fi
+
+    printf '\n==> %s%s\n' "${test_name}" "${label}"
+    if is_truthy "${optional}"; then
+        if is_truthy "${needs_target}"; then
+            bash "${test_path}" "${TARGET_FILE}" || printf 'WARN: Optional shell test failed: %s\n' "${test_name}"
+        else
+            bash "${test_path}" || printf 'WARN: Optional shell test failed: %s\n' "${test_name}"
+        fi
+        return 0
+    fi
+
+    if is_truthy "${needs_target}"; then
+        bash "${test_path}" "${TARGET_FILE}"
+    else
+        bash "${test_path}"
+    fi
+}
+
+run_python_test() {
+    local test_path="$1"
+    local optional="$2"
+    local test_name=""
+    local runtime_tag=""
+    local requires_root="0"
+    local label=""
+    local python_bin=""
+    test_name="$(basename "${test_path}")"
+    runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+    requires_root="$(runner_meta_value "${test_path}" "RUNNER_REQUIRES_ROOT" "0")"
+    python_bin="$(python_bin_for_runtime_tag "${runtime_tag}")"
+    if is_truthy "${optional}"; then
+        label=" (optional)"
+    fi
+
+    if is_truthy "${requires_root}" && [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        fail "Test ${test_name} requires root; rerun with sudo when using this selection"
+    fi
+
+    printf '\n==> %s%s\n' "${test_name}" "${label}"
+    printf 'Using python runtime: %s\n' "${python_bin}"
+    if is_truthy "${optional}"; then
+        "${python_bin}" -m unittest -v "${test_path}" || printf 'WARN: Optional python test failed: %s\n' "${test_name}"
+        return 0
+    fi
+    "${python_bin}" -m unittest -v "${test_path}"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --include-stateful)
+            INCLUDE_STATEFUL=1
+            shift
+            ;;
+        --only)
+            [ "${2:-}" ] || fail "--only requires a pattern"
+            ONLY_PATTERNS+=( "$2" )
+            shift 2
+            ;;
+        --exclude)
+            [ "${2:-}" ] || fail "--exclude requires a pattern"
+            EXCLUDE_PATTERNS+=( "$2" )
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            fail "Unknown option: $1"
+            ;;
+        *)
+            if [ -n "${TARGET_FILE}" ]; then
+                fail "Unexpected extra argument: $1"
+            fi
+            TARGET_FILE="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ "$#" -gt 0 ]; then
+    fail "Unexpected extra arguments: $*"
 fi
+
+TARGET_FILE="${TARGET_FILE:-${DEFAULT_TARGET_FILE}}"
+[ -f "${TARGET_FILE}" ] || fail "Target file not found: ${TARGET_FILE}"
+[ -d "${REGRESSION_DIR}" ] || fail "Regression directory not found: ${REGRESSION_DIR}"
+
+shopt -s nullglob
+all_shell_tests=( "${REGRESSION_DIR}"/test_*.sh )
+all_python_tests=( "${REGRESSION_DIR}"/test_*.py )
+shopt -u nullglob
+
+required_shell_tests=()
+optional_shell_tests=()
+required_python_tests=()
+optional_python_tests=()
+skipped_stateful_tests=()
+filtered_out_tests=()
+
+for test_path in "${all_shell_tests[@]}"; do
+    test_name="$(basename "${test_path}")"
+    ensure_test_executable_if_needed "${test_path}"
+    if ! test_matches_filters "${test_name}"; then
+        filtered_out_tests+=( "${test_name}" )
+        continue
+    fi
+    test_stateful="$(runner_meta_value "${test_path}" "RUNNER_STATEFUL" "0")"
+    test_optional="$(runner_meta_value "${test_path}" "RUNNER_OPTIONAL" "0")"
+    if is_truthy "${test_stateful}" && [ "${INCLUDE_STATEFUL}" -ne 1 ]; then
+        skipped_stateful_tests+=( "${test_name}" )
+        continue
+    fi
+    if is_truthy "${test_optional}"; then
+        optional_shell_tests+=( "${test_path}" )
+    else
+        required_shell_tests+=( "${test_path}" )
+    fi
+done
+
+for test_path in "${all_python_tests[@]}"; do
+    test_name="$(basename "${test_path}")"
+    ensure_test_executable_if_needed "${test_path}"
+    if ! test_matches_filters "${test_name}"; then
+        filtered_out_tests+=( "${test_name}" )
+        continue
+    fi
+    test_stateful="$(runner_meta_value "${test_path}" "RUNNER_STATEFUL" "0")"
+    test_optional="$(runner_meta_value "${test_path}" "RUNNER_OPTIONAL" "0")"
+    if is_truthy "${test_stateful}" && [ "${INCLUDE_STATEFUL}" -ne 1 ]; then
+        skipped_stateful_tests+=( "$(basename "${test_path}")" )
+        continue
+    fi
+    if is_truthy "${test_optional}"; then
+        optional_python_tests+=( "${test_path}" )
+    else
+        required_python_tests+=( "${test_path}" )
+    fi
+done
+
+total_shell_tests=$(( ${#required_shell_tests[@]} + ${#optional_shell_tests[@]} ))
+total_python_tests=$(( ${#required_python_tests[@]} + ${#optional_python_tests[@]} ))
+total_runnable_tests=$(( total_shell_tests + total_python_tests ))
+[ "${total_runnable_tests}" -gt 0 ] || fail "No runnable regression tests found under ${REGRESSION_DIR} after applying filters/stateful rules"
+
+printf 'Auto-discovered runnable tests: shell=%d python=%d (stateful skipped=%d)\n' \
+    "${total_shell_tests}" "${total_python_tests}" "${#skipped_stateful_tests[@]}"
+if [ "${#ONLY_PATTERNS[@]}" -gt 0 ]; then
+    printf 'INFO: Active --only patterns:\n'
+    for p in "${ONLY_PATTERNS[@]}"; do
+        printf '  - %s\n' "${p}"
+    done
+fi
+if [ "${#EXCLUDE_PATTERNS[@]}" -gt 0 ]; then
+    printf 'INFO: Active --exclude patterns:\n'
+    for p in "${EXCLUDE_PATTERNS[@]}"; do
+        printf '  - %s\n' "${p}"
+    done
+fi
+if [ "${#filtered_out_tests[@]}" -gt 0 ]; then
+    printf 'INFO: Filtered out tests (%d):\n' "${#filtered_out_tests[@]}"
+    for t in "${filtered_out_tests[@]}"; do
+        printf '  - %s\n' "${t}"
+    done
+fi
+if [ "${#skipped_stateful_tests[@]}" -gt 0 ]; then
+    printf 'INFO: Skipped stateful tests by default; rerun with --include-stateful to include:\n'
+    for t in "${skipped_stateful_tests[@]}"; do
+        printf '  - %s\n' "${t}"
+    done
+fi
+
+printf '\nRunning shell regressions against: %s\n' "${TARGET_FILE}"
+for test_path in "${required_shell_tests[@]}"; do
+    run_shell_test "${test_path}" "0"
+done
+for test_path in "${optional_shell_tests[@]}"; do
+    run_shell_test "${test_path}" "1"
+done
+
+if [ "${total_python_tests}" -gt 0 ]; then
+    RUNTIME_TEST_PYTHON="${RUNTIME_TEST_PYTHON:-python3}"
+    RUNTIME_TEST_PYTHON_BIN="$(resolve_python_runtime "${RUNTIME_TEST_PYTHON}" || true)"
+    [ -n "${RUNTIME_TEST_PYTHON_BIN}" ] || fail "RUNTIME_TEST_PYTHON not found/executable: ${RUNTIME_TEST_PYTHON}"
+fi
+
+for test_path in "${required_python_tests[@]}"; do
+    run_python_test "${test_path}" "0"
+done
+for test_path in "${optional_python_tests[@]}"; do
+    run_python_test "${test_path}" "1"
+done
 
 printf '\nPASS: Regression suite completed\n'

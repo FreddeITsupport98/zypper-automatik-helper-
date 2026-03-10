@@ -43,7 +43,7 @@ def _extract_dashboard_api_python_source(script_text: str) -> str:
 
 class EmbeddedDashboardApiSyntaxRegressionTest(unittest.TestCase):
     def test_embedded_dashboard_api_python_parses(self) -> None:
-        repo_root = Path(__file__).resolve().parent
+        repo_root = Path(__file__).resolve().parent.parent
         script_path = repo_root / "zypper-auto.sh"
         py_src = _extract_dashboard_api_python_source(script_path.read_text(encoding="utf-8"))
         ast.parse(py_src)
@@ -52,7 +52,7 @@ class EmbeddedDashboardApiSyntaxRegressionTest(unittest.TestCase):
 class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        repo_root = Path(__file__).resolve().parent
+        repo_root = Path(__file__).resolve().parent.parent
         script_path = repo_root / "zypper-auto.sh"
         py_src = _extract_dashboard_api_python_source(script_path.read_text(encoding="utf-8"))
 

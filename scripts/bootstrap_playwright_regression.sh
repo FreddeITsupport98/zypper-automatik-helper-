@@ -15,7 +15,7 @@ usage() {
 Usage: scripts/bootstrap_playwright_regression.sh [options]
 
 Creates/updates the local Playwright regression virtualenv and Chromium runtime
-used by test_snapper_timer_playwright_regression.py and run_regression_suite.sh.
+used by regressions/test_snapper_timer_playwright_regression.py and run_regression_suite.sh.
 
 Options:
   --python <bin>       Python executable to use for venv creation (default: python3,
@@ -101,4 +101,6 @@ fi
 printf '\nBootstrap complete.\n'
 printf 'Optional Playwright regression can now run with:\n'
 printf '  PLAYWRIGHT_TEST_PYTHON="%s" bash run_regression_suite.sh zypper-auto.sh\n' "${VENV_PYTHON}"
+printf 'Full runtime override (required + optional Python runtimes):\n'
+printf '  RUNTIME_TEST_PYTHON="%s" PLAYWRIGHT_TEST_PYTHON="%s" bash run_regression_suite.sh zypper-auto.sh\n' "${VENV_PYTHON}" "${VENV_PYTHON}"
 printf 'Or rely on auto-detect when using default venv path.\n'

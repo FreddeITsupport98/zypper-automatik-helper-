@@ -21,6 +21,17 @@
 - Added focused regression smoke test `test_self_update_recommendation_regression.sh` and wired it into `run_regression_suite.sh`.
 - Added runtime API regression test `test_self_update_api_runtime_regression.py` and wired it into `run_regression_suite.sh` for mocked `/api/self-update/status` and `/api/snapper/timers` failure-path coverage.
 - `run_regression_suite.sh` optional Playwright browser regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
+- `run_regression_suite.sh` now supports unified runtime Python overrides: `RUNTIME_TEST_PYTHON` for required runtime API regressions and `PLAYWRIGHT_TEST_PYTHON` for optional browser runtime regression.
+- Added GitHub Actions workflow `.github/workflows/regression-runtime-matrix.yml` to run `run_regression_suite.sh` across multiple Python runtime targets.
+- Runtime matrix workflow now supports dynamic runtime selection in manual (`workflow_dispatch`) runs via `runtime_pythons` JSON-array input.
+- Grouped regression scripts under `regressions/` and updated runner/runtime/CI/docs paths accordingly to keep project root uncluttered.
+- Moved additional forgotten regressions (`test_snapper_start_contract.py`, `test_ai_smart_report_contract.py`, `test_snapper_disable_verify_guard.sh`) under `regressions/` and updated their repo-root path assumptions/documented invocation paths.
+- `run_regression_suite.sh` required runtime Python batch now also executes `test_snapper_start_contract.py` and `test_ai_smart_report_contract.py` so moved contract checks stay included in one central regression run.
+- `run_regression_suite.sh` now auto-discovers regressions from `regressions/test_*.sh` and `regressions/test_*.py`, removing the manual hardcoded test inventory.
+- Stateful regressions are now explicit opt-in in the central runner (`--include-stateful`) via per-test metadata tags (`# RUNNER_STATEFUL=1`), keeping default suite runs non-destructive.
+- Runner metadata support was added for optional/warn-only tests and runtime routing (`# RUNNER_OPTIONAL=1`, `# RUNNER_RUNTIME=playwright`), and current special tests were tagged accordingly.
+- `run_regression_suite.sh` now supports selection filters `--only PATTERN` and `--exclude PATTERN` (repeatable shell-glob matching on test basenames) so focused regression slices can run without editing the runner.
+- Auto-discovered regression files are now automatically repaired to executable mode when needed (`chmod +x`), while already executable files are skipped unchanged.
 - Added helper `scripts/bootstrap_playwright_regression.sh` to create/update the local Playwright regression venv and install Chromium runtime in one command.
 - Updated `test_snapper_timer_controls_regression.sh` timer-endpoint expectations to validate probe-based live-state payloads.
 - Fixed stale downloader-status auto-repair command quoting so temporary file handling works correctly under `set -u` (prevents `tmp: unbound variable` failures).

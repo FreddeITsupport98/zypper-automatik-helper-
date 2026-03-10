@@ -7,7 +7,7 @@ from pathlib import Path
 class AiSmartReportContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        repo_root = Path(__file__).resolve().parent
+        repo_root = Path(__file__).resolve().parent.parent
         cls.script_path = repo_root / "zypper-auto.sh"
         cls.script_text = cls.script_path.read_text(encoding="utf-8")
 

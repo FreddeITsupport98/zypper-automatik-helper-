@@ -1142,7 +1142,7 @@ run repeatedly on development systems.
 
 ### 3. Snapper Disable-Intent Guard Regression Smoke Test (`test_snapper_disable_verify_guard.sh`)
 
-Located in the repo root, this root-only smoke test validates the exact
+Located under `regressions/`, this root-only smoke test validates the exact
 regression path for Snapper disable intent:
 
 1. Runs `snapper auto-off` through the helper.
@@ -1156,20 +1156,20 @@ Run it as root:
 
 ```bash
 cd /path/to/zypper-automatik-helper-
-sudo ./test_snapper_disable_verify_guard.sh
+sudo ./regressions/test_snapper_disable_verify_guard.sh
 ```
 
 Useful options:
 
 ```bash
 # Skip the verify step (quick pre/post auto-off check)
-sudo ./test_snapper_disable_verify_guard.sh --skip-verify
+sudo ./regressions/test_snapper_disable_verify_guard.sh --skip-verify
 
 # Keep resulting timer/marker state after the test (no automatic restore)
-sudo ./test_snapper_disable_verify_guard.sh --keep-state
+sudo ./regressions/test_snapper_disable_verify_guard.sh --keep-state
 
 # Override helper path or verify timeout
-sudo ./test_snapper_disable_verify_guard.sh --helper /usr/local/bin/zypper-auto-helper --verify-timeout 1800
+sudo ./regressions/test_snapper_disable_verify_guard.sh --helper /usr/local/bin/zypper-auto-helper --verify-timeout 1800
 ```
 
 Safety behavior:
@@ -1180,7 +1180,7 @@ Safety behavior:
 
 ### 4. Snapper Timer WebUI Browser Regression (`test_snapper_timer_playwright_regression.py`)
 
-Located in the repo root, this browser-level regression uses Playwright
+Located under `regressions/`, this browser-level regression uses Playwright
 (Chromium) to verify Snapper timer WebUI state sync behavior.
 
 What it checks:
@@ -1196,7 +1196,7 @@ Run it in an isolated venv (recommended, fish-safe commands):
 python3 -m venv /tmp/zah-playwright-venv
 /tmp/zah-playwright-venv/bin/python -m pip install playwright
 /tmp/zah-playwright-venv/bin/python -m playwright install chromium
-/tmp/zah-playwright-venv/bin/python -m unittest -v test_snapper_timer_playwright_regression.py
+/tmp/zah-playwright-venv/bin/python -m unittest -v regressions/test_snapper_timer_playwright_regression.py
 ```
 Or bootstrap/update the project-local regression venv in one command:
 ```bash
@@ -1212,7 +1212,7 @@ failing unrelated test runs.
 
 ### 5. Boot Kernel Inventory Regression Smoke Test (`test_boot_kernel_inventory_regression.sh`)
 
-Located in the repo root, this smoke test guards kernel counting logic used by
+Located under `regressions/`, this smoke test guards kernel counting logic used by
 Snapper Manager Boot/EFI stats and kernel purge safety checks.
 
 What it checks:
@@ -1228,12 +1228,12 @@ What it checks:
 Run it:
 
 ```bash
-bash test_boot_kernel_inventory_regression.sh zypper-auto.sh
+bash regressions/test_boot_kernel_inventory_regression.sh zypper-auto.sh
 ```
 
 ### 6. Stale Module-Dir Helper Regression Smoke Test (`test_stale_module_dirs_helper_regression.sh`)
 
-Located in the repo root, this smoke test guards stale module helper safety and
+Located under `regressions/`, this smoke test guards stale module helper safety and
 wiring behavior.
 
 What it checks:
@@ -1246,12 +1246,12 @@ What it checks:
 Run it:
 
 ```bash
-bash test_stale_module_dirs_helper_regression.sh zypper-auto.sh
+bash regressions/test_stale_module_dirs_helper_regression.sh zypper-auto.sh
 ```
 
 ### 7. Stale Module-Dir Runtime Regression (`test_stale_module_dirs_runtime_regression.sh`)
 
-Located in the repo root, this runtime regression executes the stale module-dir
+Located under `regressions/`, this runtime regression executes the stale module-dir
 helper in an isolated temporary module-tree sandbox.
 
 What it checks:
@@ -1264,11 +1264,11 @@ What it checks:
 Run it:
 
 ```bash
-bash test_stale_module_dirs_runtime_regression.sh zypper-auto.sh
+bash regressions/test_stale_module_dirs_runtime_regression.sh zypper-auto.sh
 ```
 ### 8. Snapper Service-Status Regression Smoke Test (`test_snapper_status_services_regression.sh`)
 
-Located in the repo root, this focused static regression validates Snapper
+Located under `regressions/`, this focused static regression validates Snapper
 Manager status/service reporting wiring.
 
 What it checks:
@@ -1284,30 +1284,47 @@ What it checks:
 Run it:
 
 ```bash
-bash test_snapper_status_services_regression.sh zypper-auto.sh
+bash regressions/test_snapper_status_services_regression.sh zypper-auto.sh
 ```
 ### 9. Central Regression Suite Runner (`run_regression_suite.sh`)
 
-Located in the repo root, this convenience runner executes the non-destructive
-regression scripts as one suite (including the dedicated Snapper service-status
-regression).
+Located in the repo root, this convenience runner executes grouped regressions
+from `regressions/` as one suite.
 
-What it runs:
-- `test_wrapper_lock_race_regression.sh`
-- `test_diag_follower_low_noise_regression.sh`
-- `test_snapper_timer_controls_regression.sh`
-- `test_snapper_status_services_regression.sh`
-- `test_stale_module_dirs_helper_regression.sh`
-- `test_stale_module_dirs_runtime_regression.sh`
-- `test_boot_kernel_inventory_regression.sh`
-- `test_kernel_purge_lock_regression.sh`
-- `test_snapper_option4_modal_layout.sh`
-- Optional: `test_snapper_timer_playwright_regression.py` (skip-safe; prefers `./.venv-playwright-regression/bin/python` when present)
+How it selects tests:
+- Auto-discovers shell tests from `regressions/test_*.sh`.
+- Auto-discovers Python tests from `regressions/test_*.py`.
+- Ensures discovered regression files are executable (`chmod +x`) when missing execute bits; already-executable files are skipped unchanged.
+- Runs all discovered non-stateful tests by default.
+- Skips tests tagged `# RUNNER_STATEFUL=1` unless `--include-stateful` is used.
+- Treats tests tagged `# RUNNER_OPTIONAL=1` as warn-only on failure.
+- Supports per-test runtime tag `# RUNNER_RUNTIME=playwright` for Playwright-specific Python tests.
+- Supports selection filters:
+  - `--only PATTERN` (repeatable shell-glob include filter on test basename)
+  - `--exclude PATTERN` (repeatable shell-glob exclude filter on test basename)
+
+Current metadata tags in this repo:
+- `regressions/test_snapper_disable_verify_guard.sh`:
+  - `# RUNNER_STATEFUL=1`
+  - `# RUNNER_REQUIRES_ROOT=1`
+  - `# RUNNER_NEEDS_TARGET=0`
+- `regressions/test_snapper_timer_playwright_regression.py`:
+  - `# RUNNER_OPTIONAL=1`
+  - `# RUNNER_RUNTIME=playwright`
 
 Run it:
 
 ```bash
 bash run_regression_suite.sh zypper-auto.sh
+```
+To include stateful/root-impact regressions explicitly:
+```bash
+sudo bash run_regression_suite.sh --include-stateful zypper-auto.sh
+```
+Run only selected tests (examples):
+```bash
+bash run_regression_suite.sh --only 'test_snapper_*' zypper-auto.sh
+bash run_regression_suite.sh --only 'test_*_runtime_*' --exclude '*playwright*' zypper-auto.sh
 ```
 If needed, refresh the optional Playwright venv/runtime first:
 ```bash
@@ -1316,6 +1333,19 @@ bash scripts/bootstrap_playwright_regression.sh
 You can also force a specific interpreter for the optional Playwright test:
 ```bash
 PLAYWRIGHT_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
+```
+You can force the required Python runtime regression interpreter too:
+```bash
+RUNTIME_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
+```
+Or force both required + optional Python runtimes together:
+```bash
+RUNTIME_TEST_PYTHON=/path/to/python PLAYWRIGHT_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
+```
+CI also includes a runtime matrix workflow (`.github/workflows/regression-runtime-matrix.yml`) that runs the regression suite with multiple Python runtime targets via `RUNTIME_TEST_PYTHON`.
+For manual workflow runs, you can override the runtime matrix via `workflow_dispatch` input `runtime_pythons` (JSON array), for example:
+```bash
+["3.11","3.12","3.13"]
 ```
 
 -----
@@ -2107,6 +2137,9 @@ systemctl status zypper-autodownload.service
   - 🧪 **NEW:** added central runner `run_regression_suite.sh` for non-destructive regression execution (includes Snapper service-status regression and optional Playwright run).
   - 🧪 **IMPROVED:** `run_regression_suite.sh` optional Playwright regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
   - 🧪 **NEW:** added `scripts/bootstrap_playwright_regression.sh` helper to create/update the local Playwright regression venv + Chromium runtime in one command.
+  - 🧪 **IMPROVED:** `run_regression_suite.sh` now supports unified Python runtime overrides across runtime regressions (`RUNTIME_TEST_PYTHON` for required runtime API tests + `PLAYWRIGHT_TEST_PYTHON` for optional browser runtime tests).
+  - 🧪 **NEW:** added GitHub Actions runtime matrix workflow `.github/workflows/regression-runtime-matrix.yml` to run `run_regression_suite.sh` across multiple Python runtime targets.
+  - 🧪 **IMPROVED:** runtime matrix workflow manual runs now support `workflow_dispatch` input `runtime_pythons` (JSON array) so you can choose runtime versions dynamically per run.
   - ⚡ **IMPROVED:** diagnostics follower now uses a low-noise single-tail multiplexer and caps followed service logs to most-recent entries by default (`ZNH_DIAG_MAX_SERVICE_LOGS`), now exposed in WebUI Settings.
   - ⚡ **IMPROVED:** interactive debug-menu/CLI live-log fallback paths now cap service-log source fanout (`ZNH_LIVE_LOGS_MAX_SERVICE_LOGS`) to avoid temporary tail-process spikes, now exposed in WebUI Settings.
   - 🧰 **NEW:** added `zypper-auto-helper --stale-module-dirs` helper command (safe audit default) with optional quarantine mode, explicit confirmation phrase, and non-interactive `--yes` guard.

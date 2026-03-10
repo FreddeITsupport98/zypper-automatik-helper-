@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RUNNER_STATEFUL=1
+# RUNNER_REQUIRES_ROOT=1
+# RUNNER_NEEDS_TARGET=0
 set -euo pipefail
 
 MARKER_FILE="/var/lib/zypper-auto/snapper-auto-disabled.intent"
@@ -10,6 +13,7 @@ VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS:-1200}"
 HELPER_BIN="${ZYPPER_AUTO_HELPER_BIN:-${DEFAULT_HELPER_BIN}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 TRACK_UNITS=(
     "snapper-timeline.timer"
@@ -33,7 +37,7 @@ declare -A BASE_UNIT_ACTIVE=()
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./test_snapper_disable_verify_guard.sh [options]
+Usage: sudo ./regressions/test_snapper_disable_verify_guard.sh [options]
 
 Regression smoke test for Snapper disable-intent behavior:
   1) Runs: zypper-auto-helper snapper auto-off
@@ -205,8 +209,8 @@ if ! [[ "${VERIFY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || [ "${VERIFY_TIMEOUT_SECOND
 fi
 
 if [ ! -x "${HELPER_BIN}" ] 2>/dev/null; then
-    if [ -x "${SCRIPT_DIR}/zypper-auto.sh" ] 2>/dev/null; then
-        HELPER_BIN="${SCRIPT_DIR}/zypper-auto.sh"
+    if [ -x "${REPO_ROOT}/zypper-auto.sh" ] 2>/dev/null; then
+        HELPER_BIN="${REPO_ROOT}/zypper-auto.sh"
     else
         fail "Helper binary not executable: ${HELPER_BIN}"
     fi
