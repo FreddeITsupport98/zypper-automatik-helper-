@@ -32,6 +32,8 @@
 - Runner metadata support was added for optional/warn-only tests and runtime routing (`# RUNNER_OPTIONAL=1`, `# RUNNER_RUNTIME=playwright`), and current special tests were tagged accordingly.
 - `run_regression_suite.sh` now supports selection filters `--only PATTERN` and `--exclude PATTERN` (repeatable shell-glob matching on test basenames) so focused regression slices can run without editing the runner.
 - Auto-discovered regression files are now automatically repaired to executable mode when needed (`chmod +x`), while already executable files are skipped unchanged.
+- `run_regression_suite.sh` now runs integrated preflight checks before executing tests: `bash -n` syntax checks, `shellcheck` lint checks, and runtime-aware Python compile checks (`python -m py_compile`).
+- Shellcheck preflight is enabled by default and can be temporarily bypassed with `RUNNER_SKIP_SHELLCHECK=1` when needed.
 - Added helper `scripts/bootstrap_playwright_regression.sh` to create/update the local Playwright regression venv and install Chromium runtime in one command.
 - Updated `test_snapper_timer_controls_regression.sh` timer-endpoint expectations to validate probe-based live-state payloads.
 - Fixed stale downloader-status auto-repair command quoting so temporary file handling works correctly under `set -u` (prevents `tmp: unbound variable` failures).

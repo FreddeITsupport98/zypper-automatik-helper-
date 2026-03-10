@@ -1302,6 +1302,12 @@ How it selects tests:
 - Supports selection filters:
   - `--only PATTERN` (repeatable shell-glob include filter on test basename)
   - `--exclude PATTERN` (repeatable shell-glob exclude filter on test basename)
+- Runs built-in preflight checks before tests:
+  - `bash -n` syntax checks (runner + target + selected shell regressions)
+  - `shellcheck` lint checks (runner + selected shell regressions)
+  - `python -m py_compile` checks (selected Python regressions, runtime-tag aware)
+- If needed, shellcheck preflight can be temporarily skipped with:
+  - `RUNNER_SKIP_SHELLCHECK=1`
 
 Current metadata tags in this repo:
 - `regressions/test_snapper_disable_verify_guard.sh`:

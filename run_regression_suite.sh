@@ -22,6 +22,10 @@ Safety behavior:
   - Stateful tests are skipped by default.
   - Use --include-stateful to explicitly include stateful tests.
   - Optional tests are warn-only on failure.
+  - Preflight checks run automatically before tests:
+    - Bash syntax checks (`bash -n`)
+    - Shell script lint checks (`shellcheck`)
+    - Python compile checks (`python -m py_compile`)
 
 Test metadata markers (add as single comment lines in test files):
   - # RUNNER_STATEFUL=1      include only with --include-stateful
@@ -42,6 +46,7 @@ Runtime environment variables:
   PLAYWRIGHT_TEST_PYTHON  Python runtime for optional Playwright regression
                           (default: ./.venv-playwright-regression/bin/python
                           when present, otherwise RUNTIME_TEST_PYTHON)
+  RUNNER_SKIP_SHELLCHECK  Set to 1/true/yes to skip shellcheck preflight checks
 EOF
 }
 
@@ -127,6 +132,67 @@ ensure_test_executable_if_needed() {
     fi
     chmod +x "${test_path}" || fail "Could not mark regression test executable: ${test_name}"
     printf 'INFO: Marked test executable: %s\n' "${test_name}"
+}
+
+run_preflight_bash_syntax_checks() {
+    printf '\n==> preflight: bash syntax checks\n'
+    bash -n "${SCRIPT_DIR}/run_regression_suite.sh" || fail "Bash syntax check failed: run_regression_suite.sh"
+    bash -n "${TARGET_FILE}" || fail "Bash syntax check failed: ${TARGET_FILE}"
+    for test_path in "${required_shell_tests[@]}"; do
+        bash -n "${test_path}" || fail "Bash syntax check failed: $(basename "${test_path}")"
+    done
+    for test_path in "${optional_shell_tests[@]}"; do
+        bash -n "${test_path}" || fail "Bash syntax check failed: $(basename "${test_path}")"
+    done
+}
+
+run_preflight_shellcheck_checks() {
+    local skip_shellcheck="${RUNNER_SKIP_SHELLCHECK:-0}"
+    local shellcheck_targets=()
+    if is_truthy "${skip_shellcheck}"; then
+        printf '\n==> preflight: shellcheck lint checks (skipped by RUNNER_SKIP_SHELLCHECK)\n'
+        return 0
+    fi
+    command -v shellcheck >/dev/null 2>&1 || fail "shellcheck not found. Install shellcheck or rerun with RUNNER_SKIP_SHELLCHECK=1"
+
+    printf '\n==> preflight: shellcheck lint checks\n'
+    shellcheck_targets=( "${SCRIPT_DIR}/run_regression_suite.sh" )
+    for test_path in "${required_shell_tests[@]}"; do
+        shellcheck_targets+=( "${test_path}" )
+    done
+    for test_path in "${optional_shell_tests[@]}"; do
+        shellcheck_targets+=( "${test_path}" )
+    done
+    shellcheck "${shellcheck_targets[@]}"
+}
+
+run_preflight_python_compile_checks() {
+    local runtime_tag=""
+    local python_bin=""
+    if [ "${total_python_tests}" -le 0 ]; then
+        return 0
+    fi
+
+    printf '\n==> preflight: python compile checks\n'
+    for test_path in "${required_python_tests[@]}"; do
+        runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+        python_bin="$(python_bin_for_runtime_tag "${runtime_tag}")"
+        printf 'Compiling with %s: %s\n' "${python_bin}" "$(basename "${test_path}")"
+        "${python_bin}" -m py_compile "${test_path}"
+    done
+    for test_path in "${optional_python_tests[@]}"; do
+        runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+        python_bin="$(python_bin_for_runtime_tag "${runtime_tag}")"
+        printf 'Compiling with %s: %s\n' "${python_bin}" "$(basename "${test_path}")"
+        "${python_bin}" -m py_compile "${test_path}"
+    done
+}
+
+run_preflight_checks() {
+    printf '\nRunning preflight checks before regression execution...\n'
+    run_preflight_bash_syntax_checks
+    run_preflight_shellcheck_checks
+    run_preflight_python_compile_checks
 }
 
 resolve_playwright_test_python_bin() {
@@ -359,6 +425,13 @@ if [ "${#skipped_stateful_tests[@]}" -gt 0 ]; then
         printf '  - %s\n' "${t}"
     done
 fi
+if [ "${total_python_tests}" -gt 0 ]; then
+    RUNTIME_TEST_PYTHON="${RUNTIME_TEST_PYTHON:-python3}"
+    RUNTIME_TEST_PYTHON_BIN="$(resolve_python_runtime "${RUNTIME_TEST_PYTHON}" || true)"
+    [ -n "${RUNTIME_TEST_PYTHON_BIN}" ] || fail "RUNTIME_TEST_PYTHON not found/executable: ${RUNTIME_TEST_PYTHON}"
+fi
+
+run_preflight_checks
 
 printf '\nRunning shell regressions against: %s\n' "${TARGET_FILE}"
 for test_path in "${required_shell_tests[@]}"; do
@@ -367,12 +440,6 @@ done
 for test_path in "${optional_shell_tests[@]}"; do
     run_shell_test "${test_path}" "1"
 done
-
-if [ "${total_python_tests}" -gt 0 ]; then
-    RUNTIME_TEST_PYTHON="${RUNTIME_TEST_PYTHON:-python3}"
-    RUNTIME_TEST_PYTHON_BIN="$(resolve_python_runtime "${RUNTIME_TEST_PYTHON}" || true)"
-    [ -n "${RUNTIME_TEST_PYTHON_BIN}" ] || fail "RUNTIME_TEST_PYTHON not found/executable: ${RUNTIME_TEST_PYTHON}"
-fi
 
 for test_path in "${required_python_tests[@]}"; do
     run_python_test "${test_path}" "0"
