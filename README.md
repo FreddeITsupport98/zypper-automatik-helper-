@@ -2066,6 +2066,7 @@ systemctl status zypper-autodownload.service
   - 📡 **IMPROVED:** self-update SSE stream reset now loads effective-full initial log text, then continues with incremental append streaming for new output.
   - 🐛 **FIXED:** embedded Dashboard API Python heredoc parsing regression caused by a duplicated `_recover_self_update_job` payload fragment (`IndentationError` during runtime API regression loading).
   - 🐛 **FIXED:** `/api/self-update/job` now returns effective-full `output` and `output_truncated` fields correctly in both lock/no-lock paths (eliminates HTTP 500 from undefined `tail` variable).
+  - 🧪 **NEW:** `test_self_update_api_runtime_regression.py` now includes `EmbeddedDashboardApiSyntaxRegressionTest`, which AST-parses the embedded `DASH_API_BIN` Python heredoc to catch parse/indentation regressions early.
   - 🧰 **IMPROVED:** install now adds a compatibility PATH shim at `/usr/bin/zypper-auto-helper` (symlink to `/usr/local/bin/zypper-auto-helper`) so the helper command remains discoverable in environments where `/usr/local/bin` is not in PATH.
   - 🧹 **IMPROVED:** uninstall now removes that compatibility symlink only when it points to the helper, and also removes full `zypper-auto-helper` wrapper function blocks from `.bashrc` / `.zshrc` (not just alias lines).
   - 🛡️ **CHANGED:** verification Safety Net snapshot policy now skips pre/post Snapper snapshot creation for routine `--verify` runs (including `zypper-auto-verify.timer`) to avoid repeated EFI initrd artifact growth during background verification loops.

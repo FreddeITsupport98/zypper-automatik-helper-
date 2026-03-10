@@ -3,6 +3,7 @@
 ## Unreleased
 - Fixed an embedded dashboard API heredoc parse regression: removed a duplicated `_recover_self_update_job` payload fragment that caused `IndentationError` in runtime API regression loading.
 - Fixed `/api/self-update/job` response payload wiring to use computed effective-full output fields (`output_text`, `output_truncated`) in both lock/no-lock paths, eliminating HTTP 500 failures from undefined `tail`.
+- Added explicit runtime regression guard `EmbeddedDashboardApiSyntaxRegressionTest` in `test_self_update_api_runtime_regression.py` to AST-parse the embedded `DASH_API_BIN` Python heredoc and fail fast on parse regressions.
 - Self-update recovery/status paths now return effective-full log output (bounded full view) instead of tail-only payloads, improving WebUI overlay context for long runs.
 - Self-update completion detection now falls back to systemd terminal state (`ActiveState`/`SubState` + `ExecMainStatus`) when status files lag, preventing long-lived 99% “finishing” stalls.
 - Self-update SSE stream reset now uses effective-full initial log text, while preserving incremental append streaming for new output.

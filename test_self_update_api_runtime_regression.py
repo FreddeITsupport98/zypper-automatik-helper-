@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import contextlib
 import io
 import json
@@ -28,23 +29,32 @@ def _override(ns: dict, **repls):
             else:
                 ns[k] = prev
 
+def _extract_dashboard_api_python_source(script_text: str) -> str:
+    marker = "if write_atomic \"${DASH_API_BIN}\" <<'PYEOF'"
+    start = script_text.find(marker)
+    if start < 0:
+        raise RuntimeError("Could not locate embedded dashboard API python block start marker")
+    start += len(marker)
+    end = script_text.find("\nPYEOF", start)
+    if end < 0:
+        raise RuntimeError("Could not locate embedded dashboard API python block end marker")
+    return script_text[start:end].lstrip("\n")
+
+
+class EmbeddedDashboardApiSyntaxRegressionTest(unittest.TestCase):
+    def test_embedded_dashboard_api_python_parses(self) -> None:
+        repo_root = Path(__file__).resolve().parent
+        script_path = repo_root / "zypper-auto.sh"
+        py_src = _extract_dashboard_api_python_source(script_path.read_text(encoding="utf-8"))
+        ast.parse(py_src)
+
 
 class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         repo_root = Path(__file__).resolve().parent
         script_path = repo_root / "zypper-auto.sh"
-        script_text = script_path.read_text(encoding="utf-8")
-
-        marker = "if write_atomic \"${DASH_API_BIN}\" <<'PYEOF'"
-        start = script_text.find(marker)
-        if start < 0:
-            raise RuntimeError("Could not locate embedded dashboard API python block start marker")
-        start += len(marker)
-        end = script_text.find("\nPYEOF", start)
-        if end < 0:
-            raise RuntimeError("Could not locate embedded dashboard API python block end marker")
-        py_src = script_text[start:end].lstrip("\n")
+        py_src = _extract_dashboard_api_python_source(script_path.read_text(encoding="utf-8"))
 
         cls.ns: dict = {"__name__": "znh_dashboard_api_test_runtime"}
         exec(py_src, cls.ns, cls.ns)
