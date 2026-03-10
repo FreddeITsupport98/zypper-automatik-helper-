@@ -1528,6 +1528,9 @@ WEBHOOK_URL=""            # Remote monitoring endpoint (Discord/Slack/ntfy/etc.)
 HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
 DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
 DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. firefox)
+# Dashboard auto-fetch interval (minutes) when Live mode is OFF (status-only).
+# Allowed values are constrained by schema/validation.
+WEBUI_AUTO_FETCH_INTERVAL_MINUTES="60"
 # Self-update channel used by --self-update (rolling=latest commit, stable=GitHub releases)
 # Default: stable (tags). Rolling is still available if you want "always latest".
 SELF_UPDATE_CHANNEL="stable"
@@ -2270,6 +2273,7 @@ __znh_write_dashboard_schema_json() {
     "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "8"},
     "MANAGERS_SERVER_POLL_VISIBLE_MS": {"type": "int", "min": 1200, "max": 60000, "step": 100, "default": "4500"},
     "MANAGERS_SERVER_POLL_HIDDEN_MS": {"type": "int", "min": 2000, "max": 180000, "step": 100, "default": "16000"},
+    "WEBUI_AUTO_FETCH_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60","120","180","240"], "default": "60"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
@@ -8385,6 +8389,13 @@ DASHBOARD_JS_VERBOSE_DEBUG=false
 #   zypper-auto-helper --dash-open
 DASHBOARD_PERFORMANCE_MODE="powersaving"
 
+# WEBUI_AUTO_FETCH_INTERVAL_MINUTES
+# When Live mode is OFF (status-only), the dashboard still performs periodic
+# one-shot refreshes to keep cards/logs reasonably fresh.
+# Allowed values: 1,5,10,15,30,60,120,180,240
+# Default: 60 (every 1 hour)
+WEBUI_AUTO_FETCH_INTERVAL_MINUTES=60
+
 # ZNH_DIAG_MAX_SERVICE_LOGS
 # Low-noise diagnostics follower cap: maximum number of most-recent
 # /var/log/zypper-auto/service-logs/*.log files tracked by the persistent
@@ -9311,6 +9322,7 @@ EOF
     validate_nonneg_int_bounded_optional ZNH_LIVE_LOGS_MAX_SERVICE_LOGS 8 1 30
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_VISIBLE_MS 4500 1200 60000
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_HIDDEN_MS 16000 2000 180000
+    validate_allowed_set WEBUI_AUTO_FETCH_INTERVAL_MINUTES 60 "1,5,10,15,30,60,120,180,240"
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
@@ -9567,6 +9579,7 @@ EOF
     log_debug "  ZNH_LIVE_LOGS_MAX_SERVICE_LOGS=${ZNH_LIVE_LOGS_MAX_SERVICE_LOGS:-8}"
     log_debug "  MANAGERS_SERVER_POLL_VISIBLE_MS=${MANAGERS_SERVER_POLL_VISIBLE_MS:-4500}"
     log_debug "  MANAGERS_SERVER_POLL_HIDDEN_MS=${MANAGERS_SERVER_POLL_HIDDEN_MS:-16000}"
+    log_debug "  WEBUI_AUTO_FETCH_INTERVAL_MINUTES=${WEBUI_AUTO_FETCH_INTERVAL_MINUTES:-60}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
     log_debug "  SNAP_RETENTION_OPTIMIZER_ENABLED=${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}"
     log_debug "  SNAP_RETENTION_MAX_NUMBER_LIMIT=${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}"
@@ -9686,6 +9699,7 @@ EOF
     _mark_missing_key "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS"
     _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
     _mark_missing_key "MANAGERS_SERVER_POLL_HIDDEN_MS"
+    _mark_missing_key "WEBUI_AUTO_FETCH_INTERVAL_MINUTES"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
     _mark_missing_key "SELF_UPDATE_STABLE_POLICY"
     _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
@@ -9839,6 +9853,9 @@ EOF
                     ;;
                 MANAGERS_SERVER_POLL_HIDDEN_MS)
                     log_info "  - MANAGERS_SERVER_POLL_HIDDEN_MS: Managers Server tab polling interval (ms) when browser tab is hidden/backgrounded."
+                    ;;
+                WEBUI_AUTO_FETCH_INTERVAL_MINUTES)
+                    log_info "  - WEBUI_AUTO_FETCH_INTERVAL_MINUTES: WebUI one-shot refresh interval (minutes) used when Live mode is OFF (status-only)."
                     ;;
                 SELF_UPDATE_CHANNEL)
                     log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
@@ -10123,6 +10140,9 @@ EOF
                     ;;
                 MANAGERS_SERVER_POLL_HIDDEN_MS)
                     MANAGERS_SERVER_POLL_HIDDEN_MS=16000
+                    ;;
+                WEBUI_AUTO_FETCH_INTERVAL_MINUTES)
+                    WEBUI_AUTO_FETCH_INTERVAL_MINUTES=60
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     SNAP_RETENTION_OPTIMIZER_ENABLED="true"
@@ -11042,6 +11062,7 @@ generate_dashboard() {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Zypper Auto Command Center</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='50' font-size='50'%3E%F0%9F%9A%80%3C/text%3E%3C/svg%3E" />
   <script>
     // Apply stored theme ASAP to avoid "flash of wrong theme" (FOUC) when the
     // user has forced Light/Dark while the system prefers the opposite.
@@ -12123,11 +12144,16 @@ generate_dashboard() {
         Generated <span id="time-ago">just now</span> (<span style="font-family:monospace" id="generated-at">${now}</span>) • Pending Updates: <strong id="pending-count">${pending_count}</strong>
       </p>
       <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-        <label class="pill" style="gap:10px;">
-          <input type="checkbox" id="live-toggle" /> Live mode
-        </label>
+        <span class="pill" id="live-status-pill" style="gap:10px; cursor:default;" title="Live mode is status-only in this build (no toggle action in header).">
+          <span class="feat-dot" id="live-status-dot" style="color: var(--muted);">●</span>
+          Live mode: <strong id="live-status-text">checking…</strong>
+        </span>
+        <span class="pill" id="auto-fetch-interval-pill" style="gap:10px; cursor:default;" title="When Live mode is OFF, one-shot refresh runs on this interval (configurable in Settings).">
+          <span class="feat-dot" style="color: var(--accent);">●</span>
+          <span id="auto-fetch-interval-label">Auto-fetch: 60m</span>
+        </span>
         <button class="pill" id="theme-toggle" type="button" title="Toggle theme (auto/light/dark)">Theme: Auto</button>
-        <span style="font-size:0.85rem; color: var(--muted);">Live polls <code>status-data.json</code>, <code>download-status.txt</code>, and <code>perf-data.json</code> (best via <code>http://</code>).</span>
+        <span style="font-size:0.85rem; color: var(--muted);">Live status polls <code>status-data.json</code>, <code>download-status.txt</code>, and <code>perf-data.json</code> (best via <code>http://</code>).</span>
       </div>
 
       <!-- Token repair banner (shown when Settings/Snapper token is missing) -->
@@ -18024,6 +18050,7 @@ generate_dashboard() {
         { key: 'ZNH_LIVE_LOGS_MAX_SERVICE_LOGS', type: 'int', label: 'Live logs fallback: max service logs tracked', advanced: true, help: 'Cap for debug-menu/CLI live-log fallback source fanout. Lower values reduce temporary tail-process spikes.' },
         { key: 'MANAGERS_SERVER_POLL_VISIBLE_MS', type: 'int', label: 'Managers (Server tab): visible poll interval (ms)', advanced: true, help: 'Polling interval while the browser tab is visible. Lower values are more responsive but use more API/CPU.' },
         { key: 'MANAGERS_SERVER_POLL_HIDDEN_MS', type: 'int', label: 'Managers (Server tab): hidden poll interval (ms)', advanced: true, help: 'Polling interval while browser tab is hidden/backgrounded. Use a higher value to reduce idle load.' },
+        { key: 'WEBUI_AUTO_FETCH_INTERVAL_MINUTES', type: 'interval', label: 'WebUI auto-fetch interval when Live mode is OFF (minutes)', help: 'Status-only mode refresh cadence. Default 60 minutes.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
@@ -19082,13 +19109,13 @@ generate_dashboard() {
         try { pre._znh_raw = raw; } catch (e2) {}
 
         var t = raw;
-        var maxChars = 24000;
+        var maxChars = 0;
         try {
-            if (opts.maxChars != null) maxChars = parseInt(opts.maxChars, 10) || maxChars;
+            if (opts.maxChars != null) maxChars = parseInt(opts.maxChars, 10) || 0;
         } catch (e3) {}
 
         try {
-            if (t.length > maxChars) {
+            if (maxChars > 0 && t.length > maxChars) {
                 t = '(output truncated; showing last ' + String(maxChars) + ' chars)\n' + t.slice(t.length - maxChars);
             }
         } catch (e4) {}
@@ -19122,9 +19149,9 @@ generate_dashboard() {
 
         // Bound raw buffer too.
         try {
-            var rawMax = 60000;
-            if (opts.rawMax != null) rawMax = parseInt(opts.rawMax, 10) || rawMax;
-            if (raw.length > rawMax) raw = raw.slice(raw.length - rawMax);
+            var rawMax = 0;
+            if (opts.rawMax != null) rawMax = parseInt(opts.rawMax, 10) || 0;
+            if (rawMax > 0 && raw.length > rawMax) raw = raw.slice(raw.length - rawMax);
         } catch (e2) {}
 
         _znhOverlayLogApplyRaw(preId, raw, opts);
@@ -25191,13 +25218,6 @@ generate_dashboard() {
             pre._znh_last_text = t;
         } catch (e1) {}
 
-        // Keep it bounded.
-        try {
-            var maxChars = 24000;
-            if (t.length > maxChars) {
-                t = '(output truncated; showing last ' + String(maxChars) + ' chars)\n' + t.slice(t.length - maxChars);
-            }
-        } catch (e2) {}
 
         pre.textContent = t;
         if (atBottom) {
@@ -26192,11 +26212,12 @@ generate_dashboard() {
                     var outText = String(j.output);
                     try {
                         var lp = (j && j.log_path != null) ? String(j.log_path) : '';
-                        var trunc = !!(j && j.output_truncated);
                         if (lp) {
-                            var hdr = '[webui] Full log: ' + lp + '\n';
-                            if (trunc) hdr += '[webui] NOTE: WebUI shows a tail view (latest output).\n\n';
+                            var hdr = '[webui] Log file: ' + lp + '\n\n';
                             outText = hdr + outText;
+                        }
+                        if (j && j.output_truncated) {
+                            outText += '\n\n[webui] NOTE: Response is safety-truncated by API size limits.';
                         }
                     } catch (eLP) {}
                     _suSetLog(outText);
@@ -26531,12 +26552,12 @@ generate_dashboard() {
                     try {
                         var lp = (p && p.log_path != null) ? String(p.log_path) : '';
                         if (lp) {
-                            var hdr = '[webui] Full log: ' + lp + '\n[webui] NOTE: WebUI shows a tail view (latest output).\n\n';
+                            var hdr = '[webui] Log file: ' + lp + '\\n\\n';
                             txt0 = hdr + txt0;
                         }
                     } catch (eLP) {}
 
-                    try { _znhOverlayLogApplyRaw('su-live-log', txt0, { maxChars: 24000, rawMax: 80000, highlightId: 'su-live-log' }); } catch (e1) {}
+                    try { _znhOverlayLogApplyRaw('su-live-log', txt0, { maxChars: 0, rawMax: 0, highlightId: 'su-live-log' }); } catch (e1) {}
                     try { znhTaskUpdateFromJob('self-update', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
                 },
                 onAppend: function(p) {
@@ -26544,7 +26565,7 @@ generate_dashboard() {
                     try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (e0) {}
                     try {
                         var txt = String((p && p.text != null) ? p.text : '');
-                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 24000, rawMax: 80000 });
+                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 0, rawMax: 0 });
                     } catch (e1) {}
                     try { znhTaskUpdateFromJob('self-update', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (e2) {}
                 },
@@ -28558,6 +28579,7 @@ generate_dashboard() {
             try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
             try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
             try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
+            try { if (typeof znhApplyWebUiFetchConfig === 'function') znhApplyWebUiFetchConfig(_settingsConfig); } catch (eWF) {}
             try { znhDebugUpdateToggleUi(); } catch (eDU) {}
             _renderSettingsForm(_settingsSchema, _settingsConfig)
             try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP) {}
@@ -28745,6 +28767,7 @@ generate_dashboard() {
                     if (r && r.config) {
                         _settingsConfig = r.config;
                         try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD2) {}
+                        try { if (typeof znhApplyWebUiFetchConfig === 'function') znhApplyWebUiFetchConfig(_settingsConfig); } catch (eWF2) {}
                         try { znhDebugUpdateToggleUi(); } catch (eDU2) {}
                         try { if (_settingsSchema) _renderSettingsForm(_settingsSchema, _settingsConfig); } catch (eRF) {}
                         try { if (typeof znhKernelPurgeRefreshUI === 'function') znhKernelPurgeRefreshUI(); } catch (eKP0) {}
@@ -28836,6 +28859,7 @@ generate_dashboard() {
                         try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
                         try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
                         try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
+                        try { if (typeof znhApplyWebUiFetchConfig === 'function') znhApplyWebUiFetchConfig(_settingsConfig); } catch (eWF3) {}
                         try { znhDebugUpdateToggleUi(); } catch (eDU) {}
 
                         // Only re-render the full form when the drawer is actually open.
@@ -29694,31 +29718,84 @@ generate_dashboard() {
     var _pollLogInFlight = false;
     var _pollDashMetaInFlight = false;
 
-    // Live mode toggle
-    (function() {
-        var t = document.getElementById('live-toggle');
-        if (!t) return;
-        t.checked = !!liveEnabled;
-        t.addEventListener('change', function() {
-            liveEnabled = !!t.checked;
-            try {
-                localStorage.setItem('znh_live', liveEnabled ? '1' : '0');
-            } catch (e) {
-                // ignore
+    var _webuiAutoFetchIntervalMinutes = 60;
+    var _webuiAutoFetchTimer = null;
+
+    function _znhNormalizeAutoFetchInterval(v) {
+        var allowed = [1, 5, 10, 15, 30, 60, 120, 180, 240];
+        var n = parseInt(v, 10);
+        if (!isFinite(n)) n = 60;
+        if (allowed.indexOf(n) === -1) n = 60;
+        return n;
+    }
+
+    function _znhSetLiveStatusUi() {
+        var txt = document.getElementById('live-status-text');
+        var dot = document.getElementById('live-status-dot');
+        var pill = document.getElementById('live-status-pill');
+        if (txt) txt.textContent = liveEnabled ? 'ON' : 'OFF';
+        if (dot) dot.style.color = liveEnabled ? '#2ecc71' : 'var(--muted)';
+        if (pill) {
+            pill.title = liveEnabled
+                ? 'Live mode is ON (status-only indicator).'
+                : 'Live mode is OFF. Status-only auto-fetch cadence is shown next to this indicator.';
+        }
+    }
+
+    function _znhSetAutoFetchLabel() {
+        var el = document.getElementById('auto-fetch-interval-label');
+        if (!el) return;
+        el.textContent = 'Auto-fetch: ' + String(_webuiAutoFetchIntervalMinutes) + 'm';
+    }
+
+    function _znhStatusOnlyAutoFetchRun(reason) {
+        if (liveEnabled) return;
+        try { pollLive(true); } catch (e0) {}
+        try { pollDownloaderStatus(true); } catch (e1) {}
+        try { pollPerf(true); } catch (e2) {}
+        try { pollDashboardMeta(); } catch (e3) {}
+        try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e4) {}
+        try {
+            if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') {
+                window.znhJsHealthLog('debug', 'status-only auto-fetch run (' + String(reason || 'timer') + ')');
             }
-            if (liveEnabled) {
-                pollLive();
-                pollDownloaderStatus();
-                pollPerf();
-                pollRecentActivityLog();
-                try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e5) {}
-                try { _znhRecentLogStreamEnsure(true); } catch (eSSE) {}
-            } else {
-                try { _znhRecentLogStreamStop(); } catch (eSSE2) {}
+        } catch (e5) {}
+    }
+
+    function _znhRescheduleStatusOnlyAutoFetch() {
+        try {
+            if (_webuiAutoFetchTimer) {
+                clearTimeout(_webuiAutoFetchTimer);
+                _webuiAutoFetchTimer = null;
             }
-        });
-    })();
-    try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'wired live toggle'); } catch (e) {}
+        } catch (e0) {}
+
+        var ms = _znhNormalizeAutoFetchInterval(_webuiAutoFetchIntervalMinutes) * 60 * 1000;
+        if (ms < 60 * 1000) ms = 60 * 1000;
+
+        function step() {
+            _webuiAutoFetchTimer = setTimeout(function() {
+                _znhStatusOnlyAutoFetchRun('interval');
+                step();
+            }, ms);
+        }
+        step();
+    }
+
+    function znhApplyWebUiFetchConfig(cfg) {
+        cfg = cfg || {};
+        var v = '';
+        try { v = String((cfg.WEBUI_AUTO_FETCH_INTERVAL_MINUTES != null) ? cfg.WEBUI_AUTO_FETCH_INTERVAL_MINUTES : ''); } catch (e0) { v = ''; }
+        _webuiAutoFetchIntervalMinutes = _znhNormalizeAutoFetchInterval(v || 60);
+        _znhSetAutoFetchLabel();
+        _znhSetLiveStatusUi();
+        _znhRescheduleStatusOnlyAutoFetch();
+    }
+
+    try { _znhSetLiveStatusUi(); } catch (e1) {}
+    try { _znhSetAutoFetchLabel(); } catch (e2) {}
+    try { znhApplyWebUiFetchConfig(_settingsConfig || {}); } catch (e3) {}
+    try { if (typeof window.znhJsHealthLog === 'function') window.znhJsHealthLog('debug', 'live status-only indicator ready'); } catch (e4) {}
 
     function pollLive(forceOnce) {
         var _forceOnce = !!forceOnce;
@@ -29826,8 +29903,7 @@ generate_dashboard() {
                     try {
                         liveEnabled = false;
                         try { localStorage.setItem('znh_live', '0'); } catch (eLS) {}
-                        var tgl = document.getElementById('live-toggle');
-                        if (tgl) tgl.checked = false;
+                        try { _znhSetLiveStatusUi(); } catch (eUI) {}
                     } catch (e3) {}
                 }
                 return null;
@@ -29920,6 +29996,13 @@ generate_dashboard() {
                 return meta;
             })
             .catch(function(err) {
+                if (!liveEnabled && _forceOnce) {
+                    if (ZNH_DEBUG) {
+                        var em0 = (err && err.message) ? err.message : 'pollDownloaderStatus(one-shot) failed';
+                        try { znhDebugWarn('pollDownloaderStatus(one-shot) failed:', em0); } catch (e0) {}
+                    }
+                    return null;
+                }
                 if (ZNH_DEBUG) {
                     var msg = (err && err.message) ? err.message : 'dashboard meta poll failed';
                     try { znhDebugWarn('pollDashboardMeta failed:', msg); } catch (e1) {}
@@ -30059,8 +30142,9 @@ generate_dashboard() {
         }
     }
 
-    function pollDownloaderStatus() {
-        if (!liveEnabled) return Promise.resolve(null);
+    function pollDownloaderStatus(forceOnce) {
+        var _forceOnce = !!forceOnce;
+        if (!liveEnabled && !_forceOnce) return Promise.resolve(null);
         if (_pollDownloaderInFlight) return Promise.resolve(null);
         _pollDownloaderInFlight = true;
 
@@ -30728,7 +30812,7 @@ generate_dashboard() {
     // Initial one-shot status sync (even when Live mode is off) so stale
     // static dashboard cards self-correct automatically.
     pollLive(true);
-    pollDownloaderStatus();
+    pollDownloaderStatus(true);
     pollPerf(true);
     try { _znhRecentLogStreamEnsure(false); } catch (eSSE0) {}
     pollRecentActivityLog();
@@ -30740,7 +30824,8 @@ generate_dashboard() {
         function _refreshWhenResumed() {
             if (liveEnabled) return;
             pollLive(true);
-            pollDownloaderStatus();
+            pollDownloaderStatus(true);
+            pollPerf(true);
             pollDashboardMeta();
             try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e0) {}
         }
@@ -49567,6 +49652,7 @@ def _read_self_update_state() -> dict:
 # --- Self-update job runner (dashboard API) ---
 JOB_MAX_OUTPUT_CHARS = 200_000
 JOB_OUTPUT_TAIL_CHARS = 40_000
+SELF_UPDATE_API_MAX_CHARS = 1_500_000
 JOB_TTL_SECONDS = 30 * 60
 
 # Rocket Update Wizard (system dup) needs to survive dashboard API restarts.
@@ -50177,16 +50263,26 @@ def _recover_scrub_job(job_id: str) -> dict | None:
         except Exception:
             rc = 1
 
-    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
-        done = True
-        try:
-            rc = int(props.get("ExecMainStatus", "1") or "1")
-        except Exception:
-            rc = 1
+    if not done:
+        terminal_active = active in ("inactive", "failed")
+        terminal_sub = sub in ("dead", "failed", "exited")
+        if terminal_active or terminal_sub:
+            done = True
+            if rc is None:
+                try:
+                    exec_rc_raw = str(props.get("ExecMainStatus", "") or "").strip()
+                    if exec_rc_raw and re.fullmatch(r"-?[0-9]+", exec_rc_raw):
+                        rc = int(exec_rc_raw)
+                    elif active == "inactive" and sub in ("dead", "exited"):
+                        rc = 0
+                    else:
+                        rc = 1
+                except Exception:
+                    rc = 1
 
     running = not done
 
-    tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
+    full_txt, truncated = _read_file_effective_full(log_path, SELF_UPDATE_API_MAX_CHARS) if os.path.exists(log_path) else ("", False)
 
     stage = str(status.get("stage") or ("Running" if active == "active" else "Starting"))
     if done:
@@ -50649,12 +50745,22 @@ def _recover_snapper_job(job_id: str) -> dict | None:
         except Exception:
             rc = 1
 
-    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
-        done = True
-        try:
-            rc = int(props.get("ExecMainStatus", "1") or "1")
-        except Exception:
-            rc = 1
+    if not done:
+        terminal_active = active in ("inactive", "failed")
+        terminal_sub = sub in ("dead", "failed", "exited")
+        if terminal_active or terminal_sub:
+            done = True
+            if rc is None:
+                try:
+                    exec_rc_raw = str(props.get("ExecMainStatus", "") or "").strip()
+                    if exec_rc_raw and re.fullmatch(r"-?[0-9]+", exec_rc_raw):
+                        rc = int(exec_rc_raw)
+                    elif active == "inactive" and sub in ("dead", "exited"):
+                        rc = 0
+                    else:
+                        rc = 1
+                except Exception:
+                    rc = 1
 
     running = not done
 
@@ -51293,12 +51399,22 @@ def _recover_quick_job(job_id: str) -> dict | None:
         except Exception:
             rc = 1
 
-    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
-        done = True
-        try:
-            rc = int(props.get("ExecMainStatus", "1") or "1")
-        except Exception:
-            rc = 1
+    if not done:
+        terminal_active = active in ("inactive", "failed")
+        terminal_sub = sub in ("dead", "failed", "exited")
+        if terminal_active or terminal_sub:
+            done = True
+            if rc is None:
+                try:
+                    exec_rc_raw = str(props.get("ExecMainStatus", "") or "").strip()
+                    if exec_rc_raw and re.fullmatch(r"-?[0-9]+", exec_rc_raw):
+                        rc = int(exec_rc_raw)
+                    elif active == "inactive" and sub in ("dead", "exited"):
+                        rc = 0
+                    else:
+                        rc = 1
+                except Exception:
+                    rc = 1
 
     running = not done
 
@@ -51460,6 +51576,54 @@ def _tail_file(path: str, max_chars: int) -> tuple[str, bool]:
     except Exception:
         return "", False
 
+def _read_file_effective_full(path: str, max_chars: int) -> tuple[str, bool]:
+    """Return effectively-full text for WebUI logs.
+
+    If content exceeds max_chars, return a bounded head+tail view with a clear
+    marker so callers do not degrade into tail-only UX.
+    """
+    try:
+        cap = int(max_chars or 0)
+    except Exception:
+        cap = 0
+    if cap <= 0:
+        cap = 1_500_000
+
+    try:
+        size = int(os.path.getsize(path) or 0)
+    except Exception:
+        size = 0
+
+    marker = "\n\n[webui] NOTE: Log too large; middle section omitted for safety.\n\n"
+
+    try:
+        if size <= cap:
+            with open(path, "rb") as f:
+                data = f.read()
+            return data.decode("utf-8", errors="replace"), False
+
+        head_n = int(cap * 0.60)
+        if head_n < 20_000:
+            head_n = min(20_000, cap // 2)
+        tail_n = int(cap - head_n)
+        if tail_n < 20_000 and cap > 40_000:
+            tail_n = 20_000
+            head_n = max(1, cap - tail_n)
+
+        with open(path, "rb") as f:
+            head = f.read(max(0, int(head_n)))
+            try:
+                f.seek(max(0, size - int(tail_n)))
+                tail = f.read(max(0, int(tail_n)))
+            except Exception:
+                tail = b""
+
+        txt = head.decode("utf-8", errors="replace")
+        txt += marker
+        txt += tail.decode("utf-8", errors="replace")
+        return txt, True
+    except Exception:
+        return "", False
 
 def _read_kv_status(path: str) -> dict:
     out = {}
@@ -51524,18 +51688,28 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
         except Exception:
             rc = 1
 
-    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
-        done = True
-        try:
-            rc = int(props.get("ExecMainStatus", "1") or "1")
-        except Exception:
-            rc = 1
+    if not done:
+        terminal_active = active in ("inactive", "failed")
+        terminal_sub = sub in ("dead", "failed", "exited")
+        if terminal_active or terminal_sub:
+            done = True
+            if rc is None:
+                try:
+                    exec_rc_raw = str(props.get("ExecMainStatus", "") or "").strip()
+                    if exec_rc_raw and re.fullmatch(r"-?[0-9]+", exec_rc_raw):
+                        rc = int(exec_rc_raw)
+                    elif active == "inactive" and sub in ("dead", "exited"):
+                        rc = 0
+                    else:
+                        rc = 1
+                except Exception:
+                    rc = 1
 
     running = not done
 
     tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
 
-    # Best-effort progress from log tail
+    # Best-effort progress from available output
     jtmp = {
         "stage": status.get("stage") or ("Running" if active == "active" else "Starting"),
         "progress": 0,
@@ -51762,24 +51936,34 @@ def _recover_self_update_job(job_id: str) -> dict | None:
         except Exception:
             rc = 1
 
-    if not done and active == "inactive" and sub in ("dead", "failed", "exited"):
-        done = True
-        try:
-            rc = int(props.get("ExecMainStatus", "1") or "1")
-        except Exception:
-            rc = 1
+    if not done:
+        terminal_active = active in ("inactive", "failed")
+        terminal_sub = sub in ("dead", "failed", "exited")
+        if terminal_active or terminal_sub:
+            done = True
+            if rc is None:
+                try:
+                    exec_rc_raw = str(props.get("ExecMainStatus", "") or "").strip()
+                    if exec_rc_raw and re.fullmatch(r"-?[0-9]+", exec_rc_raw):
+                        rc = int(exec_rc_raw)
+                    elif active == "inactive" and sub in ("dead", "exited"):
+                        rc = 0
+                    else:
+                        rc = 1
+                except Exception:
+                    rc = 1
 
     running = not done
 
-    tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
+    full_txt, truncated = _read_file_effective_full(log_path, SELF_UPDATE_API_MAX_CHARS) if os.path.exists(log_path) else ("", False)
 
-    # Best-effort progress from log tail
+    # Best-effort progress from available output
     jtmp = {
         "stage": status.get("stage") or ("Running" if active == "active" else "Starting"),
         "progress": 0,
     }
     try:
-        for ln in (tail or "").splitlines(True):
+        for ln in (full_txt or "").splitlines(True):
             _job_update_progress(jtmp, ln)
     except Exception:
         pass
@@ -51835,7 +52019,17 @@ def _recover_self_update_job(job_id: str) -> dict | None:
         "post_action_rc": post_action_rc,
         "stage": stage,
         "progress": int(progress),
-        "output": tail,
+        "output": full_txt,
+        "output_truncated": bool(truncated),
+        "restart_check_output": "",
+        "resumed": True,
+        "unit": unit,
+        "log_path": log_path,
+        "status_path": status_path,
+    }
+        "stage": stage,
+        "progress": int(progress),
+        "output": full_txt,
         "output_truncated": bool(truncated),
         "restart_check_output": "",
         "resumed": True,
@@ -52093,6 +52287,41 @@ class Handler(BaseHTTPRequestHandler):
                     done0 = False
                     rc0 = None
                     stage0 = ""
+
+                if not done0 and unit:
+                    try:
+                        rc_show2, out_show2 = _run_cmd(
+                            ["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus"],
+                            timeout_s=2,
+                            log=None,
+                        )
+                        if rc_show2 == 0:
+                            props2 = {}
+                            for line in (out_show2 or "").splitlines():
+                                if "=" in line:
+                                    k, v = line.split("=", 1)
+                                    props2[k.strip()] = v.strip()
+                            active2 = str(props2.get("ActiveState", "") or "").strip()
+                            sub2 = str(props2.get("SubState", "") or "").strip()
+                            terminal_active = active2 in ("inactive", "failed")
+                            terminal_sub = sub2 in ("dead", "failed", "exited")
+                            if terminal_active or terminal_sub:
+                                done0 = True
+                                if rc0 is None:
+                                    try:
+                                        exec_rc_raw = str(props2.get("ExecMainStatus", "") or "").strip()
+                                        if exec_rc_raw and re.fullmatch(r"-?[0-9]+", exec_rc_raw):
+                                            rc0 = int(exec_rc_raw)
+                                        elif active2 == "inactive" and sub2 in ("dead", "exited"):
+                                            rc0 = 0
+                                        else:
+                                            rc0 = 1
+                                    except Exception:
+                                        rc0 = 1
+                                if not stage0:
+                                    stage0 = "Done" if int(rc0 or 0) == 0 else "Failed"
+                    except Exception:
+                        pass
                 return bool(done0), rc0, stage0
 
             def _normalize_stage(s: str) -> str:
@@ -52127,14 +52356,21 @@ class Handler(BaseHTTPRequestHandler):
             offset = 0
             try:
                 if os.path.exists(log_path):
-                    with open(log_path, "rb") as f:
-                        f.seek(0, os.SEEK_END)
-                        size = f.tell()
-                        start = max(0, size - int(max_tail))
-                        offset = size
-                        f.seek(start)
-                        data = f.read()
-                    tail_txt = data.decode("utf-8", errors="replace")
+                    if job_type == "self-update":
+                        tail_txt, _tail_trunc = _read_file_effective_full(log_path, SELF_UPDATE_API_MAX_CHARS)
+                        try:
+                            offset = int(os.path.getsize(log_path) or 0)
+                        except Exception:
+                            offset = 0
+                    else:
+                        with open(log_path, "rb") as f:
+                            f.seek(0, os.SEEK_END)
+                            size = f.tell()
+                            start = max(0, size - int(max_tail))
+                            offset = size
+                            f.seek(start)
+                            data = f.read()
+                        tail_txt = data.decode("utf-8", errors="replace")
             except Exception:
                 tail_txt = ""
                 offset = 0
@@ -53270,6 +53506,29 @@ class Handler(BaseHTTPRequestHandler):
 
             now_ts = time.time()
             try:
+                def _self_update_output_payload(job_obj: dict) -> tuple[str, bool]:
+                    txt = ""
+                    trunc = False
+                    try:
+                        lp = str(job_obj.get("log_path", "") or "").strip()
+                    except Exception:
+                        lp = ""
+                    if lp and os.path.exists(lp):
+                        try:
+                            txt, trunc = _read_file_effective_full(lp, SELF_UPDATE_API_MAX_CHARS)
+                            return txt, bool(trunc)
+                        except Exception:
+                            pass
+                    try:
+                        txt = str(job_obj.get("output", "") or "")
+                    except Exception:
+                        txt = ""
+                    if len(txt) > SELF_UPDATE_API_MAX_CHARS:
+                        txt = txt[-SELF_UPDATE_API_MAX_CHARS:]
+                        trunc = True
+                    if bool(job_obj.get("output_truncated")):
+                        trunc = True
+                    return txt, bool(trunc)
                 lock = getattr(self.server, "jobs_lock", None)
                 jobs = getattr(self.server, "jobs", {})
                 if lock:
@@ -53296,9 +53555,7 @@ class Handler(BaseHTTPRequestHandler):
                                 return _json_response(self, 200, recovered, origin)
                             return _json_response(self, 404, {"error": "job not found"}, origin)
 
-                        out = str(job.get("output", ""))
-                        tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
-                        tail = _zypper_xml_pretty(tail_raw)
+                        output_text, output_truncated = _self_update_output_payload(job)
                         stage = job.get("stage")
                         progress = int(job.get("progress") or 0)
                         running = bool(job.get("running"))
@@ -53350,9 +53607,7 @@ class Handler(BaseHTTPRequestHandler):
                             return _json_response(self, 200, recovered, origin)
                         return _json_response(self, 404, {"error": "job not found"}, origin)
 
-                    out = str(job.get("output", ""))
-                    tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
-                    tail = _zypper_xml_pretty(tail_raw)
+                    output_text, output_truncated = _self_update_output_payload(job)
                     stage = job.get("stage")
                     progress = int(job.get("progress") or 0)
                     running = bool(job.get("running"))
@@ -53386,8 +53641,8 @@ class Handler(BaseHTTPRequestHandler):
                         "rc": job.get("rc"),
                         "stage": stage,
                         "progress": int(progress),
-                        "output": tail,
-                        "output_truncated": bool(job.get("output_truncated")),
+                            "output": tail,
+                            "output_truncated": bool(job.get("output_truncated")),
                         "restart_check_output": job.get("restart_check_output"),
                         "log_path": job.get("log_path"),
                         "status_path": job.get("status_path"),
@@ -53581,7 +53836,7 @@ class Handler(BaseHTTPRequestHandler):
                             pass
 
                         out = str(job.get("output", ""))
-                        tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                        tail_raw = out
                         tail = _zypper_xml_pretty(tail_raw)
                         return _json_response(self, 200, {
                             "job_id": job_id,
@@ -53617,7 +53872,7 @@ class Handler(BaseHTTPRequestHandler):
                         pass
 
                     out = str(job.get("output", ""))
-                    tail_raw = out[-JOB_OUTPUT_TAIL_CHARS:] if len(out) > JOB_OUTPUT_TAIL_CHARS else out
+                    tail_raw = out
                     tail = _zypper_xml_pretty(tail_raw)
                     return _json_response(self, 200, {
                         "job_id": job_id,

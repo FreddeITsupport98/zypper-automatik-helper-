@@ -2061,6 +2061,9 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🧾 **IMPROVED:** self-update WebUI recovery/status endpoints now return effective-full log output (bounded full view) instead of tail-only payloads, so long update sessions keep usable context.
+  - ✅ **FIXED:** self-update completion now falls back to systemd terminal state (`ActiveState`/`SubState` + `ExecMainStatus`) when status files lag, preventing 99% “stuck finishing” overlays.
+  - 📡 **IMPROVED:** self-update SSE stream reset now loads effective-full initial log text, then continues with incremental append streaming for new output.
   - 🧰 **IMPROVED:** install now adds a compatibility PATH shim at `/usr/bin/zypper-auto-helper` (symlink to `/usr/local/bin/zypper-auto-helper`) so the helper command remains discoverable in environments where `/usr/local/bin` is not in PATH.
   - 🧹 **IMPROVED:** uninstall now removes that compatibility symlink only when it points to the helper, and also removes full `zypper-auto-helper` wrapper function blocks from `.bashrc` / `.zshrc` (not just alias lines).
   - 🛡️ **CHANGED:** verification Safety Net snapshot policy now skips pre/post Snapper snapshot creation for routine `--verify` runs (including `zypper-auto-verify.timer`) to avoid repeated EFI initrd artifact growth during background verification loops.

@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Self-update recovery/status paths now return effective-full log output (bounded full view) instead of tail-only payloads, improving WebUI overlay context for long runs.
+- Self-update completion detection now falls back to systemd terminal state (`ActiveState`/`SubState` + `ExecMainStatus`) when status files lag, preventing long-lived 99% “finishing” stalls.
+- Self-update SSE stream reset now uses effective-full initial log text, while preserving incremental append streaming for new output.
 - Install flow now adds a compatibility PATH symlink `/usr/bin/zypper-auto-helper -> /usr/local/bin/zypper-auto-helper` (when safe) so helper command discovery works even when `/usr/local/bin` is absent from PATH.
 - Uninstall flow now removes that compatibility symlink only when it points to the helper target and leaves unrelated/package-managed `/usr/bin/zypper-auto-helper` files untouched.
 - Uninstall shell cleanup now removes full `zypper-auto-helper` wrapper function blocks from `.bashrc`/`.zshrc` in addition to alias lines.
