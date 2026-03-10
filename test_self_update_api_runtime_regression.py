@@ -50,7 +50,7 @@ class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
         exec(py_src, cls.ns, cls.ns)
         cls.handler_cls = cls.ns["Handler"]
 
-    def _invoke_get(self, path: str, *, conf_path: str) -> tuple[int, dict]:
+    def _invoke_get(self, path: str, *, conf_path: str, server_extras: dict | None = None) -> tuple[int, dict]:
         h = object.__new__(self.handler_cls)
         h.path = path
         h.client_address = ("127.0.0.1", 0)
@@ -73,11 +73,14 @@ class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
         h.send_header = lambda *_args, **_kwargs: None
         h.end_headers = lambda: None
 
-        h.server = types.SimpleNamespace(
-            token="tok",
-            conf_path=str(conf_path),
-            _znh_log=lambda *_args, **_kwargs: None,
-        )
+        server_kwargs = {
+            "token": "tok",
+            "conf_path": str(conf_path),
+            "_znh_log": (lambda *_args, **_kwargs: None),
+        }
+        if server_extras:
+            server_kwargs.update(server_extras)
+        h.server = types.SimpleNamespace(**server_kwargs)
 
         self.handler_cls.do_GET(h)
         raw = h.wfile.getvalue().decode("utf-8", errors="replace").strip()
@@ -237,6 +240,105 @@ class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
         live = payload.get("snapper_timeline_timer_live") or {}
         self.assertIn("load state reports", str(live.get("partial_reason", "")).lower())
         self.assertEqual(str(live.get("last_result") or ""), "failed")
+
+    def test_recover_self_update_job_uses_terminal_state_fallback(self) -> None:
+        job_id = "selfupdatet1"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            su_log_dir = root / "logs"
+            su_state_dir = root / "state"
+            su_log_dir.mkdir(parents=True, exist_ok=True)
+            su_state_dir.mkdir(parents=True, exist_ok=True)
+
+            with _override(self.ns, SU_LOG_DIR=str(su_log_dir), SU_STATUS_DIR=str(su_state_dir)):
+                unit, log_path, status_path, _script_path = self.ns["_su_paths"](job_id)
+                Path(log_path).write_text(
+                    "header\nupdate complete\nfooter\n",
+                    encoding="utf-8",
+                )
+                # Simulate status-file lag (no done=1 marker yet).
+                Path(status_path).write_text(
+                    "channel=stable\nstage=Running\ndry_run=0\n",
+                    encoding="utf-8",
+                )
+
+                def _fake_run_cmd(cmd, timeout_s=0, log=None):  # noqa: ANN001
+                    _ = timeout_s, log
+                    if list(cmd or []) == [
+                        "systemctl",
+                        "show",
+                        unit,
+                        "-p",
+                        "ActiveState",
+                        "-p",
+                        "SubState",
+                        "-p",
+                        "ExecMainStatus",
+                    ]:
+                        return 0, "ActiveState=inactive\nSubState=dead\nExecMainStatus=0\n"
+                    return 1, ""
+
+                with _override(self.ns, _run_cmd=_fake_run_cmd):
+                    recovered = self.ns["_recover_self_update_job"](job_id)
+
+        self.assertIsNotNone(recovered, "Expected recovered self-update payload")
+        self.assertTrue(bool(recovered.get("done")), "terminal state fallback should set done=true")
+        self.assertFalse(bool(recovered.get("running")), "terminal state fallback should set running=false")
+        self.assertEqual(int(recovered.get("rc", 1)), 0, "ExecMainStatus=0 should map to rc=0")
+        self.assertEqual(int(recovered.get("progress", 0)), 100, "terminal-complete update should be at 100%")
+        self.assertNotEqual(int(recovered.get("progress", 0)), 99, "terminal-complete update must not stall at 99%")
+        self.assertIn("done", str(recovered.get("stage", "")).lower())
+
+    def test_self_update_job_api_returns_effective_full_output(self) -> None:
+        conf_path = self._temp_helper_script("SELF_UPDATE_CHANNEL=\"stable\"\n")
+        job_id = "selfupdatej2"
+
+        prefix = "BEGIN-FULL-OUTPUT-MARKER\n"
+        middle = "x" * 50050
+        suffix = "\nEND-FULL-OUTPUT-MARKER\n"
+        full_log = prefix + middle + suffix
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_path = root / "self-update.log"
+            log_path.write_text(full_log, encoding="utf-8")
+
+            jobs = {
+                job_id: {
+                    "job_id": job_id,
+                    "type": "self-update",
+                    "channel": "stable",
+                    "dry_run": False,
+                    "simulate": False,
+                    "running": False,
+                    "done": True,
+                    "rc": 0,
+                    "stage": "Done",
+                    "progress": 100,
+                    "output": "tail-placeholder",
+                    "output_truncated": False,
+                    "restart_check_output": "",
+                    "log_path": str(log_path),
+                    "status_path": str(root / "self-update.status"),
+                }
+            }
+
+            code, payload = self._invoke_get(
+                f"/api/self-update/job?job_id={job_id}",
+                conf_path=conf_path,
+                server_extras={"jobs": jobs},
+            )
+
+        self.assertEqual(code, 200)
+        out = str(payload.get("output") or "")
+        self.assertIn("BEGIN-FULL-OUTPUT-MARKER", out)
+        self.assertIn("END-FULL-OUTPUT-MARKER", out)
+        self.assertEqual(
+            out,
+            full_log,
+            "self-update job API should return effective-full output, not JOB_OUTPUT_TAIL_CHARS slicing",
+        )
+        self.assertFalse(bool(payload.get("output_truncated")))
 
 
 if __name__ == "__main__":

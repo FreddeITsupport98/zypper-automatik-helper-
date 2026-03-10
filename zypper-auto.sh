@@ -52027,16 +52027,6 @@ def _recover_self_update_job(job_id: str) -> dict | None:
         "log_path": log_path,
         "status_path": status_path,
     }
-        "stage": stage,
-        "progress": int(progress),
-        "output": full_txt,
-        "output_truncated": bool(truncated),
-        "restart_check_output": "",
-        "resumed": True,
-        "unit": unit,
-        "log_path": log_path,
-        "status_path": status_path,
-    }
 
 
 def _job_output_append(job: dict, s: str) -> None:
@@ -53589,8 +53579,8 @@ class Handler(BaseHTTPRequestHandler):
                             "rc": job.get("rc"),
                             "stage": stage,
                             "progress": int(progress),
-                            "output": tail,
-                            "output_truncated": bool(job.get("output_truncated")),
+                            "output": output_text,
+                            "output_truncated": bool(output_truncated),
                             "restart_check_output": job.get("restart_check_output"),
                             "log_path": job.get("log_path"),
                             "status_path": job.get("status_path"),
@@ -53641,8 +53631,8 @@ class Handler(BaseHTTPRequestHandler):
                         "rc": job.get("rc"),
                         "stage": stage,
                         "progress": int(progress),
-                            "output": tail,
-                            "output_truncated": bool(job.get("output_truncated")),
+                        "output": output_text,
+                        "output_truncated": bool(output_truncated),
                         "restart_check_output": job.get("restart_check_output"),
                         "log_path": job.get("log_path"),
                         "status_path": job.get("status_path"),
