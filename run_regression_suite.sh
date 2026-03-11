@@ -23,9 +23,8 @@ Safety behavior:
   - Use --include-stateful to explicitly include stateful tests.
   - Optional tests are warn-only on failure.
   - Preflight checks run automatically before tests:
-    - Bash syntax checks (`bash -n`)
-    - Shell script lint checks (`shellcheck`)
-    - Python compile checks (`python -m py_compile`)
+    - Shared syntax baseline via `scripts/syntax-check.sh` (bash syntax + shellcheck)
+    - Runtime-aware Python compile checks (`python -m py_compile`)
 
 Test metadata markers (add as single comment lines in test files):
   - # RUNNER_STATEFUL=1      include only with --include-stateful
@@ -134,64 +133,75 @@ ensure_test_executable_if_needed() {
     printf 'INFO: Marked test executable: %s\n' "${test_name}"
 }
 
-run_preflight_bash_syntax_checks() {
-    printf '\n==> preflight: bash syntax checks\n'
-    bash -n "${SCRIPT_DIR}/run_regression_suite.sh" || fail "Bash syntax check failed: run_regression_suite.sh"
-    bash -n "${TARGET_FILE}" || fail "Bash syntax check failed: ${TARGET_FILE}"
+run_preflight_syntax_baseline() {
+    local syntax_script="${SCRIPT_DIR}/scripts/syntax-check.sh"
+    local syntax_skip_shellcheck="${RUNNER_SKIP_SHELLCHECK:-0}"
+    local syntax_python="${RUNTIME_TEST_PYTHON_BIN:-python3}"
+    local syntax_args=()
+    local runtime_tag=""
+    local test_path=""
+    [ -f "${syntax_script}" ] || fail "Missing syntax baseline script: ${syntax_script}"
+
+    syntax_args=( "--skip-node" "--no-runner" "--target" "${SCRIPT_DIR}/run_regression_suite.sh" "--target" "${TARGET_FILE}" )
     for test_path in "${required_shell_tests[@]}"; do
-        bash -n "${test_path}" || fail "Bash syntax check failed: $(basename "${test_path}")"
+        syntax_args+=( "--target" "${test_path}" )
     done
     for test_path in "${optional_shell_tests[@]}"; do
-        bash -n "${test_path}" || fail "Bash syntax check failed: $(basename "${test_path}")"
+        syntax_args+=( "--target" "${test_path}" )
     done
-}
+    for test_path in "${required_python_tests[@]}"; do
+        runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+        if [ "${runtime_tag}" = "default" ]; then
+            syntax_args+=( "--python-target" "${test_path}" )
+        fi
+    done
+    for test_path in "${optional_python_tests[@]}"; do
+        runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+        if [ "${runtime_tag}" = "default" ]; then
+            syntax_args+=( "--python-target" "${test_path}" )
+        fi
+    done
 
-run_preflight_shellcheck_checks() {
-    local skip_shellcheck="${RUNNER_SKIP_SHELLCHECK:-0}"
-    local shellcheck_targets=()
-    if is_truthy "${skip_shellcheck}"; then
-        printf '\n==> preflight: shellcheck lint checks (skipped by RUNNER_SKIP_SHELLCHECK)\n'
-        return 0
-    fi
-    command -v shellcheck >/dev/null 2>&1 || fail "shellcheck not found. Install shellcheck or rerun with RUNNER_SKIP_SHELLCHECK=1"
-
-    printf '\n==> preflight: shellcheck lint checks\n'
-    shellcheck_targets=( "${SCRIPT_DIR}/run_regression_suite.sh" )
-    for test_path in "${required_shell_tests[@]}"; do
-        shellcheck_targets+=( "${test_path}" )
-    done
-    for test_path in "${optional_shell_tests[@]}"; do
-        shellcheck_targets+=( "${test_path}" )
-    done
-    shellcheck "${shellcheck_targets[@]}"
+    printf '\n==> preflight: shared syntax baseline (scripts/syntax-check.sh)\n'
+    SYNTAX_SKIP_SHELLCHECK="${syntax_skip_shellcheck}" SYNTAX_PYTHON="${syntax_python}" "${syntax_script}" "${syntax_args[@]}"
 }
 
 run_preflight_python_compile_checks() {
     local runtime_tag=""
     local python_bin=""
+    local compiled_count=0
     if [ "${total_python_tests}" -le 0 ]; then
         return 0
     fi
-
-    printf '\n==> preflight: python compile checks\n'
+    printf '\n==> preflight: runtime-specific python compile checks\n'
     for test_path in "${required_python_tests[@]}"; do
         runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+        if [ "${runtime_tag}" = "default" ]; then
+            continue
+        fi
         python_bin="$(python_bin_for_runtime_tag "${runtime_tag}")"
         printf 'Compiling with %s: %s\n' "${python_bin}" "$(basename "${test_path}")"
         "${python_bin}" -m py_compile "${test_path}"
+        compiled_count=$((compiled_count + 1))
     done
     for test_path in "${optional_python_tests[@]}"; do
         runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
+        if [ "${runtime_tag}" = "default" ]; then
+            continue
+        fi
         python_bin="$(python_bin_for_runtime_tag "${runtime_tag}")"
         printf 'Compiling with %s: %s\n' "${python_bin}" "$(basename "${test_path}")"
         "${python_bin}" -m py_compile "${test_path}"
+        compiled_count=$((compiled_count + 1))
     done
+    if [ "${compiled_count}" -eq 0 ]; then
+        printf 'No runtime-specific python targets selected\n'
+    fi
 }
 
 run_preflight_checks() {
     printf '\nRunning preflight checks before regression execution...\n'
-    run_preflight_bash_syntax_checks
-    run_preflight_shellcheck_checks
+    run_preflight_syntax_baseline
     run_preflight_python_compile_checks
 }
 

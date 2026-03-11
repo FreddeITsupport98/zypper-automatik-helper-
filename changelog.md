@@ -2,6 +2,12 @@
 
 ## Unreleased
 - WebUI status-only auto-fetch now also performs self-update status checks in the background so opening the dashboard automatically keeps Self-Update state fresh.
+- Added dedicated unified syntax checker `scripts/syntax-check.sh` as a reusable baseline workflow (`bash -n`, `shellcheck`, Python compile checks, optional Node.js syntax checks) with `--include-regressions` and optional dependency auto-install support via `--install-missing`.
+- `run_regression_suite.sh` preflight now uses `scripts/syntax-check.sh` as the shared bash/shellcheck baseline checker, keeping runtime-aware Python compile checks in the runner.
+- `run_regression_suite.sh` preflight now also routes selected default-runtime Python compile targets through `scripts/syntax-check.sh`, while runtime-tagged Python checks remain runner-side.
+- Added focused static regression `test_runner_python_target_preflight_regression.sh` to guard shared preflight `--python-target` wiring and runtime-tagged Python compile fallback behavior.
+- Fixed WebUI multi-tab hard-block blank-screen edge case by guarding `#main-content` hide behavior behind blocker-page visibility and adding a self-heal path when both blocker + main content are hidden.
+- Added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init invocation).
 - WebUI auto-fetch cadence remains settings-driven via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes), and now applies low-impact behavior while the tab is hidden (longer hidden-tab interval + jitter + lightweight fetch path).
 - Self-update status checks now emit deduplicated update-availability notifications for stable/rolling channels (`update`/`install`/`switch`) via the in-dashboard Notification Center and best-effort browser desktop notifications (when permission is granted).
 - Added setting `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=true|false` to let users disable only background self-update availability notifications while keeping background status checks active.

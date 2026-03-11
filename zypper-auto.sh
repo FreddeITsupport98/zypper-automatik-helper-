@@ -11168,6 +11168,7 @@ generate_dashboard() {
         }
     }
 
+
     * { box-sizing: border-box; }
 
     body {
@@ -17537,16 +17538,50 @@ generate_dashboard() {
         var page = document.getElementById('znh-multi-instance-page');
         var main = document.getElementById('main-content');
         var t = document.getElementById('znh-multi-instance-text');
+        var pageShown = false;
 
         if (msg && t) {
             try { t.textContent = String(msg || ''); } catch (e0) {}
         }
 
-        if (main) {
-            try { main.style.display = 'none'; } catch (e1) {}
-        }
         if (page) {
-            try { page.style.display = 'block'; } catch (e2) {}
+            try {
+                page.style.display = 'block';
+                pageShown = true;
+            } catch (e2) {}
+        }
+
+        // Prevent blank-screen state: only hide main-content when the blocker
+        // page is actually available/visible.
+        if (main) {
+            if (pageShown) {
+                try { main.style.display = 'none'; } catch (e1) {}
+            } else {
+                try { main.style.display = 'block'; } catch (e3) {}
+                try { if (typeof window.znhUiWarn === 'function') window.znhUiWarn('multi-tab blocker missing; main-content left visible'); } catch (e4) {}
+            }
+        }
+    }
+
+    function _znhMiPreventBlankScreen() {
+        var page = document.getElementById('znh-multi-instance-page');
+        var main = document.getElementById('main-content');
+        var pageVisible = false;
+        var mainVisible = true;
+        if (!main) return;
+
+        try {
+            if (page) pageVisible = (window.getComputedStyle(page).display !== 'none');
+        } catch (e0) { pageVisible = false; }
+        try {
+            mainVisible = (window.getComputedStyle(main).display !== 'none');
+        } catch (e1) { mainVisible = true; }
+
+        // Self-heal: if both are hidden, restore main-content so the UI is not blank.
+        if (!mainVisible && !pageVisible) {
+            try { main.style.display = 'block'; } catch (e2) {}
+            try { if (typeof window.znhUiWarn === 'function') window.znhUiWarn('Recovered blank WebUI (main-content hidden without blocker)'); } catch (e3) {}
+            try { toast('Recovered blank WebUI', 'Main content was restored automatically', 'err'); } catch (e4) {}
         }
     }
 
@@ -17673,6 +17708,7 @@ generate_dashboard() {
 
     function _znhMiTick() {
         try { _znhMiEval(); } catch (e0) {}
+        try { _znhMiPreventBlankScreen(); } catch (e0b) {}
 
         // Broadcast heartbeat to other tabs (fast path).
         try {
@@ -17779,6 +17815,7 @@ generate_dashboard() {
         try { window.addEventListener('unload', function() { _znhMiBye(); }); } catch (e9) {}
 
         // Start loop
+        try { _znhMiPreventBlankScreen(); } catch (e10) {}
         _znhMiTick();
     }
 

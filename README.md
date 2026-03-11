@@ -1303,9 +1303,11 @@ How it selects tests:
   - `--only PATTERN` (repeatable shell-glob include filter on test basename)
   - `--exclude PATTERN` (repeatable shell-glob exclude filter on test basename)
 - Runs built-in preflight checks before tests:
-  - `bash -n` syntax checks (runner + target + selected shell regressions)
-  - `shellcheck` lint checks (runner + selected shell regressions)
-  - `python -m py_compile` checks (selected Python regressions, runtime-tag aware)
+  - shared syntax baseline via `scripts/syntax-check.sh`:
+    - `bash -n` syntax checks (runner + target + selected shell regressions)
+    - `shellcheck` lint checks (runner + selected shell regressions)
+    - default-runtime `python -m py_compile` checks for selected Python regressions
+  - runtime-specific `python -m py_compile` checks for runtime-tagged Python regressions (for example `RUNNER_RUNTIME=playwright`)
 - If needed, shellcheck preflight can be temporarily skipped with:
   - `RUNNER_SKIP_SHELLCHECK=1`
 
@@ -1352,6 +1354,36 @@ CI also includes a runtime matrix workflow (`.github/workflows/regression-runtim
 For manual workflow runs, you can override the runtime matrix via `workflow_dispatch` input `runtime_pythons` (JSON array), for example:
 ```bash
 ["3.11","3.12","3.13"]
+```
+
+### 10. Runner Python-Target Preflight Wiring Regression (`test_runner_python_target_preflight_regression.sh`)
+
+Located under `regressions/`, this focused static regression guards the shared preflight integration between `run_regression_suite.sh` and `scripts/syntax-check.sh`.
+
+What it checks:
+- `scripts/syntax-check.sh` supports explicit `--python-target` parsing and compile execution.
+- Runner preflight forwards default-runtime Python tests through `--python-target` into the shared syntax baseline script.
+- Runner keeps runtime-tagged Python compile checks (for example `RUNNER_RUNTIME=playwright`) in runner-side preflight.
+
+Run it:
+
+```bash
+bash regressions/test_runner_python_target_preflight_regression.sh
+```
+
+### 11. WebUI Blank-Screen Guard Regression (`test_webui_blank_guard_regression.sh`)
+
+Located under `regressions/`, this focused static regression guards the WebUI multi-tab blank-screen prevention path.
+
+What it checks:
+- `_znhMiHardBlockShow` only hides `#main-content` when the blocker page was actually shown.
+- `_znhMiPreventBlankScreen` exists and restores main content when both blocker and main content are hidden.
+- `_znhMiTick` and `znhMultiInstanceInit` invoke the prevention helper.
+
+Run it:
+
+```bash
+bash regressions/test_webui_blank_guard_regression.sh
 ```
 
 -----
@@ -2146,6 +2178,9 @@ systemctl status zypper-autodownload.service
   - 🧪 **IMPROVED:** static regression `test_snapper_timer_controls_regression.sh` now also guards verbose state normalization, optimistic override wiring, passive timer-sync initialization paths, and Snapper status service-state output formatting (`enabled=... active=... preset=...`).
   - 🧪 **NEW:** added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, Snapper service-state output formatting/hints, and `/api/snapper/status` helper API contract.
   - 🧪 **NEW:** added central runner `run_regression_suite.sh` for non-destructive regression execution (includes Snapper service-status regression and optional Playwright run).
+  - 🧪 **NEW:** added `scripts/syntax-check.sh` as a dedicated unified syntax baseline runner (`bash -n`, `shellcheck`, Python `py_compile`, optional Node.js `node --check`) with `--include-regressions` and `--install-missing` support.
+  - 🧪 **IMPROVED:** `run_regression_suite.sh` preflight now delegates bash/shellcheck baseline checks to `scripts/syntax-check.sh` (single shared syntax baseline), and also routes selected default-runtime Python compile targets through the same script while keeping runtime-tagged Python compile routing in the runner.
+  - 🧪 **NEW:** added focused static regression `test_runner_python_target_preflight_regression.sh` to guard shared preflight wiring (`--python-target` forwarding for default-runtime Python tests and runner-side runtime-tagged fallback compile checks).
   - 🧪 **IMPROVED:** `run_regression_suite.sh` optional Playwright regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
   - 🧪 **NEW:** added `scripts/bootstrap_playwright_regression.sh` helper to create/update the local Playwright regression venv + Chromium runtime in one command.
   - 🧪 **IMPROVED:** `run_regression_suite.sh` now supports unified Python runtime overrides across runtime regressions (`RUNTIME_TEST_PYTHON` for required runtime API tests + `PLAYWRIGHT_TEST_PYTHON` for optional browser runtime tests).
@@ -2365,6 +2400,8 @@ systemctl status zypper-autodownload.service
   - 🐛 **FIXED:** dashboard now applies stored theme in the `<head>` (prevents “flash of wrong theme” on load).
   - 🐛 **FIXED:** Dashboard API confirm-token cache is now protected by a lock to prevent crashes under concurrent clicks / multiple tabs.
   - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and **hard-blocks** the page with a warning until you close the other tab(s) and reload.
+  - 🐛 **FIXED:** multi-tab hard-block now guards against accidental blank screens by hiding `#main-content` only when the blocker page is actually visible, and by self-healing if both blocker + main content are hidden.
+  - 🧪 **NEW:** added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init calls).
   - 🧰 **IMPROVED:** Snapper cleanup now supports **minimize + resume** via the bottom-right job bubble (useful for long cleanups).
   - 🧰 **IMPROVED:** scrub-ghost (in-page Run button) now runs confirmed actions as a **background job** and opens a minimizable overlay viewer (same bubble/resume behavior as the wizard).
   - 🧯 **NEW:** WebUI panic screen (blue-screen style): if the UI freezes/crashes during long-running jobs, it shows a full-page warning with **Copy issue report** + **Download diagnostics (JSON)** + **Open GitHub issues**.
