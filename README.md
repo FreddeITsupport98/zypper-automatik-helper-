@@ -1319,6 +1319,9 @@ Current metadata tags in this repo:
 - `regressions/test_snapper_timer_playwright_regression.py`:
   - `# RUNNER_OPTIONAL=1`
   - `# RUNNER_RUNTIME=playwright`
+- `regressions/test_webui_blank_guard_playwright_regression.py`:
+  - `# RUNNER_OPTIONAL=1`
+  - `# RUNNER_RUNTIME=playwright`
 
 Run it:
 
@@ -1384,6 +1387,21 @@ Run it:
 
 ```bash
 bash regressions/test_webui_blank_guard_regression.sh
+```
+
+### 12. WebUI Blank-Screen Playwright Runtime Regression (`test_webui_blank_guard_playwright_regression.py`)
+
+Located under `regressions/`, this optional runtime browser regression executes real extracted WebUI JS guard functions in a Playwright harness.
+
+What it checks:
+- Both-hidden state recovery: when `#main-content` and the blocker page are both hidden, `_znhMiPreventBlankScreen()` restores main content and emits recovery signals.
+- Missing-blocker safety: `_znhMiHardBlockShow()` keeps main content visible when blocker DOM is unavailable.
+- Tick-path guard call: `_znhMiTick()` invokes blank-screen prevention and schedules the next heartbeat.
+
+Run it:
+
+```bash
+python3 regressions/test_webui_blank_guard_playwright_regression.py
 ```
 
 -----
@@ -2402,6 +2420,7 @@ systemctl status zypper-autodownload.service
   - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and **hard-blocks** the page with a warning until you close the other tab(s) and reload.
   - 🐛 **FIXED:** multi-tab hard-block now guards against accidental blank screens by hiding `#main-content` only when the blocker page is actually visible, and by self-healing if both blocker + main content are hidden.
   - 🧪 **NEW:** added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init calls).
+  - 🧪 **NEW:** added optional Playwright runtime regression `test_webui_blank_guard_playwright_regression.py` that executes extracted WebUI multi-tab guard functions in-browser to verify both-hidden recovery, missing-blocker safety, and `_znhMiTick` guard invocation.
   - 🧰 **IMPROVED:** Snapper cleanup now supports **minimize + resume** via the bottom-right job bubble (useful for long cleanups).
   - 🧰 **IMPROVED:** scrub-ghost (in-page Run button) now runs confirmed actions as a **background job** and opens a minimizable overlay viewer (same bubble/resume behavior as the wizard).
   - 🧯 **NEW:** WebUI panic screen (blue-screen style): if the UI freezes/crashes during long-running jobs, it shows a full-page warning with **Copy issue report** + **Download diagnostics (JSON)** + **Open GitHub issues**.

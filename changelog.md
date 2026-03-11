@@ -8,6 +8,7 @@
 - Added focused static regression `test_runner_python_target_preflight_regression.sh` to guard shared preflight `--python-target` wiring and runtime-tagged Python compile fallback behavior.
 - Fixed WebUI multi-tab hard-block blank-screen edge case by guarding `#main-content` hide behavior behind blocker-page visibility and adding a self-heal path when both blocker + main content are hidden.
 - Added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init invocation).
+- Added optional Playwright runtime regression `test_webui_blank_guard_playwright_regression.py` to exercise extracted WebUI multi-tab guard functions in-browser (both-hidden recovery, missing-blocker safety, and `_znhMiTick` guard invocation).
 - WebUI auto-fetch cadence remains settings-driven via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes), and now applies low-impact behavior while the tab is hidden (longer hidden-tab interval + jitter + lightweight fetch path).
 - Self-update status checks now emit deduplicated update-availability notifications for stable/rolling channels (`update`/`install`/`switch`) via the in-dashboard Notification Center and best-effort browser desktop notifications (when permission is granted).
 - Added setting `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=true|false` to let users disable only background self-update availability notifications while keeping background status checks active.
