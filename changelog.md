@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- WebUI status-only auto-fetch now also performs self-update status checks in the background so opening the dashboard automatically keeps Self-Update state fresh.
+- WebUI auto-fetch cadence remains settings-driven via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes), and now applies low-impact behavior while the tab is hidden (longer hidden-tab interval + jitter + lightweight fetch path).
+- Self-update status checks now emit deduplicated update-availability notifications for stable/rolling channels (`update`/`install`/`switch`) via the in-dashboard Notification Center and best-effort browser desktop notifications (when permission is granted).
+- Added setting `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=true|false` to let users disable only background self-update availability notifications while keeping background status checks active.
+- Self-Update card now includes a quick button (`Notify updates: ON/OFF`) that toggles `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED` without opening the full Settings drawer.
 - Fixed an embedded dashboard API heredoc parse regression: removed a duplicated `_recover_self_update_job` payload fragment that caused `IndentationError` in runtime API regression loading.
 - Fixed `/api/self-update/job` response payload wiring to use computed effective-full output fields (`output_text`, `output_truncated`) in both lock/no-lock paths, eliminating HTTP 500 failures from undefined `tail`.
 - Added explicit runtime regression guard `EmbeddedDashboardApiSyntaxRegressionTest` in `test_self_update_api_runtime_regression.py` to AST-parse the embedded `DASH_API_BIN` Python heredoc and fail fast on parse regressions.

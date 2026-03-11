@@ -1531,6 +1531,9 @@ DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. fire
 # Dashboard auto-fetch interval (minutes) when Live mode is OFF (status-only).
 # Allowed values are constrained by schema/validation.
 WEBUI_AUTO_FETCH_INTERVAL_MINUTES="60"
+# WebUI self-update background notifications (Notification Center + desktop API).
+# When false, background self-update checks still run but won't emit notifications.
+WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED="true"
 # Self-update channel used by --self-update (rolling=latest commit, stable=GitHub releases)
 # Default: stable (tags). Rolling is still available if you want "always latest".
 SELF_UPDATE_CHANNEL="stable"
@@ -2274,6 +2277,7 @@ __znh_write_dashboard_schema_json() {
     "MANAGERS_SERVER_POLL_VISIBLE_MS": {"type": "int", "min": 1200, "max": 60000, "step": 100, "default": "4500"},
     "MANAGERS_SERVER_POLL_HIDDEN_MS": {"type": "int", "min": 2000, "max": 180000, "step": 100, "default": "16000"},
     "WEBUI_AUTO_FETCH_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60","120","180","240"], "default": "60"},
+    "WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED": {"type": "bool", "default": "true"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
@@ -8396,6 +8400,15 @@ DASHBOARD_PERFORMANCE_MODE="powersaving"
 # Default: 60 (every 1 hour)
 WEBUI_AUTO_FETCH_INTERVAL_MINUTES=60
 
+# WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED
+# Controls whether background self-update checks in the WebUI are allowed to emit:
+#   - Notification Center items
+#   - browser desktop notifications (Notification API; permission-dependent)
+# When false, background checks still run but no self-update availability notifications are shown.
+# Allowed values: true / false
+# Default: true
+WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=true
+
 # ZNH_DIAG_MAX_SERVICE_LOGS
 # Low-noise diagnostics follower cap: maximum number of most-recent
 # /var/log/zypper-auto/service-logs/*.log files tracked by the persistent
@@ -9323,6 +9336,7 @@ EOF
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_VISIBLE_MS 4500 1200 60000
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_HIDDEN_MS 16000 2000 180000
     validate_allowed_set WEBUI_AUTO_FETCH_INTERVAL_MINUTES 60 "1,5,10,15,30,60,120,180,240"
+    validate_bool_flag WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED true
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
@@ -9580,6 +9594,7 @@ EOF
     log_debug "  MANAGERS_SERVER_POLL_VISIBLE_MS=${MANAGERS_SERVER_POLL_VISIBLE_MS:-4500}"
     log_debug "  MANAGERS_SERVER_POLL_HIDDEN_MS=${MANAGERS_SERVER_POLL_HIDDEN_MS:-16000}"
     log_debug "  WEBUI_AUTO_FETCH_INTERVAL_MINUTES=${WEBUI_AUTO_FETCH_INTERVAL_MINUTES:-60}"
+    log_debug "  WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=${WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED:-true}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
     log_debug "  SNAP_RETENTION_OPTIMIZER_ENABLED=${SNAP_RETENTION_OPTIMIZER_ENABLED:-true}"
     log_debug "  SNAP_RETENTION_MAX_NUMBER_LIMIT=${SNAP_RETENTION_MAX_NUMBER_LIMIT:-15}"
@@ -9700,6 +9715,7 @@ EOF
     _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
     _mark_missing_key "MANAGERS_SERVER_POLL_HIDDEN_MS"
     _mark_missing_key "WEBUI_AUTO_FETCH_INTERVAL_MINUTES"
+    _mark_missing_key "WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
     _mark_missing_key "SELF_UPDATE_STABLE_POLICY"
     _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
@@ -9856,6 +9872,9 @@ EOF
                     ;;
                 WEBUI_AUTO_FETCH_INTERVAL_MINUTES)
                     log_info "  - WEBUI_AUTO_FETCH_INTERVAL_MINUTES: WebUI one-shot refresh interval (minutes) used when Live mode is OFF (status-only)."
+                    ;;
+                WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED)
+                    log_info "  - WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED: enables/disables background self-update availability notifications in WebUI (Notification Center + browser desktop notifications)."
                     ;;
                 SELF_UPDATE_CHANNEL)
                     log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
@@ -10143,6 +10162,9 @@ EOF
                     ;;
                 WEBUI_AUTO_FETCH_INTERVAL_MINUTES)
                     WEBUI_AUTO_FETCH_INTERVAL_MINUTES=60
+                    ;;
+                WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED)
+                    WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED="true"
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     SNAP_RETENTION_OPTIMIZER_ENABLED="true"
@@ -12226,9 +12248,11 @@ generate_dashboard() {
           <div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Update: <strong id="self-update-status">(checking…)</strong></div>
           <div class="feat-badge znh-hidden" id="self-update-lock-badge" role="button" tabindex="0" title="Self-update safety lock is active (click to view running job)"><span class="feat-dot" style="color: rgba(239,68,68,0.9);">●</span> <strong id="self-update-lock-text">LOCKED</strong></div>
           <button class="pill" type="button" id="self-update-toggle-btn" title="Toggle update channel (rolling/stable)">Toggle channel</button>
+          <button class="pill" type="button" id="self-update-bg-notify-btn" title="Toggle background self-update availability notifications (Notification Center + desktop)">Notify updates: ON</button>
           <button class="pill" type="button" id="self-update-run-btn" title="Install the latest build from this channel (requires confirmation phrase)" disabled>Update</button>
           <button class="pill" type="button" id="self-update-changelog-btn" title="Fetch latest changelog from GitHub">Fetch changelog</button>
         </div>
+        <div style="margin-top:6px; font-size:0.82rem; color: var(--muted); font-weight: 800;">Tip: Notify updates OFF only suppresses notifications; background self-update checks still run.</div>
         <div id="self-update-detail" style="margin-top:6px; font-size:0.86rem; color: var(--muted); font-weight: 800;"></div>
         <div id="self-update-tech" class="znh-hidden" style="margin-top:4px; font-size:0.78rem; color: rgba(148,163,184,0.88); font-weight: 800;"></div>
         <div style="margin-top:10px;">
@@ -18051,6 +18075,7 @@ generate_dashboard() {
         { key: 'MANAGERS_SERVER_POLL_VISIBLE_MS', type: 'int', label: 'Managers (Server tab): visible poll interval (ms)', advanced: true, help: 'Polling interval while the browser tab is visible. Lower values are more responsive but use more API/CPU.' },
         { key: 'MANAGERS_SERVER_POLL_HIDDEN_MS', type: 'int', label: 'Managers (Server tab): hidden poll interval (ms)', advanced: true, help: 'Polling interval while browser tab is hidden/backgrounded. Use a higher value to reduce idle load.' },
         { key: 'WEBUI_AUTO_FETCH_INTERVAL_MINUTES', type: 'interval', label: 'WebUI auto-fetch interval when Live mode is OFF (minutes)', help: 'Status-only mode refresh cadence. Default 60 minutes.' },
+        { key: 'WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED', type: 'bool', label: 'WebUI: self-update background notifications', help: 'When ON, background self-update checks can send Notification Center + desktop update-available notifications.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
@@ -23920,6 +23945,7 @@ generate_dashboard() {
         var locked = _selfUpdateUiLocked();
 
         var toggleBtn = document.getElementById('self-update-toggle-btn');
+        var bgNotifyBtn = document.getElementById('self-update-bg-notify-btn');
         var runBtn = document.getElementById('self-update-run-btn');
         var clBtn = document.getElementById('self-update-changelog-btn');
         var simBtn = document.getElementById('self-update-sim-run-btn');
@@ -23981,6 +24007,51 @@ generate_dashboard() {
         if (!el) return;
         var ch = _selfUpdateGetChannel(_settingsConfig || {});
         el.textContent = ch;
+        try { _selfUpdateBgNotifyBtnRender(); } catch (e0) {}
+    }
+
+    function _selfUpdateBgNotifyBtnRender() {
+        var btn = document.getElementById('self-update-bg-notify-btn');
+        if (!btn) return;
+        var on = false;
+        try { on = _znhSelfUpdateBackgroundNotifyEnabled(); } catch (e0) { on = true; }
+        btn.textContent = on ? 'Notify updates: ON' : 'Notify updates: OFF';
+        try {
+            btn.style.borderColor = on ? 'rgba(34,197,94,0.40)' : 'rgba(239,68,68,0.35)';
+        } catch (e1) {}
+    }
+
+    function selfUpdateToggleBackgroundNotify(btnEl) {
+        var btn = btnEl || document.getElementById('self-update-bg-notify-btn');
+        var cur = true;
+        try { cur = _znhSelfUpdateBackgroundNotifyEnabled(); } catch (e0) { cur = true; }
+        var next = cur ? 'false' : 'true';
+        if (btn) btn.disabled = true;
+
+        return _api('/api/config', { method: 'POST', body: JSON.stringify({ patch: { WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED: next } }) }).then(function(r) {
+            _settingsConfig = (r && r.config) ? r.config : _settingsConfig;
+            try { _selfUpdateBgNotifyBtnRender(); } catch (e1) {}
+
+            // Keep Settings drawer value in sync when open.
+            try {
+                var form = document.getElementById('settings-form');
+                var cbox = form ? form.querySelector('input[type="checkbox"][data-key="WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED"]') : null;
+                if (cbox) cbox.checked = (next === 'true');
+            } catch (e2) {}
+
+            toast('Self-update notifications', (next === 'true') ? 'Background update notifications enabled' : 'Background update notifications disabled', 'ok');
+            _settingsClientLog('info', 'self-update background notify toggled', { to: next });
+            try { settingsLoad(false); } catch (e3) {}
+            return r;
+        }).catch(function(e) {
+            var msg = (e && e.message) ? e.message : 'failed';
+            toast('Toggle failed', msg, 'err');
+            _settingsClientLog('warn', 'self-update background notify toggle failed', { error: msg });
+            return null;
+        }).finally(function() {
+            if (btn) btn.disabled = false;
+            try { _selfUpdateBgNotifyBtnRender(); } catch (e4) {}
+        });
     }
 
     function _selfUpdateSetChangelog(text) {
@@ -24105,6 +24176,121 @@ generate_dashboard() {
         btn.disabled = !enabled;
     }
 
+    function _znhSelfUpdateNotifyStateKey() {
+        return 'znh_webui_self_update_last_notify_v1';
+    }
+
+    function _znhSelfUpdateNotifyReadState() {
+        try { return String(localStorage.getItem(_znhSelfUpdateNotifyStateKey()) || ''); } catch (e0) { return ''; }
+    }
+
+    function _znhSelfUpdateNotifyWriteState(v) {
+        try { localStorage.setItem(_znhSelfUpdateNotifyStateKey(), String(v || '')); } catch (e0) {}
+    }
+    function _znhSelfUpdateBackgroundNotifyEnabled() {
+        var raw = '';
+        try { raw = String((_settingsConfig && _settingsConfig.WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED != null) ? _settingsConfig.WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED : 'true'); } catch (e0) { raw = 'true'; }
+        raw = raw.toLowerCase().trim();
+        return !(raw === 'false' || raw === '0' || raw === 'off' || raw === 'no');
+    }
+
+    function _znhDesktopNotifyUpdate(title, body, tag) {
+        try {
+            if (!('Notification' in window)) return false;
+            var perm = '';
+            try { perm = String(Notification.permission || 'default'); } catch (eP0) { perm = 'default'; }
+            if (perm === 'granted') {
+                try {
+                    new Notification(String(title || 'WebUI update'), {
+                        body: String(body || ''),
+                        tag: String(tag || 'znh-webui-self-update'),
+                        renotify: false,
+                        silent: true
+                    });
+                    return true;
+                } catch (eN0) {}
+                return false;
+            }
+
+            // Best-effort one-time permission request (non-blocking).
+            if (perm === 'default') {
+                try {
+                    var reqKey = 'znh_webui_self_update_notify_perm_asked_v1';
+                    if (String(localStorage.getItem(reqKey) || '') !== '1') {
+                        localStorage.setItem(reqKey, '1');
+                        Notification.requestPermission().then(function() {}).catch(function() {});
+                    }
+                } catch (eP1) {}
+            }
+        } catch (e0) {}
+        return false;
+    }
+
+    function _znhSelfUpdateMaybeNotifyUpdate(st, sourceHint) {
+        st = st || null;
+        if (!_znhSelfUpdateBackgroundNotifyEnabled()) {
+            _znhSelfUpdateNotifyWriteState('');
+            return;
+        }
+        if (!st || (st && st.error)) {
+            _znhSelfUpdateNotifyWriteState('');
+            return;
+        }
+
+        var act = '';
+        var ch = '';
+        var remoteRef = '';
+        var installedRef = '';
+        try { act = String((st.evaluation && st.evaluation.action_type) || '').toLowerCase(); } catch (e1) { act = ''; }
+        try { ch = String(st.channel || st.configured_target_channel || '').toLowerCase(); } catch (e2) { ch = ''; }
+        try { remoteRef = String(((st.remote || {}).ref) || st.remote_ref || ''); } catch (e3) { remoteRef = ''; }
+        try { installedRef = String(((st.installed || {}).ref) || st.installed_ref || ''); } catch (e4) { installedRef = ''; }
+        if (ch !== 'stable' && ch !== 'rolling') ch = _selfUpdateGetChannel(_settingsConfig || {});
+
+        // Reset dedupe state whenever no update-like action exists.
+        if (!act || act === 'none' || act === 'managed') {
+            _znhSelfUpdateNotifyWriteState('');
+            return;
+        }
+        if (act !== 'update' && act !== 'install' && act !== 'switch') return;
+
+        var dedupeKey = [act, ch, remoteRef, installedRef].join('|');
+        if (!dedupeKey) return;
+        if (_znhSelfUpdateNotifyReadState() === dedupeKey) return;
+        _znhSelfUpdateNotifyWriteState(dedupeKey);
+
+        var title = 'WebUI update available';
+        var body = '';
+        if (act === 'switch') {
+            title = 'WebUI channel switch available';
+            body = 'Channel ' + String(ch || 'stable') + ' has a different target build available.';
+        } else if (act === 'install') {
+            title = 'WebUI install available';
+            body = 'Channel ' + String(ch || 'stable') + ' has an installable build available.';
+        } else {
+            title = 'WebUI update available';
+            body = 'Channel ' + String(ch || 'stable') + ' has a newer build available.';
+        }
+        if (remoteRef) body += ' Remote: ' + remoteRef + '.';
+        if (installedRef) body += ' Installed: ' + installedRef + '.';
+        if (sourceHint) body += ' Source: ' + String(sourceHint) + '.';
+
+        try {
+            if (typeof window.znhNotifyAdd === 'function') {
+                var idKey = String(dedupeKey || '').replace(/[^a-zA-Z0-9._-]/g, '_');
+                window.znhNotifyAdd({
+                    id: 'znh_webui_self_update_available_' + idKey,
+                    title: title,
+                    body: body + ' Open Features & Config → Self-Update to install.',
+                    level: 'warn',
+                    once: true
+                });
+            }
+        } catch (e5) {}
+
+        try { _znhDesktopNotifyUpdate(title, body, 'znh-webui-self-update'); } catch (e6) {}
+    }
+
     function selfUpdateFetchStatus(showToast, _attempt, _reqId) {
         var ch = _selfUpdateGetChannel(_settingsConfig || {});
 
@@ -24213,6 +24399,7 @@ generate_dashboard() {
             var act = '';
             try { act = (r.evaluation && r.evaluation.action_type) ? String(r.evaluation.action_type) : ''; } catch (eAct) { act = ''; }
             act = String(act || '').toLowerCase();
+            try { _znhSelfUpdateMaybeNotifyUpdate(r, showToast ? 'interactive' : 'background'); } catch (eNU) {}
 
             if (act === 'managed' || r.is_externally_managed) {
                 _selfUpdateSetStatus('Managed by system');
@@ -27035,12 +27222,16 @@ generate_dashboard() {
         var clBtn = document.getElementById('self-update-changelog-btn');
         var simBtn = document.getElementById('self-update-sim-run-btn');
         var lockBadge = document.getElementById('self-update-lock-badge');
-
+        if (!chEl && !statusEl && !toggleBtn && !bgNotifyBtn && !runBtn && !clBtn && !simBtn) return;
         if (!chEl && !statusEl && !toggleBtn && !runBtn && !clBtn && !simBtn) return;
 
         if (toggleBtn) toggleBtn.addEventListener('click', function(ev) {
             try { addRipple(toggleBtn, ev.clientX, ev.clientY); } catch (e) {}
             selfUpdateToggleChannel(toggleBtn);
+        });
+        if (bgNotifyBtn) bgNotifyBtn.addEventListener('click', function(ev) {
+            try { addRipple(bgNotifyBtn, ev.clientX, ev.clientY); } catch (e) {}
+            selfUpdateToggleBackgroundNotify(bgNotifyBtn);
         });
 
         // Clicking the LOCKED badge should open the overlay so the user can see live logs
@@ -29831,16 +30022,48 @@ generate_dashboard() {
 
     function _znhStatusOnlyAutoFetchRun(reason) {
         if (liveEnabled) return;
-        try { pollLive(true); } catch (e0) {}
-        try { pollDownloaderStatus(true); } catch (e1) {}
-        try { pollPerf(true); } catch (e2) {}
+        var hidden = false;
+        try { hidden = !!(document && document.hidden); } catch (eH0) { hidden = false; }
+
+        // Low-impact mode:
+        // - visible tab: full one-shot sync
+        // - hidden tab: only lightweight checks needed for update awareness
+        if (!hidden) {
+            try { pollLive(true); } catch (e0) {}
+            try { pollDownloaderStatus(true); } catch (e1) {}
+            try { pollPerf(true); } catch (e2) {}
+        }
         try { pollDashboardMeta(); } catch (e3) {}
-        try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e4) {}
+        if (!hidden) {
+            try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e4) {}
+        }
+        try { selfUpdateFetchStatus(false); } catch (eSU0) {}
         try {
             if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') {
-                window.znhJsHealthLog('debug', 'status-only auto-fetch run (' + String(reason || 'timer') + ')');
+                window.znhJsHealthLog('debug', 'status-only auto-fetch run (' + String(reason || 'timer') + ', hidden=' + String(hidden ? '1' : '0') + ')');
             }
         } catch (e5) {}
+    }
+
+    function _znhStatusOnlyAutoFetchDelayMs() {
+        var minutes = _znhNormalizeAutoFetchInterval(_webuiAutoFetchIntervalMinutes);
+        var base = minutes * 60 * 1000;
+        if (base < 60 * 1000) base = 60 * 1000;
+
+        // Low-impact background mode: run less frequently while tab is hidden.
+        var hidden = false;
+        try { hidden = !!(document && document.hidden); } catch (e0) { hidden = false; }
+        if (hidden) {
+            base = base * 3;
+            if (base > 6 * 60 * 60 * 1000) base = 6 * 60 * 60 * 1000;
+        }
+
+        // Jitter avoids synchronized timer spikes when many tabs are open.
+        var jitterMax = Math.floor(base * 0.12);
+        if (jitterMax < 0) jitterMax = 0;
+        var jitter = 0;
+        try { jitter = Math.floor(Math.random() * (jitterMax + 1)); } catch (e1) { jitter = 0; }
+        return base + jitter;
     }
 
     function _znhRescheduleStatusOnlyAutoFetch() {
@@ -29851,14 +30074,12 @@ generate_dashboard() {
             }
         } catch (e0) {}
 
-        var ms = _znhNormalizeAutoFetchInterval(_webuiAutoFetchIntervalMinutes) * 60 * 1000;
-        if (ms < 60 * 1000) ms = 60 * 1000;
 
         function step() {
             _webuiAutoFetchTimer = setTimeout(function() {
                 _znhStatusOnlyAutoFetchRun('interval');
                 step();
-            }, ms);
+            }, _znhStatusOnlyAutoFetchDelayMs());
         }
         step();
     }
@@ -30895,6 +31116,7 @@ generate_dashboard() {
     pollLive(true);
     pollDownloaderStatus(true);
     pollPerf(true);
+    try { selfUpdateFetchStatus(false); } catch (eSU1) {}
     try { _znhRecentLogStreamEnsure(false); } catch (eSSE0) {}
     pollRecentActivityLog();
     pollDashboardMeta();
@@ -30908,6 +31130,7 @@ generate_dashboard() {
             pollDownloaderStatus(true);
             pollPerf(true);
             pollDashboardMeta();
+            try { selfUpdateFetchStatus(false); } catch (eSU2) {}
             try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e0) {}
         }
         document.addEventListener('visibilitychange', function() {
