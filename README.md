@@ -2461,6 +2461,8 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Self-Update status API now returns a consolidated `evaluation.action_type` + message so the WebUI doesn’t need to guess (update vs install vs switch).
   - 🧰 **IMPROVED:** Self-Update now detects "managed by system" installs (outside `/usr/local/bin/`) and disables self-update to avoid overwriting OS/RPM-managed files (enforced in both WebUI and localhost API endpoints).
   - 🧰 **IMPROVED:** Self-Update state now tracks installed helper SHA256 so the WebUI can warn on **(local edits)** before overwriting manual changes.
+  - 🧭 **IMPROVED:** `zypper-auto-helper --self-update` without an explicit channel now auto-detects the currently installed channel (`rolling`/`stable`) from self-update state metadata (`last_update_channel`/`install_source`) before falling back to config defaults.
+  - 🧠 **IMPROVED:** self-update now applies a content-hash truth fallback for both stable and rolling refs: when remote ref metadata changes but downloaded helper payload is byte-identical, it seeds state and reports up-to-date instead of repeatedly attempting no-op updates.
   - 🧰 **IMPROVED:** Self-Update panel now shows a short detail line (server-side reason text) under the buttons for clearer UX.
   - 🧰 **IMPROVED:** Rolling channel now has a checksum fallback for raw script installs: when no git SHA is known, the API hashes the installed helper and the remote `main` script and compares them to decide up-to-date vs update available (eliminates “unknown install” false positives).
   - 🧰 **IMPROVED:** Self-update CLI now blocks overwriting **local manual edits** unless you pass `--force` (hash mismatch trap).

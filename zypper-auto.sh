@@ -40979,7 +40979,40 @@ run_self_update_only() {
         shift || true
     done
 
-    channel="${requested_channel:-${SELF_UPDATE_CHANNEL:-stable}}"
+    # Channel auto-detection:
+    # - If user explicitly passed stable/rolling, respect it.
+    # - Otherwise, detect from installed self-update state first (last_update_channel/install_source),
+    #   then fall back to config/default.
+    local detected_channel detected_reason state_last_channel state_install_source state_stable_tag state_rolling_sha
+    detected_channel=""
+    detected_reason=""
+    state_last_channel="$(__znh_self_update_state_get last_update_channel 2>/dev/null || true)"
+    state_install_source="$(__znh_self_update_state_get install_source 2>/dev/null || true)"
+    state_stable_tag="$(__znh_self_update_state_get stable_tag 2>/dev/null || true)"
+    state_rolling_sha="$(__znh_self_update_state_get rolling_sha 2>/dev/null || true)"
+    state_last_channel="${state_last_channel,,}"
+    state_install_source="${state_install_source,,}"
+
+    if [ -z "${requested_channel:-}" ]; then
+        if [ "${state_last_channel}" = "rolling" ] || [ "${state_last_channel}" = "stable" ]; then
+            detected_channel="${state_last_channel}"
+            detected_reason="state:last_update_channel"
+        elif [[ "${state_install_source}" == *"rolling"* ]]; then
+            detected_channel="rolling"
+            detected_reason="state:install_source"
+        elif [[ "${state_install_source}" == *"stable"* ]]; then
+            detected_channel="stable"
+            detected_reason="state:install_source"
+        elif [ -n "${state_rolling_sha:-}" ] && [ -z "${state_stable_tag:-}" ]; then
+            detected_channel="rolling"
+            detected_reason="state:rolling_sha"
+        elif [ -n "${state_stable_tag:-}" ] && [ -z "${state_rolling_sha:-}" ]; then
+            detected_channel="stable"
+            detected_reason="state:stable_tag"
+        fi
+    fi
+
+    channel="${requested_channel:-${detected_channel:-${SELF_UPDATE_CHANNEL:-stable}}}"
     channel="${channel,,}"
     case "${channel}" in
         rolling|stable)
@@ -40990,6 +41023,9 @@ run_self_update_only() {
             channel="stable"
             ;;
     esac
+    if [ -z "${requested_channel:-}" ] && [ -n "${detected_channel:-}" ]; then
+        log_info "[self-update] Auto-detected channel=${channel} (${detected_reason})"
+    fi
 
     # Channel-switch lock (user-requested): when switching stable <-> rolling,
     # require an explicit confirmation phrase (SWITCHS) to avoid misinterpretation.
@@ -41297,19 +41333,24 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
         fi
     fi
 
-    # Rolling raw-script fallback:
-    # If we don't know our local rolling SHA (no state file / no .git), but the remote script
-    # content perfectly matches our local script content, then we are up-to-date.
-    # Seed state so future checks are fast and deterministic.
-    if [ "${channel}" = "rolling" ] && [ -z "${installed_ref:-}" ] && [ -n "${remote_ref:-}" ]; then
-        local temp_remote local_hash remote_hash
+    # Content-hash truth fallback (stable + rolling):
+    # If refs differ (or local ref is unknown) but helper content is identical to the
+    # selected remote payload, treat as up-to-date and seed state to the remote ref.
+    # This prevents ref drift (e.g. stale state/release metadata) from creating false update cycles.
+    if [ -n "${remote_ref:-}" ] && [ -f "${dest}" ]; then
+        local compare_url temp_remote local_hash remote_hash
+        compare_url="${raw_url}"
+        if [ "${channel}" = "stable" ] && [ -n "${raw_url_tag:-}" ]; then
+            compare_url="${raw_url_tag}"
+        fi
+
         temp_remote="$(mktemp)"
         local_hash=""
         remote_hash=""
 
-        if curl -sL --fail --connect-timeout 5 --max-time 30 "${raw_url}" -o "${temp_remote}" 2>/dev/null; then
+        if curl -sL --fail --connect-timeout 5 --max-time 30 "${compare_url}" -o "${temp_remote}" 2>/dev/null; then
             # Preflight: captive portals / proxies can return HTML with HTTP 200.
-            # Verify it at least looks like a bash script before hashing.
+            # Verify it at least looks like a helper script before hashing.
             if head -n 1 "${temp_remote}" 2>/dev/null | grep -qE '^#!/bin/bash|^#!/usr/bin/env bash' \
                 && grep -qE '^#\s*VERSION\s+[0-9]+' "${temp_remote}" 2>/dev/null \
                 && grep -q "zypper-auto-helper" "${temp_remote}" 2>/dev/null \
@@ -41324,13 +41365,18 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
                 fi
 
                 if [ -n "${local_hash:-}" ] && [ "${local_hash}" = "${remote_hash}" ]; then
-                    log_info "[self-update] Local file perfectly matches remote rolling. Seeding state."
+                    log_info "[self-update] Local file perfectly matches remote ${channel} payload. Seeding state."
                     installed_ref="${remote_ref}"
-                    installed_rolling_sha="${remote_ref}"
-                    __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "rolling-commit" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+                    if [ "${channel}" = "stable" ]; then
+                        installed_stable_tag="${remote_ref}"
+                        __znh_self_update_state_write "${remote_ref}" "${installed_rolling_sha}" "stable" "${remote_ref}" "stable-release" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+                    else
+                        installed_rolling_sha="${remote_ref}"
+                        __znh_self_update_state_write "${installed_stable_tag}" "${remote_ref}" "rolling" "${remote_ref}" "rolling-commit" "${local_hash}" "${dest}" >/dev/null 2>&1 || true
+                    fi
                 fi
             else
-                log_warn "[self-update] Rolling raw-script check: remote download did not look like a valid bash script; skipping state seed (possible portal/proxy)"
+                log_warn "[self-update] ${channel} payload compare skipped (remote content is not a valid helper script)"
             fi
         fi
 

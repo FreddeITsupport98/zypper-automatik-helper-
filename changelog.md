@@ -27,6 +27,8 @@
 - Verification Safety Net policy changed: routine `--verify` runs (including `zypper-auto-verify.timer`) no longer create pre/post Snapper Safety Net snapshots on every cycle.
 - Install/update verification flow now also skips Safety Net pre/post snapshots (`run_smart_verification_with_safety_net ... never`), so helper auto-repair does not create extra Btrfs snapshots.
 - Self-update status API now computes layered SHA256 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed layers + `confidence` + `risk_level`.
+- `zypper-auto-helper --self-update` (without explicit channel argument) now auto-detects installed channel (`rolling`/`stable`) from self-update state metadata before falling back to configured defaults.
+- Self-update CLI now applies content-hash truth fallback for both stable and rolling refs: when remote ref metadata changes but helper payload is byte-identical, it seeds state and reports up-to-date instead of repeatedly attempting no-op updates.
 - Self-update WebUI install overlay now preselects post-update mode from recommendation metadata, includes an expandable **Why recommended?** explanation, and warns when manual override deviates from recommendation.
 - Self-update recommendation logic now supports `switch_to_rolling` when install-origin metadata indicates a rolling-commit lineage but the configured channel remains stable.
 - Self-update status payloads now expose normalized install-origin metadata (`install_origin`) and channel advice (`channel_recommendation`), and the WebUI surfaces this in status/detail and overlay verification text.
