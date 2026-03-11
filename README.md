@@ -2421,6 +2421,7 @@ systemctl status zypper-autodownload.service
   - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and **hard-blocks** the page with a warning until you close the other tab(s) and reload.
   - 🐛 **FIXED:** multi-tab hard-block now guards against accidental blank screens by hiding `#main-content` only when the blocker page is actually visible, and by self-healing if both blocker + main content are hidden.
   - 🧪 **NEW:** added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init calls).
+  - 🧪 **NEW:** added focused static regression `test_self_update_bg_notify_wiring_regression.sh` to guard `_wireSelfUpdateUI` `bgNotifyBtn` declaration/ordering safety (declaration before guard/listener usage and no stale pre-declaration guard), preventing recurrence of `ReferenceError: bgNotifyBtn is not defined`.
   - 🧪 **NEW:** added optional Playwright runtime regression `test_webui_blank_guard_playwright_regression.py` that executes extracted WebUI multi-tab guard functions in-browser to verify both-hidden recovery, missing-blocker safety, and `_znhMiTick` guard invocation.
   - 🧰 **IMPROVED:** Snapper cleanup now supports **minimize + resume** via the bottom-right job bubble (useful for long cleanups).
   - 🧰 **IMPROVED:** scrub-ghost (in-page Run button) now runs confirmed actions as a **background job** and opens a minimizable overlay viewer (same bubble/resume behavior as the wizard).
