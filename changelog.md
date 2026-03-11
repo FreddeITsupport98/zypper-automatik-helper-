@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Fixed Self-Update WebUI runtime wiring to declare `bgNotifyBtn` before guard/listener usage in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
 - WebUI status-only auto-fetch now also performs self-update status checks in the background so opening the dashboard automatically keeps Self-Update state fresh.
 - Added dedicated unified syntax checker `scripts/syntax-check.sh` as a reusable baseline workflow (`bash -n`, `shellcheck`, Python compile checks, optional Node.js syntax checks) with `--include-regressions` and optional dependency auto-install support via `--install-missing`.
 - `run_regression_suite.sh` preflight now uses `scripts/syntax-check.sh` as the shared bash/shellcheck baseline checker, keeping runtime-aware Python compile checks in the runner.

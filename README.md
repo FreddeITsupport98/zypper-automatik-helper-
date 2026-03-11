@@ -2165,6 +2165,7 @@ systemctl status zypper-autodownload.service
   - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **Unreleased (next build):**
+  - 🐛 **FIXED:** Self-Update WebUI wiring now defines `bgNotifyBtn` before guard/listener checks in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
   - 🔄 **IMPROVED:** status-only WebUI auto-fetch now also checks self-update status automatically in the background, so opening the dashboard keeps Self-Update state fresh without manual clicks.
   - ⏱️ **IMPROVED:** WebUI background auto-fetch remains user-configurable via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes) and now uses lower-impact hidden-tab behavior (longer hidden cadence + timer jitter + lightweight fetch path).
   - 🔔 **NEW:** self-update status checks now raise deduplicated WebUI update-availability notifications for stable/rolling channels (`update` / `install` / `switch`) in Notification Center plus best-effort browser desktop notifications (when permission is granted).

@@ -17454,6 +17454,9 @@ generate_dashboard() {
         tabId: '',
         hbMs: 2000,
         staleMs: 6500,
+        // Guard against corrupted/future-skewed peer timestamps that can
+        // otherwise keep conflict mode stuck forever.
+        futureSkewMs: 120000,
         timer: null,
         peers: {},
         conflict: false,
@@ -17527,7 +17530,7 @@ generate_dashboard() {
                 if (it && typeof it === 'object') ts = parseInt(it.ts || 0, 10) || 0;
                 else ts = parseInt(it || 0, 10) || 0;
             } catch (e1) { ts = 0; }
-            if (ts > 0 && now - ts <= _znhMi.staleMs) {
+            if (ts > 0 && ts <= (now + _znhMi.futureSkewMs) && now - ts <= _znhMi.staleMs) {
                 out[k] = (it && typeof it === 'object') ? it : { ts: ts };
             }
         }
@@ -27255,12 +27258,12 @@ generate_dashboard() {
         var chEl = document.getElementById('self-update-channel');
         var statusEl = document.getElementById('self-update-status');
         var toggleBtn = document.getElementById('self-update-toggle-btn');
+        var bgNotifyBtn = document.getElementById('self-update-bg-notify-btn');
         var runBtn = document.getElementById('self-update-run-btn');
         var clBtn = document.getElementById('self-update-changelog-btn');
         var simBtn = document.getElementById('self-update-sim-run-btn');
         var lockBadge = document.getElementById('self-update-lock-badge');
         if (!chEl && !statusEl && !toggleBtn && !bgNotifyBtn && !runBtn && !clBtn && !simBtn) return;
-        if (!chEl && !statusEl && !toggleBtn && !runBtn && !clBtn && !simBtn) return;
 
         if (toggleBtn) toggleBtn.addEventListener('click', function(ev) {
             try { addRipple(toggleBtn, ev.clientX, ev.clientY); } catch (e) {}
