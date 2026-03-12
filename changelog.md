@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- AI Smart Report (`/api/ai/smart-report`) now uses a unified normalized signal pipeline (deduped log/job signals), incident grouping with severity/confidence scoring, and recommendation-v2 ranking with local history learning weights.
+- AI Smart Report payload now includes structured explainability (`top_actions`, selected score breakdown, evidence/source refs), incident/signal/learning sections, and schema validation flags (`schema_valid`, `schema_errors`) to harden report quality controls.
+- WebUI unusual-activity crash watcher notifications now include normalized incident metadata (`inc-js-crash`, severity/confidence, analysis window, occurrence count) aligned with smart-report incident semantics.
+- Managers → Server → AI Smart Report now renders an incident summary card in-panel (top incidents with severity/confidence/occurrences and the currently suggested repair action) in addition to raw report text.
+- Added configurable unusual-activity suppression windows for repeated WebUI JavaScript alerts: `WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS` and `WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS` (schema/template/validation/UI apply wiring).
+- Added runtime regression `regressions/test_ai_smart_report_runtime_regression.py` to execute `/api/ai/smart-report` against a mocked runtime context and assert incident severity presence plus `top_actions` recommendation ordering.
 - `scripts/syntax-check.sh` now supports explicit `--no-auto-chmod` for one-off scan runs while preserving default auto-chmod behavior.
 - `scripts/syntax-check.sh` auto-chmod stage now emits explicit skip diagnostics when a target is not writable or chmod fails (`WARN: auto-chmod skipped ...`).
 - `scripts/syntax-check.sh` now auto-sets executable permission (`chmod u+x`) for discovered shell/python script targets during scan/check flow (configurable via `SYNTAX_AUTO_CHMOD`).

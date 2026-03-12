@@ -2276,6 +2276,8 @@ __znh_write_dashboard_schema_json() {
     "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "8"},
     "MANAGERS_SERVER_POLL_VISIBLE_MS": {"type": "int", "min": 1200, "max": 60000, "step": 100, "default": "4500"},
     "MANAGERS_SERVER_POLL_HIDDEN_MS": {"type": "int", "min": 2000, "max": 180000, "step": 100, "default": "16000"},
+    "WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS": {"type": "int", "min": 0, "max": 3600, "step": 5, "default": "90"},
+    "WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS": {"type": "int", "min": 0, "max": 3600, "step": 5, "default": "300"},
     "WEBUI_AUTO_FETCH_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60","120","180","240"], "default": "60"},
     "WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED": {"type": "bool", "default": "true"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
@@ -8440,6 +8442,21 @@ MANAGERS_SERVER_POLL_VISIBLE_MS=4500
 # Range: 2000..180000
 # Default: 16000
 MANAGERS_SERVER_POLL_HIDDEN_MS=16000
+# WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS
+# WebUI unusual-activity watcher suppression window for normal JavaScript crash
+# notifications. When a crash notice is emitted, repeated notices of the same
+# kind are suppressed for this many seconds.
+# Range: 0..3600 (0 disables suppression window)
+# Default: 90
+WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS=90
+
+# WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS
+# WebUI unusual-activity watcher suppression window for burst/escalated crash
+# incidents ("multiple crashes in ~3 minutes"). Keep this longer than the
+# normal crash window to reduce repeated escalations.
+# Range: 0..3600 (0 disables suppression window)
+# Default: 300
+WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS=300
 
 # SELF_UPDATE_CHANNEL
 # Controls which update channel is used by default when you run:
@@ -9335,6 +9352,8 @@ EOF
     validate_nonneg_int_bounded_optional ZNH_LIVE_LOGS_MAX_SERVICE_LOGS 8 1 30
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_VISIBLE_MS 4500 1200 60000
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_HIDDEN_MS 16000 2000 180000
+    validate_nonneg_int_bounded_optional WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS 90 0 3600
+    validate_nonneg_int_bounded_optional WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS 300 0 3600
     validate_allowed_set WEBUI_AUTO_FETCH_INTERVAL_MINUTES 60 "1,5,10,15,30,60,120,180,240"
     validate_bool_flag WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED true
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
@@ -9593,6 +9612,8 @@ EOF
     log_debug "  ZNH_LIVE_LOGS_MAX_SERVICE_LOGS=${ZNH_LIVE_LOGS_MAX_SERVICE_LOGS:-8}"
     log_debug "  MANAGERS_SERVER_POLL_VISIBLE_MS=${MANAGERS_SERVER_POLL_VISIBLE_MS:-4500}"
     log_debug "  MANAGERS_SERVER_POLL_HIDDEN_MS=${MANAGERS_SERVER_POLL_HIDDEN_MS:-16000}"
+    log_debug "  WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS=${WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS:-90}"
+    log_debug "  WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS=${WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS:-300}"
     log_debug "  WEBUI_AUTO_FETCH_INTERVAL_MINUTES=${WEBUI_AUTO_FETCH_INTERVAL_MINUTES:-60}"
     log_debug "  WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=${WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED:-true}"
     log_debug "  HOOKS_BASE_DIR=${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
@@ -9714,6 +9735,8 @@ EOF
     _mark_missing_key "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS"
     _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
     _mark_missing_key "MANAGERS_SERVER_POLL_HIDDEN_MS"
+    _mark_missing_key "WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS"
+    _mark_missing_key "WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS"
     _mark_missing_key "WEBUI_AUTO_FETCH_INTERVAL_MINUTES"
     _mark_missing_key "WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
@@ -9869,6 +9892,12 @@ EOF
                     ;;
                 MANAGERS_SERVER_POLL_HIDDEN_MS)
                     log_info "  - MANAGERS_SERVER_POLL_HIDDEN_MS: Managers Server tab polling interval (ms) when browser tab is hidden/backgrounded."
+                    ;;
+                WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS)
+                    log_info "  - WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS: suppression window (seconds) for repeated normal WebUI JavaScript crash notifications."
+                    ;;
+                WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS)
+                    log_info "  - WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS: suppression window (seconds) for repeated burst/escalated WebUI crash incident notifications."
                     ;;
                 WEBUI_AUTO_FETCH_INTERVAL_MINUTES)
                     log_info "  - WEBUI_AUTO_FETCH_INTERVAL_MINUTES: WebUI one-shot refresh interval (minutes) used when Live mode is OFF (status-only)."
@@ -10159,6 +10188,12 @@ EOF
                     ;;
                 MANAGERS_SERVER_POLL_HIDDEN_MS)
                     MANAGERS_SERVER_POLL_HIDDEN_MS=16000
+                    ;;
+                WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS)
+                    WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS=90
+                    ;;
+                WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS)
+                    WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS=300
                     ;;
                 WEBUI_AUTO_FETCH_INTERVAL_MINUTES)
                     WEBUI_AUTO_FETCH_INTERVAL_MINUTES=60
@@ -15801,6 +15836,7 @@ generate_dashboard() {
         jitterPct: 0.12,
         visibilityBound: false
     };
+    var _znhUnusualCfg = { suppressCrashSeconds: 90, suppressBurstSeconds: 300 };
 
     function _znhMgrServerBoundInt(v, dflt, min, max) {
         var n = dflt;
@@ -15822,6 +15858,18 @@ generate_dashboard() {
         } catch (e0) {
             _znhMgrServer.pollVisibleMs = 4500;
             _znhMgrServer.pollHiddenMs = 16000;
+        }
+    }
+
+    function znhApplyUnusualSuppressConfig(cfg) {
+        try {
+            var c = _znhMgrServerBoundInt((cfg && cfg.WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS != null) ? cfg.WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS : '', 90, 0, 3600);
+            var b = _znhMgrServerBoundInt((cfg && cfg.WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS != null) ? cfg.WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS : '', 300, 0, 3600);
+            _znhUnusualCfg.suppressCrashSeconds = c;
+            _znhUnusualCfg.suppressBurstSeconds = b;
+        } catch (e0) {
+            _znhUnusualCfg.suppressCrashSeconds = 90;
+            _znhUnusualCfg.suppressBurstSeconds = 300;
         }
     }
 
@@ -16329,6 +16377,7 @@ generate_dashboard() {
             + '  <button class="pill" type="button" id="mgr-ai-dl-json" style="border-color: rgba(255,255,255,0.14);">Download JSON</button>'
             + '</div>'
             + '<pre id="mgr-ai-out" style="max-height: 260px; overflow:auto; margin-top:10px; white-space:pre-wrap;">(not generated yet)</pre>'
+            + '<div id=\"mgr-ai-incidents\" style=\"margin-top:10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,0.03); color: var(--muted);\">Incident summary will appear here after generation.</div>'
             + '<div id="mgr-ai-note" style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Scans recent log tails + recent failed jobs (SQLite) and extracts ERROR/WARN lines. It is local + bounded to avoid high CPU/RAM.</div>'
             + '</div></div>');
         html.push('  <div id="mgr-srv-list" style="display:grid; gap: 10px;"></div>');
@@ -16484,6 +16533,7 @@ generate_dashboard() {
             var aiCopyBtn = document.getElementById('mgr-ai-copy');
             var aiDlBtn = document.getElementById('mgr-ai-dl-json');
             var aiOutEl = document.getElementById('mgr-ai-out');
+            var aiIncEl = document.getElementById('mgr-ai-incidents');
             var aiMetaEl = document.getElementById('mgr-ai-meta');
 
             var _aiLast = null;
@@ -16510,6 +16560,67 @@ generate_dashboard() {
                 try {
                     if (aiOutEl) aiOutEl.textContent = String(s || '');
                 } catch (e0) {}
+            }
+
+            function _aiEsc(s) {
+                return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            }
+
+            function _aiSeverityRank(s) {
+                var v = String(s || '').toLowerCase();
+                if (v === 'critical') return 4;
+                if (v === 'high') return 3;
+                if (v === 'medium') return 2;
+                if (v === 'low') return 1;
+                return 0;
+            }
+
+            function _aiRenderIncidentSummary(r) {
+                if (!aiIncEl) return;
+                var incidents = [];
+                var repairPlan = {};
+                try { incidents = Array.isArray(r && r.incidents) ? r.incidents.slice(0) : []; } catch (e0) { incidents = []; }
+                try { repairPlan = (r && r.repair_plan) ? r.repair_plan : {}; } catch (e1) { repairPlan = {}; }
+
+                incidents.sort(function(a, b) {
+                    var sa = _aiSeverityRank(a && a.severity);
+                    var sb = _aiSeverityRank(b && b.severity);
+                    if (sb !== sa) return sb - sa;
+                    var scA = parseInt((a && a.score) || 0, 10) || 0;
+                    var scB = parseInt((b && b.score) || 0, 10) || 0;
+                    return scB - scA;
+                });
+
+                var html = [];
+                html.push('<div style=\"font-weight:900; color: var(--text); margin-bottom:8px;\">Incident summary</div>');
+                var selAction = '';
+                var selConf = '';
+                try { selAction = String(repairPlan.selected_label || repairPlan.selected_action || '').trim(); } catch (e2) { selAction = ''; }
+                try { selConf = String(repairPlan.confidence || '').trim(); } catch (e3) { selConf = ''; }
+                if (selAction) {
+                    html.push('<div style=\"margin-bottom:8px;\"><span style=\"color: var(--muted);\">Suggested action:</span> <strong>' + _aiEsc(selAction) + '</strong>' + (selConf ? (' <span style=\"color:var(--muted)\">(confidence=' + _aiEsc(selConf) + ')</span>') : '') + '</div>');
+                }
+
+                if (!incidents.length) {
+                    html.push('<div style=\"color: var(--muted);\">No incidents detected in the selected range.</div>');
+                    aiIncEl.innerHTML = html.join('');
+                    return;
+                }
+
+                html.push('<div style=\"display:grid; gap:6px;\">');
+                for (var i = 0; i < incidents.length && i < 3; i++) {
+                    var it = incidents[i] || {};
+                    var iid = _aiEsc(it.id || it.kind || ('incident-' + String(i + 1)));
+                    var sev = _aiEsc(it.severity || 'unknown');
+                    var conf = _aiEsc(it.confidence || 'unknown');
+                    var occ = parseInt(it.occurrences || 0, 10) || 0;
+                    html.push('<div style=\"padding:8px 10px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.03);\">'
+                        + '<div style=\"font-weight:800; color:var(--text);\">' + iid + '</div>'
+                        + '<div style=\"font-size:0.9rem; color:var(--muted);\">severity=' + sev + ' • confidence=' + conf + ' • occurrences=' + String(occ) + '</div>'
+                        + '</div>');
+                }
+                html.push('</div>');
+                aiIncEl.innerHTML = html.join('');
             }
 
             function _aiCopyText(text, btn) {
@@ -16589,6 +16700,7 @@ generate_dashboard() {
                 try { if (aiMetaEl) aiMetaEl.textContent = '(generating…)'; } catch (e2) {}
                 _aiDisable(true);
                 _aiSetText('(generating… please wait)');
+                try { if (aiIncEl) aiIncEl.textContent = 'Generating incident summary…'; } catch (eG0) {}
 
                 _api('/api/ai/smart-report', { method: 'POST', body: JSON.stringify({ days: days, include_debug: incDbg }) }).then(function(r) {
                     _aiLast = r;
@@ -16605,12 +16717,14 @@ generate_dashboard() {
                             aiMetaEl.textContent = '(errors=' + String(c.errors || 0) + ', warnings=' + String(c.warnings || 0) + (incDbg ? (', debug=' + String(c.debug || 0)) : '') + ')';
                         }
                     } catch (eM) {}
+                    try { _aiRenderIncidentSummary(r || {}); } catch (eIR) {}
 
                     toast('AI report ready', 'Smart report generated', 'ok');
                 }).catch(function(err) {
                     var msg = (err && err.message) ? err.message : 'failed';
                     _aiSetText('ERROR: ' + String(msg));
                     try { if (aiMetaEl) aiMetaEl.textContent = '(failed)'; } catch (eM2) {}
+                    try { if (aiIncEl) aiIncEl.textContent = 'Incident summary unavailable: ' + String(msg); } catch (eM3) {}
                     toast('AI report failed', msg, 'err');
                 }).finally(function() {
                     _aiDisable(false);
@@ -17301,6 +17415,40 @@ generate_dashboard() {
             return ts + '|' + kind + '|' + msg;
         }
 
+        function _unusualSuppressionSeconds(kind) {
+            try {
+                if (String(kind || '') === 'js-burst') {
+                    return parseInt((_znhUnusualCfg && _znhUnusualCfg.suppressBurstSeconds != null) ? _znhUnusualCfg.suppressBurstSeconds : 300, 10) || 0;
+                }
+                return parseInt((_znhUnusualCfg && _znhUnusualCfg.suppressCrashSeconds != null) ? _znhUnusualCfg.suppressCrashSeconds : 90, 10) || 0;
+            } catch (e0) {
+                return (String(kind || '') === 'js-burst') ? 300 : 90;
+            }
+        }
+
+        function _unusualSuppressed(kind, nowMs) {
+            var k = String(kind || '').trim().toLowerCase();
+            if (!k) return false;
+            var sec = _unusualSuppressionSeconds(k);
+            if (sec <= 0) return false;
+
+            var key = 'znh_unusual_suppress_until_' + k + '_v1';
+            var until = 0;
+            try { until = parseInt(localStorage.getItem(key) || '0', 10) || 0; } catch (e1) { until = 0; }
+
+            var n = parseInt(nowMs || 0, 10) || 0;
+            if (!n) {
+                try { n = Date.now(); } catch (e2) { n = 0; }
+            }
+
+            if (n && until && n < until) return true;
+
+            if (n) {
+                try { localStorage.setItem(key, String(n + (sec * 1000))); } catch (e3) {}
+            }
+            return false;
+        }
+
         function notifyFromLatest(tag) {
             try {
                 if (typeof window.__znhCrashRead !== 'function') return;
@@ -17356,6 +17504,19 @@ generate_dashboard() {
                 if (burst) {
                     body += '\n\nUnusual behavior detected: ' + String(burstCount) + ' crash events in ~3 minutes.';
                 }
+                var incidentKind = burst ? 'js-burst' : 'js-crash';
+                if (_unusualSuppressed(incidentKind, now)) return;
+
+                var incidentId = burst ? 'inc-js-crash-burst' : 'inc-js-crash';
+                var severity = burst ? 'critical' : 'high';
+                var confidence = burst ? 'high' : 'medium';
+                var suppressSec = _unusualSuppressionSeconds(incidentKind);
+                body += '\n\nIncident: ' + incidentId
+                    + '\nSeverity: ' + severity
+                    + '\nConfidence: ' + confidence
+                    + '\nWindow: 3m'
+                    + '\nOccurrences: ' + String(burstCount || 1)
+                    + '\nSuppression: ' + String(suppressSec) + 's';
 
                 if (typeof window.znhNotifyAdd === 'function') {
                     window.znhNotifyAdd({
@@ -18373,6 +18534,8 @@ generate_dashboard() {
         { key: 'ZNH_LIVE_LOGS_MAX_SERVICE_LOGS', type: 'int', label: 'Live logs fallback: max service logs tracked', advanced: true, help: 'Cap for debug-menu/CLI live-log fallback source fanout. Lower values reduce temporary tail-process spikes.' },
         { key: 'MANAGERS_SERVER_POLL_VISIBLE_MS', type: 'int', label: 'Managers (Server tab): visible poll interval (ms)', advanced: true, help: 'Polling interval while the browser tab is visible. Lower values are more responsive but use more API/CPU.' },
         { key: 'MANAGERS_SERVER_POLL_HIDDEN_MS', type: 'int', label: 'Managers (Server tab): hidden poll interval (ms)', advanced: true, help: 'Polling interval while browser tab is hidden/backgrounded. Use a higher value to reduce idle load.' },
+        { key: 'WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS', type: 'int', label: 'WebUI unusual watcher: JS crash suppression window (seconds)', advanced: true, help: 'Suppress repeat non-burst JS crash notifications for this many seconds (0 disables suppression).' },
+        { key: 'WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS', type: 'int', label: 'WebUI unusual watcher: JS burst suppression window (seconds)', advanced: true, help: 'Suppress repeat burst-level unusual-behavior notifications for this many seconds (0 disables suppression).' },
         { key: 'WEBUI_AUTO_FETCH_INTERVAL_MINUTES', type: 'interval', label: 'WebUI auto-fetch interval when Live mode is OFF (minutes)', help: 'Status-only mode refresh cadence. Default 60 minutes.' },
         { key: 'WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED', type: 'bool', label: 'WebUI: self-update background notifications', help: 'When ON, background self-update checks can send Notification Center + desktop update-available notifications.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
@@ -29144,6 +29307,7 @@ generate_dashboard() {
         }).then(function(c) {
             _settingsConfig = c.config
             try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
+            try { if (typeof znhApplyUnusualSuppressConfig === 'function') znhApplyUnusualSuppressConfig(_settingsConfig); } catch (eUS0) {}
             try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
             try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
             try { if (typeof znhApplyWebUiFetchConfig === 'function') znhApplyWebUiFetchConfig(_settingsConfig); } catch (eWF) {}
@@ -29334,6 +29498,7 @@ generate_dashboard() {
                     if (r && r.config) {
                         _settingsConfig = r.config;
                         try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD2) {}
+                        try { if (typeof znhApplyUnusualSuppressConfig === 'function') znhApplyUnusualSuppressConfig(_settingsConfig); } catch (eUS1) {}
                         try { if (typeof znhApplyWebUiFetchConfig === 'function') znhApplyWebUiFetchConfig(_settingsConfig); } catch (eWF2) {}
                         try { znhDebugUpdateToggleUi(); } catch (eDU2) {}
                         try { if (_settingsSchema) _renderSettingsForm(_settingsSchema, _settingsConfig); } catch (eRF) {}
@@ -29424,6 +29589,7 @@ generate_dashboard() {
                     if (c && c.config) {
                         _settingsConfig = c.config;
                         try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
+                        try { if (typeof znhApplyUnusualSuppressConfig === 'function') znhApplyUnusualSuppressConfig(_settingsConfig); } catch (eUS2) {}
                         try { znhDebugApplyFromConfig(_settingsConfig); } catch (eD) {}
                         try { znhPerfApplyFromConfig(_settingsConfig); } catch (eP) {}
                         try { if (typeof znhApplyWebUiFetchConfig === 'function') znhApplyWebUiFetchConfig(_settingsConfig); } catch (eWF3) {}
@@ -30391,6 +30557,7 @@ generate_dashboard() {
 
     try { _znhSetLiveStatusUi(); } catch (e1) {}
     try { _znhSetAutoFetchLabel(); } catch (e2) {}
+    try { if (typeof znhApplyUnusualSuppressConfig === 'function') znhApplyUnusualSuppressConfig(_settingsConfig || {}); } catch (eUSI0) {}
     try { znhApplyWebUiFetchConfig(_settingsConfig || {}); } catch (e3) {}
     try { znhAdvancedPanelsInit(); } catch (eADV0) {}
     try { znhWelcomeMaybeShow(); } catch (eWL0) {}
@@ -55505,7 +55672,260 @@ class Handler(BaseHTTPRequestHandler):
                     out = out[:1400]
                 return out
 
-            def _build_repair_plan(issue_lines: list[str]) -> dict:
+            def _safe_ts(v, default: float = 0.0) -> float:
+                try:
+                    return float(v or default)
+                except Exception:
+                    return float(default)
+
+            def _signal_kind_from_line(line: str) -> str:
+                l = str(line or "").strip().lower()
+                if not l:
+                    return "generic"
+                if ("dashboard api" in l) or ("unauthorized" in l) or ("token" in l) or ("failed to fetch" in l):
+                    return "network-api"
+                if ("javascript error" in l) or ("referenceerror" in l) or ("typeerror" in l) or ("syntaxerror" in l):
+                    return "js-crash"
+                if ("zypp lock" in l) or ("system management is locked" in l) or ("another process is currently using zypp" in l):
+                    return "lock-contention"
+                if ("signature verification failed" in l) or ("rpmdb" in l) or ("gpg" in l) or ("repo refresh failed" in l):
+                    return "repo-rpm-integrity"
+                if ("no space left on device" in l) or ("disk full" in l) or ("critical free space" in l):
+                    return "disk-pressure"
+                if ("conflicting requests" in l) or ("problem:" in l) or ("conflicts with" in l):
+                    return "update-conflict"
+                if ("py_compile" in l) or ("python syntax" in l) or ("zypper-notify-updater.py" in l):
+                    return "notifier-syntax"
+                if ("dashboard-history.sqlite3" in l) or ("history db" in l):
+                    return "history-db"
+                return "generic"
+
+            def _collect_normalized_signals(issue_lines: list[str]) -> list[dict]:
+                max_signals = 220
+                sig_map = {}
+
+                def _push(source_kind: str, source_ref: str, ts_hint: float, level: str, message: str) -> None:
+                    if len(sig_map) >= max_signals:
+                        return
+                    m = str(message or "").strip()
+                    if not m:
+                        return
+                    if len(m) > 320:
+                        m = m[:320] + "…"
+                    lvl = str(level or "warn").strip().lower()
+                    if lvl not in ("error", "warn", "debug"):
+                        lvl = "warn"
+                    kind = _signal_kind_from_line(m)
+                    key = (lvl, kind, m.lower())
+                    existing = sig_map.get(key)
+                    if existing:
+                        existing["count"] = int(existing.get("count", 1)) + 1
+                        if ts_hint and ts_hint > float(existing.get("last_seen_ts", 0.0) or 0.0):
+                            existing["last_seen_ts"] = float(ts_hint)
+                        refs = existing.get("source_refs") or []
+                        ref = str(source_ref or "").strip()
+                        if ref and ref not in refs and len(refs) < 6:
+                            refs.append(ref)
+                            existing["source_refs"] = refs
+                        return
+                    try:
+                        sig_raw = f"{lvl}|{kind}|{m.lower()}".encode("utf-8", errors="ignore")
+                        sig_id = hashlib.sha1(sig_raw).hexdigest()[:16]
+                    except Exception:
+                        sig_id = "0000000000000000"
+                    sig_map[key] = {
+                        "signature": f"{lvl}:{kind}:{sig_id}",
+                        "level": lvl,
+                        "kind": kind,
+                        "message": m,
+                        "count": 1,
+                        "source_kind": str(source_kind or ""),
+                        "source_refs": [str(source_ref or "").strip()] if str(source_ref or "").strip() else [],
+                        "first_seen_ts": float(ts_hint or 0.0),
+                        "last_seen_ts": float(ts_hint or 0.0),
+                    }
+
+                try:
+                    for j in failed_jobs or []:
+                        base_ref = "job:" + str(j.get("job_id") or "").strip()
+                        tsj = _safe_ts(j.get("started_ts"), 0.0)
+                        iss = j.get("issues") or {}
+                        for lvl in ("error", "warn", "debug"):
+                            for ln in (iss.get(lvl) or []):
+                                _push("job", base_ref, tsj, lvl, str(ln or ""))
+                except Exception:
+                    pass
+
+                try:
+                    for f in files or []:
+                        p = str(f.get("path") or "").strip()
+                        tsf = _safe_ts(f.get("mtime"), 0.0)
+                        iss = f.get("issues") or {}
+                        for lvl in ("error", "warn", "debug"):
+                            for ln in (iss.get(lvl) or []):
+                                _push("log", p, tsf, lvl, str(ln or ""))
+                except Exception:
+                    pass
+
+                # fallback: if normalization ended up empty but raw lines exist
+                if not sig_map and issue_lines:
+                    for raw in (issue_lines or [])[:80]:
+                        _push("raw", "", 0.0, "warn", str(raw or ""))
+
+                out = list(sig_map.values())
+                try:
+                    out.sort(key=lambda x: (int(x.get("count", 0)), float(x.get("last_seen_ts", 0.0))), reverse=True)
+                except Exception:
+                    pass
+                if len(out) > max_signals:
+                    out = out[:max_signals]
+                return out
+
+            def _build_incidents(signals: list[dict]) -> list[dict]:
+                now_ts_i = time.time()
+                impact_by_kind = {
+                    "network-api": 68,
+                    "js-crash": 72,
+                    "lock-contention": 60,
+                    "repo-rpm-integrity": 84,
+                    "disk-pressure": 88,
+                    "update-conflict": 74,
+                    "notifier-syntax": 64,
+                    "history-db": 62,
+                    "generic": 48,
+                }
+                groups = {}
+                for s in (signals or []):
+                    kind = str(s.get("kind") or "generic")
+                    g = groups.get(kind)
+                    if not g:
+                        g = {
+                            "id": "inc-" + kind,
+                            "kind": kind,
+                            "signal_count": 0,
+                            "occurrences": 0,
+                            "last_seen_ts": 0.0,
+                            "max_level": "warn",
+                            "evidence": [],
+                            "source_refs": [],
+                        }
+                        groups[kind] = g
+                    g["signal_count"] = int(g.get("signal_count", 0)) + 1
+                    g["occurrences"] = int(g.get("occurrences", 0)) + int(s.get("count", 1) or 1)
+                    lts = _safe_ts(s.get("last_seen_ts"), 0.0)
+                    if lts > float(g.get("last_seen_ts", 0.0) or 0.0):
+                        g["last_seen_ts"] = lts
+                    lvl = str(s.get("level") or "warn")
+                    if lvl == "error":
+                        g["max_level"] = "error"
+                    elif g["max_level"] != "error" and lvl == "warn":
+                        g["max_level"] = "warn"
+                    ev = g.get("evidence") or []
+                    msg = str(s.get("message") or "")
+                    if msg and msg not in ev and len(ev) < 6:
+                        ev.append(msg)
+                    g["evidence"] = ev
+                    refs = g.get("source_refs") or []
+                    for rr in (s.get("source_refs") or []):
+                        r0 = str(rr or "").strip()
+                        if r0 and r0 not in refs and len(refs) < 8:
+                            refs.append(r0)
+                    g["source_refs"] = refs
+
+                out = []
+                for k, g in groups.items():
+                    impact = int(impact_by_kind.get(k, 48))
+                    freq = int(g.get("occurrences", 0) or 0)
+                    freq_score = min(35, int(freq * 8))
+                    age_sec = max(0.0, now_ts_i - float(g.get("last_seen_ts", 0.0) or 0.0))
+                    if age_sec <= 900:
+                        recency_score = 30
+                    elif age_sec <= 3600:
+                        recency_score = 18
+                    elif age_sec <= 21600:
+                        recency_score = 10
+                    else:
+                        recency_score = 4
+                    level_bonus = 14 if str(g.get("max_level") or "") == "error" else 6
+                    score = min(100, int((impact * 0.52) + freq_score + recency_score + level_bonus))
+                    sev = "low"
+                    if score >= 78:
+                        sev = "critical"
+                    elif score >= 60:
+                        sev = "high"
+                    elif score >= 42:
+                        sev = "medium"
+                    conf = "low"
+                    sig_cnt = int(g.get("signal_count", 0) or 0)
+                    if sig_cnt >= 4 or freq >= 5:
+                        conf = "high"
+                    elif sig_cnt >= 2 or freq >= 3:
+                        conf = "medium"
+                    out.append({
+                        "id": str(g.get("id") or ""),
+                        "kind": str(k),
+                        "severity": sev,
+                        "confidence": conf,
+                        "score": int(score),
+                        "impact_weight": int(impact),
+                        "signal_count": int(sig_cnt),
+                        "occurrences": int(freq),
+                        "last_seen_ts": float(g.get("last_seen_ts", 0.0) or 0.0),
+                        "evidence": list(g.get("evidence") or [])[:6],
+                        "source_refs": list(g.get("source_refs") or [])[:8],
+                    })
+                try:
+                    out.sort(key=lambda x: (int(x.get("score", 0)), int(x.get("occurrences", 0))), reverse=True)
+                except Exception:
+                    pass
+                return out[:24]
+
+            def _build_learning_summary() -> dict:
+                out = {
+                    "window_days": int(days),
+                    "action_stats": {},
+                    "samples": 0,
+                    "derived_from": "sqlite-jobs",
+                }
+                conn = _history_conn(self.server)
+                if not conn:
+                    return out
+                try:
+                    cur = conn.execute(
+                        """
+                        SELECT action,
+                               COUNT(1) AS total,
+                               SUM(CASE WHEN rc=0 THEN 1 ELSE 0 END) AS ok_count,
+                               SUM(CASE WHEN rc IS NOT NULL AND rc!=0 THEN 1 ELSE 0 END) AS fail_count,
+                               MAX(COALESCE(finished_ts, started_ts, 0)) AS last_ts
+                          FROM jobs
+                         WHERE started_ts >= ? AND done=1 AND action IS NOT NULL AND action != ''
+                         GROUP BY action
+                         LIMIT 120
+                        """,
+                        (float(since_ts),),
+                    )
+                    for r in cur.fetchall() or []:
+                        a = str(r[0] or "").strip()
+                        if not a:
+                            continue
+                        total = int(r[1] or 0)
+                        ok_count = int(r[2] or 0)
+                        fail_count = int(r[3] or 0)
+                        sr = float(ok_count / total) if total > 0 else 0.0
+                        out["action_stats"][a] = {
+                            "total": total,
+                            "ok": ok_count,
+                            "fail": fail_count,
+                            "success_rate": round(sr, 4),
+                            "last_ts": float(r[4] or 0.0),
+                        }
+                        out["samples"] = int(out.get("samples", 0)) + total
+                except Exception:
+                    return out
+                return out
+
+            def _build_repair_plan(issue_lines: list[str], incidents: list[dict], learning: dict) -> dict:
                 tbl = _quick_action_table()
                 catalog = [
                     {
@@ -55513,6 +55933,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "self-check",
                         "reason": "Notifier Python syntax/compile failures detected.",
                         "priority": 120,
+                        "incident_kinds": ["notifier-syntax"],
                         "patterns": [
                             "python script failed to compile",
                             "python syntax error in",
@@ -55525,6 +55946,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "verify",
                         "reason": "Repository/rpm integrity errors detected; run full verify & auto-repair.",
                         "priority": 110,
+                        "incident_kinds": ["repo-rpm-integrity", "history-db"],
                         "patterns": [
                             "signature verification failed",
                             "gpg",
@@ -55539,6 +55961,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "rm-conflict",
                         "reason": "Duplicate/conflicting RPM patterns detected.",
                         "priority": 105,
+                        "incident_kinds": ["update-conflict"],
                         "patterns": [
                             "conflicting requests",
                             "duplicate rpm",
@@ -55552,6 +55975,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "reset-downloads",
                         "reason": "Downloader/notifier cache-state inconsistency patterns detected.",
                         "priority": 95,
+                        "incident_kinds": ["network-api", "js-crash"],
                         "patterns": [
                             "download-status",
                             "cached state",
@@ -55565,6 +55989,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "verify",
                         "reason": "Dashboard API/token health issue patterns detected.",
                         "priority": 90,
+                        "incident_kinds": ["network-api"],
                         "patterns": [
                             "dashboard api",
                             "dashboard settings api",
@@ -55577,6 +56002,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "health",
                         "reason": "zypper lock contention detected; collect health context first.",
                         "priority": 80,
+                        "incident_kinds": ["lock-contention"],
                         "patterns": [
                             "zypp lock",
                             "system management is locked",
@@ -55589,6 +56015,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "health",
                         "reason": "Disk-pressure/low-space errors detected.",
                         "priority": 70,
+                        "incident_kinds": ["disk-pressure"],
                         "patterns": [
                             "no space left on device",
                             "disk full",
@@ -55597,6 +56024,18 @@ class Handler(BaseHTTPRequestHandler):
                         ],
                     },
                 ]
+
+                incident_map = {}
+                for it in (incidents or []):
+                    k = str(it.get("kind") or "")
+                    if k:
+                        incident_map[k] = it
+
+                action_stats = {}
+                try:
+                    action_stats = dict((learning or {}).get("action_stats") or {})
+                except Exception:
+                    action_stats = {}
 
                 matches = []
                 for item in catalog:
@@ -55607,12 +56046,8 @@ class Handler(BaseHTTPRequestHandler):
                     line_hits = 0
                     pat_hits = set()
                     evidence = []
-
                     for raw in (issue_lines or []):
-                        try:
-                            line = str(raw or "").strip()
-                        except Exception:
-                            line = ""
+                        line = str(raw or "").strip()
                         if not line:
                             continue
                         low = line.lower()
@@ -55623,16 +56058,23 @@ class Handler(BaseHTTPRequestHandler):
                                 pat_hits.add(pat)
                         if not matched:
                             continue
-
                         line_hits += 1
                         if len(evidence) < 6:
-                            ev = line
-                            if len(ev) > 280:
-                                ev = ev[:280] + "…"
+                            ev = line[:280] + ("…" if len(line) > 280 else "")
                             if ev not in evidence:
                                 evidence.append(ev)
 
-                    if not pat_hits:
+                    incident_bonus = 0
+                    incident_refs = []
+                    for ik in (item.get("incident_kinds") or []):
+                        inc = incident_map.get(str(ik))
+                        if not inc:
+                            continue
+                        incident_bonus += int(inc.get("score", 0) or 0) // 2
+                        if len(incident_refs) < 4:
+                            incident_refs.append(str(inc.get("id") or ""))
+
+                    if not pat_hits and incident_bonus <= 0:
                         continue
 
                     action = str(item.get("action") or "").strip()
@@ -55640,7 +56082,15 @@ class Handler(BaseHTTPRequestHandler):
                     title = str(meta.get("title", action) or action).strip()
                     needs_confirm = bool(meta.get("needs_confirm", False))
                     priority = int(item.get("priority", 0) or 0)
-                    score = int(len(pat_hits) * 100 + min(line_hits, 30) + priority)
+
+                    base_score = int(len(pat_hits) * 92 + min(line_hits, 30) + priority + incident_bonus)
+                    learned = action_stats.get(action) or {}
+                    total_hist = int(learned.get("total", 0) or 0)
+                    success_rate = float(learned.get("success_rate", 0.5) if total_hist > 0 else 0.5)
+                    learn_boost = int((success_rate - 0.5) * 44.0) if total_hist > 0 else 0
+                    fail_penalty = int(min(26, int(learned.get("fail", 0) or 0) * 2))
+                    confirm_penalty = 16 if needs_confirm else 0
+                    final_score = int(base_score + learn_boost - fail_penalty - confirm_penalty)
 
                     matches.append({
                         "id": str(item.get("id") or ""),
@@ -55650,9 +56100,19 @@ class Handler(BaseHTTPRequestHandler):
                         "needs_confirm": bool(needs_confirm),
                         "pattern_hits": int(len(pat_hits)),
                         "line_hits": int(line_hits),
-                        "score": int(score),
+                        "score": int(final_score),
                         "priority": int(priority),
                         "evidence": evidence,
+                        "incident_refs": incident_refs,
+                        "score_breakdown": {
+                            "base": int(base_score),
+                            "incident_bonus": int(incident_bonus),
+                            "learning_boost": int(learn_boost),
+                            "historical_fail_penalty": int(fail_penalty),
+                            "confirmation_penalty": int(confirm_penalty),
+                            "historical_total": int(total_hist),
+                            "historical_success_rate": round(success_rate, 4),
+                        },
                     })
 
                 if not matches and issue_lines:
@@ -55669,6 +56129,16 @@ class Handler(BaseHTTPRequestHandler):
                         "score": 101,
                         "priority": 1,
                         "evidence": [],
+                        "incident_refs": [],
+                        "score_breakdown": {
+                            "base": 101,
+                            "incident_bonus": 0,
+                            "learning_boost": 0,
+                            "historical_fail_penalty": 0,
+                            "confirmation_penalty": 0,
+                            "historical_total": 0,
+                            "historical_success_rate": 0.5,
+                        },
                     })
 
                 try:
@@ -55685,6 +56155,18 @@ class Handler(BaseHTTPRequestHandler):
                 elif sel_hits >= 2 or sel_score >= 220:
                     conf = "medium"
 
+                top_actions = []
+                for m in matches[:3]:
+                    top_actions.append({
+                        "action": str(m.get("action") or ""),
+                        "label": str(m.get("label") or ""),
+                        "score": int(m.get("score", 0) or 0),
+                        "reason": str(m.get("reason") or ""),
+                        "needs_confirm": bool(m.get("needs_confirm", False)),
+                        "incident_refs": list(m.get("incident_refs") or []),
+                        "score_breakdown": dict(m.get("score_breakdown") or {}),
+                    })
+
                 return {
                     "selected_action": str(selected.get("action", "") or ""),
                     "selected_label": str(selected.get("label", "") or ""),
@@ -55693,6 +56175,9 @@ class Handler(BaseHTTPRequestHandler):
                     "needs_confirm": bool(selected.get("needs_confirm", False)) if selected else False,
                     "can_auto_start": bool(selected and not bool(selected.get("needs_confirm", False))),
                     "matches": matches[:8],
+                    "top_actions": top_actions,
+                    "selected_score": int(sel_score),
+                    "selected_score_breakdown": dict(selected.get("score_breakdown") or {}),
                     "override_error": "",
                     "overridden": False,
                 }
@@ -55708,7 +56193,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
             issue_lines = _collect_issue_lines()
-            repair_plan = _build_repair_plan(issue_lines)
+            signals = _collect_normalized_signals(issue_lines)
+            incidents = _build_incidents(signals)
+            learning = _build_learning_summary()
+            repair_plan = _build_repair_plan(issue_lines, incidents, learning)
             if repair_action_override:
                 tbl_override = _quick_action_table()
                 meta_override = tbl_override.get(repair_action_override) or {}
@@ -55773,6 +56261,40 @@ class Handler(BaseHTTPRequestHandler):
                             else:
                                 initiated_repair["blocked_reason"] = str(started.get("error", "") or "start-failed")
 
+            # Recompute can_auto_start after precondition checks.
+            if initiated_repair.get("running_job"):
+                repair_plan["can_auto_start"] = False
+            if bool(repair_plan.get("needs_confirm", False)):
+                repair_plan["can_auto_start"] = False
+
+            explainability = {
+                "selected_action": str(repair_plan.get("selected_action", "") or ""),
+                "selected_reason": str(repair_plan.get("selected_reason", "") or ""),
+                "confidence": str(repair_plan.get("confidence", "") or ""),
+                "score_breakdown": dict(repair_plan.get("selected_score_breakdown") or {}),
+                "evidence_lines": [],
+                "source_refs": [],
+                "incident_refs": [],
+            }
+            try:
+                selected_match = {}
+                for mm in (repair_plan.get("matches") or []):
+                    if str(mm.get("action") or "") == str(repair_plan.get("selected_action") or ""):
+                        selected_match = mm
+                        break
+                explainability["evidence_lines"] = list((selected_match or {}).get("evidence") or [])[:6]
+                explainability["incident_refs"] = list((selected_match or {}).get("incident_refs") or [])[:4]
+                refs = []
+                for inc in (incidents or []):
+                    if str(inc.get("id") or "") in explainability["incident_refs"]:
+                        for rr in (inc.get("source_refs") or []):
+                            r0 = str(rr or "").strip()
+                            if r0 and r0 not in refs and len(refs) < 8:
+                                refs.append(r0)
+                explainability["source_refs"] = refs
+            except Exception:
+                pass
+
             # Aggregate counts
             total_err = 0
             total_warn = 0
@@ -55804,6 +56326,7 @@ class Handler(BaseHTTPRequestHandler):
             lines.append(f"range_days: {days}")
             lines.append(f"include_debug: {1 if include_debug else 0}")
             lines.append(f"counts: errors={total_err} warnings={total_warn} debug={total_dbg}")
+            lines.append(f"signals: {len(signals)} incidents: {len(incidents)}")
             lines.append("")
 
             if failed_jobs:
@@ -55884,6 +56407,27 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append("selected_action: none")
             if repair_plan.get("override_error"):
                 lines.append(f"override_error: {repair_plan.get('override_error')}")
+            if incidents:
+                lines.append("")
+                lines.append("-- Incident groups --")
+                for inc in (incidents or [])[:8]:
+                    lines.append(
+                        f"* {inc.get('id')} kind={inc.get('kind')} severity={inc.get('severity')} confidence={inc.get('confidence')} score={inc.get('score')} occurrences={inc.get('occurrences')}"
+                    )
+                    for ev in (inc.get("evidence") or [])[:2]:
+                        lines.append(f"  - {ev}")
+            lines.append("")
+            lines.append("-- Learning (local/offline) --")
+            lines.append(f"samples: {int((learning or {}).get('samples', 0) or 0)}")
+            top_learn = []
+            try:
+                for ak, av in dict((learning or {}).get("action_stats") or {}).items():
+                    top_learn.append((ak, int(av.get("total", 0) or 0), float(av.get("success_rate", 0.0) or 0.0)))
+                top_learn.sort(key=lambda x: (x[1], x[2]), reverse=True)
+            except Exception:
+                top_learn = []
+            for ak, atot, asr in top_learn[:5]:
+                lines.append(f"* action={ak} total={atot} success_rate={asr:.2f}")
             if initiate_repair:
                 if initiated_repair.get("started"):
                     lines.append(
@@ -55899,6 +56443,24 @@ class Handler(BaseHTTPRequestHandler):
             report_text = "\n".join(lines)
             if len(report_text) > 120_000:
                 report_text = report_text[:120_000] + "\n…(truncated)"
+
+            def _validate_ai_payload_shape(p: dict) -> list[str]:
+                errs = []
+                if not isinstance(p, dict):
+                    return ["payload-not-dict"]
+                if not isinstance(p.get("repair_plan"), dict):
+                    errs.append("repair_plan-not-dict")
+                if not isinstance(p.get("initiated_repair"), dict):
+                    errs.append("initiated_repair-not-dict")
+                if not isinstance(p.get("signals"), list):
+                    errs.append("signals-not-list")
+                if not isinstance(p.get("incidents"), list):
+                    errs.append("incidents-not-list")
+                if not isinstance(p.get("learning"), dict):
+                    errs.append("learning-not-dict")
+                if not isinstance(p.get("explainability"), dict):
+                    errs.append("explainability-not-dict")
+                return errs
 
             payload = {
                 "ok": True,
@@ -55919,10 +56481,18 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "failed_jobs": failed_jobs,
                 "files": files,
+                "signals": signals,
+                "incidents": incidents,
+                "learning": learning,
                 "repair_plan": repair_plan,
                 "initiated_repair": initiated_repair,
+                "explainability": explainability,
                 "text": report_text,
             }
+
+            payload_errors = _validate_ai_payload_shape(payload)
+            payload["schema_valid"] = bool(not payload_errors)
+            payload["schema_errors"] = payload_errors
 
             return _json_response(self, 200, payload, origin)
 

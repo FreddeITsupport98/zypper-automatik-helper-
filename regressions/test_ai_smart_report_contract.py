@@ -23,7 +23,7 @@ class AiSmartReportContractTest(unittest.TestCase):
     def test_smart_report_payload_includes_repair_plan_and_initiation_fields(self) -> None:
         block = self._smart_report_block()
         payload_match = re.search(
-            r'payload\s*=\s*\{(?P<payload>.*?)\}\n\s*return _json_response\(self,\s*200,\s*payload,\s*origin\)',
+            r'payload\s*=\s*\{(?P<payload>.*?)\}\n\s*payload_errors\s*=\s*_validate_ai_payload_shape\(payload\)',
             block,
             re.S,
         )
@@ -31,14 +31,25 @@ class AiSmartReportContractTest(unittest.TestCase):
         payload_text = "{" + str(payload_match.group("payload")) + "}"
 
         keys = set(re.findall(r'"([a-z_]+)"\s*:', payload_text))
-        required = {"repair_plan", "initiated_repair", "counts", "failed_jobs", "files", "text"}
+        required = {
+            "repair_plan",
+            "initiated_repair",
+            "counts",
+            "failed_jobs",
+            "files",
+            "signals",
+            "incidents",
+            "learning",
+            "explainability",
+            "text",
+        }
         missing = sorted(required - keys)
         self.assertFalse(missing, f"/api/ai/smart-report payload missing keys: {missing}; found: {sorted(keys)}")
 
     def test_smart_report_builds_selected_repair_action_fields(self) -> None:
         block = self._smart_report_block()
         plan_match = re.search(
-            r'def _build_repair_plan\(issue_lines: list\[str\]\) -> dict:(?P<body>.*?)\n\s*def _ai_start_quick_action',
+            r'def _build_repair_plan\(issue_lines: list\[str\], incidents: list\[dict\], learning: dict\) -> dict:(?P<body>.*?)\n\s*def _ai_start_quick_action',
             block,
             re.S,
         )
@@ -53,9 +64,32 @@ class AiSmartReportContractTest(unittest.TestCase):
             '"needs_confirm"',
             '"can_auto_start"',
             '"matches"',
+            '"top_actions"',
+            '"selected_score"',
+            '"selected_score_breakdown"',
         ]
         for lit in required_literals:
             self.assertIn(lit, plan_text, f"Missing repair-plan field literal: {lit}")
+
+    def test_smart_report_contains_signal_incident_and_learning_builders(self) -> None:
+        block = self._smart_report_block()
+        required_markers = [
+            "def _collect_normalized_signals(",
+            "def _build_incidents(",
+            "def _build_learning_summary(",
+            "signals = _collect_normalized_signals(issue_lines)",
+            "incidents = _build_incidents(signals)",
+            "learning = _build_learning_summary()",
+        ]
+        for marker in required_markers:
+            self.assertIn(marker, block, f"Missing smart-report pipeline marker: {marker}")
+
+    def test_smart_report_explainability_and_schema_validator_present(self) -> None:
+        block = self._smart_report_block()
+        self.assertIn('"explainability": explainability', block, "Payload must include explainability section")
+        self.assertIn("def _validate_ai_payload_shape(", block, "Smart-report should validate payload shape")
+        self.assertIn('payload["schema_valid"]', block, "Payload should include schema_valid flag")
+        self.assertIn('payload["schema_errors"]', block, "Payload should include schema_errors list")
 
     def test_smart_report_supports_optional_repair_initiation_flag(self) -> None:
         block = self._smart_report_block()
