@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- `scripts/syntax-check.sh` now supports explicit `--no-auto-chmod` for one-off scan runs while preserving default auto-chmod behavior.
+- `scripts/syntax-check.sh` auto-chmod stage now emits explicit skip diagnostics when a target is not writable or chmod fails (`WARN: auto-chmod skipped ...`).
+- `scripts/syntax-check.sh` now auto-sets executable permission (`chmod u+x`) for discovered shell/python script targets during scan/check flow (configurable via `SYNTAX_AUTO_CHMOD`).
+- WebUI now includes a version-aware welcome screen: first-time dashboard opens show onboarding guidance, and helper version upgrades (for example `v70 -> v71`) show an upgrade thank-you flow with release notes content.
+- WebUI now defaults advanced panels to hidden (`🧰 Snapper Manager` + `Recent Activity Log`) and adds a master header toggle `Enable Dev Mode / Logs` to reveal/hide them without affecting `Service Health`.
+- Unusual behavior watcher now escalates repeated JavaScript crash bursts (multiple events in a short window) into higher-severity notification-center reports with direct jump actions.
 - Fixed Self-Update WebUI runtime wiring to declare `bgNotifyBtn` before guard/listener usage in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
 - WebUI status-only auto-fetch now also performs self-update status checks in the background so opening the dashboard automatically keeps Self-Update state fresh.
 - Added dedicated unified syntax checker `scripts/syntax-check.sh` as a reusable baseline workflow (`bash -n`, `shellcheck`, Python compile checks, optional Node.js syntax checks) with `--include-regressions` and optional dependency auto-install support via `--install-missing`.

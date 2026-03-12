@@ -11,6 +11,8 @@ This repository provides a robust `systemd` architecture and CLI that:
 - Notifies you like a modern desktop app (with snooze, progress bars, and rich actions).
 - Wraps manual `zypper dup` runs with extra safety rails, service checks, and reboot advice.
 - Adds self‑healing and diagnostics so you can trust it on real, everyday systems.
+- Ships a WebUI onboarding flow: first open shows a welcome guide, and version upgrades show a thank-you + release-notes screen.
+- Keeps advanced WebUI panels (`Snapper Manager` + `Recent Activity Log`) hidden by default behind a master `Enable Dev Mode / Logs` toggle while `Service Health` stays visible.
 
 If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
 
@@ -2198,6 +2200,8 @@ systemctl status zypper-autodownload.service
   - 🧪 **NEW:** added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, Snapper service-state output formatting/hints, and `/api/snapper/status` helper API contract.
   - 🧪 **NEW:** added central runner `run_regression_suite.sh` for non-destructive regression execution (includes Snapper service-status regression and optional Playwright run).
   - 🧪 **NEW:** added `scripts/syntax-check.sh` as a dedicated unified syntax baseline runner (`bash -n`, `shellcheck`, Python `py_compile`, optional Node.js `node --check`) with `--include-regressions` and `--install-missing` support.
+  - 🧪 **IMPROVED:** `scripts/syntax-check.sh` now auto-applies `chmod u+x` to discovered shell/python script targets during scan/check flow (`SYNTAX_AUTO_CHMOD` controls this behavior; enabled by default).
+  - 🧪 **IMPROVED:** `scripts/syntax-check.sh` now supports explicit `--no-auto-chmod` for one-off runs and prints clearer skip diagnostics when auto-chmod cannot be applied (for example, target not writable or chmod failure).
   - 🧪 **IMPROVED:** `run_regression_suite.sh` preflight now delegates bash/shellcheck baseline checks to `scripts/syntax-check.sh` (single shared syntax baseline), and also routes selected default-runtime Python compile targets through the same script while keeping runtime-tagged Python compile routing in the runner.
   - 🧪 **NEW:** added focused static regression `test_runner_python_target_preflight_regression.sh` to guard shared preflight wiring (`--python-target` forwarding for default-runtime Python tests and runner-side runtime-tagged fallback compile checks).
   - 🧪 **IMPROVED:** `run_regression_suite.sh` optional Playwright regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.

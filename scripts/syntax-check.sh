@@ -14,6 +14,7 @@ INSTALL_MISSING=0
 TARGET_FILES=()
 PYTHON_TARGET_FILES=()
 NODE_TARGET_FILES=()
+AUTO_CHMOD=1
 
 usage() {
     cat <<'EOF'
@@ -30,6 +31,7 @@ Options:
   --python-target FILE     Add an explicit python script target (repeatable)
   --include-regressions    Include regressions/test_*.sh + regressions/test_*.py
   --no-runner              Skip run_regression_suite.sh check target
+  --no-auto-chmod          Disable automatic chmod u+x on discovered script targets
   --skip-node              Skip Node.js JS syntax checks
   --install-missing        Auto-install missing check tools via distro package manager
   -h, --help               Show this help
@@ -39,7 +41,43 @@ Environment:
   SYNTAX_PYTHON            Python runtime for py_compile (default: python3)
   SYNTAX_SKIP_SHELLCHECK   1/true/yes to skip shellcheck checks
   SYNTAX_NODE_TARGETS      Space-separated explicit JS files to check with node --check
+  SYNTAX_AUTO_CHMOD        1/true/yes (default) auto-set user executable bit on discovered script targets
 EOF
+}
+
+auto_chmod_script_targets() {
+    # Rule 5.2 support: when scanning, ensure script targets are executable.
+    # This keeps regression/test scripts runnable without manual chmod steps.
+    local p=""
+    local changed=0
+    local skipped=0
+    local total=0
+    local -a all=()
+    all=( "${TARGET_FILES[@]}" "${PYTHON_TARGET_FILES[@]}" )
+
+    for p in "${all[@]}"; do
+        [ -f "${p}" ] || continue
+        total=$((total + 1))
+        if [ ! -x "${p}" ]; then
+            if [ ! -w "${p}" ]; then
+                skipped=$((skipped + 1))
+                printf 'WARN: auto-chmod skipped (not writable): %s\n' "${p#"${REPO_ROOT}"/}"
+                continue
+            fi
+            chmod u+x "${p}" 2>/dev/null || true
+            if [ -x "${p}" ]; then
+                changed=$((changed + 1))
+                printf 'INFO: auto-chmod u+x %s\n' "${p#"${REPO_ROOT}"/}"
+            else
+                skipped=$((skipped + 1))
+                printf 'WARN: auto-chmod skipped (chmod failed): %s\n' "${p#"${REPO_ROOT}"/}"
+            fi
+        fi
+    done
+
+    if [ "${total}" -gt 0 ] 2>/dev/null; then
+        printf 'INFO: auto-chmod scan complete (targets=%s changed=%s skipped=%s)\n' "${total}" "${changed}" "${skipped}"
+    fi
 }
 
 package_manager() {
@@ -209,6 +247,10 @@ while [ "$#" -gt 0 ]; do
             SKIP_NODE_CHECK=1
             shift
             ;;
+        --no-auto-chmod)
+            AUTO_CHMOD=0
+            shift
+            ;;
         --install-missing)
             INSTALL_MISSING=1
             shift
@@ -225,6 +267,9 @@ done
 
 if is_truthy "${SYNTAX_INSTALL_MISSING:-0}"; then
     INSTALL_MISSING=1
+fi
+if ! is_truthy "${SYNTAX_AUTO_CHMOD:-1}"; then
+    AUTO_CHMOD=0
 fi
 
 if [ "${#TARGET_FILES[@]}" -eq 0 ]; then
@@ -245,6 +290,13 @@ done
 for path in "${PYTHON_TARGET_FILES[@]}"; do
     [ -f "${path}" ] || fail "Python target file not found: ${path}"
 done
+
+if [ "${AUTO_CHMOD}" -eq 1 ]; then
+    printf '\n==> Auto chmod script targets\n'
+    auto_chmod_script_targets
+else
+    printf '\n==> Auto chmod script targets (disabled)\n'
+fi
 
 printf '==> Bash syntax checks\n'
 for path in "${TARGET_FILES[@]}"; do
