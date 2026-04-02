@@ -11301,6 +11301,11 @@ generate_dashboard() {
         75% { transform: translateX(-1px) rotate(-3deg); }
         100% { transform: translateX(0) rotate(0deg); }
     }
+    @keyframes znhPulseDanger {
+        0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.85); transform: scale(0.95); }
+        70% { box-shadow: 0 0 0 10px rgba(239,68,68,0.00); transform: scale(1.03); }
+        100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.00); transform: scale(0.95); }
+    }
 
     .rocket-btn.rocket-downloading { animation: rocketThrust 850ms ease-in-out infinite; }
     .rocket-btn.rocket-complete {
@@ -17729,11 +17734,26 @@ generate_dashboard() {
             if (show) el.classList.remove('znh-hidden-card');
             else el.classList.add('znh-hidden-card');
         }
+        // Also gate the Settings drawer behind the same toggle so regular users
+        // don't accidentally edit advanced configuration.
+        try {
+            var sd = document.getElementById('settings-drawer');
+            if (sd) {
+                if (show) {
+                    sd.classList.remove('znh-hidden');
+                    sd.style.display = '';
+                } else {
+                    sd.open = false;
+                    sd.classList.add('znh-hidden');
+                    sd.style.display = 'none';
+                }
+            }
+        } catch (e_sd0) {}
         var btn = null;
         try { btn = document.getElementById('advanced-panels-toggle'); } catch (e1) { btn = null; }
         if (btn) {
             btn.textContent = show ? 'Disable Dev Mode / Logs' : 'Enable Dev Mode / Logs';
-            btn.title = show ? 'Hide advanced panels (Snapper/Ghost + Recent Activity)' : 'Show advanced panels (Snapper/Ghost + Recent Activity)';
+            btn.title = show ? 'Hide advanced panels + Settings' : 'Show advanced panels + Settings';
         }
     }
 
@@ -27888,10 +27908,18 @@ generate_dashboard() {
         if (conflictDetected) {
             cfBlock = [
                 '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
-                '  <div style="font-weight:950;">Conflict detected</div>',
+                '  <div style="font-weight:950; display:flex; align-items:center; gap:8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:999px; background: rgba(239,68,68,0.95); box-shadow: 0 0 0 0 rgba(239,68,68,0.9); animation: znhPulseDanger 1.2s infinite ease-out;"></span><span>Conflict detected</span></div>',
                 '  <div style="margin-top:6px; font-weight:800;">The preview suggests solver conflicts / manual decisions. Non-interactive <code>zypper dup</code> may abort. Recommended: run the update in a terminal.</div>',
                 '  <div style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Rocket setting: <code>ROCKET_WIZARD_ALLOW_VENDOR_CHANGE</code> = <strong>' + (allowVendor ? 'true' : 'false') + '</strong></div>',
                 (vendorConflict && !allowVendor ? '  <div style="margin-top:8px; font-weight:800;">This looks like a <strong>vendor switch</strong> conflict. To try non-interactively, enable <code>--allow-vendor-change</code> (or run the update in a terminal).</div>' : ''),
+                '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>sudo zypper dup --allow-vendor-change</code></div>',
+                '  <div style="margin-top:8px; font-size:0.9rem;">When zypper shows solutions, choose by number: <strong>1/2/3/4</strong> (option 4 can be deinstallation/removal depending on the conflict).</div>',
+                '  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">',
+                '    <button class="pill" type="button" id="ru-solver-1">1</button>',
+                '    <button class="pill" type="button" id="ru-solver-2">2</button>',
+                '    <button class="pill" type="button" id="ru-solver-3">3</button>',
+                '    <button class="pill" type="button" id="ru-solver-4">4</button>',
+                '  </div>',
                 (!allowVendor ? '  <button class="pill" type="button" id="ru-enable-vendor-change" style="margin-top:10px;" disabled>Enable allow-vendor-change (Rocket)</button>' : ''),
                 (!allowVendor ? '  <div style="margin-top:6px; color: var(--muted); font-size:0.88rem;">Tip: first check the manual-intervention box below, then enable vendor change.</div>' : ''),
                 (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + conflictSummary.replace(/</g,'&lt;') + '</pre>') : ''),
@@ -28000,6 +28028,29 @@ generate_dashboard() {
             try { addRipple(rb, ev.clientX, ev.clientY); } catch (e2) {}
             rocketUpdateWizardOpen({ auto_simulate: !!_ru.auto_simulate });
         });
+
+        function _ruWireSolverChoiceButtons() {
+            function _ruPickSolverChoice(n, ev) {
+                var v = String(n || '').trim();
+                if (!v) return;
+                try { if (ev) addRipple(ev.currentTarget, ev.clientX, ev.clientY); } catch (e0) {}
+                try {
+                    if (typeof copyTextToClipboard === 'function') {
+                        copyTextToClipboard(v, ev ? ev.currentTarget : null, 'Solver choice ' + v + ' copied');
+                    }
+                } catch (e1) {}
+                toast('Solver choice', 'Input: ' + v + ' (example options: 1/2/3/4)', 'ok');
+            }
+            var b1 = document.getElementById('ru-solver-1');
+            var b2 = document.getElementById('ru-solver-2');
+            var b3 = document.getElementById('ru-solver-3');
+            var b4 = document.getElementById('ru-solver-4');
+            if (b1) b1.addEventListener('click', function(ev){ _ruPickSolverChoice('1', ev); });
+            if (b2) b2.addEventListener('click', function(ev){ _ruPickSolverChoice('2', ev); });
+            if (b3) b3.addEventListener('click', function(ev){ _ruPickSolverChoice('3', ev); });
+            if (b4) b4.addEventListener('click', function(ev){ _ruPickSolverChoice('4', ev); });
+        }
+        _ruWireSolverChoiceButtons();
 
         // Conflict helper: enable vendor change for Rocket (best-effort)
         // IMPORTANT: gated behind the manual-intervention checkbox.
@@ -28238,6 +28289,14 @@ generate_dashboard() {
                 '<div class="overlay-alert overlay-alert-warn" style="margin-top: 12px; border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
                 '  <div style="font-weight:950;">Manual solver decision required</div>',
                 '  <div style="margin-top:6px; font-weight:800;">The WebUI runs <code>zypper dup</code> non-interactively. If zypper prompts for a solution (vendor switch / obsolete / dependency break), run an interactive update in a terminal.</div>',
+                '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>sudo zypper dup --allow-vendor-change</code></div>',
+                '  <div style="margin-top:8px; font-size:0.9rem;">When zypper asks for a solution, select by number: <strong>1/2/3/4</strong> (option 4 can be deinstallation/removal depending on the conflict).</div>',
+                '  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">',
+                '    <button class="pill" type="button" id="ru-result-solver-1">1</button>',
+                '    <button class="pill" type="button" id="ru-result-solver-2">2</button>',
+                '    <button class="pill" type="button" id="ru-result-solver-3">3</button>',
+                '    <button class="pill" type="button" id="ru-result-solver-4">4</button>',
+                '  </div>',
                 (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 180px; margin-top: 10px;">' + safe(conflictSummary) + '</pre>') : ''),
                 '  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
                 '    <button class="pill" type="button" id="ru-copy-interactive">Copy command</button>',
@@ -28289,6 +28348,29 @@ generate_dashboard() {
                 toast('Copy failed', interactiveCmd, 'err');
             }
         });
+
+        function _ruWireResultSolverButtons() {
+            function _pick(n, ev) {
+                var v = String(n || '').trim();
+                if (!v) return;
+                try { if (ev) addRipple(ev.currentTarget, ev.clientX, ev.clientY); } catch (e0) {}
+                try {
+                    if (typeof copyTextToClipboard === 'function') {
+                        copyTextToClipboard(v, ev ? ev.currentTarget : null, 'Solver choice ' + v + ' copied');
+                    }
+                } catch (e1) {}
+                toast('Solver choice', 'Input: ' + v + ' (example: 1/2/3/4)', 'ok');
+            }
+            var b1 = document.getElementById('ru-result-solver-1');
+            var b2 = document.getElementById('ru-result-solver-2');
+            var b3 = document.getElementById('ru-result-solver-3');
+            var b4 = document.getElementById('ru-result-solver-4');
+            if (b1) b1.addEventListener('click', function(ev){ _pick('1', ev); });
+            if (b2) b2.addEventListener('click', function(ev){ _pick('2', ev); });
+            if (b3) b3.addEventListener('click', function(ev){ _pick('3', ev); });
+            if (b4) b4.addEventListener('click', function(ev){ _pick('4', ev); });
+        }
+        _ruWireResultSolverButtons();
 
         if (e.close) e.close.textContent = 'OK';
         _suSetButtons({
@@ -32373,7 +32455,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=52
+    local TOTAL_CHECKS=53
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -34761,6 +34843,58 @@ else
     else
         log_info "ℹ journalctl or /var/log/journal not available; skipping journal vacuum check"
     fi
+fi
+
+# Check 53: Flatpak integrity (repair only on detected corruption)
+log_debug "[53/${TOTAL_CHECKS}] Checking Flatpak integrity/corruption state..."
+if command -v flatpak >/dev/null 2>&1; then
+    if verify_should_skip_heavy_check "flatpak integrity dry-run scan"; then
+        log_info "  → Flatpak integrity deep-check deferred until cooldown expires"
+    else
+        flatpak_issue_detected=0
+        flatpak_scan_out=""
+        flatpak_scan_rc=0
+
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+            flatpak_scan_out=$(timeout 180 flatpak repair --dry-run --system 2>&1)
+            flatpak_scan_rc=$?
+        else
+            flatpak_scan_out=$(flatpak repair --dry-run --system 2>&1)
+            flatpak_scan_rc=$?
+        fi
+        set -e
+
+        if [ "${flatpak_scan_rc}" -ne 0 ] 2>/dev/null; then
+            flatpak_issue_detected=1
+        elif printf '%s\n' "${flatpak_scan_out}" | grep -qiE 'corrupt|checksum|missing object|invalid object|broken|damaged|error:'; then
+            flatpak_issue_detected=1
+        fi
+
+        if [ "${flatpak_issue_detected}" -eq 1 ] 2>/dev/null; then
+            log_warn "⚠ Flatpak integrity issues detected. Attempting targeted auto-repair..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            if command -v timeout >/dev/null 2>&1; then
+                if execute_guarded "Repair Flatpak system installation (corruption detected)" timeout 300 flatpak repair --system --noninteractive; then
+                    log_success "  ✓ Flatpak repair completed successfully"
+                else
+                    log_error "  ✗ Flatpak repair failed"
+                    VERIFICATION_FAILED=1
+                fi
+            else
+                if execute_guarded "Repair Flatpak system installation (corruption detected)" flatpak repair --system --noninteractive; then
+                    log_success "  ✓ Flatpak repair completed successfully"
+                else
+                    log_error "  ✗ Flatpak repair failed"
+                    VERIFICATION_FAILED=1
+                fi
+            fi
+        else
+            log_success "✓ Flatpak integrity looks healthy (no corruption detected)"
+        fi
+    fi
+else
+    log_info "ℹ Flatpak not installed; skipping Flatpak integrity check"
 fi
 
 # Dashboard UX: reboot-required is a WARNING badge, not a FAILED status.
@@ -48141,9 +48275,11 @@ def main():
 
                     # Always give clear instructions on what to do next.
                     message += (
-                        "\\n\\nOpen a terminal and run:\n"
-                        "  sudo zypper dup\n"
-                        "or click 'Install Now' to open the helper, then follow zypper's prompts to resolve the conflicts."
+                        "\\n\\nRecommended command for vendor/switch conflicts:\\n"
+                        "  sudo zypper dup --allow-vendor-change\\n"
+                        "or click 'Install Now' to open the helper, then follow zypper's prompts."
+                        "\\n\\nWhen zypper shows solution options, enter the option number and press Enter "
+                        "(for example: 1/2/3/4). Option 4 may remove/deinstall conflicting packages depending on the case."
                     )
 
                     action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
@@ -48151,7 +48287,7 @@ def main():
                     n = Notify.Notification.new(
                         title,
                         message,
-                        "system-software-update",
+                        "dialog-error",
                     )
                     # Persistent notification, high urgency.
                     n.set_timeout(0)
@@ -52995,6 +53131,18 @@ def _job_update_progress_dup(job: dict, line: str) -> None:
         if p > prog:
             prog = p
         stage = st
+    if "[webui] stage: waiting-for-lock" in l:
+        bump(5, "Waiting for lock")
+    elif "[webui] stage: running-zypper" in l:
+        bump(18, "Running zypper")
+    elif "[webui] stage: optional-updates" in l:
+        bump(86, "Optional updates")
+    elif "[webui] stage: restart-check" in l:
+        bump(94, "Restart check")
+    elif "[webui] stage: refreshing-dashboard" in l:
+        bump(98, "Refreshing dashboard")
+    elif "[webui] stage: finalizing" in l:
+        bump(99, "Finalizing")
 
     # Lock wait UX
     if "zypp" in l and "lock" in l and "wait" in l:
@@ -57289,6 +57437,8 @@ class Handler(BaseHTTPRequestHandler):
                     'echo "" >>"$LOG"',
                     f'echo "CMD: {zcmd}" >>"$LOG"',
                     'echo "" >>"$LOG"',
+                    'echo "[webui] stage: running-zypper" >>"$LOG" || true',
+                    'write_status 0 0 running-zypper',
 
                     # Run zypper and stream output live into $LOG.
                     # We also keep a temporary copy so we can detect "Nothing to do." reliably.
@@ -57303,7 +57453,7 @@ class Handler(BaseHTTPRequestHandler):
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
                     'echo "" >>"$LOG"',
                     'echo "[webui] zypper dup rc=$rc" >>"$LOG"',
-                    'if [ ${rc} -eq 0 ]; then write_status 0 ${rc} running; else write_status 0 ${rc} failed; fi',
+                    'if [ ${rc} -eq 0 ]; then write_status 0 ${rc} running-zypper-done; else write_status 0 ${rc} failed; fi',
                     'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional updates." >>"$LOG"; fi',
                     'if [ ${rc} -ne 0 ]; then echo "[webui] zypper dup failed; skipping optional updates." >>"$LOG"; fi',
 
@@ -57314,6 +57464,8 @@ class Handler(BaseHTTPRequestHandler):
                     '  if [ "${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}" = "true" ]; then do_optional=1; fi',
                     '  if [ ${did_updates} -eq 1 ]; then do_optional=1; fi',
                     '  if [ ${do_optional} -eq 1 ]; then',
+                    '    echo "[webui] stage: optional-updates" >>"$LOG" || true',
+                    '    write_status 0 ${rc} optional-updates',
                     '    echo "" >>"$LOG"',
                     '    if [ ${did_updates} -eq 1 ]; then echo "[webui] System updates were applied; running optional updates." >>"$LOG"; fi',
                     '    if [ ${did_updates} -eq 0 ] && [ "${OPTIONAL_UPDATES_ALWAYS_REFRESH,,}" = "true" ]; then echo "[webui] No system updates were applied, but OPTIONAL_UPDATES_ALWAYS_REFRESH=true so optional updates will run." >>"$LOG"; fi',
@@ -57402,10 +57554,19 @@ class Handler(BaseHTTPRequestHandler):
 
                     # Restart check: only meaningful when system packages changed.
                     'if [ ${rc} -eq 0 ] && [ ${did_updates} -eq 1 ] && [ "${SIMULATE:-0}" != "1" ]; then',
+                    '  echo "[webui] stage: restart-check" >>"$LOG" || true',
+                    '  write_status 0 ${rc} restart-check',
                     '  echo "" >>"$LOG"',
                     '  echo "=== ZYPPER PS -s (restart check) ===" >>"$LOG"',
                     f'  {ZYPPER_BIN} ps -s >>"$LOG" 2>&1 || true',
                     'fi',
+                    'if [ ${rc} -eq 0 ] && [ "${SIMULATE:-0}" != "1" ]; then',
+                    '  echo "[webui] stage: refreshing-dashboard" >>"$LOG" || true',
+                    '  write_status 0 ${rc} refreshing-dashboard',
+                    '  /usr/local/bin/zypper-auto-helper --dashboard >>"$LOG" 2>&1 || echo "[WARN] dashboard refresh failed (continuing)" >>"$LOG"',
+                    'fi',
+                    'echo "[webui] stage: finalizing" >>"$LOG" || true',
+                    'write_status 0 ${rc} finalizing',
                     '',
                     '# Self-cleanup: remove this temporary script file so /var/lib/zypper-auto does not fill up over time.',
                     'if [ ${rc} -eq 0 ]; then write_status 1 ${rc} done; else write_status 1 ${rc} failed; fi',
@@ -59659,7 +59820,7 @@ if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
         # can open a terminal on the correct graphical session. Without
         # this, the helper fell back to DISPLAY=:0 which may not match
         # the user's real display.
-        if sudo -u "$SUDO_USER" DISPLAY="$DISPLAY" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+        if sudo -u "$SUDO_USER" DISPLAY="${DISPLAY:-}" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             "$USER_BIN_DIR/zypper-soar-install-helper" >/dev/null 2>&1 & then
             log_debug "Launched Soar install helper notification for user $SUDO_USER"
         fi

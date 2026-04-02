@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- [2026-04-02 19:37 UTC] README now includes a dedicated “Rocket conflict quick flow” troubleshooting mini-guide (allow-vendor-change fallback, solver option `1/2/3/4` guidance, log check path, and dashboard refresh hint) plus TOC/quick-link entries.
+- [2026-04-02 19:35 UTC] Rocket conflict handling UX now adds pulsing red conflict emphasis plus explicit `--allow-vendor-change` guidance and solver-choice helper cues (`1/2/3/4`) in preview and result flows.
+- [2026-04-02 19:35 UTC] Rocket result conflict view now includes quick solver helper buttons (`1`,`2`,`3`,`4`) with copy/toast wiring to speed manual zypper prompt resolution.
+- [2026-04-02 19:35 UTC] Rocket system-update progress pipeline now emits explicit stage markers through zypper run, optional-update phase, restart check, dashboard refresh, and finalization to avoid stuck/jump progress behavior.
+- [2026-04-02 19:35 UTC] Verification now includes conditional Flatpak corruption repair (dry-run detection first, repair only on detected corruption), and the Dev Mode / Logs toggle now also gates Settings drawer visibility.
 - AI Smart Report (`/api/ai/smart-report`) now uses a unified normalized signal pipeline (deduped log/job signals), incident grouping with severity/confidence scoring, and recommendation-v2 ranking with local history learning weights.
 - AI Smart Report payload now includes structured explainability (`top_actions`, selected score breakdown, evidence/source refs), incident/signal/learning sections, and schema validation flags (`schema_valid`, `schema_errors`) to harden report quality controls.
 - WebUI unusual-activity crash watcher notifications now include normalized incident metadata (`inc-js-crash`, severity/confidence, analysis window, occurrence count) aligned with smart-report incident semantics.

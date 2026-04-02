@@ -35,6 +35,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
   - Installation / upgrading
 - User guides
   - Self-update (CLI + WebUI)
+  - Rocket conflict quick flow
   - Boot Entry Scrub (scrub-ghost)
   - Configuration file (/etc/zypper-auto.conf)
   - Duplicate RPM cleanup
@@ -53,6 +54,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [How it works (architecture)](#architecture)
 - [Installation / upgrading](#installation-upgrading)
 - [Self-update (CLI + WebUI)](#self-update)
+- [Rocket conflict quick flow](#rocket-conflict-quick-flow)
 - [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
 - [Verification low-impact mode](#cfg-verify-low-impact)
@@ -2078,6 +2080,20 @@ systemctl status zypper-autodownload.service
 - For full system helper logs (may require sudo): `/var/log/zypper-auto/`
 - Easy opener (file manager): `zypper-auto-helper --show-logs`
 
+<a id="rocket-conflict-quick-flow"></a>
+### Rocket conflict quick flow
+- If Rocket reports a solver conflict, run the fallback shown in the panel:
+  - `sudo zypper dup --allow-vendor-change`
+- When zypper asks for a solution, choose the numeric solver option (`1/2/3/4`) that matches your intent:
+  - `1` keeps the first proposal.
+  - `2` selects the second proposal.
+  - `3` selects the third proposal.
+  - `4` often includes deinstallation/replacement proposals, so review that one carefully.
+- Re-check the install helper output if needed:
+  - `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+- If dashboard counters look stale after a successful run, force a refresh:
+  - `sudo zypper-auto-helper --dashboard`
+
 **Problem: Not receiving notifications**
 - Check notifier timer: `systemctl --user status zypper-notify-user.timer`
 - Check for errors: `cat ~/.local/share/zypper-notify/notifier-detailed.log | grep ERROR`
@@ -2504,6 +2520,9 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** Rocket Update Wizard now exits early when there are no updates ("Nothing to do"), instead of asking for confirmation.
   - 🧰 **IMPROVED:** Rocket Update Wizard now waits for the zypp/zypper lock (e.g. YaST, packagekit, background refresh) instead of failing instantly.
   - 🧰 **IMPROVED:** Rocket preview now detects common solver-conflict patterns and shows a dedicated "Conflict detected" warning in the WebUI.
+  - 🧰 **IMPROVED:** Rocket conflict guidance now includes explicit `sudo zypper dup --allow-vendor-change` fallback instructions and solver-choice quick guidance (`1/2/3/4`) directly in both preview and final result conflict panels.
+  - 🎨 **IMPROVED:** Rocket conflict warning visuals now include a pulsing red danger indicator to better surface manual-intervention-required states.
+  - 🧰 **IMPROVED:** Rocket result conflict panel now exposes one-click solver choice helper buttons (`1`, `2`, `3`, `4`) matching zypper prompt options, with copy/toast feedback.
   - 🎛️ **NEW (advanced):** Rocket Wizard setting `ROCKET_WIZARD_ALLOW_VENDOR_CHANGE` adds `--allow-vendor-change` to Rocket preview + install runs (useful for vendor-switch conflicts).
   - 🛡️ **IMPROVED:** In Rocket preview, enabling vendor change is now gated behind the **manual-intervention acknowledgement** checkbox (so you must explicitly confirm you understand solver conflicts before turning it on).
   - 🧪 **IMPROVED:** Rocket **Simulation mode** is now labeled as a **dry-run test** (clearer button label + a short note explaining what it tests).
@@ -2513,6 +2532,8 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** WebUI self-update status polling is now more resilient to brief localhost API restarts/outages (auto-retries "Failed to fetch" a couple of times and shows clearer guidance for file:// or non-localhost origins).
   - 🧾 **IMPROVED:** When Rocket install fails due to solver conflicts, the Result view now shows an interactive fallback command (copyable) so you can run `zypper-run-install` (recommended) or `sudo zypper dup` and choose a solution.
   - 🧰 **IMPROVED:** Rocket Update Wizard now supports real progress percentages via zypper `--xmlout` (WebUI still shows readable logs via best-effort XML text extraction).
+  - 📈 **IMPROVED:** Rocket system-update progress now emits explicit stage markers across install flow (`running-zypper`, optional updates, restart check, dashboard refresh, finalizing) so progress no longer appears stuck at early percentages and now reaches clean completion behavior.
+  - 🔄 **IMPROVED:** Rocket post-install flow now performs a best-effort dashboard refresh trigger so pending-update counters and status cards converge faster after successful installs.
   - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:
     - `ROCKET_WIZARD_DEFAULT_SIMULATE` (opens with Simulation mode pre-selected by default)
     - `ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS` + `ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS` (lock wait timeouts)
@@ -2523,6 +2544,8 @@ systemctl status zypper-autodownload.service
   - 🛡️ **IMPROVED:** When `ROCKET_WIZARD_FORCE_RESOLUTION=true`, the Rocket Wizard now requires an extra typed confirmation inside the wizard ("I UNDERSTAND") before enabling Install.
   - 🎚️ **IMPROVED:** Progress bars now use smoother width easing and show a subtle pulse animation for waiting/reconnecting stages.
   - 🛡️ **IMPROVED:** WebUI Settings drawer now hides **Advanced** settings by default, requires typing a confirmation phrase (`ADVANCED`) to reveal them (per page load), requires an explicit temporary **Unlock danger zone** toggle, and (hard mode) each dangerous setting change requires typing its own confirmation phrase (example: `REMOUNT`, `FORCE`).
+  - 🧰 **IMPROVED:** `Enable Dev Mode / Logs` now also gates Settings drawer visibility, so advanced controls and settings stay hidden together for non-technical users until explicitly enabled.
+  - 🧪 **IMPROVED:** Verification checks now include conditional Flatpak corruption repair (`flatpak repair --dry-run --system` probe, repair only when corruption indicators are detected), avoiding unnecessary repair runs on healthy systems.
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
