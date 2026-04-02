@@ -2113,76 +2113,10 @@ systemctl status zypper-autodownload.service
 
 ### Version History
 
-- **v70** (2026-02-18): **Revolutionary: Rocket Update Wizard + Smart Optional Updates**
-  - 🧾 **Release notes page:** `~/Desktop/v70`
-  - 🚀 **Revolutionary:** Rocket Update Wizard (preview → confirm → run → stream logs → restart check) + dedicated Dry-run simulation mode.
-  - ⚡ **Revolutionary:** Optional post-update refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when there are no system updates (`OPTIONAL_UPDATES_ALWAYS_REFRESH=false` by default).
-  - 🧵 **IMPROVED:** Dashboard Settings API is now **multi-threaded** so slow requests (large logs, Snapper actions) don’t freeze the whole dashboard UI.
-  - 🧷 **FIXED:** Dashboard API command output decoding is now forced to UTF‑8 with replacement to avoid crashes on weird/binary log data.
-  - 🐛 **FIXED:** self-update overlay readability (proper modal background, improved scrolling, and consistent warning banner styling).
-  - 🐛 **FIXED:** suppressed noisy "Read-only file system" errors when mirroring `dashboard-live.log` into the user dashboard directory (best-effort under systemd hardening / read-only home mounts).
-  - 🐛 **FIXED:** Soar detection in `zypper-with-ps` now works correctly when the wrapper is launched via `sudo`/`pkexec` (detects per-user installs under `~/.local/bin` / `~/pkgforge` and runs Soar as the invoking user).
-  - 🚀 **NEW:** Command Center rocket button is now **animated** in Live mode (downloading / complete / error states) and opens a **Rocket Update Wizard**: preview `zypper dup --dry-run --details`, confirm via checkbox + phrase, stream install logs + progress, then show `zypper ps -s` restart check.
-  - 🧪 **NEW:** Rocket Update Wizard supports an explicit **Dry-run simulation** mode in the WebUI:
-    - Quick Action: **“Simulate: System Update (Dry-run)”** opens the wizard with simulation pre-selected.
-    - URL auto-open: `status.html?live=1&ru=1&ru_dry=1` (opens wizard in dry-run simulation mode).
-  - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
-  - ⚡ **NEW:** optional post-update app refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when no system updates occurred:
-    - New config: `OPTIONAL_UPDATES_ALWAYS_REFRESH` (and WebUI Settings toggle)
-    - Default: only run optional app refresh steps when `zypper dup` actually changed system packages (skips when zypper prints "Nothing to do.")
-  - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
-  - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.
-  - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
-  - 🧰 **IMPROVED:** dashboard now shows the **last verify/auto-repair counts** (auto-repairs executed / remaining issues) in the Service Health panel.
-  - 🐛 **FIXED:** dashboard Live mode now parses downloader `complete:DURATION:PKGS` correctly and shows clearer text when no new downloads were needed (already cached / detect-only).
-  - ⚡ **IMPROVED:** background services now also include **systemd resource caps** (CPU/IO weight + memory high/max) to further reduce performance spikes.
-  - ⚡ **IMPROVED:** downloader progress tracker is now **event-driven** when `inotifywait` is available (from `inotify-tools`). It sleeps indefinitely until cache files change (with a 300s timeout fallback).
-  - ⚡ **IMPROVED:** downloader metered-network checks are now **cached** (short TTL) to avoid calling `nmcli` on every minutely run when the network state is stable.
-  - ⚡ **IMPROVED:** cache cleanup is now **triggered** by real activity: a marker file is created after real downloads / successful installs, and `zypper-cache-cleanup.service` only runs when that marker exists.
-  - ⚡ **IMPROVED:** dashboard components are now true "background" priority:
-    - dashboard API unit includes systemd CPU/IO/memory caps + low priority
-    - dashboard HTTP server + sync/perf workers run with best-effort `ionice -c3` + `nice(19)` (when tools are available)
-  - 🖥️ **IMPROVED:** `--dash-open` now auto-refreshes the dashboard when it is missing or outdated (so new dashboard/UI changes are applied automatically).
-  - 🧰 **IMPROVED:** auto-repair (`--verify`) now also detects stale/missing dashboard artifacts and regenerates the dashboard automatically.
-  - 🧰 **IMPROVED:** auto-repair (`--verify`) now probes the Dashboard API via `GET /api/ping` and will restart the API service if needed so new WebUI endpoints (like dashboard refresh) work immediately after upgrades.
-  - 🖱️ **NEW:** dashboard Quick Actions now include **Run: Refresh Dashboard** (WebUI button) to regenerate dashboard artifacts through the localhost API.
-  - 🐛 **FIXED:** dashboard API systemd hardening now allows safe logging + snapper actions:
-    - `ProtectHome=read-only` (instead of `true`) so user home paths are visible when needed
-    - `ReadWritePaths` now includes `/var/log/zypper-auto` so the API can create `/var/log/zypper-auto/service-logs/dashboard-api.log`
-    - auto-repair (`zypper-auto-helper --verify`) will patch older/broken unit files automatically
-  - 🧰 **IMPROVED:** Snapper menu and dashboard now show **snapper timer status** (`snapper-*.timer`) with the same green/yellow/red state colors as the AUTO option.
-  - ⚡ **IMPROVED:** installer log cleanup trims uncompressed `install-*.log` files using a single directory scan (avoids repeated `find | wc -l` passes).
-  - 🧹 **IMPROVED:** `zypper-auto.sh` now passes `shellcheck -x` cleanly (removed `ls`-based file listings, removed truly-unused variables, and suppressed the one unavoidable config-source follow warning).
-  - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:
-    - First run occurs ~30 seconds after boot (instead of waiting a full interval)
-    - Default interval is now **5 minutes**
-    - The verification service runs at low/background CPU/I/O priority to avoid desktop performance spikes
-  - 🔐 **IMPROVED:** installing now also drops a Polkit action file so `pkexec` prompts for "System Verification and Repair" look trusted/official (instead of a generic "run /usr/local/bin/..." prompt). The uninstaller removes it.
-  - 🩺 **IMPROVED:** `zypper-auto-helper --verify` now also verifies the dashboard desktop/start-menu shortcut and auto-regenerates it if it was deleted or is outdated.
-  - 🖥️ **IMPROVED:** desktop/start-menu dashboard shortcut Quick Actions now have better UX:
-    - **Check Now** shows a desktop bubble (when `notify-send` exists) before waking the notifier service.
-    - **Install Updates** and **Health Report** now keep the terminal window open until you press Enter.
-  - 🔔 **FIXED:** the "Updates Ready" notification no longer re-appears while you are already installing updates (install action now suppresses notifier popups via an install-in-progress marker; configurable via `INSTALL_CLICK_SUPPRESS_MINUTES`).
-  - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
-  - 🧰 **IMPROVED:** dashboard Recent Activity log now also includes a **Verify/Repair** view (tail of `verify.log`) so auto-repair runs are visible in the timeline.
-  - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
-  - 🥾 **NEW:** boot-menu hygiene: Snapper cleanup can prune old systemd-boot/BLS entry files to keep the boot menu clean (backup/delete modes).
-  - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path (highlighted in color when supported) and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
-  - 🎛️ **IMPROVED:** debug menu option **5** always prints a clickable `file://...` link even when auto-open succeeds/fails, so you can open the folder manually.
-  - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to XFCE openers (`exo-open`, `xfce4-open`), `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
-  - 🧹 **IMPROVED:** Snapper menu cleanup now runs a full cleanup (`number`, `timeline`, `empty-pre-post`) across all snapper configs (root/home/etc.). Auto-timers now sync Snapper config files so timeline/boot timers actually create snapshots.
-  - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
-  - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
-  - 🧠 **IMPROVED:** Snapper menu "Full Cleanup" now also does the same smart config sync + retention-cap tuning used by the AUTO timers option (best-effort, interactive-only).
-  - 🧯 **NEW:** optional Snapper cleanup Deep Clean step (broken snapshot hunter) + btrfs balance tip for emergency space recovery.
-  - 🧽 **NEW:** optional “System Deep Scrub” extras after Snapper cleanup: zypper cache clean, journal vacuum, and user thumbnail cache cleanup.
-  - 🧰 **NEW:** optional btrfs maintenance timer auto-enable (scrub/balance/trim) when using Snapper AUTO enable.
-  - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
-  - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
-  - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
-  - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
-
 - **Unreleased (next build):**
+  - _TBD_
+
+- **v71** (2026-04-02): **Stability, Rocket UX, Snapper manager, and WebUI reliability release**
   - 🐛 **FIXED:** Self-Update WebUI wiring now defines `bgNotifyBtn` before guard/listener checks in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
   - 🔄 **IMPROVED:** status-only WebUI auto-fetch now also checks self-update status automatically in the background, so opening the dashboard keeps Self-Update state fresh without manual clicks.
   - ⏱️ **IMPROVED:** WebUI background auto-fetch remains user-configurable via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes) and now uses lower-impact hidden-tab behavior (longer hidden cadence + timer jitter + lightweight fetch path).
@@ -2547,6 +2481,75 @@ systemctl status zypper-autodownload.service
   - 🧰 **IMPROVED:** `Enable Dev Mode / Logs` now also gates Settings drawer visibility, so advanced controls and settings stay hidden together for non-technical users until explicitly enabled.
   - 🧪 **IMPROVED:** Verification checks now include conditional Flatpak corruption repair (`flatpak repair --dry-run --system` probe, repair only when corruption indicators are detected), avoiding unnecessary repair runs on healthy systems.
   - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
+
+- **v70** (2026-02-18): **Revolutionary: Rocket Update Wizard + Smart Optional Updates**
+  - 🧾 **Release notes page:** `~/Desktop/v70`
+  - 🚀 **Revolutionary:** Rocket Update Wizard (preview → confirm → run → stream logs → restart check) + dedicated Dry-run simulation mode.
+  - ⚡ **Revolutionary:** Optional post-update refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when there are no system updates (`OPTIONAL_UPDATES_ALWAYS_REFRESH=false` by default).
+  - 🧵 **IMPROVED:** Dashboard Settings API is now **multi-threaded** so slow requests (large logs, Snapper actions) don’t freeze the whole dashboard UI.
+  - 🧷 **FIXED:** Dashboard API command output decoding is now forced to UTF‑8 with replacement to avoid crashes on weird/binary log data.
+  - 🐛 **FIXED:** self-update overlay readability (proper modal background, improved scrolling, and consistent warning banner styling).
+  - 🐛 **FIXED:** suppressed noisy "Read-only file system" errors when mirroring `dashboard-live.log` into the user dashboard directory (best-effort under systemd hardening / read-only home mounts).
+  - 🐛 **FIXED:** Soar detection in `zypper-with-ps` now works correctly when the wrapper is launched via `sudo`/`pkexec` (detects per-user installs under `~/.local/bin` / `~/pkgforge` and runs Soar as the invoking user).
+  - 🚀 **NEW:** Command Center rocket button is now **animated** in Live mode (downloading / complete / error states) and opens a **Rocket Update Wizard**: preview `zypper dup --dry-run --details`, confirm via checkbox + phrase, stream install logs + progress, then show `zypper ps -s` restart check.
+  - 🧪 **NEW:** Rocket Update Wizard supports an explicit **Dry-run simulation** mode in the WebUI:
+    - Quick Action: **“Simulate: System Update (Dry-run)”** opens the wizard with simulation pre-selected.
+    - URL auto-open: `status.html?live=1&ru=1&ru_dry=1` (opens wizard in dry-run simulation mode).
+  - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
+  - ⚡ **NEW:** optional post-update app refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when no system updates occurred:
+    - New config: `OPTIONAL_UPDATES_ALWAYS_REFRESH` (and WebUI Settings toggle)
+    - Default: only run optional app refresh steps when `zypper dup` actually changed system packages (skips when zypper prints "Nothing to do.")
+  - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
+  - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.
+  - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
+  - 🧰 **IMPROVED:** dashboard now shows the **last verify/auto-repair counts** (auto-repairs executed / remaining issues) in the Service Health panel.
+  - 🐛 **FIXED:** dashboard Live mode now parses downloader `complete:DURATION:PKGS` correctly and shows clearer text when no new downloads were needed (already cached / detect-only).
+  - ⚡ **IMPROVED:** background services now also include **systemd resource caps** (CPU/IO weight + memory high/max) to further reduce performance spikes.
+  - ⚡ **IMPROVED:** downloader progress tracker is now **event-driven** when `inotifywait` is available (from `inotify-tools`). It sleeps indefinitely until cache files change (with a 300s timeout fallback).
+  - ⚡ **IMPROVED:** downloader metered-network checks are now **cached** (short TTL) to avoid calling `nmcli` on every minutely run when the network state is stable.
+  - ⚡ **IMPROVED:** cache cleanup is now **triggered** by real activity: a marker file is created after real downloads / successful installs, and `zypper-cache-cleanup.service` only runs when that marker exists.
+  - ⚡ **IMPROVED:** dashboard components are now true "background" priority:
+    - dashboard API unit includes systemd CPU/IO/memory caps + low priority
+    - dashboard HTTP server + sync/perf workers run with best-effort `ionice -c3` + `nice(19)` (when tools are available)
+  - 🖥️ **IMPROVED:** `--dash-open` now auto-refreshes the dashboard when it is missing or outdated (so new dashboard/UI changes are applied automatically).
+  - 🧰 **IMPROVED:** auto-repair (`--verify`) now also detects stale/missing dashboard artifacts and regenerates the dashboard automatically.
+  - 🧰 **IMPROVED:** auto-repair (`--verify`) now probes the Dashboard API via `GET /api/ping` and will restart the API service if needed so new WebUI endpoints (like dashboard refresh) work immediately after upgrades.
+  - 🖱️ **NEW:** dashboard Quick Actions now include **Run: Refresh Dashboard** (WebUI button) to regenerate dashboard artifacts through the localhost API.
+  - 🐛 **FIXED:** dashboard API systemd hardening now allows safe logging + snapper actions:
+    - `ProtectHome=read-only` (instead of `true`) so user home paths are visible when needed
+    - `ReadWritePaths` now includes `/var/log/zypper-auto` so the API can create `/var/log/zypper-auto/service-logs/dashboard-api.log`
+    - auto-repair (`zypper-auto-helper --verify`) will patch older/broken unit files automatically
+  - 🧰 **IMPROVED:** Snapper menu and dashboard now show **snapper timer status** (`snapper-*.timer`) with the same green/yellow/red state colors as the AUTO option.
+  - ⚡ **IMPROVED:** installer log cleanup trims uncompressed `install-*.log` files using a single directory scan (avoids repeated `find | wc -l` passes).
+  - 🧹 **IMPROVED:** `zypper-auto.sh` now passes `shellcheck -x` cleanly (removed `ls`-based file listings, removed truly-unused variables, and suppressed the one unavoidable config-source follow warning).
+  - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:
+    - First run occurs ~30 seconds after boot (instead of waiting a full interval)
+    - Default interval is now **5 minutes**
+    - The verification service runs at low/background CPU/I/O priority to avoid desktop performance spikes
+  - 🔐 **IMPROVED:** installing now also drops a Polkit action file so `pkexec` prompts for "System Verification and Repair" look trusted/official (instead of a generic "run /usr/local/bin/..." prompt). The uninstaller removes it.
+  - 🩺 **IMPROVED:** `zypper-auto-helper --verify` now also verifies the dashboard desktop/start-menu shortcut and auto-regenerates it if it was deleted or is outdated.
+  - 🖥️ **IMPROVED:** desktop/start-menu dashboard shortcut Quick Actions now have better UX:
+    - **Check Now** shows a desktop bubble (when `notify-send` exists) before waking the notifier service.
+    - **Install Updates** and **Health Report** now keep the terminal window open until you press Enter.
+  - 🔔 **FIXED:** the "Updates Ready" notification no longer re-appears while you are already installing updates (install action now suppresses notifier popups via an install-in-progress marker; configurable via `INSTALL_CLICK_SUPPRESS_MINUTES`).
+  - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
+  - 🧰 **IMPROVED:** dashboard Recent Activity log now also includes a **Verify/Repair** view (tail of `verify.log`) so auto-repair runs are visible in the timeline.
+  - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
+  - 🥾 **NEW:** boot-menu hygiene: Snapper cleanup can prune old systemd-boot/BLS entry files to keep the boot menu clean (backup/delete modes).
+  - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path (highlighted in color when supported) and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
+  - 🎛️ **IMPROVED:** debug menu option **5** always prints a clickable `file://...` link even when auto-open succeeds/fails, so you can open the folder manually.
+  - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to XFCE openers (`exo-open`, `xfce4-open`), `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
+  - 🧹 **IMPROVED:** Snapper menu cleanup now runs a full cleanup (`number`, `timeline`, `empty-pre-post`) across all snapper configs (root/home/etc.). Auto-timers now sync Snapper config files so timeline/boot timers actually create snapshots.
+  - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
+  - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
+  - 🧠 **IMPROVED:** Snapper menu "Full Cleanup" now also does the same smart config sync + retention-cap tuning used by the AUTO timers option (best-effort, interactive-only).
+  - 🧯 **NEW:** optional Snapper cleanup Deep Clean step (broken snapshot hunter) + btrfs balance tip for emergency space recovery.
+  - 🧽 **NEW:** optional “System Deep Scrub” extras after Snapper cleanup: zypper cache clean, journal vacuum, and user thumbnail cache cleanup.
+  - 🧰 **NEW:** optional btrfs maintenance timer auto-enable (scrub/balance/trim) when using Snapper AUTO enable.
+  - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
+  - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
+  - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
+  - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
 
 - **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
   - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
