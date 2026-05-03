@@ -16,6 +16,12 @@ This repository provides a robust `systemd` architecture and CLI that:
 
 If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
 
+> [!IMPORTANT]
+> 🚀 **PROJECT MOVED & UPDATED!** 🚀
+> This project has evolved! The build formerly known as **ZYPPER-AUTOMATIK-HELPER** is now **UNIVERSAL-HELPER**.
+> 
+> 👉 **[Click here to visit the new UNIVERSAL-HELPER repository!](https://github.com/FreddeITsupport98/UNIVERSAL-helper)**
+
 -----
 
 <a id="reporting-issues-top"></a>
